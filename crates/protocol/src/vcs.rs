@@ -57,6 +57,8 @@ pub enum VcsConflictKind {
 pub enum VcsPendingOperation {
     Stage,
     Unstage,
+    Discard,
+    Revert,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -192,6 +194,14 @@ pub struct VcsHeadMutationResult {
     pub previous_head: String,
     pub head: Option<String>,
     pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsWorktreeMutationResult {
+    pub binding_id: RepositoryBindingId,
+    pub checkpoint_id: crate::WorkspaceCheckpointId,
+    pub workspace_revision: WorkspaceRevision,
+    pub path: WorkspacePath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

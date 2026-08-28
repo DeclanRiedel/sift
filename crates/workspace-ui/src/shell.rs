@@ -744,10 +744,23 @@ fn shell_repository_row_menu(
     let diff_path = path.clone();
     let stage_path = path.clone();
     let copy_path = path.clone();
+    let discard_path = path.clone();
     let staged = matches!(
         entry.stage,
         sift_protocol::VcsStageState::Staged | sift_protocol::VcsStageState::PartiallyStaged
     );
+    let discardable = matches!(
+        entry.state,
+        sift_protocol::VcsFileState::Modified | sift_protocol::VcsFileState::Deleted
+    ) && !matches!(
+        entry.stage,
+        sift_protocol::VcsStageState::Staged | sift_protocol::VcsStageState::Conflict
+    );
+    let discard_label = if entry.state == sift_protocol::VcsFileState::Deleted {
+        "Restore deleted file"
+    } else {
+        "Discard worktree change"
+    };
     let item = |id: &'static str, label: &'static str, icon_name: IconName| {
         div()
             .id(id)
@@ -818,17 +831,43 @@ fn shell_repository_row_menu(
         )
         .child(
             div()
-                .id("repository-menu-discard-disabled")
+                .id("repository-menu-discard")
                 .role(Role::MenuItem)
-                .aria_label("Discard file unavailable until checkpoint reconciliation")
+                .aria_label(discard_label)
                 .h(px(28.))
                 .px_2()
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_color(colors.disabled_text)
-                .child(icon(IconName::Close, colors.disabled_text, 11.))
-                .child("Discard (checkpoint required)"),
+                .rounded_sm()
+                .text_color(if discardable {
+                    colors.danger
+                } else {
+                    colors.disabled_text
+                })
+                .when(discardable, |item| {
+                    item.hover(|item| item.bg(colors.danger_muted))
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.repository_row_menu = None;
+                            shell.modal =
+                                Some(Modal::ConfirmRepositoryDiscard(discard_path.clone()));
+                            cx.notify();
+                        }))
+                })
+                .child(icon(
+                    IconName::Close,
+                    if discardable {
+                        colors.danger
+                    } else {
+                        colors.disabled_text
+                    },
+                    11.,
+                ))
+                .child(if discardable {
+                    discard_label
+                } else {
+                    "Discard unavailable"
+                }),
         )
 }
 
@@ -1011,6 +1050,11 @@ pub enum Modal {
     CsvImport,
     RepositoryCommit,
     ConfirmRepositoryUncommit,
+    ConfirmRepositoryDiscard(sift_protocol::WorkspacePath),
+    ConfirmRepositoryHunkRevert {
+        path: sift_protocol::WorkspacePath,
+        hunk_id: String,
+    },
     WorkspaceCreateFile,
     WorkspaceCreateFolder,
     WorkspaceMove,
@@ -1748,6 +1792,22 @@ pub enum ExecutorCommand {
         line_indices: Option<Vec<u32>>,
         staged: bool,
     },
+    DiscardRepositoryPath {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        request_id: u64,
+        path: sift_protocol::WorkspacePath,
+    },
+    RevertRepositoryHunk {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        request_id: u64,
+        side: sift_protocol::VcsDiffSide,
+        path: sift_protocol::WorkspacePath,
+        hunk_id: String,
+    },
     LoadAutomations {
         workspace_id: i64,
     },
@@ -1997,6 +2057,31 @@ pub enum ExecutorEvent {
         side: sift_protocol::VcsDiffSide,
         path: sift_protocol::WorkspacePath,
         result: Result<(sift_protocol::VcsStatus, sift_protocol::VcsDiff), String>,
+    },
+    RepositoryPathDiscarded {
+        workspace_id: i64,
+        request_id: u64,
+        result: Result<
+            (
+                sift_protocol::VcsWorktreeMutationResult,
+                sift_protocol::VcsStatus,
+            ),
+            String,
+        >,
+    },
+    RepositoryHunkReverted {
+        workspace_id: i64,
+        request_id: u64,
+        side: sift_protocol::VcsDiffSide,
+        path: sift_protocol::WorkspacePath,
+        result: Result<
+            (
+                sift_protocol::VcsWorktreeMutationResult,
+                sift_protocol::VcsStatus,
+                sift_protocol::VcsDiff,
+            ),
+            String,
+        >,
     },
     AutomationsLoaded {
         workspace_id: i64,
@@ -7331,6 +7416,66 @@ impl WorkspaceShell {
                     cx.notify();
                 }
             }
+            ExecutorEvent::RepositoryPathDiscarded {
+                workspace_id,
+                request_id,
+                result,
+            } => {
+                let (status, mutation) = match result {
+                    Ok((mutation, status)) => (Ok(Some(status)), Some(mutation)),
+                    Err(error) => (Err(error), None),
+                };
+                if self
+                    .repository
+                    .apply_status_result(workspace_id, request_id, status)
+                {
+                    if let Some(mutation) = mutation {
+                        self.show_success_toast(
+                            format!(
+                                "Discarded {} · recovery checkpoint {}",
+                                mutation.path.0, mutation.checkpoint_id.0
+                            ),
+                            cx,
+                        );
+                        self.request_workspace_files(cx);
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryHunkReverted {
+                workspace_id,
+                request_id,
+                side,
+                path,
+                result,
+            } => {
+                let (result, mutation) = match result {
+                    Ok((mutation, status, diff)) => (Ok((status, diff)), Some(mutation)),
+                    Err(error) => (Err(error), None),
+                };
+                if let Some(applied) = self.repository.apply_hunk_result(
+                    workspace_id,
+                    request_id,
+                    side,
+                    path.clone(),
+                    result,
+                ) {
+                    if let Ok(diff) = applied {
+                        self.open_repository_diff_tab(&path, side, diff, cx);
+                    }
+                    if let Some(mutation) = mutation {
+                        self.show_success_toast(
+                            format!(
+                                "Reverted hunk in {} · recovery checkpoint {}",
+                                mutation.path.0, mutation.checkpoint_id.0
+                            ),
+                            cx,
+                        );
+                        self.request_workspace_files(cx);
+                    }
+                    cx.notify();
+                }
+            }
             ExecutorEvent::AutomationsLoaded {
                 workspace_id,
                 result,
@@ -12249,6 +12394,92 @@ impl WorkspaceShell {
             return;
         };
         self.dispatch_repository_hunk_update(state, hunk.id, None, staged, move_next, cx);
+    }
+
+    fn confirm_active_repository_hunk_revert(&mut self, cx: &mut Context<Self>) {
+        let Some((state, hunk)) = self.active_repository_hunk(cx) else {
+            self.show_toast("Place the caret in a file diff hunk".into(), cx);
+            return;
+        };
+        if state.side != sift_protocol::VcsDiffSide::IndexToWorktree {
+            self.show_toast("Revert hunks from an index → worktree diff".into(), cx);
+            return;
+        }
+        self.modal = Some(Modal::ConfirmRepositoryHunkRevert {
+            path: state.path,
+            hunk_id: hunk.id,
+        });
+        cx.notify();
+    }
+
+    fn discard_repository_path(
+        &mut self,
+        path: sift_protocol::WorkspacePath,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((workspace_id, binding_id, expected_revision, request_id)) =
+            self.repository.begin_discard(path.clone())
+        else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::DiscardRepositoryPath {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                request_id,
+                path,
+            })
+            .is_err()
+        {
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+            return;
+        }
+        self.modal = None;
+        cx.notify();
+    }
+
+    fn revert_repository_hunk(
+        &mut self,
+        path: sift_protocol::WorkspacePath,
+        hunk_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let side = sift_protocol::VcsDiffSide::IndexToWorktree;
+        let Some((workspace_id, binding_id, expected_revision, request_id)) =
+            self.repository.begin_revert(path.clone())
+        else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::RevertRepositoryHunk {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                request_id,
+                side,
+                path,
+                hunk_id,
+            })
+            .is_err()
+        {
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+            return;
+        }
+        self.modal = None;
+        cx.notify();
     }
 
     fn set_active_repository_lines_staged(&mut self, staged: bool, cx: &mut Context<Self>) {
@@ -17251,6 +17482,7 @@ impl WorkspaceShell {
             CommandId::UnstageDiffHunkAndNext => {
                 self.set_active_repository_hunk_staged(false, true, cx)
             }
+            CommandId::RevertDiffHunk => self.confirm_active_repository_hunk_revert(cx),
             CommandId::CopyDiffHunk => self.copy_active_repository_hunk(cx),
             CommandId::ToggleDiffWhitespace => self.toggle_active_diff_whitespace(cx),
             CommandId::StageDiffLines => self.set_active_repository_lines_staged(true, cx),
@@ -25722,6 +25954,97 @@ impl WorkspaceShell {
                                         )
                                         .on_click(cx.listener(|shell, _, _, cx| {
                                             shell.apply_workspace_reconcile(cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Modal::ConfirmRepositoryDiscard(path) => {
+                    let path = path.clone();
+                    let confirm_path = path.clone();
+                    div()
+                        .debug_selector(|| "confirm-repository-discard".into())
+                        .w(px(500.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(format!("Discard worktree change to {}?", path.0)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .child("Sift will capture a recovery checkpoint, restore the tracked file from the Git index, then import that exact text into the canonical room document."),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-repository-discard", "Cancel")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("confirm-repository-discard", "Discard")
+                                        .tone(ButtonTone::DangerMuted)
+                                        .disabled(self.repository.loading())
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.discard_repository_path(confirm_path.clone(), cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Modal::ConfirmRepositoryHunkRevert { path, hunk_id } => {
+                    let path = path.clone();
+                    let confirm_path = path.clone();
+                    let hunk_id = hunk_id.clone();
+                    div()
+                        .debug_selector(|| "confirm-repository-hunk-revert".into())
+                        .w(px(500.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(format!("Revert current hunk in {}?", path.0)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .child("Sift will capture a recovery checkpoint, reverse only this authoritative worktree hunk, then import the result into the canonical room document."),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-repository-hunk-revert", "Cancel")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("confirm-repository-hunk-revert", "Revert hunk")
+                                        .tone(ButtonTone::DangerMuted)
+                                        .disabled(self.repository.loading())
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.revert_repository_hunk(
+                                                confirm_path.clone(),
+                                                hunk_id.clone(),
+                                                cx,
+                                            )
                                         })),
                                 ),
                         )

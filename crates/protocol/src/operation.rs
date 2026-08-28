@@ -92,6 +92,8 @@ pub enum VcsAction {
     Commit,
     Amend,
     Uncommit,
+    Discard,
+    Revert,
     SetCredential,
     Fetch,
     Push,
@@ -727,6 +729,8 @@ impl Operation {
                 | VcsAction::Commit
                 | VcsAction::Amend
                 | VcsAction::Uncommit
+                | VcsAction::Discard
+                | VcsAction::Revert
                 | VcsAction::SetCredential
                 | VcsAction::Fetch
                 | VcsAction::Push => OperationKind::WriteVcs,
@@ -1185,6 +1189,8 @@ single_word_audit_names!(VcsAction {
     Commit => "commit",
     Amend => "amend",
     Uncommit => "uncommit",
+    Discard => "discard",
+    Revert => "revert",
     SetCredential => "set_credential",
     Fetch => "fetch",
     Push => "push",

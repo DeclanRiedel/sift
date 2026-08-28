@@ -59,6 +59,8 @@ pub(crate) enum RepositoryOperation {
     Unstage,
     Commit,
     Uncommit,
+    Discard,
+    Revert,
 }
 
 impl RepositoryOperation {
@@ -69,6 +71,8 @@ impl RepositoryOperation {
             Self::Unstage => "Unstaging changes…",
             Self::Commit => "Creating checkpoint and commit…",
             Self::Uncommit => "Creating checkpoint and uncommitting HEAD…",
+            Self::Discard => "Creating checkpoint and discarding worktree change…",
+            Self::Revert => "Creating checkpoint and reverting diff hunk…",
         }
     }
 }
@@ -279,6 +283,35 @@ impl RepositoryProjection {
         } else {
             RepositoryOperation::Unstage
         });
+        self.error = None;
+        self.current_request_id = Some(request_id);
+        Some((workspace_id, binding_id, binding_revision, request_id))
+    }
+
+    pub(crate) fn begin_discard(&mut self, path: WorkspacePath) -> Option<(i64, i64, u64, u64)> {
+        self.begin_destructive(path, RepositoryOperation::Discard)
+    }
+
+    pub(crate) fn begin_revert(&mut self, path: WorkspacePath) -> Option<(i64, i64, u64, u64)> {
+        self.begin_destructive(path, RepositoryOperation::Revert)
+    }
+
+    fn begin_destructive(
+        &mut self,
+        path: WorkspacePath,
+        operation: RepositoryOperation,
+    ) -> Option<(i64, i64, u64, u64)> {
+        if self.loading || self.diff_loading {
+            return None;
+        }
+        let workspace_id = self.workspace_id?;
+        let status = self.status.as_ref()?;
+        let binding_id = status.binding_id.0;
+        let binding_revision = status.binding_revision;
+        let request_id = self.next_request();
+        self.pending_paths.insert(path);
+        self.loading = true;
+        self.operation = Some(operation);
         self.error = None;
         self.current_request_id = Some(request_id);
         Some((workspace_id, binding_id, binding_revision, request_id))

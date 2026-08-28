@@ -243,6 +243,20 @@ pub struct VcsHunkRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsDiscardRequest {
+    pub expected_revision: u64,
+    pub path: WorkspacePath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRevertHunkRequest {
+    pub expected_revision: u64,
+    pub side: VcsDiffSide,
+    pub path: WorkspacePath,
+    pub hunk_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VcsCommitRequest {
     pub expected_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

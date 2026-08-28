@@ -56,10 +56,10 @@ use sift_protocol::{
     SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, TransferRecipe,
     TransferRecipeAction, TransferRecipeId, UpdateConnectionPolicyRequest,
     UpdateTenantLimitsRequest, VcsAction, VcsBranch, VcsCommitResult, VcsDiff,
-    VcsHeadMutationResult, VcsPendingOperation, VcsRemoteResult, VcsStatus, WebAuthResponse,
-    WhoAmIResponse, Workspace, WorkspaceAction, WorkspaceCheckpoint, WorkspaceCheckpointId,
-    WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    VcsHeadMutationResult, VcsPendingOperation, VcsRemoteResult, VcsStatus,
+    VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceAction,
+    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -508,6 +508,14 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/metadata/repositories/:id/unstage-hunk",
             post_with(unstage_repository_hunk, doc("unstageRepositoryHunk", "Unstage one revision-guarded typed diff hunk")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/discard",
+            post_with(discard_repository_path, doc("discardRepositoryPath", "Checkpoint and discard one tracked worktree path into the canonical workspace")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/revert-hunk",
+            post_with(revert_repository_hunk, doc("revertRepositoryHunk", "Checkpoint and revert one worktree diff hunk into the canonical workspace")),
         )
         .api_route(
             "/v1/metadata/repositories/:id/commit",
@@ -1655,9 +1663,9 @@ use sift_metadata::http::{
     StartRunRequest, UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest,
     UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
     UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
-    VcsCommitRequest, VcsDiffQuery, VcsHunkRequest, VcsPathsRequest, VcsRemoteRequest,
-    VcsUncommitRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
-    WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
+    VcsCommitRequest, VcsDiffQuery, VcsDiscardRequest, VcsHunkRequest, VcsPathsRequest,
+    VcsRemoteRequest, VcsRevertHunkRequest, VcsUncommitRequest, WorkspaceBatchMutationItem,
+    WorkspaceBatchMutationRequest, WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
 };
 
 fn metadata_room_kind(kind: sift_api_types::RoomKind) -> sift_metadata::RoomKind {
@@ -6840,6 +6848,245 @@ async fn unstage_repository_hunk(
     mutate_repository_hunk(state, headers, id, req, false).await
 }
 
+async fn discard_repository_path(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsDiscardRequest>,
+) -> ApiResult<Json<VcsWorktreeMutationResult>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let initial =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        initial.record.binding.workspace_id,
+        binding_id,
+        VcsAction::Discard,
+    )?;
+    let workspace_id = initial.record.binding.workspace_id;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
+            expected: req.expected_revision,
+            current: context.record.binding.revision,
+        }
+        .into());
+    }
+    let status = context
+        .adapter
+        .status(
+            &context.worktree,
+            binding_id,
+            context.record.binding.revision,
+            context.workspace.revision,
+        )
+        .await
+        .map_err(git_adapter_error)?;
+    let entry = status
+        .entries
+        .iter()
+        .find(|entry| entry.path == req.path)
+        .ok_or_else(|| ApiError::Conflict("changed file is stale".into()))?;
+    if !matches!(
+        entry.state,
+        sift_protocol::VcsFileState::Modified | sift_protocol::VcsFileState::Deleted
+    ) || matches!(
+        entry.stage,
+        sift_protocol::VcsStageState::Staged | sift_protocol::VcsStageState::Conflict
+    ) {
+        return Err(ApiError::BadRequest(
+            "discard is limited to tracked, non-conflicted worktree modifications or deletions"
+                .into(),
+        ));
+    }
+    let checkpoint = capture_before_vcs_checkpoint(
+        &state,
+        metadata.clone(),
+        actor,
+        workspace_id,
+        context.workspace.revision,
+    )
+    .await?;
+    state.rooms.set_vcs_pending(
+        binding_id.0,
+        std::slice::from_ref(&req.path),
+        VcsPendingOperation::Discard,
+    );
+    let operation = context
+        .adapter
+        .discard_worktree_path(&context.worktree, &req.path)
+        .await;
+    state
+        .rooms
+        .clear_vcs_pending(binding_id.0, std::slice::from_ref(&req.path));
+    operation.map_err(git_adapter_error)?;
+    let workspace = reconcile_vcs_worktree_path(
+        &state,
+        metadata.clone(),
+        actor,
+        context.record.binding.projection_id,
+        &req.path,
+    )
+    .await?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = metadata_blocking(move || {
+        metadata
+            .observe_repository(
+                binding_id,
+                actor,
+                sift_metadata::RepositoryObservation {
+                    expected_revision: req.expected_revision,
+                    branch: observation.branch,
+                    head: observation.head,
+                },
+            )
+            .map(|record| record.binding)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_vcs_operation(&state, actor, VcsAction::Discard, workspace_id, binding_id);
+    publish_workspace_changed(
+        &state,
+        &public_workspace_record(workspace.clone(), workspace_runtime_capabilities(&state)),
+        true,
+    );
+    publish_repository_changed(&state, &workspace, binding_id, updated.revision);
+    Ok(Json(VcsWorktreeMutationResult {
+        binding_id,
+        checkpoint_id: checkpoint.id,
+        workspace_revision: workspace.revision,
+        path: req.path,
+    }))
+}
+
+async fn revert_repository_hunk(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRevertHunkRequest>,
+) -> ApiResult<Json<VcsWorktreeMutationResult>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let initial =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        initial.record.binding.workspace_id,
+        binding_id,
+        VcsAction::Revert,
+    )?;
+    if req.side != sift_protocol::VcsDiffSide::IndexToWorktree || req.hunk_id.len() != 64 {
+        return Err(ApiError::BadRequest(
+            "hunk revert requires an index-to-worktree hunk".into(),
+        ));
+    }
+    let workspace_id = initial.record.binding.workspace_id;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
+            expected: req.expected_revision,
+            current: context.record.binding.revision,
+        }
+        .into());
+    }
+    let diff = context
+        .adapter
+        .diff(&context.worktree, binding_id, req.side, Some(&req.path))
+        .await
+        .map_err(git_adapter_error)?;
+    let file = diff
+        .files
+        .iter()
+        .find(|file| file.path == req.path)
+        .ok_or_else(|| ApiError::Conflict("changed file is stale".into()))?;
+    let hunk = file
+        .hunks
+        .iter()
+        .find(|hunk| hunk.id == req.hunk_id)
+        .ok_or_else(|| ApiError::Conflict("diff hunk is stale".into()))?;
+    let checkpoint = capture_before_vcs_checkpoint(
+        &state,
+        metadata.clone(),
+        actor,
+        workspace_id,
+        context.workspace.revision,
+    )
+    .await?;
+    state.rooms.set_vcs_pending(
+        binding_id.0,
+        std::slice::from_ref(&req.path),
+        VcsPendingOperation::Revert,
+    );
+    let operation = context
+        .adapter
+        .revert_worktree_hunk(&context.worktree, file, hunk)
+        .await;
+    state
+        .rooms
+        .clear_vcs_pending(binding_id.0, std::slice::from_ref(&req.path));
+    operation.map_err(git_adapter_error)?;
+    let workspace = reconcile_vcs_worktree_path(
+        &state,
+        metadata.clone(),
+        actor,
+        context.record.binding.projection_id,
+        &req.path,
+    )
+    .await?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = metadata_blocking(move || {
+        metadata
+            .observe_repository(
+                binding_id,
+                actor,
+                sift_metadata::RepositoryObservation {
+                    expected_revision: req.expected_revision,
+                    branch: observation.branch,
+                    head: observation.head,
+                },
+            )
+            .map(|record| record.binding)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_vcs_operation(&state, actor, VcsAction::Revert, workspace_id, binding_id);
+    publish_workspace_changed(
+        &state,
+        &public_workspace_record(workspace.clone(), workspace_runtime_capabilities(&state)),
+        true,
+    );
+    publish_repository_changed(&state, &workspace, binding_id, updated.revision);
+    Ok(Json(VcsWorktreeMutationResult {
+        binding_id,
+        checkpoint_id: checkpoint.id,
+        workspace_revision: workspace.revision,
+        path: req.path,
+    }))
+}
+
 async fn mutate_repository_hunk(
     state: AppState,
     headers: HeaderMap,
@@ -7633,6 +7880,115 @@ fn load_projection_inputs(
         baseline,
         captures,
     })
+}
+
+async fn reconcile_vcs_worktree_path(
+    state: &AppState,
+    metadata: MetadataStore,
+    actor: PrincipalId,
+    binding_id: sift_protocol::ProjectionBindingId,
+    path: &sift_protocol::WorkspacePath,
+) -> ApiResult<sift_metadata::WorkspaceRecord> {
+    let adapter = state.rooms.workspace_adapter().ok_or_else(|| {
+        ApiError::BadRequest("workspace filesystem projections are disabled".into())
+    })?;
+    let rooms = state.rooms.clone();
+    let path = path.clone();
+    let (workspace, broadcast) = metadata_blocking(move || {
+        let current = load_projection_inputs(&metadata, &rooms, &adapter, binding_id, actor, true)?;
+        let plan = crate::workspace_projection::reconcile_plan(
+            &current.binding.binding,
+            current.workspace.revision,
+            &current.baseline,
+            &current.files,
+            &current.projection,
+        );
+        let entry = plan
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::Conflict("projection path changed during VCS mutation".into())
+            })?;
+        let projected_path = entry.previous_path.as_ref().unwrap_or(&entry.path);
+        let projected = current
+            .projection
+            .files
+            .iter()
+            .find(|projected| projected.path == *projected_path);
+        let broadcast = import_projection_resolution(
+            &metadata,
+            &rooms,
+            actor,
+            current.workspace.id,
+            &entry,
+            projected,
+            false,
+        )?;
+        let observed =
+            load_projection_inputs(&metadata, &rooms, &adapter, binding_id, actor, true)?;
+        let mut baseline = observed
+            .baseline
+            .iter()
+            .filter(|file| file.path != path)
+            .cloned()
+            .collect::<Vec<_>>();
+        let workspace_file = observed.files.iter().find(|file| file.path == path);
+        let projection_file = observed
+            .projection
+            .files
+            .iter()
+            .find(|file| file.path == path);
+        if workspace_file.is_some() || projection_file.is_some() {
+            baseline.push(ProjectionFileState {
+                node_id: workspace_file.map(|file| file.node_id),
+                path: path.clone(),
+                workspace_digest: workspace_file.map(|file| file.digest.clone()),
+                projection_digest: projection_file.map(|file| file.digest.clone()),
+            });
+        }
+        baseline.sort_by(|left, right| left.path.0.cmp(&right.path.0));
+        metadata.commit_projection_observation(
+            binding_id,
+            actor,
+            observed.binding.binding.revision,
+            observed.workspace.revision,
+            match observed.binding.binding.mode {
+                ProjectionMode::ReadOnly => ProjectionHealth::ReadOnly,
+                ProjectionMode::ReadWrite => ProjectionHealth::Ready,
+            },
+            &baseline,
+        )?;
+        Ok::<_, ApiError>((observed.workspace, broadcast))
+    })
+    .await?;
+    if let Some((document, replica_id, update_id, server_seq, update, version)) = broadcast {
+        state.rooms.publish_doc(
+            workspace.room_id.0,
+            RoomServerMessage::DocumentUpdateCommitted {
+                document_id: document.0,
+                replica_id: sift_protocol::ReplicaId(replica_id),
+                server_seq,
+                update: sift_protocol::CrdtUpdate::new(update),
+                server_version: sift_protocol::DocumentVersion::new(version),
+            },
+        );
+        state.sessions.push_operation_full(
+            Operation::ApplyDocumentUpdate {
+                room_id: workspace.room_id.0,
+                document_id: document.0,
+                update_id,
+                server_seq,
+            },
+            OperationStatus::Succeeded,
+            Some(actor.0),
+            None,
+            None,
+            None,
+        );
+    }
+    Ok(workspace)
 }
 
 async fn plan_workspace_projection(

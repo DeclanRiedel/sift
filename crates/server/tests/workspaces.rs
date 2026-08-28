@@ -537,6 +537,7 @@ async fn git_commit_is_tied_to_a_checkpoint_and_later_virtual_edits_stay_uncommi
         )
         .unwrap();
     let response = router
+        .clone()
         .oneshot(json_request(
             Method::GET,
             &format!("/v1/metadata/repositories/{}/status", binding.id.0),
@@ -546,6 +547,80 @@ async fn git_commit_is_tied_to_a_checkpoint_and_later_virtual_edits_stay_uncommi
         .unwrap();
     let status: sift_protocol::VcsStatus = json(response.into_body()).await;
     assert!(status.entries.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(checkout.path().join("query.sql")).unwrap(),
+        "select 1;\n"
+    );
+
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::GET,
+            &format!(
+                "/v1/metadata/workspace-projections/{}/reconcile",
+                projection.id.0
+            ),
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    let plan: ReconcilePlan = json(response.into_body()).await;
+    let changed = plan
+        .entries
+        .iter()
+        .find(|entry| entry.path.0 == "query.sql")
+        .unwrap()
+        .clone();
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!(
+                "/v1/metadata/workspace-projections/{}/reconcile",
+                projection.id.0
+            ),
+            serde_json::json!({
+                "binding_revision": plan.binding_revision,
+                "workspace_revision": plan.workspace_revision,
+                "resolutions": [{
+                    "observed": changed,
+                    "resolution": "materialize_workspace"
+                }]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(checkout.path().join("query.sql")).unwrap(),
+        "select 2;\n"
+    );
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::GET,
+            &format!("/v1/metadata/repositories/{}/status", binding.id.0),
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    let status: sift_protocol::VcsStatus = json(response.into_body()).await;
+    assert_eq!(status.entries.len(), 1);
+    let response = router
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/repositories/{}/discard", binding.id.0),
+            serde_json::json!({
+                "expected_revision": status.binding_revision,
+                "path": "query.sql"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let discarded: sift_protocol::VcsWorktreeMutationResult = json(response.into_body()).await;
+    assert_eq!(discarded.path.0, "query.sql");
+    assert_eq!(actor.lock().unwrap().text(), "select 1;\n");
     assert_eq!(
         std::fs::read_to_string(checkout.path().join("query.sql")).unwrap(),
         "select 1;\n"

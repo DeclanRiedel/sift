@@ -158,8 +158,8 @@ ways:
 - [x] Stage all tracked changes.
 - [x] Stage all including untracked files with explicit labeling.
 - [x] Unstage all.
-- [ ] Discard one worktree path with confirmation and checkpoint.
-- [ ] Restore one deleted path with confirmation and checkpoint.
+- [x] Discard one worktree path with confirmation and checkpoint.
+- [x] Restore one deleted path with confirmation and checkpoint.
 - [x] Disable invalid actions for conflicts and in-flight operations.
 - [x] Display optimistic pending state without pretending success.
 
@@ -181,7 +181,7 @@ ways:
 - [x] Stage and move to next hunk.
 - [x] Unstage and move to next hunk.
 - [x] Stage or unstage selected lines where patch boundaries permit.
-- [ ] Revert selected hunk with confirmation and checkpoint.
+- [x] Revert selected hunk with confirmation and checkpoint.
 - [x] Copy hunk or patch.
 - [x] Toggle whitespace visibility.
 - [x] Preserve diff position across repository refresh.

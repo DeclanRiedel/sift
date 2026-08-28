@@ -66,6 +66,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "deleteDdlSource",
     "deleteWorkspaceProjection",
     "deleteWorkspaceRepository",
+    "discardRepositoryPath",
     "deleteSpilledCursor",
     "diagnoseSemanticDocument",
     "disconnectMetadataConnectionProfile",
@@ -169,6 +170,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "refreshDdlSource",
     "registerPrincipalKey",
     "releaseSavepoint",
+    "revertRepositoryHunk",
     "removeMetadataRoomMember",
     "restoreWorkspaceCheckpoint",
     "resetPassword",
@@ -265,9 +267,9 @@ pub use sift_api_types::{
     UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateInstanceConfigurationRequest,
     UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
     UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
-    VcsCommitRequest, VcsDiffQuery, VcsHunkRequest, VcsPathsRequest, VcsRemoteRequest,
-    VcsUncommitRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
-    WorkspaceTreeResponse,
+    VcsCommitRequest, VcsDiffQuery, VcsDiscardRequest, VcsHunkRequest, VcsPathsRequest,
+    VcsRemoteRequest, VcsRevertHunkRequest, VcsUncommitRequest, WorkspaceBatchMutationItem,
+    WorkspaceBatchMutationRequest, WorkspaceTreeResponse,
 };
 use sift_api_types::{
     ApiTokenId, ApiTokenRow, ConnectionProfile, ConnectionProfileId, Document, DocumentId,
@@ -306,9 +308,9 @@ use sift_protocol::{
     TransactionState, TransferExecutionResult, TransferRecipe, TransferRecipeId, TxHandleRef, TxId,
     TxMode, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, ValidatedExtensionPackage,
     Value, VcsBranch, VcsCommitResult, VcsDiff, VcsDiffSide, VcsHeadMutationResult,
-    VcsRemoteResult, VcsStatus, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceArtifactId,
-    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WsClientMessage,
-    WsServerMessage, PROTOCOL_VERSION_NUMBER,
+    VcsRemoteResult, VcsStatus, VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse,
+    Workspace, WorkspaceArtifactId, WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId,
+    WorkspaceNodeId, WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
 };
 
 #[derive(Clone)]
@@ -2681,6 +2683,30 @@ impl Client {
     ) -> Result<RepositoryBinding> {
         self.post(
             &format!("/v1/metadata/repositories/{}/unstage-hunk", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn discard_repository_path(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsDiscardRequest,
+    ) -> Result<VcsWorktreeMutationResult> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/discard", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn revert_repository_hunk(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRevertHunkRequest,
+    ) -> Result<VcsWorktreeMutationResult> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/revert-hunk", binding.0),
             &request,
         )
         .await

@@ -16,8 +16,8 @@ fn system_epoch_millis() -> u64 {
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
 use sift_api_types::{
     ConnectionProfileId, CredentialMode, RoomId, StartRunRequest, TenantId,
-    UpsertConnectionProfileRequest, VcsCommitRequest, VcsDiffQuery, VcsHunkRequest,
-    VcsPathsRequest, VcsUncommitRequest,
+    UpsertConnectionProfileRequest, VcsCommitRequest, VcsDiffQuery, VcsDiscardRequest,
+    VcsHunkRequest, VcsPathsRequest, VcsRevertHunkRequest, VcsUncommitRequest,
 };
 use sift_client_sdk::{
     Client, Error as ClientError, Ingest, OpenConnectionFromProfileRequest, RoomReplica,
@@ -1656,6 +1656,113 @@ async fn run_query_executor(
                 };
                 if events
                     .send(ExecutorEvent::RepositoryHunkUpdated {
+                        workspace_id,
+                        request_id,
+                        side,
+                        path,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DiscardRepositoryPath {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                request_id,
+                path,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let binding = sift_protocol::RepositoryBindingId(binding_id);
+                        match client
+                            .discard_repository_path(
+                                binding,
+                                VcsDiscardRequest {
+                                    expected_revision,
+                                    path,
+                                },
+                            )
+                            .await
+                        {
+                            Ok(mutation) => client
+                                .repository_status(binding)
+                                .await
+                                .map(|status| (mutation, status))
+                                .map_err(|error| {
+                                    format!("refreshing repository status failed: {error}")
+                                }),
+                            Err(error) => {
+                                Err(format!("discarding repository path failed: {error}"))
+                            }
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryPathDiscarded {
+                        workspace_id,
+                        request_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RevertRepositoryHunk {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                request_id,
+                side,
+                path,
+                hunk_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let binding = sift_protocol::RepositoryBindingId(binding_id);
+                        match client
+                            .revert_repository_hunk(
+                                binding,
+                                VcsRevertHunkRequest {
+                                    expected_revision,
+                                    side,
+                                    path: path.clone(),
+                                    hunk_id,
+                                },
+                            )
+                            .await
+                        {
+                            Ok(mutation) => match client.repository_status(binding).await {
+                                Ok(status) => client
+                                    .repository_diff(
+                                        binding,
+                                        VcsDiffQuery {
+                                            side,
+                                            path: Some(path.clone()),
+                                        },
+                                    )
+                                    .await
+                                    .map(|diff| (mutation, status, diff))
+                                    .map_err(|error| {
+                                        format!("refreshing repository diff failed: {error}")
+                                    }),
+                                Err(error) => {
+                                    Err(format!("refreshing repository status failed: {error}"))
+                                }
+                            },
+                            Err(error) => Err(format!("reverting repository hunk failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryHunkReverted {
                         workspace_id,
                         request_id,
                         side,

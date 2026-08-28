@@ -110,6 +110,7 @@ pub trait VcsRepository: Send + Sync {
     async fn branches(&self, worktree: &Path) -> Result<Vec<VcsBranch>>;
     async fn stage(&self, worktree: &Path, paths: &[WorkspacePath]) -> Result<()>;
     async fn unstage(&self, worktree: &Path, paths: &[WorkspacePath]) -> Result<()>;
+    async fn discard_worktree_path(&self, worktree: &Path, path: &WorkspacePath) -> Result<()>;
     async fn apply_hunk(
         &self,
         worktree: &Path,
@@ -124,6 +125,12 @@ pub trait VcsRepository: Send + Sync {
         hunk: &VcsDiffHunk,
         line_indices: &[u32],
         stage: bool,
+    ) -> Result<()>;
+    async fn revert_worktree_hunk(
+        &self,
+        worktree: &Path,
+        file: &VcsDiffFile,
+        hunk: &VcsDiffHunk,
     ) -> Result<()>;
     async fn commit(
         &self,
@@ -589,6 +596,18 @@ impl VcsRepository for GitAdapter {
         Ok(())
     }
 
+    async fn discard_worktree_path(&self, worktree: &Path, path: &WorkspacePath) -> Result<()> {
+        validate_paths(std::slice::from_ref(path))?;
+        self.run(
+            worktree,
+            ["restore", "--worktree", "--", path.0.as_str()],
+            false,
+            &[],
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn apply_hunk(
         &self,
         worktree: &Path,
@@ -637,6 +656,35 @@ impl VcsRepository for GitAdapter {
             vec![
                 OsString::from("apply"),
                 OsString::from("--cached"),
+                OsString::from("--recount"),
+                OsString::from("--whitespace=nowarn"),
+                OsString::from("-"),
+            ],
+            patch.as_bytes(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn revert_worktree_hunk(
+        &self,
+        worktree: &Path,
+        file: &VcsDiffFile,
+        hunk: &VcsDiffHunk,
+    ) -> Result<()> {
+        validate_paths(std::slice::from_ref(&file.path))?;
+        if file.binary || hunk.truncated || hunk.lines.is_empty() {
+            return Err(GitAdapterError::InvalidData);
+        }
+        let patch = patch_for_hunk(file, hunk);
+        if patch.len() > MAX_GIT_OUTPUT_BYTES {
+            return Err(GitAdapterError::OutputLimit);
+        }
+        self.run_with_input(
+            worktree,
+            vec![
+                OsString::from("apply"),
+                OsString::from("--reverse"),
                 OsString::from("--recount"),
                 OsString::from("--whitespace=nowarn"),
                 OsString::from("-"),
@@ -1504,6 +1552,72 @@ mod tests {
             .iter()
             .any(|line| line.kind == VcsDiffLineKind::Addition && line.text == "select 2;"));
         assert_eq!(file_diff.files[0].hunks[0].id.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn worktree_hunk_revert_and_path_discard_restore_tracked_content() {
+        let adapter = GitAdapter::for_tests().await.unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        adapter.initialize(repository.path()).await.unwrap();
+        let path = WorkspacePath("query.sql".into());
+        let original = (1..=14)
+            .map(|line| format!("select {line};"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(repository.path().join(&path.0), &original).unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        adapter
+            .commit(
+                repository.path(),
+                "initial",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap();
+        let changed = original
+            .replace("select 2;", "select 200;")
+            .replace("select 13;", "select 1300;");
+        std::fs::write(repository.path().join(&path.0), changed).unwrap();
+        let diff = adapter
+            .diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                VcsDiffSide::IndexToWorktree,
+                Some(&path),
+            )
+            .await
+            .unwrap();
+        assert_eq!(diff.files[0].hunks.len(), 2);
+        adapter
+            .revert_worktree_hunk(repository.path(), &diff.files[0], &diff.files[0].hunks[0])
+            .await
+            .unwrap();
+        let partially_reverted = std::fs::read_to_string(repository.path().join(&path.0)).unwrap();
+        assert!(partially_reverted.contains("select 2;"));
+        assert!(partially_reverted.contains("select 1300;"));
+
+        adapter
+            .discard_worktree_path(repository.path(), &path)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join(&path.0)).unwrap(),
+            original
+        );
+        std::fs::remove_file(repository.path().join(&path.0)).unwrap();
+        adapter
+            .discard_worktree_path(repository.path(), &path)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join(&path.0)).unwrap(),
+            original
+        );
     }
 
     #[tokio::test]
