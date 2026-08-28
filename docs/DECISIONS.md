@@ -1601,3 +1601,35 @@ its own checkpoint mapping while the superseded commit record is retained for
 audit. Uncommit recovery uses the captured workspace checkpoint plus ordinary
 Git history; later branch/history milestones may expose that relationship more
 fully.
+
+---
+
+## ADR-045 — Desktop Workspace Files Follow The Canonical Room Frontier
+
+**Context.** The desktop needs an IDE-like file tree while Sift SQL text is a
+collaborative room document and the filesystem is only an optional projection.
+Treating editor buffers, watcher events, or Git files as another authority
+would permit a save, checkout, or refresh to overwrite newer collaborative
+text.
+
+**Decision.** The desktop maintains a typed workspace-files projection separate
+from repository status. Nodes retain server `WorkspaceNodeId` identity across
+moves, and SQL tabs open the node's canonical room document. Editor updates are
+submitted immediately; Save and Save All insert an ordered flush marker and
+mark a tab clean only when the room supervisor confirms that every preceding
+CRDT update was submitted.
+
+Filesystem state is read through the existing bounded reconciliation plan.
+The UI distinguishes editor, virtual-tree, filesystem-projection, and Git dirty
+states. Both-changed entries have no default resolution. Applying a complete
+revision-guarded plan uses the existing server checkpoint and reconciliation
+transaction; watcher/fallback refreshes only plan changes and never mutate room
+text. Git refresh caused by document editing occurs after the projection
+revision commits, while a bounded fallback still discovers external checkout
+or Git changes.
+
+**Consequences.** Workspace CRUD, checkpoint history, restore-as-new-head, and
+reconciliation are available to local and remote desktops without direct
+filesystem access. A save acknowledgement is meaningful rather than cosmetic,
+stale plans fail safely, and external checkout changes become visible choices
+instead of implicit document replacements.

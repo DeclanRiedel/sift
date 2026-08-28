@@ -7,6 +7,7 @@ mod repository;
 pub mod results;
 mod settings;
 mod shell;
+mod workspace;
 
 pub use editor::{QueryDocument, QueryEditor, SemanticOutcome, SemanticRequestKind};
 pub use results::{ResultData, ResultState, ResultsView};
@@ -39,3 +40,4 @@ pub use shell::{
     StatusBar, Toast, ToastTone, ToggleBottomDock, ToggleFrameMetrics, ToggleLeftDock,
     ToggleRightDock, WorkspaceShell,
 };
+pub use workspace::{WorkspaceFileRow, WorkspaceFilesProjection, WorkspaceFilesSnapshot};

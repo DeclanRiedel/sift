@@ -28,7 +28,7 @@ use sift_workspace_ui::{
     ConnectionHealthFailure, ConnectionHealthReport, ConnectionStatus, EditorMode, ExecutorCommand,
     ExecutorEvent, PresentationState, PresentationStore, Rect, ResultState, RoomDocumentCommand,
     RoomDocumentEvent, SemanticOutcome, SemanticRequestKind, SettingsStore, UserSettings,
-    WorkspaceShell,
+    WorkspaceFilesSnapshot, WorkspaceShell,
 };
 
 use crate::config::DesktopConfig;
@@ -1172,6 +1172,256 @@ async fn run_query_executor(
                     .send(ExecutorEvent::RepositoryStatusLoaded {
                         workspace_id,
                         request_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadWorkspaceFiles {
+                workspace_id,
+                request_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let workspace = sift_protocol::WorkspaceId(workspace_id);
+                        match client.workspace_nodes(workspace).await {
+                            Ok(tree) => match client.workspace_projection(workspace).await {
+                                Ok(projection) => {
+                                    let reconcile_plan = match projection.as_ref() {
+                                        Some(binding) => client
+                                            .plan_workspace_projection(binding.id)
+                                            .await
+                                            .map(Some)
+                                            .map_err(|error| {
+                                                format!(
+                                                    "planning workspace projection failed: {error}"
+                                                )
+                                            }),
+                                        None => Ok(None),
+                                    };
+                                    match reconcile_plan {
+                                        Ok(reconcile_plan) => client
+                                            .workspace_checkpoints(workspace, None, 100)
+                                            .await
+                                            .map(|checkpoints| WorkspaceFilesSnapshot {
+                                                tree,
+                                                projection,
+                                                reconcile_plan,
+                                                checkpoints,
+                                            })
+                                            .map_err(|error| {
+                                                format!(
+                                                    "loading workspace checkpoints failed: {error}"
+                                                )
+                                            }),
+                                        Err(error) => Err(error),
+                                    }
+                                }
+                                Err(error) => {
+                                    Err(format!("loading workspace projection failed: {error}"))
+                                }
+                            },
+                            Err(error) => Err(format!("loading workspace files failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::WorkspaceFilesLoaded {
+                        workspace_id,
+                        request_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateWorkspaceNode {
+                workspace_id,
+                expected_revision,
+                parent_id,
+                path,
+                kind,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .create_workspace_node(
+                            sift_protocol::WorkspaceId(workspace_id),
+                            sift_api_types::CreateWorkspaceNodeRequest {
+                                expected_workspace_revision: expected_revision,
+                                parent_id,
+                                path,
+                                kind,
+                                initial_text: (kind
+                                    == sift_protocol::WorkspaceNodeKind::SqlDocument)
+                                    .then(String::new),
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("creating workspace node failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::WorkspaceMutationFinished {
+                        workspace_id,
+                        action: "Created workspace node",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::MoveWorkspaceNode {
+                workspace_id,
+                node_id,
+                expected_revision,
+                parent_id,
+                path,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .move_workspace_node(
+                            node_id,
+                            sift_api_types::MoveWorkspaceNodeRequest {
+                                expected_workspace_revision: expected_revision,
+                                parent_id,
+                                path,
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("moving workspace node failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::WorkspaceMutationFinished {
+                        workspace_id,
+                        action: "Moved workspace node",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteWorkspaceNode {
+                workspace_id,
+                node_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_workspace_node(
+                            node_id,
+                            sift_api_types::ExpectedWorkspaceRevisionRequest { expected_revision },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("deleting workspace node failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::WorkspaceMutationFinished {
+                        workspace_id,
+                        action: "Deleted workspace node",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateWorkspaceCheckpoint {
+                workspace_id,
+                expected_revision,
+                name,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .create_workspace_checkpoint(
+                            sift_protocol::WorkspaceId(workspace_id),
+                            sift_api_types::CreateWorkspaceCheckpointRequest {
+                                expected_workspace_revision: expected_revision,
+                                reason: sift_protocol::WorkspaceCheckpointReason::Named,
+                                name: Some(name),
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("creating workspace checkpoint failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::WorkspaceMutationFinished {
+                        workspace_id,
+                        action: "Created workspace checkpoint",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RestoreWorkspaceCheckpoint {
+                workspace_id,
+                checkpoint_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .restore_workspace_checkpoint(
+                            checkpoint_id,
+                            sift_api_types::RestoreWorkspaceCheckpointRequest {
+                                expected_workspace_revision: expected_revision,
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("restoring workspace checkpoint failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::WorkspaceMutationFinished {
+                        workspace_id,
+                        action: "Restored workspace checkpoint as new head",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ApplyWorkspaceProjection {
+                workspace_id,
+                binding_id,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .apply_workspace_projection(binding_id, request)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| {
+                            format!("reconciling workspace projection failed: {error}")
+                        }),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::WorkspaceMutationFinished {
+                        workspace_id,
+                        action: "Reconciled workspace projection",
                         result,
                     })
                     .is_err()
@@ -3559,6 +3809,11 @@ async fn supervise_instances(
     }
 }
 
+enum RoomDocumentInput {
+    Update(Vec<u8>),
+    Flush(u64),
+}
+
 async fn run_room_document_supervisor(
     mut targets: tokio::sync::watch::Receiver<DesktopServer>,
     mut commands: tokio::sync::mpsc::UnboundedReceiver<RoomDocumentCommand>,
@@ -3568,7 +3823,7 @@ async fn run_room_document_supervisor(
         i64,
         (
             tokio::task::JoinHandle<()>,
-            tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+            tokio::sync::mpsc::UnboundedSender<RoomDocumentInput>,
         ),
     > = HashMap::new();
     loop {
@@ -3655,7 +3910,15 @@ async fn run_room_document_supervisor(
                     }
                     RoomDocumentCommand::Update { document_id, update } => {
                         if let Some((_, sender)) = documents.get(&document_id) {
-                            let _ = sender.send(update);
+                            let _ = sender.send(RoomDocumentInput::Update(update));
+                        }
+                    }
+                    RoomDocumentCommand::Flush {
+                        document_id,
+                        generation,
+                    } => {
+                        if let Some((_, sender)) = documents.get(&document_id) {
+                            let _ = sender.send(RoomDocumentInput::Flush(generation));
                         }
                     }
                     RoomDocumentCommand::Close { document_id } => {
@@ -3682,7 +3945,7 @@ async fn run_room_document(
     server: DesktopServer,
     source: sift_workspace_ui::RoomDocumentSource,
     snapshot: Vec<u8>,
-    mut updates: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    mut updates: tokio::sync::mpsc::UnboundedReceiver<RoomDocumentInput>,
     events: tokio::sync::mpsc::UnboundedSender<RoomDocumentEvent>,
 ) -> Result<(), String> {
     let client = server.client().await?;
@@ -3715,24 +3978,34 @@ async fn run_room_document(
     heartbeat.tick().await;
     loop {
         tokio::select! {
-            update = updates.recv() => {
-                let Some(update) = update else { return Ok(()) };
-                let message = replica.import_local_update(&update)
-                    .map_err(|error| format!("applying editor update failed: {error}"))?;
-                room.submit(&mut replica, message)
-                    .await
-                    .map_err(|error| format!("saving editor update failed: {error}"))?;
-                // Do not momentarily roll the editor back to an intermediate
-                // ACK when more local updates are already queued.
-                if updates.is_empty() {
-                    let _ = events.send(RoomDocumentEvent::Text {
-                        document_id: source.document_id,
-                        snapshot: replica
-                            .persist()
-                            .map_err(|error| format!("snapshotting room replica failed: {error}"))?
-                            .1,
-                        synced: true,
-                    });
+            input = updates.recv() => {
+                let Some(input) = input else { return Ok(()) };
+                match input {
+                    RoomDocumentInput::Update(update) => {
+                        let message = replica.import_local_update(&update)
+                            .map_err(|error| format!("applying editor update failed: {error}"))?;
+                        room.submit(&mut replica, message)
+                            .await
+                            .map_err(|error| format!("saving editor update failed: {error}"))?;
+                        // Do not momentarily roll the editor back to an intermediate
+                        // ACK when more local updates are already queued.
+                        if updates.is_empty() {
+                            let _ = events.send(RoomDocumentEvent::Text {
+                                document_id: source.document_id,
+                                snapshot: replica
+                                    .persist()
+                                    .map_err(|error| format!("snapshotting room replica failed: {error}"))?
+                                    .1,
+                                synced: true,
+                            });
+                        }
+                    }
+                    RoomDocumentInput::Flush(generation) => {
+                        let _ = events.send(RoomDocumentEvent::Flushed {
+                            document_id: source.document_id,
+                            generation,
+                        });
+                    }
                 }
             }
             incoming = room.next(&mut replica) => {

@@ -212,24 +212,24 @@ ways:
 
 ## Milestone G4 — Workspace files and projection reconciliation
 
-- [ ] Render the complete virtual workspace file tree in desktop.
-- [ ] Open workspace `.sql` documents in query tabs.
-- [ ] Create, rename, move, and delete workspace files/folders.
-- [ ] Save query tab changes into the canonical room document.
-- [ ] Materialize the matching document revision into the projection.
-- [ ] Show editor dirty, virtual-tree dirty, projection dirty, and Git dirty as
+- [x] Render the complete virtual workspace file tree in desktop.
+- [x] Open workspace `.sql` documents in query tabs.
+- [x] Create, rename, move, and delete workspace files/folders.
+- [x] Save query tab changes into the canonical room document.
+- [x] Materialize the matching document revision into the projection.
+- [x] Show editor dirty, virtual-tree dirty, projection dirty, and Git dirty as
       distinct states.
-- [ ] Save all workspace documents.
-- [ ] Create named checkpoint.
-- [ ] Browse checkpoint history.
-- [ ] Restore checkpoint as a new audited head.
-- [ ] Plan filesystem reconciliation before applying it.
-- [ ] Show virtual-only, filesystem-only, identical, and both-changed entries.
-- [ ] Require explicit conflict resolution when both sides changed.
-- [ ] Never overwrite collaborative text from a watcher event.
-- [ ] Refresh Git only after projection revision commits.
-- [ ] Preserve node identity across file moves and Git renames.
-- [ ] Handle external checkout changes while desktop is connected.
+- [x] Save all workspace documents.
+- [x] Create named checkpoint.
+- [x] Browse checkpoint history.
+- [x] Restore checkpoint as a new audited head.
+- [x] Plan filesystem reconciliation before applying it.
+- [x] Show virtual-only, filesystem-only, identical, and both-changed entries.
+- [x] Require explicit conflict resolution when both sides changed.
+- [x] Never overwrite collaborative text from a watcher event.
+- [x] Refresh Git only after projection revision commits.
+- [x] Preserve node identity across file moves and Git renames.
+- [x] Handle external checkout changes while desktop is connected.
 
 ## Milestone G5 — Branches and history
 

@@ -31,6 +31,9 @@ use crate::settings::{
     EditorMode, KeyboardProfile, KeymapSettings, RepositoryGrouping, RepositoryPrimaryAction,
     RepositorySort, RepositoryView, SettingsStore, UserSettings,
 };
+use crate::workspace::{
+    child_path, WorkspaceFileRow, WorkspaceFilesProjection, WorkspaceFilesSnapshot,
+};
 
 use crate::presentation::{
     BottomTool, DatabaseObjectSource, ItemKind, ItemPresentation, ItemSource, LeftPanel, PaneAxis,
@@ -1008,6 +1011,14 @@ pub enum Modal {
     CsvImport,
     RepositoryCommit,
     ConfirmRepositoryUncommit,
+    WorkspaceCreateFile,
+    WorkspaceCreateFolder,
+    WorkspaceMove,
+    ConfirmWorkspaceDelete,
+    WorkspaceCheckpoint,
+    WorkspaceHistory,
+    ConfirmWorkspaceRestore(sift_protocol::WorkspaceCheckpointId),
+    WorkspaceReconcile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1655,6 +1666,44 @@ pub enum ExecutorCommand {
         workspace_id: i64,
         request_id: u64,
     },
+    LoadWorkspaceFiles {
+        workspace_id: i64,
+        request_id: u64,
+    },
+    CreateWorkspaceNode {
+        workspace_id: i64,
+        expected_revision: sift_protocol::WorkspaceRevision,
+        parent_id: Option<sift_protocol::WorkspaceNodeId>,
+        path: sift_protocol::WorkspacePath,
+        kind: sift_protocol::WorkspaceNodeKind,
+    },
+    MoveWorkspaceNode {
+        workspace_id: i64,
+        node_id: sift_protocol::WorkspaceNodeId,
+        expected_revision: sift_protocol::WorkspaceRevision,
+        parent_id: Option<sift_protocol::WorkspaceNodeId>,
+        path: sift_protocol::WorkspacePath,
+    },
+    DeleteWorkspaceNode {
+        workspace_id: i64,
+        node_id: sift_protocol::WorkspaceNodeId,
+        expected_revision: sift_protocol::WorkspaceRevision,
+    },
+    CreateWorkspaceCheckpoint {
+        workspace_id: i64,
+        expected_revision: sift_protocol::WorkspaceRevision,
+        name: String,
+    },
+    RestoreWorkspaceCheckpoint {
+        workspace_id: i64,
+        checkpoint_id: sift_protocol::WorkspaceCheckpointId,
+        expected_revision: sift_protocol::WorkspaceRevision,
+    },
+    ApplyWorkspaceProjection {
+        workspace_id: i64,
+        binding_id: sift_protocol::ProjectionBindingId,
+        request: sift_api_types::ApplyWorkspaceProjectionRequest,
+    },
     SetRepositoryPathsStaged {
         workspace_id: i64,
         binding_id: i64,
@@ -1903,6 +1952,16 @@ pub enum ExecutorEvent {
         request_id: u64,
         result: Result<Option<sift_protocol::VcsStatus>, String>,
     },
+    WorkspaceFilesLoaded {
+        workspace_id: i64,
+        request_id: u64,
+        result: Result<WorkspaceFilesSnapshot, String>,
+    },
+    WorkspaceMutationFinished {
+        workspace_id: i64,
+        action: &'static str,
+        result: Result<(), String>,
+    },
     RepositoryCommitted {
         workspace_id: i64,
         request_id: u64,
@@ -2083,6 +2142,10 @@ pub enum RoomDocumentCommand {
         document_id: i64,
         update: Vec<u8>,
     },
+    Flush {
+        document_id: i64,
+        generation: u64,
+    },
     Close {
         document_id: i64,
     },
@@ -2096,6 +2159,10 @@ pub enum RoomDocumentEvent {
         document_id: i64,
         snapshot: Vec<u8>,
         synced: bool,
+    },
+    Flushed {
+        document_id: i64,
+        generation: u64,
     },
     Failed {
         document_id: i64,
@@ -4580,6 +4647,7 @@ pub struct WorkspaceShell {
     saved_query_name_input: Entity<TextInput>,
     result_cell_edit_input: Entity<TextInput>,
     repository_commit_input: Entity<TextInput>,
+    workspace_path_input: Entity<TextInput>,
     repository_commit_drafts: HashMap<i64, String>,
     recent_repository_commit: Option<sift_protocol::VcsCommitResult>,
     repository_recovery_notice: Option<String>,
@@ -4667,6 +4735,10 @@ pub struct WorkspaceShell {
     room_members_loading: bool,
     room_members_error: Option<String>,
     repository: RepositoryProjection,
+    workspace_files: WorkspaceFilesProjection,
+    workspace_reconcile_resolutions:
+        HashMap<sift_protocol::WorkspacePath, sift_protocol::ReconcileResolution>,
+    workspace_files_scroll_handle: UniformListScrollHandle,
     repository_scroll_handle: UniformListScrollHandle,
     repository_diff_items: HashMap<u64, RepositoryDiffItemState>,
     _repository_refresh_task: Option<Task<()>>,
@@ -4681,6 +4753,7 @@ pub struct WorkspaceShell {
     _instance_task: Option<Task<()>>,
     executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
     room_document_sender: Option<tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>>,
+    room_document_generations: HashMap<i64, u64>,
     running_queries: HashMap<u64, u64>,
     database_processes: Vec<sift_protocol::DatabaseProcess>,
     database_processes_loading: bool,
@@ -4942,6 +5015,8 @@ impl WorkspaceShell {
             TextInput::new(repository_commit_draft, "Commit message", cx)
                 .aria_label("Git commit message")
         });
+        let workspace_path_input =
+            cx.new(|cx| TextInput::new("", "Workspace path", cx).aria_label("Workspace path"));
         let schema_search_input = cx.new(|cx| {
             TextInput::new("", "Search schema…", cx).aria_label("Search database schema")
         });
@@ -5099,6 +5174,7 @@ impl WorkspaceShell {
             });
         });
         let mut repository = RepositoryProjection::new(selected_workspace_id);
+        let workspace_files = WorkspaceFilesProjection::new(selected_workspace_id);
         repository.set_view_preferences(
             settings.repository.grouping,
             settings.repository.sort,
@@ -5114,6 +5190,7 @@ impl WorkspaceShell {
             saved_query_name_input,
             result_cell_edit_input,
             repository_commit_input,
+            workspace_path_input,
             repository_commit_drafts,
             recent_repository_commit: None,
             repository_recovery_notice: None,
@@ -5199,6 +5276,9 @@ impl WorkspaceShell {
             room_members_loading: false,
             room_members_error: None,
             repository,
+            workspace_files,
+            workspace_reconcile_resolutions: HashMap::new(),
+            workspace_files_scroll_handle: UniformListScrollHandle::new(),
             repository_scroll_handle: UniformListScrollHandle::new(),
             repository_diff_items: HashMap::new(),
             _repository_refresh_task: None,
@@ -5213,6 +5293,7 @@ impl WorkspaceShell {
             _instance_task: None,
             executor_sender: None,
             room_document_sender: None,
+            room_document_generations: HashMap::new(),
             running_queries: HashMap::new(),
             database_processes: Vec::new(),
             database_processes_loading: false,
@@ -5682,6 +5763,8 @@ impl WorkspaceShell {
             self.workspace_sessions.insert(previous, outgoing);
         }
         self.repository.select_workspace(self.selected_workspace_id);
+        self.workspace_files
+            .select_workspace(self.selected_workspace_id);
 
         if let Some(sender) = &self.executor_sender {
             let _ = sender.send(ExecutorCommand::Disconnect);
@@ -5778,7 +5861,7 @@ impl WorkspaceShell {
             while let Some(event) = receiver.recv().await {
                 if shell
                     .update(cx, |shell, cx| {
-                        let repository_changed = match &event {
+                        let workspace_changed = match &event {
                             PresenceEvent::Message(
                                 sift_protocol::RoomServerMessage::RepositoryChanged {
                                     workspace_id,
@@ -5795,7 +5878,8 @@ impl WorkspaceShell {
                             _ => false,
                         };
                         shell.presence.apply(event);
-                        if repository_changed {
+                        if workspace_changed {
+                            shell.request_workspace_files(cx);
                             shell.request_repository_status(cx);
                         }
                         cx.notify();
@@ -5872,6 +5956,29 @@ impl WorkspaceShell {
                     });
                 }
             }
+            RoomDocumentEvent::Flushed {
+                document_id,
+                generation,
+            } => {
+                if self.room_document_generations.get(&document_id).copied() != Some(generation) {
+                    return;
+                }
+                for pane in &self.panes {
+                    let item_id = pane.read(cx).items.iter().find_map(|item| {
+                        matches!(
+                            item.source,
+                            Some(ItemSource::RoomDocument(RoomDocumentSource {
+                                document_id: id,
+                                ..
+                            })) if id == document_id
+                        )
+                        .then_some(item.id)
+                    });
+                    if let Some(item_id) = item_id {
+                        pane.update(cx, |pane, cx| pane.mark_clean(item_id, cx));
+                    }
+                }
+            }
             RoomDocumentEvent::Failed {
                 document_id,
                 message,
@@ -5885,7 +5992,7 @@ impl WorkspaceShell {
             && self.left_dock.presentation.open
             && self.active_left_panel == LeftPanel::Git
         {
-            self.request_repository_status(cx);
+            self.request_workspace_files(cx);
         }
         cx.notify();
     }
@@ -7073,6 +7180,35 @@ impl WorkspaceShell {
                 if self.selected_workspace().map(|workspace| workspace.room_id) == Some(room_id) {
                     cx.notify();
                 }
+            }
+            ExecutorEvent::WorkspaceFilesLoaded {
+                workspace_id,
+                request_id,
+                result,
+            } => {
+                if self
+                    .workspace_files
+                    .apply_load(workspace_id, request_id, result)
+                {
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::WorkspaceMutationFinished {
+                workspace_id,
+                action,
+                result,
+            } => {
+                if self.selected_workspace_id != Some(workspace_id) {
+                    return;
+                }
+                let succeeded = result.is_ok();
+                self.workspace_files.finish_mutation(result);
+                if succeeded {
+                    self.show_success_toast(action.into(), cx);
+                    self.request_workspace_files(cx);
+                    self.request_repository_status(cx);
+                }
+                cx.notify();
             }
             ExecutorEvent::RepositoryStatusLoaded {
                 workspace_id,
@@ -11451,6 +11587,7 @@ impl WorkspaceShell {
             self.request_room_members(cx);
         }
         if panel == LeftPanel::Git && self.left_dock.presentation.open {
+            self.request_workspace_files(cx);
             self.request_repository_status(cx);
             self.start_repository_fallback_refresh(cx);
         } else {
@@ -11541,10 +11678,370 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn request_workspace_files(&mut self, cx: &mut Context<Self>) {
+        self.workspace_files
+            .select_workspace(self.selected_workspace_id);
+        let Some((workspace_id, request_id)) = self.workspace_files.begin_load() else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            let _ = self.workspace_files.apply_load(
+                workspace_id,
+                request_id,
+                Err("Workspace file service is unavailable".into()),
+            );
+            cx.notify();
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::LoadWorkspaceFiles {
+                workspace_id,
+                request_id,
+            })
+            .is_err()
+        {
+            let _ = self.workspace_files.apply_load(
+                workspace_id,
+                request_id,
+                Err("Workspace file service is unavailable".into()),
+            );
+        }
+        cx.notify();
+    }
+
+    fn open_workspace_create(&mut self, folder: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace_path_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.modal = Some(if folder {
+            Modal::WorkspaceCreateFolder
+        } else {
+            Modal::WorkspaceCreateFile
+        });
+        self.workspace_path_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn create_workspace_node(&mut self, folder: bool, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(expected_revision) = self.workspace_files.revision() else {
+            return;
+        };
+        let selected = self.workspace_files.selected_node().cloned();
+        let parent = selected.as_ref().and_then(|node| {
+            if node.kind == sift_protocol::WorkspaceNodeKind::Folder {
+                Some(node)
+            } else {
+                node.parent_id.and_then(|parent_id| {
+                    self.workspace_files.snapshot().and_then(|snapshot| {
+                        snapshot.tree.nodes.iter().find(|node| node.id == parent_id)
+                    })
+                })
+            }
+        });
+        let name = self.workspace_path_input.read(cx).text().to_owned();
+        let path = match child_path(parent, &name) {
+            Ok(path) => path,
+            Err(error) => {
+                self.show_toast(error, cx);
+                return;
+            }
+        };
+        let parent_id = parent.map(|node| node.id);
+        let kind = if folder {
+            sift_protocol::WorkspaceNodeKind::Folder
+        } else {
+            sift_protocol::WorkspaceNodeKind::SqlDocument
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if !self.workspace_files.begin_mutation() {
+            return;
+        }
+        if sender
+            .send(ExecutorCommand::CreateWorkspaceNode {
+                workspace_id,
+                expected_revision,
+                parent_id,
+                path,
+                kind,
+            })
+            .is_err()
+        {
+            self.workspace_files
+                .finish_mutation(Err("Workspace file service is unavailable".into()));
+            return;
+        }
+        self.modal = None;
+        cx.notify();
+    }
+
+    fn move_workspace_node(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(expected_revision) = self.workspace_files.revision() else {
+            return;
+        };
+        let Some(node) = self.workspace_files.selected_node().cloned() else {
+            self.show_toast("Select a workspace file or folder first".into(), cx);
+            return;
+        };
+        let path = match sift_protocol::WorkspacePath::new(
+            self.workspace_path_input.read(cx).text().trim().to_owned(),
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                self.show_toast(error.into(), cx);
+                return;
+            }
+        };
+        let parent_path = path.0.rsplit_once('/').map(|(parent, _)| parent);
+        let parent_id = match parent_path {
+            Some(parent_path) => self.workspace_files.snapshot().and_then(|snapshot| {
+                snapshot
+                    .tree
+                    .nodes
+                    .iter()
+                    .find(|candidate| {
+                        candidate.kind == sift_protocol::WorkspaceNodeKind::Folder
+                            && candidate.path.0 == parent_path
+                    })
+                    .map(|candidate| candidate.id)
+            }),
+            None => None,
+        };
+        if parent_path.is_some() && parent_id.is_none() {
+            self.show_toast("The destination folder does not exist".into(), cx);
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if !self.workspace_files.begin_mutation() {
+            return;
+        }
+        if sender
+            .send(ExecutorCommand::MoveWorkspaceNode {
+                workspace_id,
+                node_id: node.id,
+                expected_revision,
+                parent_id,
+                path,
+            })
+            .is_err()
+        {
+            self.workspace_files
+                .finish_mutation(Err("Workspace file service is unavailable".into()));
+            return;
+        }
+        self.modal = None;
+        cx.notify();
+    }
+
+    fn delete_workspace_node(&mut self, cx: &mut Context<Self>) {
+        let Some((workspace_id, expected_revision, node_id)) = self
+            .selected_workspace_id
+            .zip(self.workspace_files.revision())
+            .and_then(|(workspace_id, revision)| {
+                self.workspace_files
+                    .selected_node()
+                    .map(|node| (workspace_id, revision, node.id))
+            })
+        else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if !self.workspace_files.begin_mutation() {
+            return;
+        }
+        if sender
+            .send(ExecutorCommand::DeleteWorkspaceNode {
+                workspace_id,
+                node_id,
+                expected_revision,
+            })
+            .is_err()
+        {
+            self.workspace_files
+                .finish_mutation(Err("Workspace file service is unavailable".into()));
+            return;
+        }
+        self.modal = None;
+        cx.notify();
+    }
+
+    fn create_named_workspace_checkpoint(&mut self, cx: &mut Context<Self>) {
+        let Some((workspace_id, expected_revision)) = self
+            .selected_workspace_id
+            .zip(self.workspace_files.revision())
+        else {
+            return;
+        };
+        let name = self.workspace_path_input.read(cx).text().trim().to_owned();
+        if name.is_empty() {
+            self.show_toast("Checkpoint name is required".into(), cx);
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if !self.workspace_files.begin_mutation() {
+            return;
+        }
+        if sender
+            .send(ExecutorCommand::CreateWorkspaceCheckpoint {
+                workspace_id,
+                expected_revision,
+                name,
+            })
+            .is_err()
+        {
+            self.workspace_files
+                .finish_mutation(Err("Workspace file service is unavailable".into()));
+            return;
+        }
+        self.modal = None;
+        cx.notify();
+    }
+
+    fn restore_workspace_checkpoint(
+        &mut self,
+        checkpoint_id: sift_protocol::WorkspaceCheckpointId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((workspace_id, expected_revision)) = self
+            .selected_workspace_id
+            .zip(self.workspace_files.revision())
+        else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if !self.workspace_files.begin_mutation() {
+            return;
+        }
+        if sender
+            .send(ExecutorCommand::RestoreWorkspaceCheckpoint {
+                workspace_id,
+                checkpoint_id,
+                expected_revision,
+            })
+            .is_err()
+        {
+            self.workspace_files
+                .finish_mutation(Err("Workspace file service is unavailable".into()));
+            return;
+        }
+        self.modal = None;
+        cx.notify();
+    }
+
+    fn open_workspace_reconcile(&mut self, cx: &mut Context<Self>) {
+        self.workspace_reconcile_resolutions.clear();
+        if let Some(plan) = self
+            .workspace_files
+            .snapshot()
+            .and_then(|snapshot| snapshot.reconcile_plan.as_ref())
+        {
+            for entry in plan
+                .entries
+                .iter()
+                .filter(|entry| entry.state != sift_protocol::ReconcileState::Unchanged)
+            {
+                let resolution = match entry.state {
+                    sift_protocol::ReconcileState::WorkspaceOnly => {
+                        Some(sift_protocol::ReconcileResolution::MaterializeWorkspace)
+                    }
+                    sift_protocol::ReconcileState::ProjectionOnly => {
+                        Some(sift_protocol::ReconcileResolution::ImportProjection)
+                    }
+                    _ => None,
+                };
+                if let Some(resolution) = resolution {
+                    self.workspace_reconcile_resolutions
+                        .insert(entry.path.clone(), resolution);
+                }
+            }
+        }
+        self.modal = Some(Modal::WorkspaceReconcile);
+        cx.notify();
+    }
+
+    fn apply_workspace_reconcile(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(snapshot) = self.workspace_files.snapshot() else {
+            return;
+        };
+        let (Some(binding), Some(plan)) = (
+            snapshot.projection.as_ref(),
+            snapshot.reconcile_plan.as_ref(),
+        ) else {
+            return;
+        };
+        let changed = plan
+            .entries
+            .iter()
+            .filter(|entry| entry.state != sift_protocol::ReconcileState::Unchanged)
+            .collect::<Vec<_>>();
+        let resolutions = changed
+            .iter()
+            .filter_map(|entry| {
+                self.workspace_reconcile_resolutions
+                    .get(&entry.path)
+                    .copied()
+                    .map(|resolution| sift_api_types::ProjectionResolutionRequest {
+                        observed: (*entry).clone(),
+                        resolution,
+                    })
+            })
+            .collect::<Vec<_>>();
+        if resolutions.len() != changed.len() {
+            self.show_toast(
+                "Resolve every projection conflict before applying".into(),
+                cx,
+            );
+            return;
+        }
+        let command = ExecutorCommand::ApplyWorkspaceProjection {
+            workspace_id,
+            binding_id: binding.id,
+            request: sift_api_types::ApplyWorkspaceProjectionRequest {
+                binding_revision: plan.binding_revision,
+                workspace_revision: plan.workspace_revision,
+                resolutions,
+            },
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if !self.workspace_files.begin_mutation() {
+            return;
+        }
+        if sender.send(command).is_err() {
+            self.workspace_files
+                .finish_mutation(Err("Workspace file service is unavailable".into()));
+            return;
+        }
+        self.modal = None;
+        cx.notify();
+    }
+
     fn focus_source_control(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.active_left_panel = LeftPanel::Git;
         self.left_dock.presentation.open = true;
         self.request_repository_status(cx);
+        self.request_workspace_files(cx);
         self.start_repository_fallback_refresh(cx);
         self.persist(cx);
         cx.notify();
@@ -12176,6 +12673,7 @@ impl WorkspaceShell {
                     let open = shell.left_dock.presentation.open
                         && shell.active_left_panel == LeftPanel::Git;
                     if open {
+                        shell.request_workspace_files(cx);
                         shell.request_repository_status(cx);
                     }
                     open
@@ -12984,8 +13482,10 @@ impl WorkspaceShell {
         self.recent_repository_commit = None;
         self.repository_recovery_notice = None;
         self.repository.select_workspace(Some(workspace.id));
+        self.workspace_files.select_workspace(Some(workspace.id));
         self.presence.join(RoomId(workspace.room_id));
         if self.left_dock.presentation.open && self.active_left_panel == LeftPanel::Git {
+            self.request_workspace_files(cx);
             self.request_repository_status(cx);
         }
         self.persist(cx);
@@ -13038,6 +13538,7 @@ impl WorkspaceShell {
         if !exists {
             self.selected_workspace_id = None;
             self.repository.select_workspace(None);
+            self.workspace_files.select_workspace(None);
             self.show_toast("Restored workspace is no longer available".into(), cx);
             self.persist(cx);
         }
@@ -13621,6 +14122,11 @@ impl WorkspaceShell {
                     .map(|source| source.document_id);
                 if let (Some(sender), Some(document_id)) = (&self.room_document_sender, document_id)
                 {
+                    let generation = self
+                        .room_document_generations
+                        .entry(document_id)
+                        .or_default();
+                    *generation = generation.saturating_add(1);
                     let _ = sender.send(RoomDocumentCommand::Update {
                         document_id,
                         update: update.clone(),
@@ -14362,6 +14868,20 @@ impl WorkspaceShell {
             self.save_instance_configuration(cx);
             return;
         }
+        let active_room_document = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            let item = pane.active_item()?;
+            match item.source.as_ref()? {
+                ItemSource::RoomDocument(source) => Some(source.document_id),
+                ItemSource::DatabaseObject(_) => None,
+            }
+        });
+        if let Some(document_id) = active_room_document {
+            self.flush_room_document(document_id);
+            self.show_toast("Saving canonical workspace document…".into(), cx);
+            self.focus_active_pane(window, cx);
+            return;
+        }
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.update(cx, |pane, cx| {
                 if let Some(item_id) = pane.active_item().map(|item| item.id) {
@@ -14374,6 +14894,44 @@ impl WorkspaceShell {
         self.persist(cx);
         self.focus_active_pane(window, cx);
         cx.notify();
+    }
+
+    fn flush_room_document(&self, document_id: i64) {
+        let Some(sender) = &self.room_document_sender else {
+            return;
+        };
+        let generation = self
+            .room_document_generations
+            .get(&document_id)
+            .copied()
+            .unwrap_or_default();
+        let _ = sender.send(RoomDocumentCommand::Flush {
+            document_id,
+            generation,
+        });
+    }
+
+    fn save_all_workspace_documents(&mut self, cx: &mut Context<Self>) {
+        let document_ids = self
+            .panes
+            .iter()
+            .flat_map(|pane| pane.read(cx).items.clone())
+            .filter_map(|item| match item.source {
+                Some(ItemSource::RoomDocument(source)) => Some(source.document_id),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        if document_ids.is_empty() {
+            self.show_toast("No workspace documents are open".into(), cx);
+            return;
+        }
+        for document_id in &document_ids {
+            self.flush_room_document(*document_id);
+        }
+        self.show_toast(
+            format!("Saving {} workspace document(s)…", document_ids.len()),
+            cx,
+        );
     }
 
     fn open_command_palette(
@@ -16722,6 +17280,52 @@ impl WorkspaceShell {
                 self.modal = Some(Modal::ConfirmRepositoryUncommit);
                 cx.notify();
             }
+            CommandId::RefreshWorkspaceFiles => self.request_workspace_files(cx),
+            CommandId::CreateWorkspaceFile => self.open_workspace_create(false, window, cx),
+            CommandId::CreateWorkspaceFolder => self.open_workspace_create(true, window, cx),
+            CommandId::MoveWorkspaceNode => {
+                let path = self
+                    .workspace_files
+                    .selected_node()
+                    .map(|node| node.path.0.clone())
+                    .unwrap_or_default();
+                if path.is_empty() {
+                    self.show_toast("Select a workspace file or folder first".into(), cx);
+                } else {
+                    self.workspace_path_input
+                        .update(cx, |input, cx| input.set_text(path, cx));
+                    self.modal = Some(Modal::WorkspaceMove);
+                    self.workspace_path_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .focus(window, cx);
+                    cx.notify();
+                }
+            }
+            CommandId::DeleteWorkspaceNode => {
+                if self.workspace_files.selected_node().is_some() {
+                    self.modal = Some(Modal::ConfirmWorkspaceDelete);
+                    cx.notify();
+                } else {
+                    self.show_toast("Select a workspace file or folder first".into(), cx);
+                }
+            }
+            CommandId::SaveAllWorkspaceDocuments => self.save_all_workspace_documents(cx),
+            CommandId::CreateWorkspaceCheckpoint => {
+                self.workspace_path_input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                self.modal = Some(Modal::WorkspaceCheckpoint);
+                self.workspace_path_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .focus(window, cx);
+                cx.notify();
+            }
+            CommandId::OpenWorkspaceHistory => {
+                self.modal = Some(Modal::WorkspaceHistory);
+                cx.notify();
+            }
+            CommandId::ReconcileWorkspaceProjection => self.open_workspace_reconcile(cx),
             CommandId::ToggleRepositoryGrouping => self.toggle_repository_grouping(cx),
             CommandId::ToggleRepositorySort => self.toggle_repository_sort(cx),
             CommandId::ToggleRepositoryView => self.toggle_repository_view(cx),
@@ -16912,6 +17516,7 @@ impl WorkspaceShell {
     ) {
         self.left_dock.presentation.open = !self.left_dock.presentation.open;
         if self.left_dock.presentation.open && self.active_left_panel == LeftPanel::Git {
+            self.request_workspace_files(cx);
             self.request_repository_status(cx);
             self.start_repository_fallback_refresh(cx);
         } else {
@@ -19658,6 +20263,122 @@ impl WorkspaceShell {
         }
     }
 
+    fn render_workspace_file_row(
+        &self,
+        index: usize,
+        row: WorkspaceFileRow,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors;
+        match row {
+            WorkspaceFileRow::Node {
+                node,
+                depth,
+                expanded,
+            } => {
+                let node_id = node.id;
+                let selected = self
+                    .workspace_files
+                    .selected_node()
+                    .is_some_and(|selected| selected.id == node_id);
+                let is_folder = node.kind == sift_protocol::WorkspaceNodeKind::Folder;
+                let label = node
+                    .path
+                    .0
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&node.path.0)
+                    .to_owned();
+                div()
+                    .id(("workspace-file", index))
+                    .mx_2()
+                    .h(cx.theme().metrics.row_height)
+                    .pl(px(6. + depth as f32 * 13.))
+                    .pr_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .rounded_sm()
+                    .when(selected, |row| row.bg(colors.active_surface))
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.workspace_files.select_node(node_id);
+                        if is_folder {
+                            shell.workspace_files.toggle_folder(node_id);
+                        } else {
+                            shell.open_workspace_file(node_id, window, cx);
+                        }
+                        cx.notify();
+                    }))
+                    .child(if is_folder {
+                        icon(
+                            if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            },
+                            colors.muted_text,
+                            10.,
+                        )
+                    } else {
+                        div().w(px(10.)).into_any_element()
+                    })
+                    .child(icon(
+                        if is_folder {
+                            IconName::Folder
+                        } else {
+                            IconName::Terminal
+                        },
+                        colors.muted_text,
+                        11.,
+                    ))
+                    .child(div().min_w_0().flex_1().truncate().child(label))
+                    .children((node.revision > 1).then(|| {
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(format!("r{}", node.revision))
+                    }))
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn open_workspace_file(
+        &mut self,
+        node_id: sift_protocol::WorkspaceNodeId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(node) = self
+            .workspace_files
+            .snapshot()
+            .and_then(|snapshot| snapshot.tree.nodes.iter().find(|node| node.id == node_id))
+            .cloned()
+        else {
+            return;
+        };
+        if node.kind != sift_protocol::WorkspaceNodeKind::SqlDocument {
+            return;
+        }
+        let Some(document_id) = node.document_id else {
+            self.show_toast(format!("{} has no room document", node.path.0), cx);
+            return;
+        };
+        let document = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| &tenant.rooms)
+            .flat_map(|room| &room.documents)
+            .find(|document| document.id.0 == document_id)
+            .cloned();
+        if let Some(document) = document {
+            self.open_room_document(&document, window, cx);
+        } else {
+            self.show_toast(format!("{} is not loaded in this room", node.path.0), cx);
+        }
+    }
+
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -19898,6 +20619,29 @@ impl WorkspaceShell {
                 |dock_view| {
                     let rows = self.repository.rows();
                     let row_count = rows.len();
+                    let workspace_rows = self.workspace_files.rows();
+                    let workspace_row_count = workspace_rows.len();
+                    let workspace_list_height =
+                        (workspace_row_count.max(1) as f32 * f32::from(cx.theme().metrics.row_height))
+                            .min(190.);
+                    let workspace_tree_dirty = self.workspace_files.workspace_tree_dirty();
+                    let projection_dirty = self.workspace_files.projection_dirty();
+                    let editor_dirty = self
+                        .panes
+                        .iter()
+                        .map(|pane| {
+                            pane.read(cx)
+                                .items
+                                .iter()
+                                .filter(|item| {
+                                    item.dirty
+                                        && matches!(item.source, Some(ItemSource::RoomDocument(_)))
+                                })
+                                .count()
+                        })
+                        .sum::<usize>();
+                    let (virtual_only, filesystem_only, both_changed, identical) =
+                        self.workspace_files.reconcile_summary();
                     let workspace_name = self
                         .selected_workspace()
                         .map(|workspace| workspace.name.clone())
@@ -19994,6 +20738,249 @@ impl WorkspaceShell {
                                             })),
                                         ),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .h(px(28.))
+                                .px_3()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .child(SectionLabel::new(format!(
+                                    "FILES ({workspace_row_count})"
+                                )))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .children(
+                                            (editor_dirty > 0)
+                                                .then(|| format!("editor*{editor_dirty}")),
+                                        )
+                                        .children(workspace_tree_dirty.then_some("virtual*"))
+                                        .children(projection_dirty.then_some("projection*"))
+                                        .child(
+                                            IconButton::new(
+                                                "create-workspace-file",
+                                                IconName::Add,
+                                                "New SQL file",
+                                            )
+                                            .square(px(22.))
+                                            .icon_size(11.)
+                                            .tooltip("New SQL file")
+                                            .disabled(self.workspace_files.mutation_pending())
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_workspace_create(false, window, cx)
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "create-workspace-folder",
+                                                IconName::Folder,
+                                                "New folder",
+                                            )
+                                            .square(px(22.))
+                                            .icon_size(11.)
+                                            .tooltip("New folder")
+                                            .disabled(self.workspace_files.mutation_pending())
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_workspace_create(true, window, cx)
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "move-workspace-node",
+                                                IconName::Edit,
+                                                "Move or rename selected",
+                                            )
+                                            .square(px(22.))
+                                            .icon_size(11.)
+                                            .tooltip("Move or rename selected")
+                                            .disabled(
+                                                self.workspace_files.selected_node().is_none()
+                                                    || self
+                                                        .workspace_files
+                                                        .mutation_pending(),
+                                            )
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                let path = shell
+                                                    .workspace_files
+                                                    .selected_node()
+                                                    .map(|node| node.path.0.clone())
+                                                    .unwrap_or_default();
+                                                shell.workspace_path_input.update(
+                                                    cx,
+                                                    |input, cx| input.set_text(path, cx),
+                                                );
+                                                shell.modal = Some(Modal::WorkspaceMove);
+                                                shell
+                                                    .workspace_path_input
+                                                    .read(cx)
+                                                    .focus_handle(cx)
+                                                    .focus(window, cx);
+                                                cx.notify();
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "delete-workspace-node",
+                                                IconName::Close,
+                                                "Delete selected",
+                                            )
+                                            .square(px(22.))
+                                            .icon_size(11.)
+                                            .tooltip("Delete selected")
+                                            .disabled(
+                                                self.workspace_files.selected_node().is_none()
+                                                    || self.workspace_files.mutation_pending(),
+                                            )
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.modal =
+                                                    Some(Modal::ConfirmWorkspaceDelete);
+                                                cx.notify();
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "create-workspace-checkpoint",
+                                                IconName::VersionControl,
+                                                "Create named checkpoint",
+                                            )
+                                            .square(px(22.))
+                                            .icon_size(11.)
+                                            .tooltip("Create named checkpoint")
+                                            .disabled(self.workspace_files.mutation_pending())
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.workspace_path_input.update(
+                                                    cx,
+                                                    |input, cx| input.set_text("", cx),
+                                                );
+                                                shell.modal = Some(Modal::WorkspaceCheckpoint);
+                                                shell
+                                                    .workspace_path_input
+                                                    .read(cx)
+                                                    .focus_handle(cx)
+                                                    .focus(window, cx);
+                                                cx.notify();
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "workspace-history",
+                                                IconName::View,
+                                                "Workspace checkpoint history",
+                                            )
+                                            .square(px(22.))
+                                            .icon_size(11.)
+                                            .tooltip("Workspace checkpoint history")
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.modal = Some(Modal::WorkspaceHistory);
+                                                cx.notify();
+                                            })),
+                                        )
+                                        .when(projection_dirty, |actions| {
+                                            actions.child(
+                                                IconButton::new(
+                                                    "reconcile-workspace-projection",
+                                                    IconName::Warning,
+                                                    "Reconcile workspace projection",
+                                                )
+                                                .square(px(22.))
+                                                .icon_size(11.)
+                                                .tooltip("Reconcile workspace projection")
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.open_workspace_reconcile(cx)
+                                                })),
+                                            )
+                                        })
+                                        .child(
+                                            IconButton::new(
+                                                "save-all-workspace-documents",
+                                                IconName::Check,
+                                                "Save all workspace documents",
+                                            )
+                                            .square(px(22.))
+                                            .icon_size(11.)
+                                            .tooltip("Save all workspace documents")
+                                            .disabled(editor_dirty == 0)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.save_all_workspace_documents(cx)
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "refresh-workspace-files",
+                                                IconName::Refresh,
+                                                "Refresh workspace files",
+                                            )
+                                            .square(px(22.))
+                                            .icon_size(11.)
+                                            .tooltip("Refresh workspace files and reconciliation")
+                                            .disabled(self.workspace_files.loading())
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.request_workspace_files(cx)
+                                            })),
+                                        ),
+                                ),
+                        )
+                        .children(self.workspace_files.error().map(|message| {
+                            div().mx_2().mb_1().child(ErrorBanner::new(message.to_owned()))
+                        }))
+                        .when(projection_dirty, |panel| {
+                            panel.child(
+                                div()
+                                    .px_3()
+                                    .pb_1()
+                                    .text_xs()
+                                    .text_color(if both_changed > 0 {
+                                        colors.warning
+                                    } else {
+                                        colors.muted_text
+                                    })
+                                    .child(format!(
+                                        "Reconcile · {virtual_only} virtual-only · {filesystem_only} filesystem-only · {both_changed} conflicts · {identical} identical"
+                                    )),
+                            )
+                        })
+                        .child(
+                            uniform_list(
+                                "workspace-files-list",
+                                workspace_row_count,
+                                cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                    range
+                                        .filter_map(|index| {
+                                            workspace_rows
+                                                .get(index)
+                                                .cloned()
+                                                .map(|row| (index, row))
+                                        })
+                                        .map(|(index, row)| {
+                                            shell.render_workspace_file_row(index, row, cx)
+                                        })
+                                        .collect()
+                                }),
+                            )
+                            .h(px(workspace_list_height))
+                            .flex_none()
+                            .w_full()
+                            .track_scroll(&self.workspace_files_scroll_handle),
+                        )
+                        .child(
+                            div()
+                                .h(px(28.))
+                                .px_3()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .child(SectionLabel::new(format!("CHANGES ({row_count})"))),
                         )
                         .children(self.repository.error().map(|failure| {
                             div().mx_2().mb_2().child(ErrorBanner::new(format!(
@@ -24267,6 +25254,477 @@ impl WorkspaceShell {
                             .child(Button::new("cancel-catalog-migration-run", "Stop run").debug_selector("cancel-catalog-migration-run").tone(ButtonTone::DangerGhost).disabled(!run_running || self.catalog_migration_pending).on_click(cx.listener(|shell, _, _, cx| shell.cancel_catalog_migration_run(cx))))
                             .child(Button::new("cancel-catalog-migration", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
                             .child(Button::new("apply-catalog-migration", if self.catalog_migration_pending { "Working…" } else { "Apply migration" }).tone(ButtonTone::DangerMuted).disabled(self.catalog_migration_pending || self.catalog_migration_plan.is_none() || self.catalog_migration_run.is_some()).on_click(cx.listener(|shell, _, _, cx| shell.apply_catalog_migration(cx)))))
+                        .into_any_element()
+                }
+                Modal::WorkspaceCreateFile | Modal::WorkspaceCreateFolder => {
+                    let folder = matches!(modal, Modal::WorkspaceCreateFolder);
+                    let parent = self
+                        .workspace_files
+                        .selected_node()
+                        .filter(|node| node.kind == sift_protocol::WorkspaceNodeKind::Folder)
+                        .map(|node| node.path.0.as_str())
+                        .unwrap_or("workspace root");
+                    div()
+                        .debug_selector(|| "workspace-create-node".into())
+                        .w(px(480.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(if folder { "New folder" } else { "New SQL file" }),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .child(format!("Create beneath {parent}")),
+                        )
+                        .child(self.workspace_path_input.clone())
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-workspace-create", "Cancel")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("submit-workspace-create", "Create")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(
+                                            self.workspace_path_input.read(cx).text().trim().is_empty()
+                                                || self.workspace_files.mutation_pending(),
+                                        )
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.create_workspace_node(folder, cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Modal::WorkspaceMove => div()
+                    .debug_selector(|| "workspace-move-node".into())
+                    .w(px(520.))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Move or rename workspace node"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.muted_text)
+                            .child("Enter the complete destination path. The destination folder must already exist."),
+                    )
+                    .child(self.workspace_path_input.clone())
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("cancel-workspace-move", "Cancel")
+                                    .tone(ButtonTone::Neutral)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("submit-workspace-move", "Move")
+                                    .tone(ButtonTone::Accent)
+                                    .disabled(self.workspace_files.mutation_pending())
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.move_workspace_node(cx)
+                                    })),
+                            ),
+                    )
+                    .into_any_element(),
+                Modal::ConfirmWorkspaceDelete => {
+                    let path = self
+                        .workspace_files
+                        .selected_node()
+                        .map(|node| node.path.0.clone())
+                        .unwrap_or_else(|| "selected node".into());
+                    div()
+                        .debug_selector(|| "confirm-workspace-delete".into())
+                        .w(px(480.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(format!("Delete {path}?")),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .child("This deletes the virtual subtree and is recorded in the audit log. Create a checkpoint first if you need a recovery point."),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-workspace-delete", "Cancel")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("submit-workspace-delete", "Delete")
+                                        .tone(ButtonTone::DangerMuted)
+                                        .disabled(self.workspace_files.mutation_pending())
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.delete_workspace_node(cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Modal::WorkspaceCheckpoint => div()
+                    .debug_selector(|| "workspace-checkpoint".into())
+                    .w(px(480.))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Create named checkpoint"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.muted_text)
+                            .child("Captures the workspace tree and every canonical SQL document frontier."),
+                    )
+                    .child(self.workspace_path_input.clone())
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("cancel-workspace-checkpoint", "Cancel")
+                                    .tone(ButtonTone::Neutral)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("submit-workspace-checkpoint", "Create checkpoint")
+                                    .tone(ButtonTone::Accent)
+                                    .disabled(
+                                        self.workspace_path_input.read(cx).text().trim().is_empty()
+                                            || self.workspace_files.mutation_pending(),
+                                    )
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.create_named_workspace_checkpoint(cx)
+                                    })),
+                            ),
+                    )
+                    .into_any_element(),
+                Modal::WorkspaceHistory => {
+                    let checkpoints = self
+                        .workspace_files
+                        .snapshot()
+                        .map(|snapshot| snapshot.checkpoints.clone())
+                        .unwrap_or_default();
+                    let rows = checkpoints.into_iter().enumerate().map(|(index, checkpoint)| {
+                        let checkpoint_id = checkpoint.id;
+                        div()
+                            .id(("workspace-checkpoint-row", index))
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div().truncate().child(
+                                            checkpoint
+                                                .name
+                                                .clone()
+                                                .unwrap_or_else(|| format!("{:?}", checkpoint.reason)),
+                                        ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child(format!(
+                                                "revision {} · actor {} · {}",
+                                                checkpoint.workspace_revision.0,
+                                                checkpoint.created_by,
+                                                checkpoint.created_at
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                Button::new(("restore-workspace-checkpoint", index), "Restore")
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(self.workspace_files.mutation_pending())
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.modal =
+                                            Some(Modal::ConfirmWorkspaceRestore(checkpoint_id));
+                                        cx.notify();
+                                    })),
+                            )
+                    });
+                    div()
+                        .debug_selector(|| "workspace-history".into())
+                        .w(px(680.))
+                        .max_h(px(620.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Workspace checkpoint history"),
+                        )
+                        .child(
+                            div()
+                                .id("workspace-history-scroll")
+                                .flex_1()
+                                .min_h(px(180.))
+                                .overflow_y_scroll()
+                                .border_1()
+                                .border_color(colors.subtle_border)
+                                .children(rows),
+                        )
+                        .child(
+                            div().flex().justify_end().child(
+                                Button::new("close-workspace-history", "Close")
+                                    .tone(ButtonTone::Neutral)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
+                            ),
+                        )
+                        .into_any_element()
+                }
+                Modal::ConfirmWorkspaceRestore(checkpoint_id) => {
+                    let checkpoint_id = *checkpoint_id;
+                    div()
+                        .debug_selector(|| "confirm-workspace-restore".into())
+                        .w(px(480.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(format!("Restore checkpoint {}?", checkpoint_id.0)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .child("Restore creates a new audited workspace head; it does not rewrite checkpoint history."),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-workspace-restore", "Cancel")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("submit-workspace-restore", "Restore as new head")
+                                        .tone(ButtonTone::DangerMuted)
+                                        .disabled(self.workspace_files.mutation_pending())
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.restore_workspace_checkpoint(checkpoint_id, cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Modal::WorkspaceReconcile => {
+                    let changed = self
+                        .workspace_files
+                        .snapshot()
+                        .and_then(|snapshot| snapshot.reconcile_plan.as_ref())
+                        .map(|plan| {
+                            plan.entries
+                                .iter()
+                                .filter(|entry| {
+                                    entry.state != sift_protocol::ReconcileState::Unchanged
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let rows = changed.iter().enumerate().map(|(index, entry)| {
+                        let path = entry.path.clone();
+                        let import_path = path.clone();
+                        let materialize_path = path.clone();
+                        let keep_both_path = path.clone();
+                        let selected = self
+                            .workspace_reconcile_resolutions
+                            .get(&path)
+                            .copied();
+                        div()
+                            .id(("workspace-reconcile-row", index))
+                            .px_2()
+                            .py_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().truncate().child(path.0.clone()))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child(format!("{:?}", entry.state)),
+                                    ),
+                            )
+                            .child(
+                                Button::new(("reconcile-import", index), "Use filesystem")
+                                    .tone(if selected
+                                        == Some(sift_protocol::ReconcileResolution::ImportProjection)
+                                    {
+                                        ButtonTone::Accent
+                                    } else {
+                                        ButtonTone::Ghost
+                                    })
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.workspace_reconcile_resolutions.insert(
+                                            import_path.clone(),
+                                            sift_protocol::ReconcileResolution::ImportProjection,
+                                        );
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(("reconcile-materialize", index), "Use virtual")
+                                    .tone(if selected
+                                        == Some(sift_protocol::ReconcileResolution::MaterializeWorkspace)
+                                    {
+                                        ButtonTone::Accent
+                                    } else {
+                                        ButtonTone::Ghost
+                                    })
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.workspace_reconcile_resolutions.insert(
+                                            materialize_path.clone(),
+                                            sift_protocol::ReconcileResolution::MaterializeWorkspace,
+                                        );
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(("reconcile-keep-both", index), "Keep both")
+                                    .tone(if selected
+                                        == Some(sift_protocol::ReconcileResolution::KeepBoth)
+                                    {
+                                        ButtonTone::Accent
+                                    } else {
+                                        ButtonTone::Ghost
+                                    })
+                                    .disabled(
+                                        entry.workspace_digest.is_none()
+                                            || entry.projection_digest.is_none(),
+                                    )
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.workspace_reconcile_resolutions.insert(
+                                            keep_both_path.clone(),
+                                            sift_protocol::ReconcileResolution::KeepBoth,
+                                        );
+                                        cx.notify();
+                                    })),
+                            )
+                    });
+                    let all_resolved = changed.iter().all(|entry| {
+                        self.workspace_reconcile_resolutions.contains_key(&entry.path)
+                    });
+                    div()
+                        .debug_selector(|| "workspace-reconcile".into())
+                        .w(px(860.))
+                        .max_h(px(680.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Reconcile virtual workspace and filesystem"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .child("Both-changed entries have no default. Choose explicitly; Sift captures a checkpoint before applying the complete plan."),
+                        )
+                        .child(
+                            div()
+                                .id("workspace-reconcile-scroll")
+                                .flex_1()
+                                .min_h(px(180.))
+                                .overflow_y_scroll()
+                                .border_1()
+                                .border_color(colors.subtle_border)
+                                .children(rows),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-workspace-reconcile", "Cancel")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("apply-workspace-reconcile", "Apply plan")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(
+                                            !all_resolved
+                                                || changed.is_empty()
+                                                || self.workspace_files.mutation_pending(),
+                                        )
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.apply_workspace_reconcile(cx)
+                                        })),
+                                ),
+                        )
                         .into_any_element()
                 }
                 Modal::ConfirmRepositoryUncommit => {

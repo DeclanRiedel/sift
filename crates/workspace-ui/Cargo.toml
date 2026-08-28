@@ -23,6 +23,7 @@ toml = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
+chrono = { workspace = true }
 criterion = { workspace = true }
 gpui = { workspace = true, features = ["bench", "test-support"] }
 gpui_platform = { workspace = true, features = ["test-support"] }

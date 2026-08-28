@@ -7801,6 +7801,7 @@ dependencies = [
 name = "sift-workspace-ui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "criterion",
  "csv",
  "gpui",
