@@ -106,6 +106,17 @@ fn validate_keymap_commands(keymaps: &KeymapSettings) -> Result<(), String> {
     Ok(())
 }
 
+fn normalize_saved_query_tags(input: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .filter(|tag| seen.insert(tag.to_lowercase()))
+        .map(str::to_owned)
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProblemSeverity {
     Error,
@@ -5524,6 +5535,7 @@ pub struct WorkspaceShell {
     palette_selected: usize,
     palette_scroll_handle: UniformListScrollHandle,
     saved_query_switcher_input: Entity<TextInput>,
+    saved_query_tags_input: Entity<TextInput>,
     saved_query_switcher_selected: usize,
     saved_query_switcher_scroll_handle: UniformListScrollHandle,
     schema_search_selected: usize,
@@ -5626,6 +5638,8 @@ pub struct WorkspaceShell {
     saved_queries_error: Option<String>,
     saved_query_editing: Option<sift_api_types::SavedQueryId>,
     pending_saved_query_renames: HashMap<u64, String>,
+    saved_query_tag_editing: Option<sift_api_types::SavedQueryId>,
+    pending_saved_query_tag_update: Option<(String, sift_api_types::SavedQueryId, Option<u64>)>,
     saved_query_delete_confirmation: Option<sift_api_types::SavedQueryId>,
     pending_saved_query_deletion: Option<(String, sift_api_types::SavedQueryId)>,
     result_cell_edit_target: Option<ResultCellEditTarget>,
@@ -5852,6 +5866,8 @@ impl WorkspaceShell {
         let query_input = cx.new(|cx| TextInput::new("", "Search commands…", cx));
         let saved_query_switcher_input =
             cx.new(|cx| TextInput::new("", "Open saved query…", cx).aria_label("Open saved query"));
+        let saved_query_tags_input = cx
+            .new(|cx| TextInput::new("", "finance, reporting", cx).aria_label("Saved query tags"));
         let semantic_rename_input = cx.new(|cx| TextInput::new("", "New symbol name", cx));
         let saved_query_name_input = cx.new(|cx| TextInput::new("", "Saved query name…", cx));
         let result_cell_edit_input = cx.new(|cx| TextInput::new("", "New value…", cx));
@@ -5946,6 +5962,7 @@ impl WorkspaceShell {
         .detach();
         cx.observe(&saved_query_switcher_input, |shell, _, cx| {
             shell.saved_query_delete_confirmation = None;
+            shell.saved_query_tag_editing = None;
             shell.saved_query_switcher_selected = 0;
             shell
                 .saved_query_switcher_scroll_handle
@@ -5959,6 +5976,16 @@ impl WorkspaceShell {
             |shell, _, event: &TextInputEvent, window, cx| {
                 if *event == TextInputEvent::Submitted {
                     shell.open_selected_saved_query(window, cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &saved_query_tags_input,
+            window,
+            |shell, _, event: &TextInputEvent, window, cx| {
+                if *event == TextInputEvent::Submitted {
+                    shell.confirm_saved_query_tag_edit(window, cx);
                 }
             },
         )
@@ -6096,6 +6123,7 @@ impl WorkspaceShell {
             palette_selected: 0,
             palette_scroll_handle: UniformListScrollHandle::new(),
             saved_query_switcher_input,
+            saved_query_tags_input,
             saved_query_switcher_selected: 0,
             saved_query_switcher_scroll_handle: UniformListScrollHandle::new(),
             schema_search_selected: 0,
@@ -6192,6 +6220,8 @@ impl WorkspaceShell {
             saved_queries_error: None,
             saved_query_editing: None,
             pending_saved_query_renames: HashMap::new(),
+            saved_query_tag_editing: None,
+            pending_saved_query_tag_update: None,
             saved_query_delete_confirmation: None,
             pending_saved_query_deletion: None,
             result_cell_edit_target: None,
@@ -8213,6 +8243,20 @@ impl WorkspaceShell {
             }
             ExecutorEvent::SavedQuerySaved { item_id, result } => {
                 self.saved_queries_loading = false;
+                let tag_update = self
+                    .pending_saved_query_tag_update
+                    .as_ref()
+                    .filter(|(_, _, pending_item_id)| *pending_item_id == item_id)
+                    .cloned();
+                if tag_update.is_some() {
+                    self.pending_saved_query_tag_update = None;
+                }
+                if tag_update.as_ref().is_some_and(|(instance_id, _, _)| {
+                    self.selected_instance_id.as_deref().unwrap_or("local") != instance_id.as_str()
+                }) {
+                    cx.notify();
+                    return;
+                }
                 let renamed_from = item_id.and_then(|item_id| {
                     self.pending_saved_query_renames
                         .remove(&item_id)
@@ -8221,8 +8265,8 @@ impl WorkspaceShell {
                 match result {
                     Ok(saved) => {
                         if let Some(item_id) = item_id {
-                            if renamed_from.is_some() {
-                                self.apply_saved_query_rename_to_item(item_id, &saved, cx);
+                            if renamed_from.is_some() || tag_update.is_some() {
+                                self.apply_saved_query_metadata_to_item(item_id, &saved, cx);
                             } else {
                                 self.apply_saved_query_to_item(item_id, &saved, false, cx);
                             }
@@ -8239,7 +8283,13 @@ impl WorkspaceShell {
                         self.saved_queries.sort_by(|a, b| a.name.cmp(&b.name));
                         self.saved_query_editing = None;
                         self.saved_queries_error = None;
-                        if renamed_from.is_some() {
+                        if tag_update.is_some() {
+                            self.saved_query_tag_editing = None;
+                            if item_id.is_some() {
+                                self.persist(cx);
+                            }
+                            self.show_toast("Updated query tags".into(), cx);
+                        } else if renamed_from.is_some() {
                             self.persist(cx);
                             self.show_toast("Renamed query".into(), cx);
                         } else {
@@ -8248,7 +8298,9 @@ impl WorkspaceShell {
                     }
                     Err(message) => {
                         self.saved_queries_error = Some(message.clone());
-                        if let Some(item_id) = item_id {
+                        if tag_update.is_some() {
+                            self.record_runtime_error(item_id, "Update query tags", message, cx);
+                        } else if let Some(item_id) = item_id {
                             if let Some((_, old_title)) = renamed_from {
                                 self.set_item_title(item_id, old_title, cx);
                                 self.record_runtime_error(
@@ -12832,7 +12884,7 @@ impl WorkspaceShell {
         false
     }
 
-    fn apply_saved_query_rename_to_item(
+    fn apply_saved_query_metadata_to_item(
         &mut self,
         item_id: u64,
         saved: &sift_api_types::SavedQuery,
@@ -12969,6 +13021,14 @@ impl WorkspaceShell {
             .contains_key(&snapshot.item_id)
         {
             self.show_toast("Wait for the query rename to finish".into(), cx);
+            return;
+        }
+        if self
+            .pending_saved_query_tag_update
+            .as_ref()
+            .is_some_and(|(_, _, item_id)| *item_id == Some(snapshot.item_id))
+        {
+            self.show_toast("Wait for the tag update to finish".into(), cx);
             return;
         }
         let Some(sender) = &self.executor_sender else {
@@ -13243,6 +13303,90 @@ impl WorkspaceShell {
             self.saved_queries_error = None;
             cx.notify();
         }
+    }
+
+    fn begin_selected_saved_query_tag_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saved_queries_loading || self.pending_saved_query_tag_update.is_some() {
+            return;
+        }
+        let selected = self
+            .filtered_saved_queries(cx)
+            .get(self.saved_query_switcher_selected)
+            .cloned();
+        let Some(query) = selected else {
+            return;
+        };
+        self.saved_query_delete_confirmation = None;
+        self.saved_query_tag_editing = Some(query.id);
+        self.saved_queries_error = None;
+        self.saved_query_tags_input
+            .update(cx, |input, cx| input.set_text(query.tags.join(", "), cx));
+        self.saved_query_tags_input
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_saved_query_tag_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.saved_query_tag_editing = None;
+        self.saved_queries_error = None;
+        self.saved_query_switcher_input
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn confirm_saved_query_tag_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_saved_query_tag_update.is_some() {
+            return;
+        }
+        let Some(id) = self.saved_query_tag_editing else {
+            return;
+        };
+        let Some(query) = self.saved_queries.iter().find(|query| query.id == id) else {
+            self.saved_query_tag_editing = None;
+            return;
+        };
+        let revision = query.revision;
+        let tags = normalize_saved_query_tags(self.saved_query_tags_input.read(cx).text());
+        if tags == query.tags {
+            self.cancel_saved_query_tag_edit(window, cx);
+            return;
+        }
+        let item_id = self.saved_query_item_id(id, cx);
+        let Some(sender) = &self.executor_sender else {
+            let message = "Saved-query executor is unavailable".to_owned();
+            self.saved_queries_error = Some(message.clone());
+            self.record_runtime_error(item_id, "Update query tags", message, cx);
+            return;
+        };
+        let sent = sender
+            .send(ExecutorCommand::UpdateSavedQuery {
+                item_id,
+                id,
+                request: sift_api_types::UpdateSavedQueryRequest {
+                    expected_revision: revision,
+                    tags: Some(tags),
+                    ..Default::default()
+                },
+            })
+            .is_ok();
+        if sent {
+            self.pending_saved_query_tag_update = Some((
+                self.selected_instance_id
+                    .clone()
+                    .unwrap_or_else(|| "local".into()),
+                id,
+                item_id,
+            ));
+            self.saved_queries_loading = true;
+            self.saved_queries_error = None;
+        } else {
+            let message = "Saved-query executor stopped".to_owned();
+            self.saved_queries_error = Some(message.clone());
+            self.record_runtime_error(item_id, "Update query tags", message, cx);
+        }
+        cx.notify();
     }
 
     fn cancel_saved_query_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -15583,6 +15727,7 @@ impl WorkspaceShell {
         }
         self.modal = Some(Modal::SavedQuerySwitcher);
         self.saved_query_delete_confirmation = None;
+        self.saved_query_tag_editing = None;
         self.saved_query_switcher_selected = 0;
         self.saved_query_switcher_scroll_handle
             .scroll_to_item(0, ScrollStrategy::Top);
@@ -15613,12 +15758,24 @@ impl WorkspaceShell {
     ) {
         let key = event.keystroke.unparse();
         if self.modal == Some(Modal::SavedQuerySwitcher) {
+            if self.saved_query_tag_editing.is_some() {
+                if key == "escape" {
+                    self.cancel_saved_query_tag_edit(window, cx);
+                    cx.stop_propagation();
+                }
+                return;
+            }
             if self.saved_query_delete_confirmation.is_some() {
                 match key.as_str() {
                     "y" => self.confirm_saved_query_delete(cx),
                     "escape" | "n" => self.cancel_saved_query_delete(window, cx),
                     _ => {}
                 }
+                cx.stop_propagation();
+                return;
+            }
+            if key == "ctrl-t" {
+                self.begin_selected_saved_query_tag_edit(window, cx);
                 cx.stop_propagation();
                 return;
             }
@@ -17784,6 +17941,7 @@ impl WorkspaceShell {
         }
         if self.modal == Some(Modal::SavedQuerySwitcher) {
             self.saved_query_delete_confirmation = None;
+            self.saved_query_tag_editing = None;
             self.saved_query_switcher_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
@@ -21685,6 +21843,85 @@ impl WorkspaceShell {
                                                     .map(|query| (index, query))
                                             })
                                             .map(|(index, query)| {
+                                                if shell.saved_query_tag_editing == Some(query.id) {
+                                                    let saving = shell
+                                                        .pending_saved_query_tag_update
+                                                        .as_ref()
+                                                        .is_some_and(|(_, id, _)| *id == query.id);
+                                                    return div()
+                                                        .id(("saved-query-tags-editor", index))
+                                                        .debug_selector(move || {
+                                                            format!(
+                                                                "saved-query-tags-editor-{index}"
+                                                            )
+                                                        })
+                                                        .w_full()
+                                                        .h(px(PALETTE_ROW_HEIGHT))
+                                                        .px_2()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .bg(colors.active_surface)
+                                                        .child(
+                                                            div()
+                                                                .flex_none()
+                                                                .text_xs()
+                                                                .text_color(colors.muted_text)
+                                                                .child("Tags"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .overflow_hidden()
+                                                                .child(
+                                                                    shell
+                                                                        .saved_query_tags_input
+                                                                        .clone(),
+                                                                ),
+                                                        )
+                                                        .child(KeyBinding::new("Esc"))
+                                                        .child(
+                                                            Button::new(
+                                                                (
+                                                                    "cancel-switcher-tags",
+                                                                    query.id.0 as usize,
+                                                                ),
+                                                                "Cancel",
+                                                            )
+                                                            .tone(ButtonTone::Ghost)
+                                                            .disabled(saving)
+                                                            .on_click(cx.listener(
+                                                                |shell, _, window, cx| {
+                                                                    shell
+                                                                        .cancel_saved_query_tag_edit(
+                                                                            window, cx,
+                                                                        )
+                                                                },
+                                                            )),
+                                                        )
+                                                        .child(KeyBinding::new("Enter"))
+                                                        .child(
+                                                            Button::new(
+                                                                (
+                                                                    "save-switcher-tags",
+                                                                    query.id.0 as usize,
+                                                                ),
+                                                                if saving { "Saving…" } else { "Save" },
+                                                            )
+                                                            .tone(ButtonTone::Accent)
+                                                            .disabled(saving)
+                                                            .on_click(cx.listener(
+                                                                |shell, _, window, cx| {
+                                                                    shell
+                                                                        .confirm_saved_query_tag_edit(
+                                                                            window, cx,
+                                                                        )
+                                                                },
+                                                            )),
+                                                        )
+                                                        .into_any_element();
+                                                }
                                                 if shell.saved_query_delete_confirmation
                                                     == Some(query.id)
                                                 {
@@ -21877,15 +22114,19 @@ impl WorkspaceShell {
                                 .border_color(colors.subtle_border)
                                 .text_xs()
                                 .text_color(colors.muted_text)
-                                .child(if self.saved_query_delete_confirmation.is_some() {
+                                .child(if self.saved_query_tag_editing.is_some() {
+                                    "Comma-separated tags"
+                                } else if self.saved_query_delete_confirmation.is_some() {
                                     "y delete  ·  Esc cancel"
                                 } else {
                                     "↑/↓ or Ctrl-J/K navigate  ·  Enter open"
                                 })
-                                .child(if self.saved_query_delete_confirmation.is_some() {
+                                .child(if self.saved_query_tag_editing.is_some() {
+                                    "Enter save  ·  Esc cancel"
+                                } else if self.saved_query_delete_confirmation.is_some() {
                                     ""
                                 } else {
-                                    "Ctrl-D delete  ·  Esc close"
+                                    "Ctrl-T tags  ·  Ctrl-D delete  ·  Esc close"
                                 }),
                         )
                         .into_any_element()
@@ -32697,6 +32938,146 @@ mod tests {
             assert_eq!(
                 pane.editor(item_id).unwrap().read(cx).document().text(),
                 "select * from temporary_report"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn saved_query_switcher_edits_tags_and_preserves_dirty_sql(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let timestamp = "2026-08-28T10:00:00Z".parse().unwrap();
+        let saved = sift_api_types::SavedQuery {
+            id: sift_api_types::SavedQueryId(13),
+            tenant_id: sift_api_types::TenantId(1),
+            owner_principal_id: Some(sift_api_types::PrincipalId(7)),
+            name: "Revenue report".into(),
+            sql_text: "select revenue from reports".into(),
+            connection_profile_id: None,
+            tags: vec!["finance".into()],
+            created_at: timestamp,
+            updated_at: timestamp,
+            revision: 6,
+        };
+
+        let item_id = workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "demo".into(),
+                rooms: Vec::new(),
+                connections: Vec::new(),
+            }];
+            shell.open_saved_query(saved.clone(), window, cx);
+            let pane = shell.panes[shell.active_pane].clone();
+            let item_id = pane.read(cx).active_item().unwrap().id;
+            pane.update(cx, |pane, cx| {
+                pane.editor(item_id).unwrap().update(cx, |editor, cx| {
+                    editor.replace_text_from_owner("select unsaved_change from reports", cx)
+                });
+                pane.items
+                    .iter_mut()
+                    .find(|item| item.id == item_id)
+                    .unwrap()
+                    .dirty = true;
+            });
+            shell.open_saved_query_switcher(window, cx);
+            item_id
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadSavedQueries { tenant_id: 1 })
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQueriesLoaded {
+                    tenant_id: 1,
+                    result: Ok(vec![saved.clone()]),
+                },
+                cx,
+            );
+        });
+
+        cx.simulate_keystrokes("ctrl-t");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("saved-query-tags-editor-0").is_some());
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.saved_query_tags_input.read(cx).text(), "finance");
+        });
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.saved_query_tag_editing.is_none());
+            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
+        });
+
+        cx.simulate_keystrokes("ctrl-t");
+        workspace.update(&mut cx, |shell, cx| {
+            shell.saved_query_tags_input.update(cx, |input, cx| {
+                input.set_text(" finance, Ops, finance, , urgent ", cx)
+            });
+        });
+        cx.simulate_keystrokes("enter");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::UpdateSavedQuery {
+                item_id: Some(command_item_id),
+                id: sift_api_types::SavedQueryId(13),
+                request,
+            }) if command_item_id == item_id
+                && request.expected_revision == 6
+                && request.tags == Some(vec!["finance".into(), "Ops".into(), "urgent".into()])
+                && request.sql_text.is_none()
+        ));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQuerySaved {
+                    item_id: Some(item_id),
+                    result: Err("revision conflict".into()),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell.saved_query_tag_editing,
+                Some(sift_api_types::SavedQueryId(13))
+            );
+            assert!(shell.global_problems.last().is_some_and(|problem| {
+                problem.item_id == item_id && problem.title.starts_with("Update query tags")
+            }));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("saved-query-switcher-error").is_some());
+
+        cx.simulate_keystrokes("enter");
+        assert!(commands.try_recv().is_ok());
+        let mut updated = saved;
+        updated.tags = vec!["finance".into(), "Ops".into(), "urgent".into()];
+        updated.revision = 7;
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQuerySaved {
+                    item_id: Some(item_id),
+                    result: Ok(updated),
+                },
+                cx,
+            );
+            assert!(shell.saved_query_tag_editing.is_none());
+            assert_eq!(
+                shell.saved_queries[0].tags,
+                vec!["finance", "Ops", "urgent"]
+            );
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert!(item.dirty);
+            assert!(matches!(
+                item.source.as_ref(),
+                Some(ItemSource::SavedQuery(source)) if source.revision == 7
+            ));
+            assert_eq!(
+                pane.editor(item_id).unwrap().read(cx).document().text(),
+                "select unsaved_change from reports"
             );
         });
     }
