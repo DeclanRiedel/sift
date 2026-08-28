@@ -272,6 +272,89 @@ pub struct VcsUncommitRequest {
     pub expected_head: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsCreateBranchRequest {
+    pub expected_revision: u64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<sift_protocol::WorkspaceCheckpointId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsSwitchBranchRequest {
+    pub expected_revision: u64,
+    pub target: String,
+    #[serde(default)]
+    pub detached: bool,
+    #[serde(default)]
+    pub checkpoint_changes: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRenameBranchRequest {
+    pub expected_revision: u64,
+    pub old: String,
+    pub new: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsDeleteBranchRequest {
+    pub expected_revision: u64,
+    pub name: String,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub confirm_unmerged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsSetUpstreamRequest {
+    pub expected_revision: u64,
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsHistoryQuery {
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default = "default_vcs_history_limit")]
+    pub limit: u32,
+    #[serde(default)]
+    pub query: Option<String>,
+}
+
+fn default_vcs_history_limit() -> u32 {
+    50
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsHistoricalFileQuery {
+    pub path: WorkspacePath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsCompareQuery {
+    pub base: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRestoreHistoricalFileRequest {
+    pub expected_revision: u64,
+    pub commit: String,
+    pub path: WorkspacePath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRevertCommitRequest {
+    pub expected_revision: u64,
+    pub commit: String,
+}
+
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SetVcsCredentialRequest {
     pub expected_revision: u64,

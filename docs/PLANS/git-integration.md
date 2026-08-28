@@ -120,7 +120,7 @@ ways:
       error state in that projection.
 - [x] Subscribe every Git surface to the same projection.
 - [x] Coalesce status requests and discard stale revision results.
-- [ ] Refresh after editor save, projection reconciliation, stage, unstage,
+- [x] Refresh after editor save, projection reconciliation, stage, unstage,
       commit, branch, and remote operations.
 - [x] Add bounded periodic fallback refresh only while a Git surface is open.
 - [x] Add server-side projection/repository change events for immediate refresh.
@@ -235,35 +235,35 @@ ways:
 
 ### Branches
 
-- [ ] Add searchable branch picker.
-- [ ] List local and remote branches with upstream/ahead/behind state.
-- [ ] Create branch from HEAD.
-- [ ] Create branch from selected commit or checkpoint.
-- [ ] Switch branch with clean-worktree guard.
-- [ ] Offer checkpointed reconciliation when switching with changes.
-- [ ] Rename local branch.
-- [ ] Delete merged local branch with confirmation.
-- [ ] Require stronger confirmation for unmerged branch deletion.
-- [ ] Set or change upstream.
-- [ ] Preserve detached HEAD and unborn branch states.
-- [ ] Broadcast branch/HEAD changes to collaborators.
-- [ ] Do not add automatic merge or rebase in this milestone.
+- [x] Add searchable branch picker.
+- [x] List local and remote branches with upstream/ahead/behind state.
+- [x] Create branch from HEAD.
+- [x] Create branch from selected commit or checkpoint.
+- [x] Switch branch with clean-worktree guard.
+- [x] Offer checkpointed reconciliation when switching with changes.
+- [x] Rename local branch.
+- [x] Delete merged local branch with confirmation.
+- [x] Require stronger confirmation for unmerged branch deletion.
+- [x] Set or change upstream.
+- [x] Preserve detached HEAD and unborn branch states.
+- [x] Broadcast branch/HEAD changes to collaborators.
+- [x] Do not add automatic merge or rebase in this milestone.
 
 ### History
 
-- [ ] Add virtualized commit-history tab.
-- [ ] Render compact commit graph, refs, author, date, subject, and short hash.
-- [ ] Load history incrementally by cursor/page.
-- [ ] Load history from detached HEAD when no current branch exists.
-- [ ] Search by message, author, ref, and hash.
-- [ ] Open commit detail.
-- [ ] List commit files and stats.
-- [ ] Compare commit to parent.
-- [ ] Compare two selected commits.
-- [ ] Open historical file read-only.
-- [ ] Restore historical file through a new audited workspace mutation.
-- [ ] Revert commit with preview and checkpoint.
-- [ ] Copy commit hash/message/permalink.
+- [x] Add virtualized commit-history tab.
+- [x] Render compact commit graph, refs, author, date, subject, and short hash.
+- [x] Load history incrementally by cursor/page.
+- [x] Load history from detached HEAD when no current branch exists.
+- [x] Search by message, author, ref, and hash.
+- [x] Open commit detail.
+- [x] List commit files and stats.
+- [x] Compare commit to parent.
+- [x] Compare two selected commits.
+- [x] Open historical file read-only.
+- [x] Restore historical file through a new audited workspace mutation.
+- [x] Revert commit with preview and checkpoint.
+- [x] Copy commit hash/message/permalink.
 
 ## Milestone G6 — Conflicts and recovery
 

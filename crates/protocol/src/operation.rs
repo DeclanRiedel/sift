@@ -87,6 +87,12 @@ pub enum VcsAction {
     Status,
     Diff,
     Branches,
+    History,
+    CreateBranch,
+    SwitchBranch,
+    RenameBranch,
+    DeleteBranch,
+    SetUpstream,
     Stage,
     Unstage,
     Commit,
@@ -721,7 +727,9 @@ impl Operation {
                 | WorkspaceAction::BatchMutate => OperationKind::ManageWorkspace,
             },
             Self::Vcs { action, .. } => match action {
-                VcsAction::Status | VcsAction::Diff | VcsAction::Branches => OperationKind::ReadVcs,
+                VcsAction::Status | VcsAction::Diff | VcsAction::Branches | VcsAction::History => {
+                    OperationKind::ReadVcs
+                }
                 VcsAction::Bind
                 | VcsAction::Unbind
                 | VcsAction::Stage
@@ -731,6 +739,11 @@ impl Operation {
                 | VcsAction::Uncommit
                 | VcsAction::Discard
                 | VcsAction::Revert
+                | VcsAction::CreateBranch
+                | VcsAction::SwitchBranch
+                | VcsAction::RenameBranch
+                | VcsAction::DeleteBranch
+                | VcsAction::SetUpstream
                 | VcsAction::SetCredential
                 | VcsAction::Fetch
                 | VcsAction::Push => OperationKind::WriteVcs,
@@ -1184,6 +1197,12 @@ single_word_audit_names!(VcsAction {
     Status => "status",
     Diff => "diff",
     Branches => "branches",
+    History => "history",
+    CreateBranch => "create_branch",
+    SwitchBranch => "switch_branch",
+    RenameBranch => "rename_branch",
+    DeleteBranch => "delete_branch",
+    SetUpstream => "set_upstream",
     Stage => "stage",
     Unstage => "unstage",
     Commit => "commit",

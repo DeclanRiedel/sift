@@ -1179,6 +1179,375 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadRepositoryBranches {
+                workspace_id,
+                binding_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .repository_branches(sift_protocol::RepositoryBindingId(binding_id))
+                        .await
+                        .map_err(|error| format!("loading branches failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryBranchesLoaded {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadRepositoryHistory {
+                workspace_id,
+                binding_id,
+                cursor,
+                query,
+                append,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .repository_history(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsHistoryQuery {
+                                cursor,
+                                limit: 80,
+                                query,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("loading repository history failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryHistoryLoaded {
+                        workspace_id,
+                        append,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadRepositoryCommit {
+                workspace_id,
+                binding_id,
+                oid,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .repository_commit(sift_protocol::RepositoryBindingId(binding_id), &oid)
+                        .await
+                        .map_err(|error| format!("loading commit failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryCommitLoaded {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadRepositoryHistoricalFile {
+                workspace_id,
+                binding_id,
+                oid,
+                path,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .repository_historical_file(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            &oid,
+                            path,
+                        )
+                        .await
+                        .map_err(|error| format!("loading historical file failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryHistoricalFileLoaded {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CompareRepositoryCommits {
+                workspace_id,
+                binding_id,
+                base,
+                target,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .compare_repository_commits(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsCompareQuery { base, target },
+                        )
+                        .await
+                        .map_err(|error| format!("comparing commits failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryComparisonLoaded {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RestoreRepositoryHistoricalFile {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                oid,
+                path,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .restore_repository_historical_file(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsRestoreHistoricalFileRequest {
+                                expected_revision,
+                                commit: oid,
+                                path,
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("restoring historical file failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryHistoryMutationFinished {
+                        workspace_id,
+                        action: "Historical file restored",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RevertRepositoryCommit {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                oid,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .revert_repository_commit(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsRevertCommitRequest {
+                                expected_revision,
+                                commit: oid,
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("preparing commit revert failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryHistoryMutationFinished {
+                        workspace_id,
+                        action: "Commit revert prepared for review",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateRepositoryBranch {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                name,
+                start,
+                checkpoint_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .create_repository_branch(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsCreateBranchRequest {
+                                expected_revision,
+                                name,
+                                start,
+                                checkpoint_id,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("creating branch failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryBranchChanged {
+                        workspace_id,
+                        action: "Branch created",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SwitchRepositoryBranch {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                target,
+                detached,
+                checkpoint_changes,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .switch_repository_branch(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsSwitchBranchRequest {
+                                expected_revision,
+                                target,
+                                detached,
+                                checkpoint_changes,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("switching branch failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryBranchChanged {
+                        workspace_id,
+                        action: "Branch switched",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RenameRepositoryBranch {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                old,
+                new,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .rename_repository_branch(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsRenameBranchRequest {
+                                expected_revision,
+                                old,
+                                new,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("renaming branch failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryBranchChanged {
+                        workspace_id,
+                        action: "Branch renamed",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteRepositoryBranch {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                name,
+                force,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_repository_branch(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsDeleteBranchRequest {
+                                expected_revision,
+                                name,
+                                force,
+                                confirm_unmerged: force,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("deleting branch failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryBranchChanged {
+                        workspace_id,
+                        action: "Branch deleted",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SetRepositoryUpstream {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                branch,
+                upstream,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .set_repository_upstream(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsSetUpstreamRequest {
+                                expected_revision,
+                                branch,
+                                upstream,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("updating branch upstream failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryBranchChanged {
+                        workspace_id,
+                        action: "Branch upstream updated",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadWorkspaceFiles {
                 workspace_id,
                 request_id,

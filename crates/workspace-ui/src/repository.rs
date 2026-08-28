@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use sift_protocol::{
-    VcsDiff, VcsDiffSide, VcsFileState, VcsStageState, VcsStatus, VcsStatusEntry, WorkspacePath,
+    VcsBranch, VcsCommitDetail, VcsCommitSummary, VcsDiff, VcsDiffSide, VcsFileState,
+    VcsHistoricalFile, VcsHistoryPage, VcsStageState, VcsStatus, VcsStatusEntry, WorkspacePath,
 };
 
 use crate::settings::{RepositoryGrouping, RepositorySort, RepositoryView};
@@ -124,6 +125,15 @@ pub(crate) struct RepositoryProjection {
     diff_loading: bool,
     current_diff_request_id: Option<u64>,
     diffs: HashMap<(VcsDiffSide, Option<WorkspacePath>), Arc<VcsDiff>>,
+    branches: Arc<[VcsBranch]>,
+    history: Vec<VcsCommitSummary>,
+    history_cursor: Option<String>,
+    history_loading: bool,
+    history_query: String,
+    commit_detail: Option<VcsCommitDetail>,
+    historical_file: Option<VcsHistoricalFile>,
+    comparison_base: Option<String>,
+    comparison: Option<VcsDiff>,
 }
 
 impl RepositoryProjection {
@@ -152,6 +162,109 @@ impl RepositoryProjection {
         self.diff_loading = false;
         self.current_diff_request_id = None;
         self.diffs.clear();
+        self.branches = Arc::default();
+        self.history.clear();
+        self.history_cursor = None;
+        self.history_loading = false;
+        self.history_query.clear();
+        self.commit_detail = None;
+        self.historical_file = None;
+        self.comparison_base = None;
+        self.comparison = None;
+    }
+
+    pub(crate) fn branches(&self) -> Arc<[VcsBranch]> {
+        self.branches.clone()
+    }
+
+    pub(crate) fn history(&self) -> &[VcsCommitSummary] {
+        &self.history
+    }
+
+    pub(crate) fn history_cursor(&self) -> Option<&str> {
+        self.history_cursor.as_deref()
+    }
+
+    pub(crate) fn history_loading(&self) -> bool {
+        self.history_loading
+    }
+
+    pub(crate) fn commit_detail(&self) -> Option<&VcsCommitDetail> {
+        self.commit_detail.as_ref()
+    }
+
+    pub(crate) fn historical_file(&self) -> Option<&VcsHistoricalFile> {
+        self.historical_file.as_ref()
+    }
+
+    pub(crate) fn comparison_base(&self) -> Option<&str> {
+        self.comparison_base.as_deref()
+    }
+
+    pub(crate) fn set_comparison_base(&mut self, oid: Option<String>) {
+        self.comparison_base = oid;
+    }
+
+    pub(crate) fn comparison(&self) -> Option<&VcsDiff> {
+        self.comparison.as_ref()
+    }
+
+    pub(crate) fn begin_history_load(&mut self, query: String, append: bool) -> bool {
+        if self.history_loading {
+            return false;
+        }
+        if !append {
+            self.history.clear();
+            self.history_cursor = None;
+        }
+        self.history_query = query;
+        self.history_loading = true;
+        true
+    }
+
+    pub(crate) fn apply_branches(&mut self, result: Result<Vec<VcsBranch>, String>) {
+        match result {
+            Ok(branches) => self.branches = branches.into(),
+            Err(message) => self.set_error(message),
+        }
+    }
+
+    pub(crate) fn apply_history(&mut self, result: Result<VcsHistoryPage, String>, append: bool) {
+        self.history_loading = false;
+        match result {
+            Ok(page) => {
+                if !append {
+                    self.history.clear();
+                }
+                self.history.extend(page.commits);
+                self.history_cursor = page.next_cursor;
+            }
+            Err(message) => self.set_error(message),
+        }
+    }
+
+    pub(crate) fn set_commit_detail(&mut self, result: Result<VcsCommitDetail, String>) {
+        match result {
+            Ok(detail) => self.commit_detail = Some(detail),
+            Err(message) => self.set_error(message),
+        }
+    }
+
+    pub(crate) fn set_historical_file(&mut self, result: Result<VcsHistoricalFile, String>) {
+        match result {
+            Ok(file) => self.historical_file = Some(file),
+            Err(message) => self.set_error(message),
+        }
+    }
+
+    pub(crate) fn set_comparison(&mut self, result: Result<VcsDiff, String>) {
+        match result {
+            Ok(diff) => {
+                self.comparison = Some(diff);
+                self.comparison_base = None;
+            }
+            Err(message) => self.set_error(message),
+        }
     }
 
     pub(crate) fn set_view_preferences(
@@ -899,6 +1012,8 @@ mod tests {
         let diff = VcsDiff {
             binding_id: sift_protocol::RepositoryBindingId(9),
             side,
+            base_revision: None,
+            target_revision: None,
             files: Vec::new(),
             truncated: false,
         };

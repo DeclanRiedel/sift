@@ -1055,6 +1055,18 @@ pub enum Modal {
         path: sift_protocol::WorkspacePath,
         hunk_id: String,
     },
+    RepositoryBranches,
+    RepositoryHistory,
+    RepositoryCommitDetail,
+    RepositoryHistoricalFile,
+    RepositoryComparison,
+    RepositoryRenameBranch(String),
+    RepositoryBranchFromCheckpoint(sift_protocol::WorkspaceCheckpointId),
+    RepositorySetUpstream(String),
+    ConfirmRepositoryDeleteBranch {
+        name: String,
+        force: bool,
+    },
     WorkspaceCreateFile,
     WorkspaceCreateFolder,
     WorkspaceMove,
@@ -1710,6 +1722,84 @@ pub enum ExecutorCommand {
         workspace_id: i64,
         request_id: u64,
     },
+    LoadRepositoryBranches {
+        workspace_id: i64,
+        binding_id: i64,
+    },
+    LoadRepositoryHistory {
+        workspace_id: i64,
+        binding_id: i64,
+        cursor: Option<String>,
+        query: Option<String>,
+        append: bool,
+    },
+    LoadRepositoryCommit {
+        workspace_id: i64,
+        binding_id: i64,
+        oid: String,
+    },
+    LoadRepositoryHistoricalFile {
+        workspace_id: i64,
+        binding_id: i64,
+        oid: String,
+        path: sift_protocol::WorkspacePath,
+    },
+    CompareRepositoryCommits {
+        workspace_id: i64,
+        binding_id: i64,
+        base: String,
+        target: String,
+    },
+    RestoreRepositoryHistoricalFile {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        oid: String,
+        path: sift_protocol::WorkspacePath,
+    },
+    RevertRepositoryCommit {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        oid: String,
+    },
+    CreateRepositoryBranch {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        name: String,
+        start: Option<String>,
+        checkpoint_id: Option<sift_protocol::WorkspaceCheckpointId>,
+    },
+    SwitchRepositoryBranch {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        target: String,
+        detached: bool,
+        checkpoint_changes: bool,
+    },
+    RenameRepositoryBranch {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        old: String,
+        new: String,
+    },
+    DeleteRepositoryBranch {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        name: String,
+        force: bool,
+    },
+    SetRepositoryUpstream {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        branch: String,
+        upstream: Option<String>,
+    },
     LoadWorkspaceFiles {
         workspace_id: i64,
         request_id: u64,
@@ -2011,6 +2101,37 @@ pub enum ExecutorEvent {
         workspace_id: i64,
         request_id: u64,
         result: Result<Option<sift_protocol::VcsStatus>, String>,
+    },
+    RepositoryBranchesLoaded {
+        workspace_id: i64,
+        result: Result<Vec<sift_protocol::VcsBranch>, String>,
+    },
+    RepositoryHistoryLoaded {
+        workspace_id: i64,
+        append: bool,
+        result: Result<sift_protocol::VcsHistoryPage, String>,
+    },
+    RepositoryCommitLoaded {
+        workspace_id: i64,
+        result: Result<sift_protocol::VcsCommitDetail, String>,
+    },
+    RepositoryHistoricalFileLoaded {
+        workspace_id: i64,
+        result: Result<sift_protocol::VcsHistoricalFile, String>,
+    },
+    RepositoryComparisonLoaded {
+        workspace_id: i64,
+        result: Result<sift_protocol::VcsDiff, String>,
+    },
+    RepositoryHistoryMutationFinished {
+        workspace_id: i64,
+        action: &'static str,
+        result: Result<(), String>,
+    },
+    RepositoryBranchChanged {
+        workspace_id: i64,
+        action: &'static str,
+        result: Result<sift_protocol::RepositoryBinding, String>,
     },
     WorkspaceFilesLoaded {
         workspace_id: i64,
@@ -7310,6 +7431,102 @@ impl WorkspaceShell {
                     cx.notify();
                 }
             }
+            ExecutorEvent::RepositoryBranchesLoaded {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    self.repository.apply_branches(result);
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryHistoryLoaded {
+                workspace_id,
+                append,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    self.repository.apply_history(result, append);
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryCommitLoaded {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    let loaded = result.is_ok();
+                    self.repository.set_commit_detail(result);
+                    if loaded {
+                        self.query_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                        self.modal = Some(Modal::RepositoryCommitDetail);
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryHistoricalFileLoaded {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    let loaded = result.is_ok();
+                    self.repository.set_historical_file(result);
+                    if loaded {
+                        self.modal = Some(Modal::RepositoryHistoricalFile);
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryComparisonLoaded {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    let loaded = result.is_ok();
+                    self.repository.set_comparison(result);
+                    if loaded {
+                        self.modal = Some(Modal::RepositoryComparison);
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryHistoryMutationFinished {
+                workspace_id,
+                action,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    match result {
+                        Ok(()) => {
+                            self.modal = None;
+                            self.show_success_toast(action.into(), cx);
+                            self.request_workspace_files(cx);
+                            self.request_repository_status(cx);
+                        }
+                        Err(message) => self.repository.set_error(message),
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryBranchChanged {
+                workspace_id,
+                action,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    match result {
+                        Ok(_) => {
+                            self.show_success_toast(action.into(), cx);
+                            self.modal = None;
+                            self.request_repository_status(cx);
+                            self.request_workspace_files(cx);
+                        }
+                        Err(message) => self.repository.set_error(message),
+                    }
+                    cx.notify();
+                }
+            }
             ExecutorEvent::RepositoryCommitted {
                 workspace_id,
                 request_id,
@@ -11821,6 +12038,64 @@ impl WorkspaceShell {
                 .fail_to_send(request_id, "Source control is unavailable");
         }
         cx.notify();
+    }
+
+    fn open_repository_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(binding_id) = self.repository.status().map(|status| status.binding_id.0) else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.query_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        let _ = sender.send(ExecutorCommand::LoadRepositoryBranches {
+            workspace_id,
+            binding_id,
+        });
+        self.modal = Some(Modal::RepositoryBranches);
+        self.query_input.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn request_repository_history(&mut self, append: bool, cx: &mut Context<Self>) {
+        let Some(binding_id) = self.repository.status().map(|status| status.binding_id.0) else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let query = self.query_input.read(cx).text().trim().to_owned();
+        if !self.repository.begin_history_load(query.clone(), append) {
+            return;
+        }
+        let cursor = append
+            .then(|| self.repository.history_cursor().map(str::to_owned))
+            .flatten();
+        let Some(sender) = &self.executor_sender else {
+            self.repository
+                .apply_history(Err("Repository history is unavailable".into()), append);
+            return;
+        };
+        let _ = sender.send(ExecutorCommand::LoadRepositoryHistory {
+            workspace_id,
+            binding_id,
+            cursor,
+            query: (!query.is_empty()).then_some(query),
+            append,
+        });
+        cx.notify();
+    }
+
+    fn open_repository_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.query_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.modal = Some(Modal::RepositoryHistory);
+        self.request_repository_history(false, cx);
+        self.query_input.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     fn request_workspace_files(&mut self, cx: &mut Context<Self>) {
@@ -20806,7 +21081,7 @@ impl WorkspaceShell {
                             uniform_list(
                                 "connections-scroll",
                                 row_count,
-                                cx.processor(move |shell, range: Range<usize>, _, cx| {
+                            cx.processor(move |shell, range: Range<usize>, _, cx| {
                                     range
                                         .filter_map(|index| {
                                             rows.get(index).cloned().map(|row| (index, row))
@@ -20938,6 +21213,34 @@ impl WorkspaceShell {
                                         .flex()
                                         .items_center()
                                         .gap_1()
+                                        .child(
+                                            IconButton::new(
+                                                "repository-branches",
+                                                IconName::VersionControl,
+                                                "Branches",
+                                            )
+                                            .square(px(24.))
+                                            .icon_size(12.)
+                                            .tooltip("Search and manage branches")
+                                            .disabled(self.repository.status().is_none())
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_repository_branches(window, cx)
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "repository-history",
+                                                IconName::View,
+                                                "History",
+                                            )
+                                            .square(px(24.))
+                                            .icon_size(12.)
+                                            .tooltip("Repository history")
+                                            .disabled(self.repository.status().is_none())
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_repository_history(window, cx)
+                                            })),
+                                        )
                                         .child(
                                             IconButton::new(
                                                 "refresh-repository-status",
@@ -25626,6 +25929,600 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::RepositoryBranches => {
+                    let query = self.query_input.read(cx).text().trim().to_lowercase();
+                    let branches = self.repository.branches();
+                    let filtered = branches
+                        .iter()
+                        .filter(|branch| query.is_empty() || branch.name.to_lowercase().contains(&query))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let status = self.repository.status().cloned();
+                    let rows = filtered.into_iter().enumerate().map(|(index, branch)| {
+                        let target = branch.name.clone();
+                        let rename_name = branch.name.clone();
+                        let upstream_name = branch.name.clone();
+                        let delete_name = branch.name.clone();
+                        let current = branch.current;
+                        let remote = branch.remote;
+                        let upstream = branch.upstream.clone().unwrap_or_else(|| "No upstream".into());
+                        let switch_status = status.clone();
+                        let checkpoint_changes = switch_status
+                            .as_ref()
+                            .is_some_and(|status| !status.entries.is_empty());
+                        div()
+                            .id(("repository-branch-row", index))
+                            .px_2().py_2().flex().items_center().gap_2()
+                            .border_b_1().border_color(colors.subtle_border)
+                            .child(div().w(px(14.)).text_color(colors.accent).child(if current { "●" } else { "" }))
+                            .child(div().flex_1().min_w_0().flex().flex_col()
+                                .child(div().truncate().child(branch.name))
+                                .child(div().text_xs().text_color(colors.muted_text).child(format!(
+                                    "{} · {upstream} · ↑{} ↓{}",
+                                    if remote { "remote" } else { "local" }, branch.ahead, branch.behind
+                                ))))
+                            .child(Button::new(("switch-repository-branch", index), if current { "Current" } else if checkpoint_changes { "Checkpoint & switch" } else { "Switch" })
+                                .tone(ButtonTone::Ghost)
+                                .disabled(current || remote || switch_status.is_none())
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    let Some(status) = switch_status.as_ref() else { return };
+                                    let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                    let Some(sender) = &shell.executor_sender else { return };
+                                    let _ = sender.send(ExecutorCommand::SwitchRepositoryBranch {
+                                        workspace_id,
+                                        binding_id: status.binding_id.0,
+                                        expected_revision: status.binding_revision,
+                                        target: target.clone(),
+                                        detached: false,
+                                        checkpoint_changes,
+                                    });
+                                    cx.notify();
+                                })))
+                            .child(Button::new(("rename-repository-branch", index), "Rename")
+                                .tone(ButtonTone::Ghost)
+                                .disabled(remote)
+                                .on_click(cx.listener(move |shell, _, window, cx| {
+                                    shell.workspace_path_input.update(cx, |input, cx| input.set_text(rename_name.clone(), cx));
+                                    shell.modal = Some(Modal::RepositoryRenameBranch(rename_name.clone()));
+                                    shell.workspace_path_input.read(cx).focus_handle(cx).focus(window, cx);
+                                    cx.notify();
+                                })))
+                            .child(Button::new(("upstream-repository-branch", index), "Upstream")
+                                .tone(ButtonTone::Ghost)
+                                .disabled(remote)
+                                .on_click(cx.listener(move |shell, _, window, cx| {
+                                    shell.workspace_path_input.update(cx, |input, cx| input.set_text("", cx));
+                                    shell.modal = Some(Modal::RepositorySetUpstream(upstream_name.clone()));
+                                    shell.workspace_path_input.read(cx).focus_handle(cx).focus(window, cx);
+                                    cx.notify();
+                                })))
+                            .child(Button::new(("delete-repository-branch", index), "Delete")
+                                .tone(ButtonTone::DangerMuted)
+                                .disabled(remote || current)
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.modal = Some(Modal::ConfirmRepositoryDeleteBranch { name: delete_name.clone(), force: false });
+                                    cx.notify();
+                                })))
+                    });
+                    let create_name = self.query_input.read(cx).text().trim().to_owned();
+                    let create_status = status.clone();
+                    div().debug_selector(|| "repository-branches-modal".into())
+                        .w(px(640.)).max_h(px(620.)).flex().flex_col().gap_3()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Branches"))
+                        .child(self.query_input.clone())
+                        .child(div().id("repository-branch-list").flex_1().min_h(px(180.)).overflow_y_scroll().border_1().border_color(colors.subtle_border).children(rows))
+                        .child(div().flex().justify_between().gap_2()
+                            .child(Button::new("create-filtered-repository-branch", "Create from HEAD")
+                                .tone(ButtonTone::Accent)
+                                .disabled(create_name.is_empty() || create_status.is_none())
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    let Some(status) = create_status.as_ref() else { return };
+                                    let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                    let Some(sender) = &shell.executor_sender else { return };
+                                    let _ = sender.send(ExecutorCommand::CreateRepositoryBranch {
+                                        workspace_id,
+                                        binding_id: status.binding_id.0,
+                                        expected_revision: status.binding_revision,
+                                        name: create_name.clone(),
+                                        start: None,
+                                        checkpoint_id: None,
+                                    });
+                                    cx.notify();
+                                })))
+                            .child(Button::new("close-repository-branches", "Close").tone(ButtonTone::Neutral)
+                                .on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
+                        )
+                        .into_any_element()
+                }
+                Modal::RepositoryRenameBranch(old) => {
+                    let old = old.clone();
+                    let new = self.workspace_path_input.read(cx).text().trim().to_owned();
+                    let status = self.repository.status().cloned();
+                    div().w(px(480.)).flex().flex_col().gap_3()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Rename {old}")))
+                        .child(self.workspace_path_input.clone())
+                        .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("cancel-rename-repository-branch", "Cancel").tone(ButtonTone::Neutral)
+                                .on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
+                            .child(Button::new("submit-rename-repository-branch", "Rename").tone(ButtonTone::Accent)
+                                .disabled(new.is_empty() || new == old || status.is_none())
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    let Some(status) = status.as_ref() else { return };
+                                    let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                    let Some(sender) = &shell.executor_sender else { return };
+                                    let _ = sender.send(ExecutorCommand::RenameRepositoryBranch {
+                                        workspace_id, binding_id: status.binding_id.0,
+                                        expected_revision: status.binding_revision,
+                                        old: old.clone(), new: new.clone(),
+                                    });
+                                    cx.notify();
+                                })))
+                        )
+                        .into_any_element()
+                }
+                Modal::RepositoryBranchFromCheckpoint(checkpoint_id) => {
+                    let checkpoint_id = *checkpoint_id;
+                    let name = self.workspace_path_input.read(cx).text().trim().to_owned();
+                    let status = self.repository.status().cloned();
+                    div().w(px(500.)).flex().flex_col().gap_3()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Create branch from checkpoint {}", checkpoint_id.0)))
+                        .child(div().text_sm().text_color(colors.muted_text).child("Only checkpoints captured by a successful Sift commit have a Git object to branch from."))
+                        .child(self.workspace_path_input.clone())
+                        .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("cancel-branch-from-checkpoint", "Cancel").tone(ButtonTone::Neutral)
+                                .on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
+                            .child(Button::new("submit-branch-from-checkpoint", "Create branch").tone(ButtonTone::Accent)
+                                .disabled(name.is_empty() || status.is_none())
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    let Some(status) = status.as_ref() else { return };
+                                    let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                    let Some(sender) = &shell.executor_sender else { return };
+                                    let _ = sender.send(ExecutorCommand::CreateRepositoryBranch {
+                                        workspace_id, binding_id: status.binding_id.0,
+                                        expected_revision: status.binding_revision,
+                                        name: name.clone(), start: None,
+                                        checkpoint_id: Some(checkpoint_id),
+                                    });
+                                    cx.notify();
+                                })))
+                        )
+                        .into_any_element()
+                }
+                Modal::RepositorySetUpstream(branch) => {
+                    let branch = branch.clone();
+                    let value = self.workspace_path_input.read(cx).text().trim().to_owned();
+                    let status = self.repository.status().cloned();
+                    let clear_status = status.clone();
+                    let clear_branch = branch.clone();
+                    div().w(px(520.)).flex().flex_col().gap_3()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Upstream for {branch}")))
+                        .child(div().text_sm().text_color(colors.muted_text).child("Enter a remote branch such as origin/main, or clear the current upstream."))
+                        .child(self.workspace_path_input.clone())
+                        .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("clear-repository-upstream", "Clear upstream").tone(ButtonTone::Ghost)
+                                .disabled(clear_status.is_none())
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    let Some(status) = clear_status.as_ref() else { return };
+                                    let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                    let Some(sender) = &shell.executor_sender else { return };
+                                    let _ = sender.send(ExecutorCommand::SetRepositoryUpstream {
+                                        workspace_id, binding_id: status.binding_id.0,
+                                        expected_revision: status.binding_revision,
+                                        branch: clear_branch.clone(), upstream: None,
+                                    });
+                                    cx.notify();
+                                })))
+                            .child(Button::new("submit-repository-upstream", "Set upstream").tone(ButtonTone::Accent)
+                                .disabled(value.is_empty() || status.is_none())
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    let Some(status) = status.as_ref() else { return };
+                                    let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                    let Some(sender) = &shell.executor_sender else { return };
+                                    let _ = sender.send(ExecutorCommand::SetRepositoryUpstream {
+                                        workspace_id, binding_id: status.binding_id.0,
+                                        expected_revision: status.binding_revision,
+                                        branch: branch.clone(), upstream: Some(value.clone()),
+                                    });
+                                    cx.notify();
+                                })))
+                        )
+                        .into_any_element()
+                }
+                Modal::ConfirmRepositoryDeleteBranch { name, force } => {
+                    let name = name.clone();
+                    let force = *force;
+                    let status = self.repository.status().cloned();
+                    div().w(px(500.)).flex().flex_col().gap_3()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Delete branch {name}?")))
+                        .child(div().text_sm().text_color(if force { colors.warning } else { colors.muted_text }).child(
+                            if force { "This permanently deletes an unmerged local branch. The repository reflog may be the only recovery path." }
+                            else { "The first attempt only deletes a branch Git confirms is merged." }
+                        ))
+                        .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("cancel-delete-repository-branch", "Cancel").tone(ButtonTone::Neutral)
+                                .on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
+                            .when(!force, |actions| actions.child(Button::new("force-delete-repository-branch", "Delete unmerged…").tone(ButtonTone::DangerMuted)
+                                .on_click(cx.listener({ let name = name.clone(); move |shell, _, _, cx| { shell.modal = Some(Modal::ConfirmRepositoryDeleteBranch { name: name.clone(), force: true }); cx.notify(); } }))))
+                            .child(Button::new("submit-delete-repository-branch", if force { "Force delete" } else { "Delete merged" }).tone(ButtonTone::DangerMuted)
+                                .disabled(status.is_none())
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    let Some(status) = status.as_ref() else { return };
+                                    let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                    let Some(sender) = &shell.executor_sender else { return };
+                                    let _ = sender.send(ExecutorCommand::DeleteRepositoryBranch {
+                                        workspace_id, binding_id: status.binding_id.0,
+                                        expected_revision: status.binding_revision,
+                                        name: name.clone(), force,
+                                    });
+                                    cx.notify();
+                                })))
+                        )
+                        .into_any_element()
+                }
+                Modal::RepositoryHistory => {
+                    let commits: Arc<[sift_protocol::VcsCommitSummary]> = self.repository.history().to_vec().into();
+                    let row_count = commits.len();
+                    let binding_id = self.repository.status().map(|status| status.binding_id.0);
+                    let has_more = self.repository.history_cursor().is_some();
+                    let loading = self.repository.history_loading();
+                    div().debug_selector(|| "repository-history-modal".into())
+                        .w(px(780.)).h(px(620.)).flex().flex_col().gap_3()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Repository history"))
+                        .child(div().flex().gap_2().child(self.query_input.clone())
+                            .child(Button::new("search-repository-history", "Search").tone(ButtonTone::Accent)
+                                .disabled(loading)
+                                .on_click(cx.listener(|shell, _, _, cx| shell.request_repository_history(false, cx)))))
+                        .child(uniform_list("repository-history-list", row_count, cx.processor(move |shell, range: Range<usize>, _, cx| {
+                            range.filter_map(|index| commits.get(index).cloned().map(|commit| (index, commit))).map(|(index, commit)| {
+                                let oid = commit.oid.clone();
+                                let compare_oid = commit.oid.clone();
+                                let compare_selected = shell.repository.comparison_base() == Some(compare_oid.as_str());
+                                let short = commit.oid.chars().take(8).collect::<String>();
+                                let refs = commit.refs.join(", ");
+                                div().id(("repository-history-row", index)).h(px(50.)).px_2().flex().items_center().gap_2()
+                                    .border_b_1().border_color(cx.theme().colors.subtle_border)
+                                    .child(div().w(px(18.)).text_color(cx.theme().colors.accent).child("●"))
+                                    .child(div().flex_1().min_w_0().flex().flex_col()
+                                        .child(div().truncate().child(commit.subject))
+                                        .child(div().text_xs().text_color(cx.theme().colors.muted_text).truncate().child(format!("{} · {} · {}", commit.author_name, commit.authored_at, refs))))
+                                    .child(div().font_family("monospace").text_xs().text_color(cx.theme().colors.muted_text).child(short))
+                                    .child(Button::new(("compare-repository-commit", index), if compare_selected { "Selected" } else { "Compare" })
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            if let Some(base) = shell.repository.comparison_base().map(str::to_owned) {
+                                                let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                                let Some(binding_id) = binding_id else { return };
+                                                let Some(sender) = &shell.executor_sender else { return };
+                                                let _ = sender.send(ExecutorCommand::CompareRepositoryCommits {
+                                                    workspace_id, binding_id, base, target: compare_oid.clone(),
+                                                });
+                                            } else {
+                                                shell.repository.set_comparison_base(Some(compare_oid.clone()));
+                                            }
+                                            cx.notify();
+                                        })))
+                                    .on_click(cx.listener(move |shell, _, _, _| {
+                                        let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                        let Some(binding_id) = binding_id else { return };
+                                        let Some(sender) = &shell.executor_sender else { return };
+                                        let _ = sender.send(ExecutorCommand::LoadRepositoryCommit { workspace_id, binding_id, oid: oid.clone() });
+                                    }))
+                            }).collect()
+                        })).flex_1().min_h_0().border_1().border_color(colors.subtle_border))
+                        .child(div().flex().justify_between()
+                            .child(Button::new("more-repository-history", if loading { "Loading…" } else { "Load more" }).tone(ButtonTone::Ghost)
+                                .disabled(loading || !has_more).on_click(cx.listener(|shell, _, _, cx| shell.request_repository_history(true, cx))))
+                            .child(Button::new("close-repository-history", "Close").tone(ButtonTone::Neutral)
+                                .on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx)))))
+                        .into_any_element()
+                }
+                Modal::RepositoryCommitDetail => {
+                    let detail = self
+                        .repository
+                        .commit_detail()
+                        .cloned()
+                        .expect("commit detail modal requires loaded commit");
+                    let hash = detail.commit.oid.clone();
+                    let message = detail.message.clone();
+                    let permalink = self.repository.status().map(|status| {
+                        format!("sift://repository/{}/commit/{hash}", status.binding_id.0)
+                    });
+                    let status = self.repository.status().cloned();
+                    let parent = detail.commit.parents.first().cloned();
+                    let file_hash = hash.clone();
+                    let file_status = status.clone();
+                    let rows = detail.files.into_iter().enumerate().map(|(index, file)| {
+                        let path = file.path.clone();
+                        let oid = file_hash.clone();
+                        let status = file_status.clone();
+                        div()
+                            .id(("repository-commit-file", index))
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .cursor_pointer()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(div().truncate().child(file.path.0))
+                            .child(
+                                div().text_xs().text_color(colors.muted_text).child(
+                                    if file.binary {
+                                        "binary".into()
+                                    } else {
+                                        format!(
+                                            "+{} −{}",
+                                            file.additions.unwrap_or(0),
+                                            file.deletions.unwrap_or(0)
+                                        )
+                                    },
+                                ),
+                            )
+                            .on_click(cx.listener(move |shell, _, _, _| {
+                                let Some(status) = status.as_ref() else { return };
+                                let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                let Some(sender) = &shell.executor_sender else { return };
+                                let _ = sender.send(ExecutorCommand::LoadRepositoryHistoricalFile {
+                                    workspace_id,
+                                    binding_id: status.binding_id.0,
+                                    oid: oid.clone(),
+                                    path: path.clone(),
+                                });
+                            }))
+                    });
+                    let create_hash = hash.clone();
+                    let create_status = status.clone();
+                    let branch_name = self.query_input.read(cx).text().trim().to_owned();
+                    let detached_hash = hash.clone();
+                    let detached_status = status.clone();
+                    let revert_hash = hash.clone();
+                    let revert_status = status.clone();
+                    let copy_hash = hash.clone();
+                    let compare_hash = hash.clone();
+                    let compare_status = status.clone();
+                    div()
+                        .debug_selector(|| "repository-commit-detail".into())
+                        .w(px(760.))
+                        .max_h(px(660.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(detail.commit.subject),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child(format!(
+                                    "{} <{}> · {}",
+                                    detail.commit.author_name,
+                                    detail.commit.author_email,
+                                    detail.commit.authored_at
+                                )),
+                        )
+                        .child(
+                            div()
+                                .p_2()
+                                .bg(colors.surface)
+                                .font_family("monospace")
+                                .whitespace_normal()
+                                .child(detail.message),
+                        )
+                        .child(
+                            div()
+                                .id("repository-commit-files")
+                                .flex_1()
+                                .min_h(px(160.))
+                                .overflow_y_scroll()
+                                .border_1()
+                                .border_color(colors.subtle_border)
+                                .children(rows),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(self.query_input.clone())
+                                .child(
+                                    Button::new("create-branch-from-commit", "Create branch")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(branch_name.is_empty() || create_status.is_none())
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            let Some(status) = create_status.as_ref() else { return };
+                                            let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                            let Some(sender) = &shell.executor_sender else { return };
+                                            let _ = sender.send(ExecutorCommand::CreateRepositoryBranch {
+                                                workspace_id,
+                                                binding_id: status.binding_id.0,
+                                                expected_revision: status.binding_revision,
+                                                name: branch_name.clone(),
+                                                start: Some(create_hash.clone()),
+                                                checkpoint_id: None,
+                                            });
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("compare-repository-parent", "Compare parent")
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(parent.is_none() || compare_status.is_none())
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            let Some(base) = parent.as_ref() else { return };
+                                            let Some(status) = compare_status.as_ref() else { return };
+                                            let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                            let Some(sender) = &shell.executor_sender else { return };
+                                            let _ = sender.send(ExecutorCommand::CompareRepositoryCommits {
+                                                workspace_id,
+                                                binding_id: status.binding_id.0,
+                                                base: base.clone(),
+                                                target: compare_hash.clone(),
+                                            });
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("detach-repository-head", "Checkout detached")
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(detached_status.is_none())
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            let Some(status) = detached_status.as_ref() else { return };
+                                            let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                            let Some(sender) = &shell.executor_sender else { return };
+                                            let _ = sender.send(ExecutorCommand::SwitchRepositoryBranch {
+                                                workspace_id,
+                                                binding_id: status.binding_id.0,
+                                                expected_revision: status.binding_revision,
+                                                target: detached_hash.clone(),
+                                                detached: true,
+                                                checkpoint_changes: !status.entries.is_empty(),
+                                            });
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("revert-repository-commit", "Revert for review")
+                                        .tone(ButtonTone::DangerMuted)
+                                        .disabled(revert_status.is_none())
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            let Some(status) = revert_status.as_ref() else { return };
+                                            let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                            let Some(sender) = &shell.executor_sender else { return };
+                                            let _ = sender.send(ExecutorCommand::RevertRepositoryCommit {
+                                                workspace_id,
+                                                binding_id: status.binding_id.0,
+                                                expected_revision: status.binding_revision,
+                                                oid: revert_hash.clone(),
+                                            });
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("copy-repository-commit-hash", "Copy hash")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_hash.clone()));
+                                            shell.show_toast("Copied commit hash".into(), cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("copy-repository-commit-message", "Copy message")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(message.clone()));
+                                            shell.show_toast("Copied commit message".into(), cx);
+                                        })),
+                                )
+                                .children(permalink.map(|permalink| {
+                                    Button::new("copy-repository-commit-permalink", "Copy link")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(permalink.clone()));
+                                            shell.show_toast("Copied commit link".into(), cx);
+                                        }))
+                                }))
+                                .child(
+                                    Button::new("close-repository-commit-detail", "Close")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Modal::RepositoryComparison => {
+                    let diff = self.repository.comparison().cloned()
+                        .expect("comparison modal requires loaded diff");
+                    let base = diff.base_revision.as_deref().unwrap_or("base");
+                    let target = diff.target_revision.as_deref().unwrap_or("target");
+                    let rows = diff.files.into_iter().enumerate().map(|(index, file)| {
+                        div().id(("repository-comparison-file", index)).px_2().py_1().flex().items_center().justify_between()
+                            .border_b_1().border_color(colors.subtle_border)
+                            .child(div().truncate().child(file.path.0))
+                            .child(div().text_xs().text_color(colors.muted_text).child(format!("+{} −{}", file.additions, file.deletions)))
+                    });
+                    div().w(px(700.)).h(px(560.)).flex().flex_col().gap_3()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Compare {} → {}", &base[..8.min(base.len())], &target[..8.min(target.len())])))
+                        .child(div().id("repository-comparison-files").flex_1().min_h_0().overflow_y_scroll().border_1().border_color(colors.subtle_border).children(rows))
+                        .child(div().flex().justify_end().child(Button::new("close-repository-comparison", "Close").tone(ButtonTone::Neutral)
+                            .on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx)))))
+                        .into_any_element()
+                }
+                Modal::RepositoryHistoricalFile => {
+                    let file = self
+                        .repository
+                        .historical_file()
+                        .cloned()
+                        .expect("historical file modal requires loaded file");
+                    let restore_file = file.clone();
+                    let status = self.repository.status().cloned();
+                    div()
+                        .debug_selector(|| "repository-historical-file".into())
+                        .w(px(760.))
+                        .h(px(620.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(format!("{} at {}", file.path.0, &file.commit[..8])),
+                        )
+                        .child(
+                            div()
+                                .id("repository-historical-file-text")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .p_2()
+                                .bg(colors.surface)
+                                .font_family("monospace")
+                                .whitespace_normal()
+                                .child(file.text),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("restore-repository-historical-file", "Restore file")
+                                        .tone(ButtonTone::DangerMuted)
+                                        .disabled(status.is_none() || restore_file.truncated)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            let Some(status) = status.as_ref() else { return };
+                                            let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                            let Some(sender) = &shell.executor_sender else { return };
+                                            let _ = sender.send(ExecutorCommand::RestoreRepositoryHistoricalFile {
+                                                workspace_id,
+                                                binding_id: status.binding_id.0,
+                                                expected_revision: status.binding_revision,
+                                                oid: restore_file.commit.clone(),
+                                                path: restore_file.path.clone(),
+                                            });
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("close-repository-historical-file", "Close")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::WorkspaceCheckpoint => div()
                     .debug_selector(|| "workspace-checkpoint".into())
                     .w(px(480.))
@@ -25711,6 +26608,24 @@ impl WorkspaceShell {
                                                 checkpoint.created_at
                                             )),
                                     ),
+                            )
+                            .child(
+                                Button::new(("branch-workspace-checkpoint", index), "Branch")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(move |shell, _, window, cx| {
+                                        shell.workspace_path_input.update(cx, |input, cx| {
+                                            input.set_text("", cx)
+                                        });
+                                        shell.modal = Some(
+                                            Modal::RepositoryBranchFromCheckpoint(checkpoint_id),
+                                        );
+                                        shell
+                                            .workspace_path_input
+                                            .read(cx)
+                                            .focus_handle(cx)
+                                            .focus(window, cx);
+                                        cx.notify();
+                                    })),
                             )
                             .child(
                                 Button::new(("restore-workspace-checkpoint", index), "Restore")
@@ -27180,6 +28095,8 @@ mod tests {
         let diff = sift_protocol::VcsDiff {
             binding_id: sift_protocol::RepositoryBindingId(9),
             side: sift_protocol::VcsDiffSide::IndexToWorktree,
+            base_revision: None,
+            target_revision: None,
             files: vec![sift_protocol::VcsDiffFile {
                 path: path.clone(),
                 previous_path: None,
@@ -27278,6 +28195,8 @@ mod tests {
             Arc::new(sift_protocol::VcsDiff {
                 binding_id: sift_protocol::RepositoryBindingId(9),
                 side,
+                base_revision: None,
+                target_revision: None,
                 files: vec![sift_protocol::VcsDiffFile {
                     path: path.clone(),
                     previous_path: None,
@@ -27330,6 +28249,8 @@ mod tests {
                 Arc::new(sift_protocol::VcsDiff {
                     binding_id: sift_protocol::RepositoryBindingId(9),
                     side,
+                    base_revision: None,
+                    target_revision: None,
                     files: vec![sift_protocol::VcsDiffFile {
                         path: path.clone(),
                         previous_path: None,
@@ -34153,6 +35074,8 @@ mod tests {
                 Arc::new(sift_protocol::VcsDiff {
                     binding_id: sift_protocol::RepositoryBindingId(9),
                     side,
+                    base_revision: None,
+                    target_revision: None,
                     files: vec![sift_protocol::VcsDiffFile {
                         path: path.clone(),
                         previous_path: None,

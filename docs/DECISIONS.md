@@ -1633,3 +1633,35 @@ reconciliation are available to local and remote desktops without direct
 filesystem access. A save acknowledgement is meaningful rather than cosmetic,
 stale plans fail safely, and external checkout changes become visible choices
 instead of implicit document replacements.
+
+---
+
+## ADR-046 — Revision-Guarded Shared Branches And Bounded History
+
+**Context.** A repository binding has one shared worktree, index, and HEAD for
+every collaborator in its room. Branch changes therefore are not client-local
+navigation. History can also be arbitrarily large, contain unusual paths, and
+produce output well beyond an interactive frame budget.
+
+**Decision.** Branch and HEAD mutations execute only on the server through
+typed, audited operations carrying the observed repository-binding revision.
+Switching requires a clean Git worktree; reconciliation remains explicit
+because the canonical room workspace must never be overwritten by checkout as
+a watcher side effect. Local branch deletion uses Git's merged guard by
+default, and an unmerged deletion requires a separate explicit confirmation.
+Every successful mutation updates the observed binding and broadcasts its new
+revision to the room.
+
+History is read through bounded typed pages. Commit identifiers accepted for
+historical content, comparison, restore, detached checkout, and revert are
+full object ids rather than arbitrary revision expressions. Commit files and
+historical text have server byte/count ceilings. Desktop history rows are
+virtualized, historical files are read-only, and restoring/reverting first
+captures a workspace checkpoint before reconciling changed projection paths
+back into canonical room documents.
+
+**Consequences.** Collaborators see one authoritative branch/HEAD transition,
+stale clients fail rather than racing it, and history rendering cost is tied to
+the visible page. Sift deliberately does not automate merge or rebase here;
+dirty switching must first go through the visible workspace reconciliation
+workflow.

@@ -55,11 +55,11 @@ use sift_protocol::{
     ScheduleOccurrence, ScheduleOccurrenceId, SchemaFilter, SchemaScope, SshProxyAccessGrant,
     SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, TransferRecipe,
     TransferRecipeAction, TransferRecipeId, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, VcsAction, VcsBranch, VcsCommitResult, VcsDiff,
-    VcsHeadMutationResult, VcsPendingOperation, VcsRemoteResult, VcsStatus,
-    VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceAction,
-    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind,
-    WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    UpdateTenantLimitsRequest, VcsAction, VcsBranch, VcsCommitDetail, VcsCommitResult, VcsDiff,
+    VcsHeadMutationResult, VcsHistoricalFile, VcsHistoryPage, VcsPendingOperation, VcsRemoteResult,
+    VcsStatus, VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace,
+    WorkspaceAction, WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId,
+    WorkspaceNodeKind, WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -491,7 +491,47 @@ pub fn app(state: AppState) -> Router {
         )
         .api_route(
             "/v1/metadata/repositories/:id/branches",
-            get_with(list_repository_branches, doc("listRepositoryBranches", "List typed local and remote branches")),
+            get_with(list_repository_branches, doc("listRepositoryBranches", "List typed local and remote branches")).post_with(create_repository_branch, doc("createRepositoryBranch", "Create a local branch from HEAD or a revision")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/branches/switch",
+            post_with(switch_repository_branch, doc("switchRepositoryBranch", "Checkpoint and switch a clean shared worktree")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/branches/rename",
+            post_with(rename_repository_branch, doc("renameRepositoryBranch", "Rename a local branch")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/branches/delete",
+            post_with(delete_repository_branch, doc("deleteRepositoryBranch", "Delete a local branch with merged-state protection")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/branches/upstream",
+            post_with(set_repository_upstream, doc("setRepositoryUpstream", "Set or clear a local branch upstream")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/history",
+            get_with(get_repository_history, doc("getRepositoryHistory", "Keyset-page bounded repository history")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/history/compare",
+            get_with(compare_repository_commits, doc("compareRepositoryCommits", "Compare two immutable commits")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/history/:oid",
+            get_with(get_repository_commit, doc("getRepositoryCommit", "Read bounded commit details and file statistics")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/history/:oid/file",
+            get_with(get_repository_historical_file, doc("getRepositoryHistoricalFile", "Read a bounded historical text file")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/history/restore-file",
+            post_with(restore_repository_historical_file, doc("restoreRepositoryHistoricalFile", "Checkpoint and restore a historical file")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/history/revert",
+            post_with(revert_repository_commit, doc("revertRepositoryCommit", "Checkpoint and preview a commit revert in the worktree")),
         )
         .api_route(
             "/v1/metadata/repositories/:id/stage",
@@ -1663,9 +1703,12 @@ use sift_metadata::http::{
     StartRunRequest, UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest,
     UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
     UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
-    VcsCommitRequest, VcsDiffQuery, VcsDiscardRequest, VcsHunkRequest, VcsPathsRequest,
-    VcsRemoteRequest, VcsRevertHunkRequest, VcsUncommitRequest, WorkspaceBatchMutationItem,
-    WorkspaceBatchMutationRequest, WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
+    VcsCommitRequest, VcsCompareQuery, VcsCreateBranchRequest, VcsDeleteBranchRequest,
+    VcsDiffQuery, VcsDiscardRequest, VcsHistoricalFileQuery, VcsHistoryQuery, VcsHunkRequest,
+    VcsPathsRequest, VcsRemoteRequest, VcsRenameBranchRequest, VcsRestoreHistoricalFileRequest,
+    VcsRevertCommitRequest, VcsRevertHunkRequest, VcsSetUpstreamRequest, VcsSwitchBranchRequest,
+    VcsUncommitRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
+    WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
 };
 
 fn metadata_room_kind(kind: sift_api_types::RoomKind) -> sift_metadata::RoomKind {
@@ -6812,6 +6855,744 @@ async fn list_repository_branches(
     Ok(Json(branches))
 }
 
+async fn get_repository_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<VcsHistoryQuery>,
+) -> ApiResult<Json<VcsHistoryPage>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context = load_repository_context(&state, metadata, actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::History,
+    )?;
+    let page = context
+        .adapter
+        .history(
+            &context.worktree,
+            query.cursor.as_deref(),
+            query.limit,
+            query.query.as_deref(),
+        )
+        .await
+        .map_err(git_adapter_error)?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::History,
+        context.workspace.id,
+        binding_id,
+    );
+    Ok(Json(page))
+}
+
+async fn compare_repository_commits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<VcsCompareQuery>,
+) -> ApiResult<Json<VcsDiff>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context = load_repository_context(&state, metadata, actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::History,
+    )?;
+    let diff = context
+        .adapter
+        .revision_diff(&context.worktree, binding_id, &query.base, &query.target)
+        .await
+        .map_err(git_adapter_error)?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::History,
+        context.workspace.id,
+        binding_id,
+    );
+    Ok(Json(diff))
+}
+
+async fn get_repository_commit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, oid)): Path<(i64, String)>,
+) -> ApiResult<Json<VcsCommitDetail>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context = load_repository_context(&state, metadata, actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::History,
+    )?;
+    let detail = context
+        .adapter
+        .commit_detail(&context.worktree, &oid)
+        .await
+        .map_err(git_adapter_error)?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::History,
+        context.workspace.id,
+        binding_id,
+    );
+    Ok(Json(detail))
+}
+
+async fn get_repository_historical_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, oid)): Path<(i64, String)>,
+    Query(query): Query<VcsHistoricalFileQuery>,
+) -> ApiResult<Json<VcsHistoricalFile>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context = load_repository_context(&state, metadata, actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::History,
+    )?;
+    let file = context
+        .adapter
+        .historical_file(&context.worktree, &oid, &query.path)
+        .await
+        .map_err(git_adapter_error)?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::History,
+        context.workspace.id,
+        binding_id,
+    );
+    Ok(Json(file))
+}
+
+async fn observe_repository_after_mutation(
+    metadata: MetadataStore,
+    binding_id: RepositoryBindingId,
+    actor: PrincipalId,
+    expected_revision: u64,
+    observation: crate::git_adapter::GitRepositoryObservation,
+) -> ApiResult<sift_metadata::RepositoryBindingRecord> {
+    metadata_blocking(move || {
+        metadata
+            .observe_repository(
+                binding_id,
+                actor,
+                sift_metadata::RepositoryObservation {
+                    expected_revision,
+                    branch: observation.branch,
+                    head: observation.head,
+                },
+            )
+            .map_err(Into::into)
+    })
+    .await
+}
+
+async fn create_repository_branch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsCreateBranchRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::CreateBranch,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    if req.start.is_some() && req.checkpoint_id.is_some() {
+        return Err(ApiError::BadRequest(
+            "choose either a commit start or a checkpoint, not both".into(),
+        ));
+    }
+    let start = if let Some(checkpoint_id) = req.checkpoint_id {
+        let lookup = metadata.clone();
+        Some(
+            metadata_blocking(move || {
+                lookup
+                    .repository_commit_for_checkpoint(binding_id, actor, checkpoint_id)
+                    .map_err(Into::into)
+            })
+            .await?
+            .ok_or_else(|| {
+                ApiError::BadRequest("checkpoint is not linked to a repository commit".into())
+            })?,
+        )
+    } else {
+        req.start.clone()
+    };
+    context
+        .adapter
+        .create_branch(&context.worktree, &req.name, start.as_deref())
+        .await
+        .map_err(git_adapter_error)?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = observe_repository_after_mutation(
+        metadata,
+        binding_id,
+        actor,
+        req.expected_revision,
+        observation,
+    )
+    .await?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::CreateBranch,
+        context.workspace.id,
+        binding_id,
+    );
+    publish_repository_changed(
+        &state,
+        &context.workspace,
+        binding_id,
+        updated.binding.revision,
+    );
+    Ok(Json(updated.binding))
+}
+
+async fn switch_repository_branch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsSwitchBranchRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::SwitchBranch,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    let status = context
+        .adapter
+        .status(
+            &context.worktree,
+            binding_id,
+            req.expected_revision,
+            context.workspace.revision,
+        )
+        .await
+        .map_err(git_adapter_error)?;
+    if !status.entries.is_empty() && !req.checkpoint_changes {
+        return Err(ApiError::Conflict(
+            "workspace contains changes; request checkpointed reconciliation before switching"
+                .into(),
+        ));
+    }
+    let old_head = context.record.binding.head.clone();
+    let mut reconcile_paths = status
+        .entries
+        .iter()
+        .flat_map(|entry| [Some(entry.path.clone()), entry.previous_path.clone()])
+        .flatten()
+        .collect::<Vec<_>>();
+    if !status.entries.is_empty() {
+        let lookup = metadata.clone();
+        let workspace_id = context.workspace.id;
+        let recoverable_paths = metadata_blocking(move || {
+            lookup
+                .list_workspace_nodes_for_principal(workspace_id, actor)
+                .map(|nodes| {
+                    nodes
+                        .into_iter()
+                        .filter(|node| node.kind == WorkspaceNodeKind::SqlDocument)
+                        .map(|node| node.path)
+                        .collect::<std::collections::HashSet<_>>()
+                })
+                .map_err(Into::into)
+        })
+        .await?;
+        if status.entries.iter().any(|entry| {
+            !recoverable_paths.contains(&entry.path)
+                && entry
+                    .previous_path
+                    .as_ref()
+                    .map_or(true, |path| !recoverable_paths.contains(path))
+        }) {
+            return Err(ApiError::Conflict(
+                "checkpointed switch cannot recover projection-only Git changes; reconcile them into the workspace or discard them first".into(),
+            ));
+        }
+        capture_before_vcs_checkpoint(
+            &state,
+            metadata.clone(),
+            actor,
+            context.workspace.id,
+            context.workspace.revision,
+        )
+        .await?;
+        context
+            .adapter
+            .clean_for_switch(&context.worktree, &reconcile_paths)
+            .await
+            .map_err(git_adapter_error)?;
+    }
+    let observation = context
+        .adapter
+        .switch_branch(&context.worktree, &req.target, req.detached)
+        .await
+        .map_err(git_adapter_error)?;
+    reconcile_paths.extend(
+        context
+            .adapter
+            .changed_paths_between(
+                &context.worktree,
+                old_head.as_deref(),
+                observation.head.as_deref(),
+            )
+            .await
+            .map_err(git_adapter_error)?,
+    );
+    reconcile_paths.sort_by(|left, right| left.0.cmp(&right.0));
+    reconcile_paths.dedup();
+    let mut workspace = context.workspace.clone();
+    for path in &reconcile_paths {
+        workspace = reconcile_vcs_worktree_path(
+            &state,
+            metadata.clone(),
+            actor,
+            context.record.binding.projection_id,
+            path,
+        )
+        .await?;
+    }
+    let updated = observe_repository_after_mutation(
+        metadata,
+        binding_id,
+        actor,
+        req.expected_revision,
+        observation,
+    )
+    .await?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::SwitchBranch,
+        workspace.id,
+        binding_id,
+    );
+    publish_repository_changed(&state, &workspace, binding_id, updated.binding.revision);
+    Ok(Json(updated.binding))
+}
+
+async fn rename_repository_branch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRenameBranchRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::RenameBranch,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    context
+        .adapter
+        .rename_branch(&context.worktree, &req.old, &req.new)
+        .await
+        .map_err(git_adapter_error)?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = observe_repository_after_mutation(
+        metadata,
+        binding_id,
+        actor,
+        req.expected_revision,
+        observation,
+    )
+    .await?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::RenameBranch,
+        context.workspace.id,
+        binding_id,
+    );
+    publish_repository_changed(
+        &state,
+        &context.workspace,
+        binding_id,
+        updated.binding.revision,
+    );
+    Ok(Json(updated.binding))
+}
+
+async fn delete_repository_branch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsDeleteBranchRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    if req.force && !req.confirm_unmerged {
+        return Err(ApiError::BadRequest(
+            "force deletion requires explicit unmerged-branch confirmation".into(),
+        ));
+    }
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::DeleteBranch,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    context
+        .adapter
+        .delete_branch(&context.worktree, &req.name, req.force)
+        .await
+        .map_err(git_adapter_error)?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = observe_repository_after_mutation(
+        metadata,
+        binding_id,
+        actor,
+        req.expected_revision,
+        observation,
+    )
+    .await?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::DeleteBranch,
+        context.workspace.id,
+        binding_id,
+    );
+    publish_repository_changed(
+        &state,
+        &context.workspace,
+        binding_id,
+        updated.binding.revision,
+    );
+    Ok(Json(updated.binding))
+}
+
+async fn set_repository_upstream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsSetUpstreamRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::SetUpstream,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    context
+        .adapter
+        .set_upstream(&context.worktree, &req.branch, req.upstream.as_deref())
+        .await
+        .map_err(git_adapter_error)?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = observe_repository_after_mutation(
+        metadata,
+        binding_id,
+        actor,
+        req.expected_revision,
+        observation,
+    )
+    .await?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::SetUpstream,
+        context.workspace.id,
+        binding_id,
+    );
+    publish_repository_changed(
+        &state,
+        &context.workspace,
+        binding_id,
+        updated.binding.revision,
+    );
+    Ok(Json(updated.binding))
+}
+
+async fn restore_repository_historical_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRestoreHistoricalFileRequest>,
+) -> ApiResult<Json<VcsWorktreeMutationResult>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::Revert,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    let checkpoint = capture_before_vcs_checkpoint(
+        &state,
+        metadata.clone(),
+        actor,
+        context.workspace.id,
+        context.workspace.revision,
+    )
+    .await?;
+    context
+        .adapter
+        .restore_historical_file(&context.worktree, &req.commit, &req.path)
+        .await
+        .map_err(git_adapter_error)?;
+    let workspace = reconcile_vcs_worktree_path(
+        &state,
+        metadata.clone(),
+        actor,
+        context.record.binding.projection_id,
+        &req.path,
+    )
+    .await?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = observe_repository_after_mutation(
+        metadata,
+        binding_id,
+        actor,
+        req.expected_revision,
+        observation,
+    )
+    .await?;
+    push_vcs_operation(&state, actor, VcsAction::Revert, workspace.id, binding_id);
+    publish_repository_changed(&state, &workspace, binding_id, updated.binding.revision);
+    Ok(Json(VcsWorktreeMutationResult {
+        binding_id,
+        checkpoint_id: checkpoint.id,
+        workspace_revision: workspace.revision,
+        path: req.path,
+    }))
+}
+
+async fn revert_repository_commit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRevertCommitRequest>,
+) -> ApiResult<Json<VcsHeadMutationResult>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::Revert,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    let before = context
+        .record
+        .binding
+        .head
+        .clone()
+        .ok_or_else(|| ApiError::Conflict("cannot revert from an unborn branch".into()))?;
+    let status = context
+        .adapter
+        .status(
+            &context.worktree,
+            binding_id,
+            req.expected_revision,
+            context.workspace.revision,
+        )
+        .await
+        .map_err(git_adapter_error)?;
+    if !status.entries.is_empty() {
+        return Err(ApiError::Conflict(
+            "commit revert requires a clean worktree".into(),
+        ));
+    }
+    let checkpoint = capture_before_vcs_checkpoint(
+        &state,
+        metadata.clone(),
+        actor,
+        context.workspace.id,
+        context.workspace.revision,
+    )
+    .await?;
+    context
+        .adapter
+        .revert_commit(&context.worktree, &req.commit)
+        .await
+        .map_err(git_adapter_error)?;
+    let changed = context
+        .adapter
+        .status(
+            &context.worktree,
+            binding_id,
+            req.expected_revision,
+            checkpoint.workspace_revision,
+        )
+        .await
+        .map_err(git_adapter_error)?;
+    let mut workspace = context.workspace.clone();
+    for path in changed.entries.iter().map(|entry| &entry.path) {
+        workspace = reconcile_vcs_worktree_path(
+            &state,
+            metadata.clone(),
+            actor,
+            context.record.binding.projection_id,
+            path,
+        )
+        .await?;
+    }
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let branch = observation.branch.clone();
+    let head = observation.head.clone();
+    let updated = observe_repository_after_mutation(
+        metadata,
+        binding_id,
+        actor,
+        req.expected_revision,
+        observation,
+    )
+    .await?;
+    push_vcs_operation(&state, actor, VcsAction::Revert, workspace.id, binding_id);
+    publish_repository_changed(&state, &workspace, binding_id, updated.binding.revision);
+    Ok(Json(VcsHeadMutationResult {
+        binding_id,
+        checkpoint_id: checkpoint.id,
+        workspace_revision: workspace.revision,
+        previous_head: before,
+        head,
+        branch,
+    }))
+}
+
 async fn stage_repository_paths(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -7907,10 +8688,10 @@ async fn reconcile_vcs_worktree_path(
             .entries
             .iter()
             .find(|entry| entry.path == path)
-            .cloned()
-            .ok_or_else(|| {
-                ApiError::Conflict("projection path changed during VCS mutation".into())
-            })?;
+            .cloned();
+        let Some(entry) = entry else {
+            return Ok::<_, ApiError>((current.workspace, None));
+        };
         let projected_path = entry.previous_path.as_ref().unwrap_or(&entry.path);
         let projected = current
             .projection

@@ -40,6 +40,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "closeSession",
     "commitTransaction",
     "compareCatalogSchemas",
+    "compareRepositoryCommits",
     "comparePlanCaptures",
     "completeSemanticDocument",
     "createGithubAllowlist",
@@ -55,6 +56,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "createTenantInvitation",
     "createWorkspaceCheckpoint",
     "createWorkspaceNode",
+    "createRepositoryBranch",
     "deleteMetadataConnectionProfile",
     "deleteMetadataDocument",
     "deleteMetadataRoom",
@@ -66,6 +68,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "deleteDdlSource",
     "deleteWorkspaceProjection",
     "deleteWorkspaceRepository",
+    "deleteRepositoryBranch",
     "discardRepositoryPath",
     "deleteSpilledCursor",
     "diagnoseSemanticDocument",
@@ -88,6 +91,9 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "getMigrationRun",
     "getPlanCapture",
     "getObjectDdl",
+    "getRepositoryCommit",
+    "getRepositoryHistoricalFile",
+    "getRepositoryHistory",
     "getWorkspace",
     "getWorkspaceProjection",
     "getWorkspaceRepository",
@@ -171,8 +177,11 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "registerPrincipalKey",
     "releaseSavepoint",
     "revertRepositoryHunk",
+    "revertRepositoryCommit",
+    "renameRepositoryBranch",
     "removeMetadataRoomMember",
     "restoreWorkspaceCheckpoint",
+    "restoreRepositoryHistoricalFile",
     "resetPassword",
     "revokeAuthToken",
     "revokeGithubAllowlist",
@@ -188,8 +197,10 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "sessionWebSocket",
     "setMetadataConnectionCredential",
     "setRepositoryCredential",
+    "setRepositoryUpstream",
     "stageRepositoryPaths",
     "stageRepositoryHunk",
+    "switchRepositoryBranch",
     "unstageRepositoryPaths",
     "unstageRepositoryHunk",
     "commitRepository",
@@ -267,9 +278,12 @@ pub use sift_api_types::{
     UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateInstanceConfigurationRequest,
     UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
     UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
-    VcsCommitRequest, VcsDiffQuery, VcsDiscardRequest, VcsHunkRequest, VcsPathsRequest,
-    VcsRemoteRequest, VcsRevertHunkRequest, VcsUncommitRequest, WorkspaceBatchMutationItem,
-    WorkspaceBatchMutationRequest, WorkspaceTreeResponse,
+    VcsCommitRequest, VcsCompareQuery, VcsCreateBranchRequest, VcsDeleteBranchRequest,
+    VcsDiffQuery, VcsDiscardRequest, VcsHistoryQuery, VcsHunkRequest, VcsPathsRequest,
+    VcsRemoteRequest, VcsRenameBranchRequest, VcsRestoreHistoricalFileRequest,
+    VcsRevertCommitRequest, VcsRevertHunkRequest, VcsSetUpstreamRequest, VcsSwitchBranchRequest,
+    VcsUncommitRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
+    WorkspaceTreeResponse,
 };
 use sift_api_types::{
     ApiTokenId, ApiTokenRow, ConnectionProfile, ConnectionProfileId, Document, DocumentId,
@@ -307,10 +321,11 @@ use sift_protocol::{
     TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
     TransactionState, TransferExecutionResult, TransferRecipe, TransferRecipeId, TxHandleRef, TxId,
     TxMode, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, ValidatedExtensionPackage,
-    Value, VcsBranch, VcsCommitResult, VcsDiff, VcsDiffSide, VcsHeadMutationResult,
-    VcsRemoteResult, VcsStatus, VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse,
-    Workspace, WorkspaceArtifactId, WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId,
-    WorkspaceNodeId, WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
+    Value, VcsBranch, VcsCommitDetail, VcsCommitResult, VcsDiff, VcsDiffSide,
+    VcsHeadMutationResult, VcsHistoricalFile, VcsHistoryPage, VcsRemoteResult, VcsStatus,
+    VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceArtifactId,
+    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspacePath,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
 };
 
 #[derive(Clone)]
@@ -2638,6 +2653,155 @@ impl Client {
     ) -> Result<Vec<VcsBranch>> {
         self.get(&format!("/v1/metadata/repositories/{}/branches", binding.0))
             .await
+    }
+
+    pub async fn create_repository_branch(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsCreateBranchRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/branches", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn switch_repository_branch(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsSwitchBranchRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/branches/switch", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn rename_repository_branch(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRenameBranchRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/branches/rename", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn delete_repository_branch(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsDeleteBranchRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/branches/delete", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn set_repository_upstream(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsSetUpstreamRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/branches/upstream", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn repository_history(
+        &self,
+        binding: RepositoryBindingId,
+        query: VcsHistoryQuery,
+    ) -> Result<VcsHistoryPage> {
+        let mut path = format!(
+            "/v1/metadata/repositories/{}/history?limit={}",
+            binding.0, query.limit
+        );
+        if let Some(cursor) = query.cursor {
+            path.push_str("&cursor=");
+            path.push_str(&urlencoding_replace(&cursor));
+        }
+        if let Some(query) = query.query {
+            path.push_str("&query=");
+            path.push_str(&urlencoding_replace(&query));
+        }
+        self.get(&path).await
+    }
+
+    pub async fn repository_commit(
+        &self,
+        binding: RepositoryBindingId,
+        oid: &str,
+    ) -> Result<VcsCommitDetail> {
+        self.get(&format!(
+            "/v1/metadata/repositories/{}/history/{}",
+            binding.0,
+            urlencoding_replace(oid)
+        ))
+        .await
+    }
+
+    pub async fn compare_repository_commits(
+        &self,
+        binding: RepositoryBindingId,
+        query: VcsCompareQuery,
+    ) -> Result<VcsDiff> {
+        self.get(&format!(
+            "/v1/metadata/repositories/{}/history/compare?base={}&target={}",
+            binding.0,
+            urlencoding_replace(&query.base),
+            urlencoding_replace(&query.target)
+        ))
+        .await
+    }
+
+    pub async fn repository_historical_file(
+        &self,
+        binding: RepositoryBindingId,
+        oid: &str,
+        path: WorkspacePath,
+    ) -> Result<VcsHistoricalFile> {
+        self.get(&format!(
+            "/v1/metadata/repositories/{}/history/{}/file?path={}",
+            binding.0,
+            urlencoding_replace(oid),
+            urlencoding_replace(&path.0)
+        ))
+        .await
+    }
+
+    pub async fn restore_repository_historical_file(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRestoreHistoricalFileRequest,
+    ) -> Result<VcsWorktreeMutationResult> {
+        self.post(
+            &format!(
+                "/v1/metadata/repositories/{}/history/restore-file",
+                binding.0
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn revert_repository_commit(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRevertCommitRequest,
+    ) -> Result<VcsHeadMutationResult> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/history/revert", binding.0),
+            &request,
+        )
+        .await
     }
 
     pub async fn stage_repository_paths(

@@ -13,8 +13,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sift_protocol::{
-    VcsBranch, VcsConflictKind, VcsDiff, VcsDiffFile, VcsDiffHunk, VcsDiffLine, VcsDiffLineKind,
-    VcsDiffSide, VcsFileState, VcsStageState, VcsStatus, VcsStatusEntry, VcsUpstreamStatus,
+    VcsBranch, VcsCommitDetail, VcsCommitFile, VcsCommitSummary, VcsConflictKind, VcsDiff,
+    VcsDiffFile, VcsDiffHunk, VcsDiffLine, VcsDiffLineKind, VcsDiffSide, VcsFileState,
+    VcsHistoricalFile, VcsHistoryPage, VcsStageState, VcsStatus, VcsStatusEntry, VcsUpstreamStatus,
     WorkspacePath, WorkspaceRevision,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
@@ -29,6 +30,8 @@ const MAX_STATUS_ENTRIES: usize = 20_000;
 const MAX_DIFF_FILES: usize = 2_000;
 const MAX_DIFF_HUNKS: usize = 4_000;
 const MAX_DIFF_LINES: usize = 200_000;
+const MAX_HISTORY_PAGE: u32 = 200;
+const MAX_COMMIT_FILES: usize = 5_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitAdapterError {
@@ -108,6 +111,56 @@ pub trait VcsRepository: Send + Sync {
         path: Option<&WorkspacePath>,
     ) -> Result<VcsDiff>;
     async fn branches(&self, worktree: &Path) -> Result<Vec<VcsBranch>>;
+    async fn create_branch(&self, worktree: &Path, name: &str, start: Option<&str>) -> Result<()>;
+    async fn switch_branch(
+        &self,
+        worktree: &Path,
+        target: &str,
+        detached: bool,
+    ) -> Result<GitRepositoryObservation>;
+    async fn clean_for_switch(&self, worktree: &Path, paths: &[WorkspacePath]) -> Result<()>;
+    async fn changed_paths_between(
+        &self,
+        worktree: &Path,
+        old: Option<&str>,
+        new: Option<&str>,
+    ) -> Result<Vec<WorkspacePath>>;
+    async fn rename_branch(&self, worktree: &Path, old: &str, new: &str) -> Result<()>;
+    async fn delete_branch(&self, worktree: &Path, name: &str, force: bool) -> Result<()>;
+    async fn set_upstream(
+        &self,
+        worktree: &Path,
+        branch: &str,
+        upstream: Option<&str>,
+    ) -> Result<()>;
+    async fn history(
+        &self,
+        worktree: &Path,
+        cursor: Option<&str>,
+        limit: u32,
+        query: Option<&str>,
+    ) -> Result<VcsHistoryPage>;
+    async fn commit_detail(&self, worktree: &Path, oid: &str) -> Result<VcsCommitDetail>;
+    async fn historical_file(
+        &self,
+        worktree: &Path,
+        oid: &str,
+        path: &WorkspacePath,
+    ) -> Result<VcsHistoricalFile>;
+    async fn revision_diff(
+        &self,
+        worktree: &Path,
+        binding_id: sift_protocol::RepositoryBindingId,
+        base: &str,
+        target: &str,
+    ) -> Result<VcsDiff>;
+    async fn restore_historical_file(
+        &self,
+        worktree: &Path,
+        oid: &str,
+        path: &WorkspacePath,
+    ) -> Result<()>;
+    async fn revert_commit(&self, worktree: &Path, oid: &str) -> Result<()>;
     async fn stage(&self, worktree: &Path, paths: &[WorkspacePath]) -> Result<()>;
     async fn unstage(&self, worktree: &Path, paths: &[WorkspacePath]) -> Result<()>;
     async fn discard_worktree_path(&self, worktree: &Path, path: &WorkspacePath) -> Result<()>;
@@ -564,6 +617,381 @@ impl VcsRepository for GitAdapter {
             )
             .await?;
         parse_branches(&output.stdout)
+    }
+
+    async fn create_branch(&self, worktree: &Path, name: &str, start: Option<&str>) -> Result<()> {
+        validate_ref(name)?;
+        let mut args = vec![
+            OsString::from("branch"),
+            OsString::from("--"),
+            OsString::from(name),
+        ];
+        if let Some(start) = start {
+            validate_revision(start)?;
+            args.push(OsString::from(start));
+        }
+        self.run(worktree, args, false, &[]).await?;
+        Ok(())
+    }
+
+    async fn switch_branch(
+        &self,
+        worktree: &Path,
+        target: &str,
+        detached: bool,
+    ) -> Result<GitRepositoryObservation> {
+        validate_revision(target)?;
+        let args = if detached {
+            vec!["switch", "--detach", "--", target]
+        } else {
+            vec!["switch", "--", target]
+        };
+        self.run(worktree, args, false, &[]).await?;
+        self.observation(worktree).await
+    }
+
+    async fn clean_for_switch(&self, worktree: &Path, paths: &[WorkspacePath]) -> Result<()> {
+        validate_paths(paths)?;
+        let has_head = self.observation(worktree).await?.head.is_some();
+        if has_head {
+            self.run(worktree, ["reset", "--hard", "HEAD"], false, &[])
+                .await?;
+        } else {
+            self.run(
+                worktree,
+                ["rm", "--cached", "-r", "--ignore-unmatch", "--", "."],
+                false,
+                &[],
+            )
+            .await?;
+        }
+        let mut args = vec![
+            OsString::from("clean"),
+            OsString::from("-f"),
+            OsString::from("-d"),
+            OsString::from("--"),
+        ];
+        args.extend(paths.iter().map(|path| OsString::from(&path.0)));
+        self.run(worktree, args, false, &[]).await?;
+        Ok(())
+    }
+
+    async fn changed_paths_between(
+        &self,
+        worktree: &Path,
+        old: Option<&str>,
+        new: Option<&str>,
+    ) -> Result<Vec<WorkspacePath>> {
+        if old.is_none() && new.is_none() {
+            return Ok(Vec::new());
+        }
+        if let Some(value) = old {
+            validate_oid(value)?;
+        }
+        if let Some(value) = new {
+            validate_oid(value)?;
+        }
+        let output = match (old, new) {
+            (Some(old), Some(new)) => {
+                self.run(
+                    worktree,
+                    ["diff", "--name-only", "-z", old, new, "--"],
+                    false,
+                    &[],
+                )
+                .await?
+            }
+            (None, Some(new)) => {
+                self.run(
+                    worktree,
+                    ["ls-tree", "-r", "--name-only", "-z", new],
+                    false,
+                    &[],
+                )
+                .await?
+            }
+            (Some(old), None) => {
+                self.run(
+                    worktree,
+                    ["ls-tree", "-r", "--name-only", "-z", old],
+                    false,
+                    &[],
+                )
+                .await?
+            }
+            (None, None) => unreachable!(),
+        };
+        let mut paths = output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| std::str::from_utf8(bytes).map_err(|_| GitAdapterError::InvalidData))
+            .map(|path| path.and_then(checked_path))
+            .collect::<Result<Vec<_>>>()?;
+        paths.sort_by(|left, right| left.0.cmp(&right.0));
+        paths.dedup();
+        Ok(paths)
+    }
+
+    async fn rename_branch(&self, worktree: &Path, old: &str, new: &str) -> Result<()> {
+        validate_ref(old)?;
+        validate_ref(new)?;
+        self.run(worktree, ["branch", "-m", "--", old, new], false, &[])
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_branch(&self, worktree: &Path, name: &str, force: bool) -> Result<()> {
+        validate_ref(name)?;
+        self.run(
+            worktree,
+            ["branch", if force { "-D" } else { "-d" }, "--", name],
+            false,
+            &[],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn set_upstream(
+        &self,
+        worktree: &Path,
+        branch: &str,
+        upstream: Option<&str>,
+    ) -> Result<()> {
+        validate_ref(branch)?;
+        if let Some(upstream) = upstream {
+            validate_ref(upstream)?;
+            self.run(
+                worktree,
+                ["branch", "--set-upstream-to", upstream, "--", branch],
+                false,
+                &[],
+            )
+            .await?;
+        } else {
+            self.run(
+                worktree,
+                ["branch", "--unset-upstream", "--", branch],
+                false,
+                &[],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn history(
+        &self,
+        worktree: &Path,
+        cursor: Option<&str>,
+        limit: u32,
+        query: Option<&str>,
+    ) -> Result<VcsHistoryPage> {
+        let limit = limit.clamp(1, MAX_HISTORY_PAGE);
+        let skip = cursor
+            .unwrap_or("0")
+            .parse::<u32>()
+            .map_err(|_| GitAdapterError::InvalidData)?;
+        let normalized_query = query
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .map(str::to_lowercase);
+        if normalized_query
+            .as_ref()
+            .is_some_and(|query| query.len() > 512 || query.contains(['\0', '\n', '\r']))
+        {
+            return Err(GitAdapterError::InvalidData);
+        }
+        let scan_limit = if normalized_query.is_some() {
+            1_000
+        } else {
+            limit
+        };
+        let mut args = vec![
+            OsString::from("log"),
+            OsString::from("--all"),
+            OsString::from("--date=iso-strict"),
+            OsString::from("--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%D%x00%s%x00"),
+            OsString::from(format!("--max-count={}", scan_limit + 1)),
+            OsString::from(format!("--skip={skip}")),
+        ];
+        let observation = self.observation(worktree).await?;
+        if observation.branch.is_none() && observation.head.is_some() {
+            args.push(OsString::from("HEAD"));
+        }
+        let output = self.run_truncated(worktree, args, false, &[]).await?;
+        let page = parse_history(&output.stdout, skip, scan_limit, output.truncated)?;
+        let Some(query) = normalized_query else {
+            return Ok(page);
+        };
+        let source_has_more = page.next_cursor.is_some();
+        let source_count = page.commits.len();
+        let mut commits = Vec::new();
+        let mut consumed = 0usize;
+        for commit in page.commits {
+            consumed += 1;
+            let matches = commit.subject.to_lowercase().contains(&query)
+                || commit.author_name.to_lowercase().contains(&query)
+                || commit.author_email.to_lowercase().contains(&query)
+                || commit.oid.to_lowercase().contains(&query)
+                || commit
+                    .refs
+                    .iter()
+                    .any(|reference| reference.to_lowercase().contains(&query));
+            if matches {
+                commits.push(commit);
+                if commits.len() == limit as usize {
+                    break;
+                }
+            }
+        }
+        let has_more = consumed < source_count || source_has_more;
+        Ok(VcsHistoryPage {
+            next_cursor: has_more.then(|| (skip + consumed as u32).to_string()),
+            commits,
+        })
+    }
+
+    async fn commit_detail(&self, worktree: &Path, oid: &str) -> Result<VcsCommitDetail> {
+        validate_oid(oid)?;
+        let metadata = self
+            .run(
+                worktree,
+                [
+                    "show",
+                    "-s",
+                    "--date=iso-strict",
+                    "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%D%x00%s%x00%B%x00",
+                    oid,
+                ],
+                false,
+                &[],
+            )
+            .await?;
+        let stats = self
+            .run_truncated(
+                worktree,
+                [
+                    "diff-tree",
+                    "--root",
+                    "--no-commit-id",
+                    "--numstat",
+                    "-r",
+                    oid,
+                ],
+                false,
+                &[],
+            )
+            .await?;
+        parse_commit_detail(&metadata.stdout, &stats.stdout, stats.truncated)
+    }
+
+    async fn historical_file(
+        &self,
+        worktree: &Path,
+        oid: &str,
+        path: &WorkspacePath,
+    ) -> Result<VcsHistoricalFile> {
+        validate_oid(oid)?;
+        validate_paths(std::slice::from_ref(path))?;
+        let spec = format!("{oid}:{}", path.0);
+        let output = self
+            .run_truncated(worktree, ["show", spec.as_str()], false, &[])
+            .await?;
+        let text = String::from_utf8(output.stdout).map_err(|_| GitAdapterError::InvalidData)?;
+        Ok(VcsHistoricalFile {
+            commit: oid.to_owned(),
+            path: path.clone(),
+            text,
+            truncated: output.truncated,
+        })
+    }
+
+    async fn revision_diff(
+        &self,
+        worktree: &Path,
+        binding_id: sift_protocol::RepositoryBindingId,
+        base: &str,
+        target: &str,
+    ) -> Result<VcsDiff> {
+        validate_oid(base)?;
+        validate_oid(target)?;
+        let names = self
+            .run(
+                worktree,
+                [
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--name-status",
+                    "-z",
+                    base,
+                    target,
+                    "--",
+                ],
+                false,
+                &[],
+            )
+            .await?;
+        let stats = self
+            .run(
+                worktree,
+                [
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--numstat",
+                    "-z",
+                    base,
+                    target,
+                    "--",
+                ],
+                false,
+                &[],
+            )
+            .await?;
+        let mut diff = parse_diff(
+            binding_id,
+            VcsDiffSide::HeadToWorktree,
+            &names.stdout,
+            &stats.stdout,
+        )?;
+        diff.base_revision = Some(base.to_owned());
+        diff.target_revision = Some(target.to_owned());
+        Ok(diff)
+    }
+
+    async fn restore_historical_file(
+        &self,
+        worktree: &Path,
+        oid: &str,
+        path: &WorkspacePath,
+    ) -> Result<()> {
+        validate_oid(oid)?;
+        validate_paths(std::slice::from_ref(path))?;
+        self.run(
+            worktree,
+            [
+                "restore",
+                "--source",
+                oid,
+                "--worktree",
+                "--",
+                path.0.as_str(),
+            ],
+            false,
+            &[],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn revert_commit(&self, worktree: &Path, oid: &str) -> Result<()> {
+        validate_oid(oid)?;
+        self.run(worktree, ["revert", "--no-commit", oid], false, &[])
+            .await?;
+        Ok(())
     }
 
     async fn stage(&self, worktree: &Path, paths: &[WorkspacePath]) -> Result<()> {
@@ -1068,6 +1496,8 @@ fn parse_diff(
     Ok(VcsDiff {
         binding_id,
         side,
+        base_revision: None,
+        target_revision: None,
         files,
         truncated: false,
     })
@@ -1357,6 +1787,100 @@ fn parse_branches(bytes: &[u8]) -> Result<Vec<VcsBranch>> {
     Ok(branches)
 }
 
+fn parse_history(bytes: &[u8], skip: u32, limit: u32, truncated: bool) -> Result<VcsHistoryPage> {
+    let text = std::str::from_utf8(bytes).map_err(|_| GitAdapterError::InvalidData)?;
+    let mut fields = text.split('\0');
+    let mut commits = Vec::new();
+    while let Some(raw_oid) = fields.next() {
+        let oid = raw_oid.trim_start_matches('\n');
+        if oid.is_empty() {
+            break;
+        }
+        let parents = fields.next().ok_or(GitAdapterError::InvalidData)?;
+        let author_name = fields.next().ok_or(GitAdapterError::InvalidData)?;
+        let author_email = fields.next().ok_or(GitAdapterError::InvalidData)?;
+        let authored_at = fields.next().ok_or(GitAdapterError::InvalidData)?;
+        let refs = fields.next().ok_or(GitAdapterError::InvalidData)?;
+        let subject = fields.next().ok_or(GitAdapterError::InvalidData)?;
+        if !is_oid(oid) || !parents.split_whitespace().all(is_oid) {
+            return Err(GitAdapterError::InvalidData);
+        }
+        commits.push(VcsCommitSummary {
+            oid: oid.to_owned(),
+            parents: parents.split_whitespace().map(str::to_owned).collect(),
+            author_name: author_name.to_owned(),
+            author_email: author_email.to_owned(),
+            authored_at: authored_at
+                .parse()
+                .map_err(|_| GitAdapterError::InvalidData)?,
+            refs: refs
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            subject: subject.to_owned(),
+        });
+    }
+    let has_more = commits.len() > limit as usize || truncated;
+    commits.truncate(limit as usize);
+    Ok(VcsHistoryPage {
+        next_cursor: has_more.then(|| (skip + commits.len() as u32).to_string()),
+        commits,
+    })
+}
+
+fn parse_commit_detail(metadata: &[u8], stats: &[u8], truncated: bool) -> Result<VcsCommitDetail> {
+    let text = std::str::from_utf8(metadata).map_err(|_| GitAdapterError::InvalidData)?;
+    let fields = text.splitn(9, '\0').collect::<Vec<_>>();
+    if fields.len() < 9 || !is_oid(fields[0]) || !fields[1].split_whitespace().all(is_oid) {
+        return Err(GitAdapterError::InvalidData);
+    }
+    let commit = VcsCommitSummary {
+        oid: fields[0].to_owned(),
+        parents: fields[1].split_whitespace().map(str::to_owned).collect(),
+        author_name: fields[2].to_owned(),
+        author_email: fields[3].to_owned(),
+        authored_at: fields[4]
+            .parse()
+            .map_err(|_| GitAdapterError::InvalidData)?,
+        refs: fields[5]
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        subject: fields[6].to_owned(),
+    };
+    let stats = std::str::from_utf8(stats).map_err(|_| GitAdapterError::InvalidData)?;
+    let mut files = Vec::new();
+    for line in stats.lines().take(MAX_COMMIT_FILES) {
+        let mut parts = line.splitn(3, '\t');
+        let additions = parts.next().ok_or(GitAdapterError::InvalidData)?;
+        let deletions = parts.next().ok_or(GitAdapterError::InvalidData)?;
+        let path = checked_path(parts.next().ok_or(GitAdapterError::InvalidData)?)?;
+        let binary = additions == "-" || deletions == "-";
+        files.push(VcsCommitFile {
+            path,
+            previous_path: None,
+            state: VcsFileState::Modified,
+            additions: (!binary)
+                .then(|| additions.parse().map_err(|_| GitAdapterError::InvalidData))
+                .transpose()?,
+            deletions: (!binary)
+                .then(|| deletions.parse().map_err(|_| GitAdapterError::InvalidData))
+                .transpose()?,
+            binary,
+        });
+    }
+    Ok(VcsCommitDetail {
+        commit,
+        message: fields[7].trim_end_matches('\n').to_owned(),
+        files_truncated: truncated || stats.lines().count() > MAX_COMMIT_FILES,
+        files,
+    })
+}
+
 fn parse_track(value: &str) -> Result<(u32, u32)> {
     let mut ahead = 0;
     let mut behind = 0;
@@ -1411,6 +1935,37 @@ fn validate_commit_identity(message: &str, name: &str, email: &str) -> Result<()
 
 fn validate_remote(remote: &str) -> Result<()> {
     if valid_ref_component(remote) {
+        Ok(())
+    } else {
+        Err(GitAdapterError::InvalidData)
+    }
+}
+
+fn validate_ref(value: &str) -> Result<()> {
+    if valid_ref_component(value)
+        && !value.contains("..")
+        && !value.contains("@{")
+        && !value.ends_with(['.', '/'])
+        && !value.starts_with('/')
+        && !value.contains("//")
+        && !value.contains(['~', '^', ':', '?', '*', '[', '\\'])
+    {
+        Ok(())
+    } else {
+        Err(GitAdapterError::InvalidData)
+    }
+}
+
+fn validate_oid(value: &str) -> Result<()> {
+    if is_oid(value) {
+        Ok(())
+    } else {
+        Err(GitAdapterError::InvalidData)
+    }
+}
+
+fn validate_revision(value: &str) -> Result<()> {
+    if is_oid(value) || validate_ref(value).is_ok() {
         Ok(())
     } else {
         Err(GitAdapterError::InvalidData)
@@ -1552,6 +2107,126 @@ mod tests {
             .iter()
             .any(|line| line.kind == VcsDiffLineKind::Addition && line.text == "select 2;"));
         assert_eq!(file_diff.files[0].hunks[0].id.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn branches_and_history_are_typed_bounded_and_support_detached_head() {
+        let adapter = GitAdapter::for_tests().await.unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        adapter.initialize(repository.path()).await.unwrap();
+        let path = WorkspacePath("query.sql".into());
+        std::fs::write(repository.path().join(&path.0), "select 1;\n").unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        let initial = adapter
+            .commit(
+                repository.path(),
+                "initial query",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap()
+            .head
+            .unwrap();
+        adapter
+            .create_branch(repository.path(), "feature/history", Some(&initial))
+            .await
+            .unwrap();
+        adapter
+            .switch_branch(repository.path(), "feature/history", false)
+            .await
+            .unwrap();
+        std::fs::write(repository.path().join(&path.0), "select 2;\n").unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        let second = adapter
+            .commit(
+                repository.path(),
+                "second query",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap()
+            .head
+            .unwrap();
+
+        let branches = adapter.branches(repository.path()).await.unwrap();
+        assert!(branches
+            .iter()
+            .any(|branch| branch.name == "feature/history" && branch.current));
+        let first_page = adapter
+            .history(repository.path(), None, 1, None)
+            .await
+            .unwrap();
+        assert_eq!(first_page.commits.len(), 1);
+        assert_eq!(first_page.commits[0].oid, second);
+        let second_page = adapter
+            .history(
+                repository.path(),
+                first_page.next_cursor.as_deref(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_page.commits[0].oid, initial);
+        for query in ["Sift Test", "feature/history", &second[..10]] {
+            let matches = adapter
+                .history(repository.path(), None, 10, Some(query))
+                .await
+                .unwrap();
+            assert!(!matches.commits.is_empty(), "query {query} should match");
+        }
+        let detail = adapter
+            .commit_detail(repository.path(), &initial)
+            .await
+            .unwrap();
+        assert_eq!(detail.commit.subject, "initial query");
+        assert_eq!(detail.files[0].path, path);
+        let historical = adapter
+            .historical_file(repository.path(), &initial, &path)
+            .await
+            .unwrap();
+        assert_eq!(historical.text, "select 1;\n");
+        let comparison = adapter
+            .revision_diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                &initial,
+                &second,
+            )
+            .await
+            .unwrap();
+        assert_eq!(comparison.base_revision.as_deref(), Some(initial.as_str()));
+        assert_eq!(comparison.target_revision.as_deref(), Some(second.as_str()));
+        assert_eq!(comparison.files[0].path, path);
+        let changed_paths = adapter
+            .changed_paths_between(repository.path(), Some(&initial), Some(&second))
+            .await
+            .unwrap();
+        assert_eq!(changed_paths, vec![path.clone()]);
+        std::fs::write(repository.path().join(&path.0), "select 3;\n").unwrap();
+        adapter
+            .clean_for_switch(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join(&path.0)).unwrap(),
+            "select 2;\n"
+        );
+
+        let observation = adapter
+            .switch_branch(repository.path(), &initial, true)
+            .await
+            .unwrap();
+        assert!(observation.branch.is_none());
+        assert_eq!(observation.head.as_deref(), Some(initial.as_str()));
     }
 
     #[tokio::test]

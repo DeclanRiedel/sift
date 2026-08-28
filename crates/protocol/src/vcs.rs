@@ -162,6 +162,10 @@ pub struct VcsDiffHunk {
 pub struct VcsDiff {
     pub binding_id: RepositoryBindingId,
     pub side: VcsDiffSide,
+    #[serde(default)]
+    pub base_revision: Option<String>,
+    #[serde(default)]
+    pub target_revision: Option<String>,
     pub files: Vec<VcsDiffFile>,
     pub truncated: bool,
 }
@@ -175,6 +179,49 @@ pub struct VcsBranch {
     pub upstream: Option<String>,
     pub ahead: u32,
     pub behind: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsCommitSummary {
+    pub oid: String,
+    pub parents: Vec<String>,
+    pub author_name: String,
+    pub author_email: String,
+    pub authored_at: DateTime<Utc>,
+    pub refs: Vec<String>,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsHistoryPage {
+    pub commits: Vec<VcsCommitSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsCommitFile {
+    pub path: WorkspacePath,
+    pub previous_path: Option<WorkspacePath>,
+    pub state: VcsFileState,
+    pub additions: Option<u32>,
+    pub deletions: Option<u32>,
+    pub binary: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsCommitDetail {
+    pub commit: VcsCommitSummary,
+    pub message: String,
+    pub files: Vec<VcsCommitFile>,
+    pub files_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsHistoricalFile {
+    pub commit: String,
+    pub path: WorkspacePath,
+    pub text: String,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
