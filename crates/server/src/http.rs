@@ -43,24 +43,24 @@ use sift_protocol::{
     EndTransactionRequest, ExecuteRequest, ExecuteRequestHttp, ExpectedRevision,
     GithubNativeAuthExchangeRequest, GithubNativeAuthStartResponse, HandshakeDeployment,
     HandshakeRequest, HandshakeResponse, HandshakeRuntimeMode, HandshakeTransport, Health,
-    InvitationRole, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
-    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
-    ObjectPath, OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus,
-    PasswordLoginRequest, PasswordResetRequest, ProjectionBinding, ProjectionHealth,
-    ProjectionMode, ProtocolRange, Readiness, ReconcilePlan, ReconcileResolution,
-    RefreshAuthRequest, RegisterPrincipalKeyRequest, RepositoryBinding, RepositoryBindingId,
-    RoomClientMessage, RoomQueryResult, RoomServerMessage, Run, RunAction, RunConfiguration,
-    RunConfigurationAction, RunConfigurationId, RunId, RunLogEntry, RunManifest, RunManifestScript,
-    RunSchedule, RunState, RunStepResult, RunTrigger, SavepointRequest, ScheduleAction, ScheduleId,
-    ScheduleOccurrence, ScheduleOccurrenceId, SchemaFilter, SchemaScope, SshProxyAccessGrant,
-    SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, TransferRecipe,
-    TransferRecipeAction, TransferRecipeId, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, VcsAction, VcsBranch, VcsCommitDetail, VcsCommitResult,
-    VcsConflictFile, VcsDiff, VcsHeadMutationResult, VcsHistoricalFile, VcsHistoryPage,
-    VcsPendingOperation, VcsRemote, VcsRemoteResult, VcsStatus, VcsWorktreeMutationResult,
-    WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceAction, WorkspaceCheckpoint,
-    WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind, WsClientMessage,
-    WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    HostingRepositoryCandidate, HostingRepositorySummary, InvitationRole,
+    IssuedPasswordResetResponse, IssuedTenantInvitationResponse, KeyAuthenticateRequest,
+    KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest, ObjectPath,
+    OpenConnectionRequest, OpenSessionRequest, Operation, OperationStatus, PasswordLoginRequest,
+    PasswordResetRequest, ProjectionBinding, ProjectionHealth, ProjectionMode, ProtocolRange,
+    Readiness, ReconcilePlan, ReconcileResolution, RefreshAuthRequest, RegisterPrincipalKeyRequest,
+    RepositoryBinding, RepositoryBindingId, RoomClientMessage, RoomQueryResult, RoomServerMessage,
+    Run, RunAction, RunConfiguration, RunConfigurationAction, RunConfigurationId, RunId,
+    RunLogEntry, RunManifest, RunManifestScript, RunSchedule, RunState, RunStepResult, RunTrigger,
+    SavepointRequest, ScheduleAction, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    SchemaFilter, SchemaScope, SshProxyAccessGrant, SshProxyCapabilityExchangeRequest,
+    TransactionPreviewRequest, TransferRecipe, TransferRecipeAction, TransferRecipeId,
+    UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, VcsAction, VcsBranch,
+    VcsCommitDetail, VcsCommitResult, VcsConflictFile, VcsDiff, VcsHeadMutationResult,
+    VcsHistoricalFile, VcsHistoryPage, VcsPendingOperation, VcsRemote, VcsRemoteResult, VcsStatus,
+    VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceAction,
+    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -650,6 +650,23 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/metadata/repositories/:id/push",
             post_with(push_repository, doc("pushRepository", "Push with the bound one-operation credential helper")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/hosting",
+            get_with(get_repository_hosting, doc("getRepositoryHosting", "Detect hosting and load safe links, pull requests, and checks")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/hosting/repositories",
+            get_with(list_hosting_repositories, doc("listHostingRepositories", "List repositories visible to the separate hosting credential")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/hosting/credential",
+            post_with(set_hosting_credential, doc("setHostingCredential", "Store a per-principal hosting API credential separately from Git transport"))
+                .delete_with(delete_hosting_credential, doc("deleteHostingCredential", "Remove the current principal hosting credential")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/hosting/pull-requests",
+            post_with(create_hosting_pull_request, doc("createHostingPullRequest", "Create a pull request from the current pushed branch")),
         )
         .api_route(
             "/v1/metadata/workspaces/:id/ddl-sources",
@@ -10581,6 +10598,343 @@ async fn remote_repository_operation(
         updated_refs,
         ref_changes,
     }))
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct HostingQuery {
+    remote: Option<String>,
+    path: Option<String>,
+}
+
+async fn hosting_identity(
+    context: &RepositoryContext,
+    remote_name: Option<&str>,
+) -> ApiResult<sift_protocol::HostingRepositoryIdentity> {
+    let remotes = context
+        .adapter
+        .remotes(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let selected = remote_name
+        .and_then(|name| remotes.iter().find(|remote| remote.name == name))
+        .or_else(|| remotes.iter().find(|remote| remote.name == "origin"))
+        .or_else(|| remotes.first())
+        .ok_or_else(|| ApiError::BadRequest("repository has no hosting remote".into()))?;
+    crate::hosting::detect_repository(&selected.fetch_url).map_err(hosting_error)
+}
+
+fn hosting_client() -> ApiResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| ApiError::Internal("hosting client initialization failed".into()))
+}
+
+fn hosting_error(error: crate::hosting::HostingError) -> ApiError {
+    use crate::hosting::HostingError;
+    match error {
+        HostingError::CredentialRequired
+        | HostingError::UnsupportedRemote
+        | HostingError::UnsupportedOperation => ApiError::BadRequest(error.to_string()),
+        HostingError::Rejected(401 | 403) => {
+            ApiError::Forbidden("hosting provider rejected credential or permissions".into())
+        }
+        HostingError::Rejected(404) => {
+            ApiError::BadRequest("hosting repository not found or not visible".into())
+        }
+        HostingError::Rejected(_) | HostingError::InvalidResponse => {
+            ApiError::BadRequest(error.to_string())
+        }
+    }
+}
+
+async fn get_repository_hosting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<HostingQuery>,
+) -> ApiResult<Json<HostingRepositorySummary>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::HostingRead,
+    )?;
+    let identity = hosting_identity(&context, query.remote.as_deref()).await?;
+    let mut credential = metadata
+        .repository_hosting_credential(binding_id, actor)
+        .await?;
+    let credential_present = credential.is_some();
+    let links = crate::hosting::browser_links(
+        &identity,
+        context.record.binding.branch.as_deref(),
+        context.record.binding.head.as_deref(),
+        query.path.as_deref(),
+    );
+    let provider = crate::hosting::provider(identity.provider);
+    let client = hosting_client()?;
+    let pull_requests = if context.record.binding.network_enabled {
+        match context.record.binding.branch.as_deref() {
+            Some(branch) => provider
+                .pull_requests(&client, credential.as_deref(), &identity, branch)
+                .await
+                .map_err(hosting_error)?,
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let checks = if context.record.binding.network_enabled {
+        match context.record.binding.head.as_deref() {
+            Some(head) => provider
+                .checks(&client, credential.as_deref(), &identity, head)
+                .await
+                .map_err(hosting_error)?,
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    if let Some(secret) = credential.as_mut() {
+        secret.fill(0);
+    }
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::HostingRead,
+        context.workspace.id,
+        binding_id,
+    );
+    Ok(Json(HostingRepositorySummary {
+        identity,
+        credential_present,
+        links,
+        pull_requests,
+        checks,
+    }))
+}
+
+async fn list_hosting_repositories(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<HostingQuery>,
+) -> ApiResult<Json<Vec<HostingRepositoryCandidate>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::HostingRead,
+    )?;
+    if !context.record.binding.network_enabled {
+        return Err(ApiError::Forbidden(
+            "network Git and hosting operations are disabled".into(),
+        ));
+    }
+    let identity = hosting_identity(&context, query.remote.as_deref()).await?;
+    let mut credential = metadata
+        .repository_hosting_credential(binding_id, actor)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("hosting credential is required".into()))?;
+    let result = crate::hosting::provider(identity.provider)
+        .repositories(&hosting_client()?, &credential)
+        .await
+        .map_err(hosting_error);
+    credential.fill(0);
+    let repositories = result?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::HostingRead,
+        context.workspace.id,
+        binding_id,
+    );
+    Ok(Json(repositories))
+}
+
+async fn set_hosting_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<sift_protocol::SetHostingCredentialRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::SetHostingCredential,
+    )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::SetHostingCredential,
+    )
+    .await;
+    let mut token = request.token.0.into_bytes();
+    let result = metadata
+        .set_repository_hosting_credential(binding_id, actor, request.expected_revision, &token)
+        .await;
+    token.fill(0);
+    let binding = result?.binding;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::SetHostingCredential,
+        binding.workspace_id,
+        binding_id,
+    );
+    publish_repository_changed(&state, &context.workspace, binding_id, binding.revision);
+    lease.succeed();
+    Ok(Json(binding))
+}
+
+async fn delete_hosting_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<ExpectedRepositoryRevisionRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::RemoveHostingCredential,
+    )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::RemoveHostingCredential,
+    )
+    .await;
+    let binding = metadata
+        .delete_repository_hosting_credential(binding_id, actor, request.expected_revision)
+        .await?
+        .binding;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::RemoveHostingCredential,
+        binding.workspace_id,
+        binding_id,
+    );
+    publish_repository_changed(&state, &context.workspace, binding_id, binding.revision);
+    lease.succeed();
+    Ok(Json(binding))
+}
+
+async fn create_hosting_pull_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<sift_protocol::CreateHostingPullRequestRequest>,
+) -> ApiResult<Json<sift_protocol::HostingPullRequest>> {
+    if request.title.trim().is_empty()
+        || request.title.len() > 256
+        || request
+            .body
+            .as_ref()
+            .is_some_and(|body| body.len() > 64 * 1024)
+        || !crate::hosting::validate_ref(&request.head_branch)
+        || !crate::hosting::validate_ref(&request.base_branch)
+    {
+        return Err(ApiError::BadRequest("invalid pull request fields".into()));
+    }
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::CreatePullRequest,
+    )?;
+    if !context.record.binding.network_enabled {
+        return Err(ApiError::Forbidden(
+            "network Git and hosting operations are disabled".into(),
+        ));
+    }
+    if context.record.binding.revision != request.expected_revision
+        || context.record.binding.branch.as_deref() != Some(request.head_branch.as_str())
+    {
+        return Err(ApiError::Conflict(
+            "repository branch or revision changed; refresh and retry".into(),
+        ));
+    }
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::CreatePullRequest,
+    )
+    .await;
+    let identity = hosting_identity(&context, None).await?;
+    let mut credential = metadata
+        .repository_hosting_credential(binding_id, actor)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("hosting credential is required".into()))?;
+    let result = crate::hosting::provider(identity.provider)
+        .create_pull_request(
+            &hosting_client()?,
+            &credential,
+            &identity,
+            crate::hosting::PullRequestDraft {
+                title: request.title.trim(),
+                body: request.body.as_deref(),
+                head: &request.head_branch,
+                base: &request.base_branch,
+            },
+        )
+        .await
+        .map_err(hosting_error);
+    credential.fill(0);
+    let pull = result?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::CreatePullRequest,
+        context.workspace.id,
+        binding_id,
+    );
+    lease.succeed();
+    Ok(Json(pull))
 }
 
 struct ProjectionInputs {

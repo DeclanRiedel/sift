@@ -94,6 +94,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "getObjectDdl",
     "getRepositoryCommit",
     "getRepositoryHistoricalFile",
+    "getRepositoryHosting",
     "getRepositoryHistory",
     "getWorkspace",
     "getWorkspaceProjection",
@@ -126,6 +127,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listConnections",
     "listExtensions",
     "listGithubAllowlist",
+    "listHostingRepositories",
     "listGovernedTools",
     "listMetadataConnectionProfiles",
     "listMetadataDocuments",
@@ -197,10 +199,12 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "selectSemanticStatement",
     "sessionWebSocket",
     "setMetadataConnectionCredential",
+    "setHostingCredential",
     "setRepositoryCredential",
     "setRepositoryUpstream",
     "stageRepositoryPaths",
     "stageRepositoryHunk",
+    "createHostingPullRequest",
     "switchRepositoryBranch",
     "unstageRepositoryPaths",
     "unstageRepositoryHunk",
@@ -278,6 +282,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "renameRepositoryRemote",
     "resolveRepositoryConflict",
     "testRepositoryCredential",
+    "deleteHostingCredential",
     "updateRepositoryRemote",
     "whoAmI",
 ];
@@ -329,27 +334,28 @@ use sift_protocol::{
     ExtensionGrantRequest, ExtensionPurgeResponse, ExtensionSelectionRequest,
     ExtensionTenantSelectionRequest, GithubNativeAuthExchangeRequest,
     GithubNativeAuthStartResponse, GovernedToolDescriptor, HandshakeClientKind, HandshakeRequest,
-    HandshakeResponse, Health, InvokeExtensionOutcome, InvokeExtensionRequest, InvokeToolRequest,
-    InvokeToolResponse, IssuedPasswordResetResponse, IssuedTenantInvitationResponse,
-    KeyAuthenticateRequest, KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest,
-    KillProcessResponse, OpenConnectionRequest, OpenSessionRequest, OperationApproval,
-    OperationCapability, OperationCapabilityContext, Page, PasswordLoginRequest,
-    PasswordResetRequest, PreviewEditsRequest, ProjectionBinding, ProjectionBindingId,
-    ProtocolRange, ProviderDescriptor, Readiness, ReconcilePlan, RefreshAuthRequest,
-    RegisterPrincipalKeyRequest, RepositoryBinding, RepositoryBindingId, RoomQueryResult,
-    RoomResultId, RoomResultPages, RoomSelection, Run, RunConfiguration, RunConfigurationId, RunId,
-    RunLogEntry, RunManifest, RunSchedule, RunStepResult, SavepointRequest, ScheduleId,
-    ScheduleOccurrence, ScheduleOccurrenceId, SchemaSearchRequest, SchemaSearchResponse,
-    SchemaSnapshot, ServerInfo, SessionId, SessionInfo, SshProxyAccessGrant,
-    SshProxyCapabilityExchangeRequest, TenantResourceLimits, TenantUsageSnapshot, ToolContext,
-    TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
-    TransactionState, TransferExecutionResult, TransferRecipe, TransferRecipeId, TxHandleRef, TxId,
-    TxMode, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, ValidatedExtensionPackage,
-    Value, VcsBranch, VcsCommitDetail, VcsCommitResult, VcsConflictFile, VcsDiff, VcsDiffSide,
-    VcsHeadMutationResult, VcsHistoricalFile, VcsHistoryPage, VcsRemote, VcsRemoteResult,
-    VcsStatus, VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace,
-    WorkspaceArtifactId, WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId,
-    WorkspacePath, WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
+    HandshakeResponse, Health, HostingRepositoryCandidate, HostingRepositorySummary,
+    InvokeExtensionOutcome, InvokeExtensionRequest, InvokeToolRequest, InvokeToolResponse,
+    IssuedPasswordResetResponse, IssuedTenantInvitationResponse, KeyAuthenticateRequest,
+    KeyChallengeRequest, KeyChallengeResponse, KillProcessRequest, KillProcessResponse,
+    OpenConnectionRequest, OpenSessionRequest, OperationApproval, OperationCapability,
+    OperationCapabilityContext, Page, PasswordLoginRequest, PasswordResetRequest,
+    PreviewEditsRequest, ProjectionBinding, ProjectionBindingId, ProtocolRange, ProviderDescriptor,
+    Readiness, ReconcilePlan, RefreshAuthRequest, RegisterPrincipalKeyRequest, RepositoryBinding,
+    RepositoryBindingId, RoomQueryResult, RoomResultId, RoomResultPages, RoomSelection, Run,
+    RunConfiguration, RunConfigurationId, RunId, RunLogEntry, RunManifest, RunSchedule,
+    RunStepResult, SavepointRequest, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
+    SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
+    SshProxyAccessGrant, SshProxyCapabilityExchangeRequest, TenantResourceLimits,
+    TenantUsageSnapshot, ToolContext, TransactionEndAction, TransactionInfo, TransactionPreview,
+    TransactionPreviewRequest, TransactionState, TransferExecutionResult, TransferRecipe,
+    TransferRecipeId, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
+    UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value, VcsBranch, VcsCommitDetail,
+    VcsCommitResult, VcsConflictFile, VcsDiff, VcsDiffSide, VcsHeadMutationResult,
+    VcsHistoricalFile, VcsHistoryPage, VcsRemote, VcsRemoteResult, VcsStatus,
+    VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceArtifactId,
+    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspacePath,
+    WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
 };
 
 #[derive(Clone)]
@@ -3164,6 +3170,87 @@ impl Client {
     ) -> Result<VcsRemoteResult> {
         self.post(
             &format!("/v1/metadata/repositories/{}/push", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn repository_hosting(
+        &self,
+        binding: RepositoryBindingId,
+        remote: Option<&str>,
+        path: Option<&WorkspacePath>,
+    ) -> Result<HostingRepositorySummary> {
+        let mut url = reqwest::Url::parse(
+            &self.url(&format!("/v1/metadata/repositories/{}/hosting", binding.0)),
+        )
+        .map_err(|_| Error::Protocol("invalid hosting endpoint URL".into()))?;
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(remote) = remote {
+                query.append_pair("remote", remote);
+            }
+            if let Some(path) = path {
+                query.append_pair("path", &path.0);
+            }
+        }
+        self.send(self.http.get(url)).await
+    }
+
+    pub async fn hosting_repositories(
+        &self,
+        binding: RepositoryBindingId,
+        remote: Option<&str>,
+    ) -> Result<Vec<HostingRepositoryCandidate>> {
+        let mut url = reqwest::Url::parse(&self.url(&format!(
+            "/v1/metadata/repositories/{}/hosting/repositories",
+            binding.0
+        )))
+        .map_err(|_| Error::Protocol("invalid hosting endpoint URL".into()))?;
+        if let Some(remote) = remote {
+            url.query_pairs_mut().append_pair("remote", remote);
+        }
+        self.send(self.http.get(url)).await
+    }
+
+    pub async fn set_hosting_credential(
+        &self,
+        binding: RepositoryBindingId,
+        request: sift_protocol::SetHostingCredentialRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/hosting/credential", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn delete_hosting_credential(
+        &self,
+        binding: RepositoryBindingId,
+        request: ExpectedRepositoryRevisionRequest,
+    ) -> Result<RepositoryBinding> {
+        self.send(
+            self.http
+                .delete(self.url(&format!(
+                    "/v1/metadata/repositories/{}/hosting/credential",
+                    binding.0
+                )))
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn create_hosting_pull_request(
+        &self,
+        binding: RepositoryBindingId,
+        request: sift_protocol::CreateHostingPullRequestRequest,
+    ) -> Result<sift_protocol::HostingPullRequest> {
+        self.post(
+            &format!(
+                "/v1/metadata/repositories/{}/hosting/pull-requests",
+                binding.0
+            ),
             &request,
         )
         .await

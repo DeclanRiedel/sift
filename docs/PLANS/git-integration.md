@@ -385,16 +385,16 @@ but must label their identity source and confidence explicitly.
 
 ## Milestone G10 — Hosting-provider integration
 
-- [ ] Add provider-neutral hosting-provider trait and typed repository identity.
-- [ ] Detect GitHub/GitLab/Bitbucket-style HTTPS remotes safely.
-- [ ] Open repository, branch, commit, and file in browser.
-- [ ] GitHub repository picker using linked identity.
-- [ ] Show pull-request association for branch/commit.
-- [ ] Show CI/check status.
-- [ ] Create pull request from current pushed branch.
-- [ ] Open pull request in browser.
-- [ ] Add review comments only after core local review workflow graduates.
-- [ ] Keep hosting authentication separate from database and Git transport
+- [x] Add provider-neutral hosting-provider trait and typed repository identity.
+- [x] Detect GitHub/GitLab/Bitbucket-style HTTPS remotes safely.
+- [x] Open repository, branch, commit, and file in browser.
+- [x] GitHub repository picker using linked identity.
+- [x] Show pull-request association for branch/commit.
+- [x] Show CI/check status.
+- [x] Create pull request from current pushed branch.
+- [x] Open pull request in browser.
+- [x] Add review comments only after core local review workflow graduates.
+- [x] Keep hosting authentication separate from database and Git transport
       credentials.
 
 ## Milestone G11 — Performance and polish

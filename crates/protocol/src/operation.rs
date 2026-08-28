@@ -115,6 +115,10 @@ pub enum VcsAction {
     RemoveCredential,
     Fetch,
     Push,
+    HostingRead,
+    SetHostingCredential,
+    RemoveHostingCredential,
+    CreatePullRequest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -751,7 +755,8 @@ impl Operation {
                 | VcsAction::Branches
                 | VcsAction::History
                 | VcsAction::Conflicts
-                | VcsAction::Remotes => OperationKind::ReadVcs,
+                | VcsAction::Remotes
+                | VcsAction::HostingRead => OperationKind::ReadVcs,
                 VcsAction::Bind
                 | VcsAction::Unbind
                 | VcsAction::Stage
@@ -777,7 +782,10 @@ impl Operation {
                 | VcsAction::TestCredential
                 | VcsAction::RemoveCredential
                 | VcsAction::Fetch
-                | VcsAction::Push => OperationKind::WriteVcs,
+                | VcsAction::Push
+                | VcsAction::SetHostingCredential
+                | VcsAction::RemoveHostingCredential
+                | VcsAction::CreatePullRequest => OperationKind::WriteVcs,
             },
             Self::DdlSource { action, .. } => match action {
                 DdlSourceAction::Read => OperationKind::ReadDdlSource,
@@ -1259,6 +1267,10 @@ single_word_audit_names!(VcsAction {
     RemoveCredential => "remove_credential",
     Fetch => "fetch",
     Push => "push",
+    HostingRead => "hosting_read",
+    SetHostingCredential => "set_hosting_credential",
+    RemoveHostingCredential => "remove_hosting_credential",
+    CreatePullRequest => "create_pull_request",
 });
 single_word_audit_names!(DdlSourceAction {
     Read => "read",

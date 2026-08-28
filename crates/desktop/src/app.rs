@@ -1317,6 +1317,151 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadRepositoryHosting {
+                workspace_id,
+                binding_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .repository_hosting(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            None,
+                            None,
+                        )
+                        .await
+                        .map_err(|error| format!("loading hosting state failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryHostingLoaded {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadHostingRepositories {
+                workspace_id,
+                binding_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .hosting_repositories(sift_protocol::RepositoryBindingId(binding_id), None)
+                        .await
+                        .map_err(|error| format!("loading hosted repositories failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::HostingRepositoriesLoaded {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SetHostingCredential {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                token,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .set_hosting_credential(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_protocol::SetHostingCredentialRequest {
+                                expected_revision,
+                                token: sift_protocol::RedactedString(token),
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("saving hosting credential failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryHostingFinished {
+                        workspace_id,
+                        action: "Hosting credential saved",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteHostingCredential {
+                workspace_id,
+                binding_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_hosting_credential(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::ExpectedRepositoryRevisionRequest { expected_revision },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("removing hosting credential failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryHostingFinished {
+                        workspace_id,
+                        action: "Hosting credential removed",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateHostingPullRequest {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                title,
+                head_branch,
+                base_branch,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .create_hosting_pull_request(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_protocol::CreateHostingPullRequestRequest {
+                                expected_revision,
+                                title,
+                                body: None,
+                                head_branch,
+                                base_branch,
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("creating pull request failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryHostingFinished {
+                        workspace_id,
+                        action: "Pull request created",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::AddRepositoryRemote {
                 workspace_id,
                 binding_id,

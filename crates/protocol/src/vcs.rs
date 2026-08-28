@@ -353,3 +353,114 @@ pub struct VcsRemoteResult {
     #[serde(default)]
     pub ref_changes: Vec<VcsRefChange>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HostingProviderKind {
+    GitHub,
+    GitLab,
+    Bitbucket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HostingRepositoryIdentity {
+    pub provider: HostingProviderKind,
+    pub host: String,
+    pub owner: String,
+    pub name: String,
+    pub web_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HostingLinkKind {
+    Repository,
+    Branch,
+    Commit,
+    File,
+    PullRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HostingLink {
+    pub kind: HostingLinkKind,
+    pub label: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HostingPullRequestState {
+    Open,
+    Closed,
+    Merged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HostingPullRequest {
+    pub id: u64,
+    pub title: String,
+    pub state: HostingPullRequestState,
+    pub url: String,
+    pub head_branch: String,
+    pub base_branch: String,
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HostingCheckState {
+    Pending,
+    Success,
+    Failure,
+    Neutral,
+    Skipped,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HostingCheck {
+    pub name: String,
+    pub state: HostingCheckState,
+    pub url: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HostingRepositorySummary {
+    pub identity: HostingRepositoryIdentity,
+    pub credential_present: bool,
+    pub links: Vec<HostingLink>,
+    pub pull_requests: Vec<HostingPullRequest>,
+    pub checks: Vec<HostingCheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HostingRepositoryCandidate {
+    pub identity: HostingRepositoryIdentity,
+    pub private: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SetHostingCredentialRequest {
+    pub expected_revision: u64,
+    pub token: crate::RedactedString,
+}
+
+impl std::fmt::Debug for SetHostingCredentialRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetHostingCredentialRequest")
+            .field("expected_revision", &self.expected_revision)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CreateHostingPullRequestRequest {
+    pub expected_revision: u64,
+    pub title: String,
+    pub body: Option<String>,
+    pub head_branch: String,
+    pub base_branch: String,
+}

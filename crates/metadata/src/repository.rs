@@ -9,8 +9,128 @@ use crate::{
 };
 
 const VCS_CREDENTIAL_NAMESPACE: &str = "vcs-credential";
+const HOSTING_CREDENTIAL_NAMESPACE: &str = "vcs-hosting-credential";
 
 impl MetadataStore {
+    pub async fn set_repository_hosting_credential(
+        &self,
+        id: RepositoryBindingId,
+        actor: PrincipalId,
+        expected_revision: u64,
+        secret: &[u8],
+    ) -> Result<RepositoryBindingRecord> {
+        if secret.is_empty() || secret.len() > 16 * 1024 {
+            return Err(MetadataError::InvalidRepositoryBinding);
+        }
+        let handle = Uuid::new_v4().to_string();
+        self.secrets
+            .put(HOSTING_CREDENTIAL_NAMESPACE, &handle, secret)
+            .await?;
+        let backend = self.backend.clone();
+        let db_handle = handle.clone();
+        let result = sqlite_blocking_repository(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current = repository_binding_by_id_locked(&tx, id)?;
+            let workspace = workspace_by_id_locked(&tx, current.binding.workspace_id)?;
+            ensure_room_access(&tx, workspace.room_id, actor, true)?;
+            ensure_revision(&current.binding, expected_revision)?;
+            let previous = hosting_credential_handle_locked(&tx, id, actor)?;
+            let now = now_text();
+            tx.execute(
+                "INSERT INTO repository_hosting_credential
+                 (binding_id, principal_id, credential_handle, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)
+                 ON CONFLICT(binding_id, principal_id) DO UPDATE SET
+                   credential_handle = excluded.credential_handle,
+                   updated_at = excluded.updated_at",
+                params![id.0, actor.0, db_handle, now],
+            )?;
+            tx.execute(
+                "UPDATE repository_binding SET revision = revision + 1, updated_at = ?1 WHERE id = ?2",
+                params![now_text(), id.0],
+            )?;
+            let mut updated = repository_binding_by_id_locked(&tx, id)?;
+            attach_principal_credential(&tx, &mut updated, actor)?;
+            tx.commit()?;
+            Ok((updated, previous))
+        }).await;
+        match result {
+            Ok((updated, previous)) => {
+                if let Some(previous) = previous {
+                    self.secrets
+                        .delete(HOSTING_CREDENTIAL_NAMESPACE, &previous)
+                        .await?;
+                }
+                Ok(updated)
+            }
+            Err(error) => {
+                let _ = self
+                    .secrets
+                    .delete(HOSTING_CREDENTIAL_NAMESPACE, &handle)
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn repository_hosting_credential(
+        &self,
+        id: RepositoryBindingId,
+        principal: PrincipalId,
+    ) -> Result<Option<Vec<u8>>> {
+        let handle = {
+            let conn = self.conn()?;
+            let binding = repository_binding_by_id_locked(&conn, id)?;
+            let workspace = workspace_by_id_locked(&conn, binding.binding.workspace_id)?;
+            ensure_room_access(&conn, workspace.room_id, principal, false)?;
+            hosting_credential_handle_locked(&conn, id, principal)?
+        };
+        match handle {
+            Some(handle) => {
+                self.secrets
+                    .get(HOSTING_CREDENTIAL_NAMESPACE, &handle)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub async fn delete_repository_hosting_credential(
+        &self,
+        id: RepositoryBindingId,
+        actor: PrincipalId,
+        expected_revision: u64,
+    ) -> Result<RepositoryBindingRecord> {
+        let backend = self.backend.clone();
+        let (updated, previous) = sqlite_blocking_repository(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current = repository_binding_by_id_locked(&tx, id)?;
+            let workspace = workspace_by_id_locked(&tx, current.binding.workspace_id)?;
+            ensure_room_access(&tx, workspace.room_id, actor, true)?;
+            ensure_revision(&current.binding, expected_revision)?;
+            let previous = hosting_credential_handle_locked(&tx, id, actor)?;
+            tx.execute(
+                "DELETE FROM repository_hosting_credential WHERE binding_id = ?1 AND principal_id = ?2",
+                params![id.0, actor.0],
+            )?;
+            tx.execute(
+                "UPDATE repository_binding SET revision = revision + 1, updated_at = ?1 WHERE id = ?2",
+                params![now_text(), id.0],
+            )?;
+            let mut updated = repository_binding_by_id_locked(&tx, id)?;
+            attach_principal_credential(&tx, &mut updated, actor)?;
+            tx.commit()?;
+            Ok((updated, previous))
+        }).await?;
+        if let Some(previous) = previous {
+            self.secrets
+                .delete(HOSTING_CREDENTIAL_NAMESPACE, &previous)
+                .await?;
+        }
+        Ok(updated)
+    }
     pub fn repository_commit_provenance(
         &self,
         id: RepositoryBindingId,
@@ -389,7 +509,7 @@ impl MetadataStore {
         expected_revision: u64,
     ) -> Result<()> {
         let backend = self.backend.clone();
-        let credentials = sqlite_blocking_repository(move || {
+        let (credentials, hosting_credentials) = sqlite_blocking_repository(move || {
             let mut conn = backend.conn()?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let current = repository_binding_by_id_locked(&tx, id)?;
@@ -403,17 +523,29 @@ impl MetadataStore {
                 .query_map(params![id.0], |row| row.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             drop(statement);
+            let mut statement = tx.prepare(
+                "SELECT credential_handle FROM repository_hosting_credential WHERE binding_id = ?1",
+            )?;
+            let hosting_credentials = statement
+                .query_map(params![id.0], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(statement);
             tx.execute(
                 "DELETE FROM repository_binding WHERE id = ?1",
                 params![id.0],
             )?;
             tx.commit()?;
-            Ok(credentials)
+            Ok((credentials, hosting_credentials))
         })
         .await?;
         for handle in credentials {
             self.secrets
                 .delete(VCS_CREDENTIAL_NAMESPACE, &handle)
+                .await?;
+        }
+        for handle in hosting_credentials {
+            self.secrets
+                .delete(HOSTING_CREDENTIAL_NAMESPACE, &handle)
                 .await?;
         }
         Ok(())
@@ -427,6 +559,21 @@ fn principal_credential_handle_locked(
 ) -> Result<Option<String>> {
     conn.query_row(
         "SELECT credential_handle FROM repository_principal_credential
+         WHERE binding_id = ?1 AND principal_id = ?2",
+        params![id.0, principal.0],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn hosting_credential_handle_locked(
+    conn: &Connection,
+    id: RepositoryBindingId,
+    principal: PrincipalId,
+) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT credential_handle FROM repository_hosting_credential
          WHERE binding_id = ?1 AND principal_id = ?2",
         params![id.0, principal.0],
         |row| row.get(0),
@@ -579,6 +726,13 @@ mod tests {
         let debug = format!("{request:?}");
         assert!(!debug.contains("alice-secret"));
         assert!(!debug.contains("password-secret"));
+        assert!(debug.contains("[REDACTED]"));
+        let hosting = sift_protocol::SetHostingCredentialRequest {
+            expected_revision: 1,
+            token: sift_protocol::RedactedString("hosting-secret".into()),
+        };
+        let debug = format!("{hosting:?}");
+        assert!(!debug.contains("hosting-secret"));
         assert!(debug.contains("[REDACTED]"));
     }
 
@@ -763,6 +917,29 @@ mod tests {
             Some(secret.as_slice()),
             "each principal keeps a distinct SecretStore handle"
         );
+        let hosting_token = b"github-hosting-token-not-in-sqlite";
+        let hosting_binding = store
+            .set_repository_hosting_credential(binding.binding.id, actor, 3, hosting_token)
+            .await
+            .unwrap();
+        assert_eq!(hosting_binding.binding.revision, 4);
+        assert_eq!(
+            store
+                .repository_hosting_credential(binding.binding.id, actor)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(hosting_token.as_slice())
+        );
+        assert_eq!(
+            store
+                .repository_credential(binding.binding.id, actor)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(secret.as_slice()),
+            "hosting identity cannot replace the Git transport credential"
+        );
         let conn = store.conn().unwrap();
         let stored: String = conn
             .query_row(
@@ -774,9 +951,18 @@ mod tests {
             .unwrap();
         assert!(!stored.contains("alice"));
         assert!(!stored.contains("not-in-sqlite"));
+        let hosting_handle: String = conn
+            .query_row(
+                "SELECT credential_handle FROM repository_hosting_credential
+                 WHERE binding_id = ?1 AND principal_id = ?2",
+                params![binding.binding.id.0, actor.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!hosting_handle.contains("github-hosting-token"));
         drop(conn);
         store
-            .delete_repository_binding(binding.binding.id, actor, 3)
+            .delete_repository_binding(binding.binding.id, actor, 4)
             .await
             .unwrap();
         assert!(secrets.is_empty());

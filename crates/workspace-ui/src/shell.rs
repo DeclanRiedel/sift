@@ -1070,6 +1070,7 @@ pub enum Modal {
     RepositoryConflict,
     RepositorySetup,
     RepositoryRemotes,
+    RepositoryHosting,
     WorkspaceCreateFile,
     WorkspaceCreateFolder,
     WorkspaceMove,
@@ -1746,6 +1747,33 @@ pub enum ExecutorCommand {
         workspace_id: i64,
         binding_id: i64,
     },
+    LoadRepositoryHosting {
+        workspace_id: i64,
+        binding_id: i64,
+    },
+    LoadHostingRepositories {
+        workspace_id: i64,
+        binding_id: i64,
+    },
+    SetHostingCredential {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        token: String,
+    },
+    DeleteHostingCredential {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+    },
+    CreateHostingPullRequest {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        title: String,
+        head_branch: String,
+        base_branch: String,
+    },
     AddRepositoryRemote {
         workspace_id: i64,
         binding_id: i64,
@@ -2241,6 +2269,19 @@ pub enum ExecutorEvent {
     RepositoryRemotesLoaded {
         workspace_id: i64,
         result: Result<Vec<sift_protocol::VcsRemote>, String>,
+    },
+    RepositoryHostingLoaded {
+        workspace_id: i64,
+        result: Result<sift_protocol::HostingRepositorySummary, String>,
+    },
+    HostingRepositoriesLoaded {
+        workspace_id: i64,
+        result: Result<Vec<sift_protocol::HostingRepositoryCandidate>, String>,
+    },
+    RepositoryHostingFinished {
+        workspace_id: i64,
+        action: &'static str,
+        result: Result<(), String>,
     },
     RepositoryConfigurationFinished {
         workspace_id: i64,
@@ -5029,6 +5070,10 @@ fn vcs_action_label(action: sift_protocol::VcsAction) -> &'static str {
         VcsAction::RemoveCredential => "credential removal",
         VcsAction::Fetch => "fetch",
         VcsAction::Push => "push",
+        VcsAction::HostingRead => "hosting refresh",
+        VcsAction::SetHostingCredential => "hosting credential update",
+        VcsAction::RemoveHostingCredential => "hosting credential removal",
+        VcsAction::CreatePullRequest => "pull request creation",
     }
 }
 
@@ -5072,6 +5117,9 @@ pub struct WorkspaceShell {
     repository_remote_url_input: Entity<TextInput>,
     repository_username_input: Entity<TextInput>,
     repository_password_input: Entity<TextInput>,
+    hosting_token_input: Entity<TextInput>,
+    hosting_pr_title_input: Entity<TextInput>,
+    hosting_pr_base_input: Entity<TextInput>,
     repository_remote_selected: Option<String>,
     workspace_path_input: Entity<TextInput>,
     repository_commit_drafts: HashMap<i64, String>,
@@ -5175,6 +5223,10 @@ pub struct WorkspaceShell {
     change_ledger_chain_verified: bool,
     change_ledger_loading: bool,
     change_ledger_error: Option<String>,
+    repository_hosting: Option<sift_protocol::HostingRepositorySummary>,
+    hosting_repositories: Vec<sift_protocol::HostingRepositoryCandidate>,
+    repository_hosting_loading: bool,
+    repository_hosting_error: Option<String>,
     _repository_refresh_task: Option<Task<()>>,
     automation_configurations: Vec<sift_protocol::RunConfiguration>,
     automation_runs: HashMap<sift_protocol::RunConfigurationId, sift_protocol::Run>,
@@ -5469,6 +5521,17 @@ impl WorkspaceShell {
                 .aria_label("Git personal access token or password")
                 .masked()
         });
+        let hosting_token_input = cx.new(|cx| {
+            TextInput::new("", "Hosting API token", cx)
+                .aria_label("Hosting provider API token")
+                .masked()
+        });
+        let hosting_pr_title_input = cx.new(|cx| {
+            TextInput::new("", "Pull request title", cx).aria_label("Pull request title")
+        });
+        let hosting_pr_base_input = cx.new(|cx| {
+            TextInput::new("main", "Base branch", cx).aria_label("Pull request base branch")
+        });
         let workspace_path_input =
             cx.new(|cx| TextInput::new("", "Workspace path", cx).aria_label("Workspace path"));
         let schema_search_input = cx.new(|cx| {
@@ -5649,6 +5712,9 @@ impl WorkspaceShell {
             repository_remote_url_input,
             repository_username_input,
             repository_password_input,
+            hosting_token_input,
+            hosting_pr_title_input,
+            hosting_pr_base_input,
             repository_remote_selected: None,
             workspace_path_input,
             repository_commit_drafts,
@@ -5749,6 +5815,10 @@ impl WorkspaceShell {
             change_ledger_chain_verified: false,
             change_ledger_loading: false,
             change_ledger_error: None,
+            repository_hosting: None,
+            hosting_repositories: Vec::new(),
+            repository_hosting_loading: false,
+            repository_hosting_error: None,
             _repository_refresh_task: None,
             automation_configurations: Vec::new(),
             automation_runs: HashMap::new(),
@@ -7819,6 +7889,54 @@ impl WorkspaceShell {
             } => {
                 if self.selected_workspace_id == Some(workspace_id) {
                     self.repository.apply_remotes(result);
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryHostingLoaded {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    self.repository_hosting_loading = false;
+                    match result {
+                        Ok(summary) => {
+                            self.repository_hosting = Some(summary);
+                            self.repository_hosting_error = None;
+                        }
+                        Err(message) => self.repository_hosting_error = Some(message),
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::HostingRepositoriesLoaded {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    match result {
+                        Ok(repositories) => {
+                            self.hosting_repositories = repositories;
+                            self.repository_hosting_error = None;
+                        }
+                        Err(message) => self.repository_hosting_error = Some(message),
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryHostingFinished {
+                workspace_id,
+                action,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    match result {
+                        Ok(()) => {
+                            self.show_success_toast(action.into(), cx);
+                            self.request_repository_status(cx);
+                            self.request_repository_hosting(cx);
+                        }
+                        Err(message) => self.repository_hosting_error = Some(message),
+                    }
                     cx.notify();
                 }
             }
@@ -12670,6 +12788,107 @@ impl WorkspaceShell {
             .read(cx)
             .focus_handle(cx)
             .focus(window, cx);
+        cx.notify();
+    }
+
+    fn request_repository_hosting(&mut self, cx: &mut Context<Self>) {
+        let Some(status) = self.repository.status() else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.repository_hosting_loading = true;
+        if sender
+            .send(ExecutorCommand::LoadRepositoryHosting {
+                workspace_id,
+                binding_id: status.binding_id.0,
+            })
+            .is_err()
+        {
+            self.repository_hosting_loading = false;
+            self.repository_hosting_error = Some("Hosting integration is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn open_repository_hosting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(status) = self.repository.status() else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        self.repository_hosting = None;
+        self.hosting_repositories.clear();
+        self.repository_hosting_error = None;
+        self.hosting_token_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.hosting_pr_title_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::LoadRepositoryHosting {
+                workspace_id,
+                binding_id: status.binding_id.0,
+            });
+        }
+        self.repository_hosting_loading = true;
+        self.modal = Some(Modal::RepositoryHosting);
+        self.hosting_pr_title_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn hosting_action(&mut self, action: &str, cx: &mut Context<Self>) {
+        let Some(status) = self.repository.status() else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        let command = match action {
+            "save" => ExecutorCommand::SetHostingCredential {
+                workspace_id,
+                binding_id: status.binding_id.0,
+                expected_revision: status.binding_revision,
+                token: self.hosting_token_input.read(cx).text().to_owned(),
+            },
+            "remove" => ExecutorCommand::DeleteHostingCredential {
+                workspace_id,
+                binding_id: status.binding_id.0,
+                expected_revision: status.binding_revision,
+            },
+            "repositories" => ExecutorCommand::LoadHostingRepositories {
+                workspace_id,
+                binding_id: status.binding_id.0,
+            },
+            "create_pr" => {
+                let Some(head_branch) = status.branch.clone() else {
+                    self.repository_hosting_error = Some("A current branch is required".into());
+                    return;
+                };
+                ExecutorCommand::CreateHostingPullRequest {
+                    workspace_id,
+                    binding_id: status.binding_id.0,
+                    expected_revision: status.binding_revision,
+                    title: self.hosting_pr_title_input.read(cx).text().to_owned(),
+                    head_branch,
+                    base_branch: self.hosting_pr_base_input.read(cx).text().to_owned(),
+                }
+            }
+            _ => return,
+        };
+        if sender.send(command).is_err() {
+            self.repository_hosting_error = Some("Hosting integration is unavailable".into());
+        }
         cx.notify();
     }
 
@@ -18813,6 +19032,7 @@ impl WorkspaceShell {
             CommandId::StageDiffLines => self.set_active_repository_lines_staged(true, cx),
             CommandId::UnstageDiffLines => self.set_active_repository_lines_staged(false, cx),
             CommandId::RefreshRepository => self.request_repository_status(cx),
+            CommandId::OpenRepositoryHosting => self.open_repository_hosting(window, cx),
             CommandId::StageRepositoryPath => self.set_selected_repository_path_staged(true, cx),
             CommandId::UnstageRepositoryPath => self.set_selected_repository_path_staged(false, cx),
             CommandId::StageAllTrackedRepositoryPaths => self.set_repository_paths_staged(
@@ -22343,6 +22563,20 @@ impl WorkspaceShell {
                                         )
                                         .child(
                                             IconButton::new(
+                                                "repository-hosting",
+                                                IconName::Github,
+                                                "Repository hosting",
+                                            )
+                                            .square(px(24.))
+                                            .icon_size(12.)
+                                            .tooltip("Hosting links, pull requests and checks")
+                                            .disabled(self.repository.status().is_none())
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_repository_hosting(window, cx)
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
                                                 "repository-branches",
                                                 IconName::VersionControl,
                                                 "Branches",
@@ -23399,6 +23633,7 @@ impl WorkspaceShell {
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let repository_conflict = matches!(modal, Modal::RepositoryConflict);
             let change_ledger = matches!(modal, Modal::ChangeLedger);
+            let repository_hosting = matches!(modal, Modal::RepositoryHosting);
             let card_width = if data_results {
                 0.0
             } else if settings
@@ -23410,6 +23645,7 @@ impl WorkspaceShell {
                 || plan_captures
                 || catalog_snapshots
                 || change_ledger
+                || repository_hosting
             {
                 720.0
             } else if catalog_diagram {
@@ -27338,6 +27574,61 @@ impl WorkspaceShell {
                             .child(div().flex_1())
                             .child(div().text_xs().text_color(colors.muted_text).child("Network actions are manual and visible. Force push is unavailable.")))
                         .children(result_rows)
+                        .into_any_element()
+                }
+                Modal::RepositoryHosting => {
+                    let summary = self.repository_hosting.clone();
+                    let credential_present = summary.as_ref().is_some_and(|summary| summary.credential_present);
+                    let links = summary.iter().flat_map(|summary| summary.links.iter()).enumerate().map(|(index, link)| {
+                        let url = link.url.clone();
+                        Button::new(("open-hosting-link", index), link.label.clone())
+                            .tone(ButtonTone::Ghost)
+                            .on_click(move |_, _, cx| cx.open_url(&url))
+                    });
+                    let pulls = summary.iter().flat_map(|summary| summary.pull_requests.iter()).enumerate().map(|(index, pull)| {
+                        let url = pull.url.clone();
+                        div().id(("hosting-pull", index)).px_2().py_1().flex().items_center().gap_2()
+                            .child(div().flex_1().min_w_0().truncate().child(format!("#{} {}", pull.id, pull.title)))
+                            .child(div().text_xs().text_color(colors.muted_text).child(format!("{:?}", pull.state)))
+                            .child(Button::new(("open-hosting-pull", index), "Open").tone(ButtonTone::Ghost).on_click(move |_, _, cx| cx.open_url(&url)))
+                    });
+                    let checks = summary.iter().flat_map(|summary| summary.checks.iter()).enumerate().map(|(index, check)| {
+                        let url = check.url.clone();
+                        div().id(("hosting-check", index)).px_2().py_1().flex().items_center().gap_2()
+                            .child(div().flex_1().truncate().child(check.name.clone()))
+                            .child(div().text_xs().text_color(match check.state { sift_protocol::HostingCheckState::Success => colors.success, sift_protocol::HostingCheckState::Failure => colors.danger, _ => colors.muted_text }).child(format!("{:?}", check.state)))
+                            .children(url.map(|url| Button::new(("open-hosting-check", index), "Open").tone(ButtonTone::Ghost).on_click(move |_, _, cx| cx.open_url(&url))))
+                    });
+                    let repositories = self.hosting_repositories.iter().enumerate().map(|(index, repository)| {
+                        let url = repository.identity.web_url.clone();
+                        div().id(("hosting-repository", index)).px_2().py_1().flex().items_center().gap_2()
+                            .child(div().flex_1().truncate().child(format!("{}/{}", repository.identity.owner, repository.identity.name)))
+                            .child(div().text_xs().text_color(colors.muted_text).child(if repository.private { "private" } else { "public" }))
+                            .child(Button::new(("open-hosting-repository", index), "Open").tone(ButtonTone::Ghost).on_click(move |_, _, cx| cx.open_url(&url)))
+                    });
+                    div().debug_selector(|| "repository-hosting".into()).w(px(720.)).max_h(px(680.)).flex().flex_col().gap_3()
+                        .child(div().flex().items_center().justify_between()
+                            .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child(summary.as_ref().map_or_else(|| "Repository hosting".into(), |summary| format!("{:?} · {}/{}", summary.identity.provider, summary.identity.owner, summary.identity.name))))
+                            .child(Button::new("close-repository-hosting", "Close").tone(ButtonTone::Ghost).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx)))))
+                        .children(self.repository_hosting_error.clone().map(ErrorBanner::new))
+                        .when(self.repository_hosting_loading, |view| view.child(div().text_sm().text_color(colors.muted_text).child("Loading hosting state…")))
+                        .child(div().flex().flex_wrap().gap_2().children(links))
+                        .child(div().border_t_1().border_color(colors.subtle_border).pt_2().flex().flex_col().gap_2()
+                            .child(SectionLabel::new(if credential_present { "HOSTING API CREDENTIAL · CONFIGURED FOR YOU" } else { "HOSTING API CREDENTIAL · NOT CONFIGURED" }))
+                            .child(self.hosting_token_input.clone())
+                            .child(div().flex().gap_2()
+                                .child(Button::new("save-hosting-credential", "Save / replace").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.hosting_action("save", cx))))
+                                .child(Button::new("remove-hosting-credential", "Remove").tone(ButtonTone::DangerGhost).disabled(!credential_present).on_click(cx.listener(|shell, _, _, cx| shell.hosting_action("remove", cx))))
+                                .child(Button::new("load-hosting-repositories", "Browse repositories").tone(ButtonTone::Ghost).disabled(!credential_present).on_click(cx.listener(|shell, _, _, cx| shell.hosting_action("repositories", cx)))))
+                            .child(div().text_xs().text_color(colors.muted_text).child("Hosting API credentials are per-principal and separate from Git fetch/push credentials.")))
+                        .children((!self.hosting_repositories.is_empty()).then(|| div().id("hosting-repositories-list").max_h(px(140.)).overflow_y_scroll().children(repositories)))
+                        .child(div().border_t_1().border_color(colors.subtle_border).pt_2().flex().flex_col().gap_2()
+                            .child(SectionLabel::new("CREATE PULL REQUEST FROM CURRENT PUSHED BRANCH"))
+                            .child(self.hosting_pr_title_input.clone())
+                            .child(self.hosting_pr_base_input.clone())
+                            .child(Button::new("create-hosting-pull", "Create pull request").tone(ButtonTone::Accent).disabled(!credential_present).on_click(cx.listener(|shell, _, _, cx| shell.hosting_action("create_pr", cx)))))
+                        .children(summary.as_ref().map(|summary| !summary.pull_requests.is_empty()).unwrap_or(false).then(|| div().border_t_1().border_color(colors.subtle_border).pt_2().flex().flex_col().child(SectionLabel::new("PULL REQUESTS")).children(pulls)))
+                        .children(summary.as_ref().map(|summary| !summary.checks.is_empty()).unwrap_or(false).then(|| div().border_t_1().border_color(colors.subtle_border).pt_2().flex().flex_col().child(SectionLabel::new("CHECKS")).children(checks)))
                         .into_any_element()
                 }
                 Modal::RepositoryBranches => {
@@ -36956,6 +37247,53 @@ mod tests {
                 && username == "alice"
                 && password == "secret"
         ));
+    }
+
+    #[gpui::test]
+    fn repository_hosting_routes_separate_credential_and_current_branch_pr(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(cx, |shell, cx| {
+            shell.selected_workspace_id = Some(7);
+            shell.repository.select_workspace(Some(7));
+            let (_, request_id) = shell.repository.begin_refresh().unwrap();
+            let status = serde_json::from_value(serde_json::json!({
+                "binding_id": 9,
+                "workspace_revision": 3,
+                "binding_revision": 4,
+                "head_oid": "0123456789012345678901234567890123456789",
+                "branch": "feature/audit",
+                "upstream": null,
+                "entries": [],
+                "truncated": false,
+                "observed_at": "2026-08-28T00:00:00Z"
+            }))
+            .unwrap();
+            assert!(shell
+                .repository
+                .apply_status_result(7, request_id, Ok(Some(status))));
+            shell.executor_sender = Some(sender);
+            shell
+                .hosting_token_input
+                .update(cx, |input, cx| input.set_text("hosting-only-token", cx));
+            shell.hosting_action("save", cx);
+            shell
+                .hosting_pr_title_input
+                .update(cx, |input, cx| input.set_text("Audit ledger", cx));
+            shell
+                .hosting_pr_base_input
+                .update(cx, |input, cx| input.set_text("main", cx));
+            shell.hosting_action("create_pr", cx);
+        });
+        assert!(
+            matches!(commands.try_recv(), Ok(ExecutorCommand::SetHostingCredential { workspace_id: 7, binding_id: 9, expected_revision: 4, token }) if token == "hosting-only-token")
+        );
+        assert!(
+            matches!(commands.try_recv(), Ok(ExecutorCommand::CreateHostingPullRequest { workspace_id: 7, binding_id: 9, expected_revision: 4, title, head_branch, base_branch }) if title == "Audit ledger" && head_branch == "feature/audit" && base_branch == "main")
+        );
     }
 
     #[gpui::test]

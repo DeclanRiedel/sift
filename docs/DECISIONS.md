@@ -1862,3 +1862,40 @@ tamper-evident trail, developers can move from commit or table to executions,
 and normal Git workflows cannot accidentally capture result data or secrets.
 Installations needing stronger delivery guarantees configure native auditing
 and an external collector rather than assuming cross-system atomicity.
+
+---
+
+## ADR-051 — Provider-Neutral Repository Hosting Boundary
+
+**Context.** Browser links, pull requests, and CI checks enrich Git review, but
+hosting APIs are not Git transport. Reusing fetch/push credentials would grant
+unnecessary API scope and blur user identity. Accepting arbitrary hosts or
+redirects while attaching a token would also create a credential-exfiltration
+path.
+
+**Decision.** A typed `HostingProvider` boundary owns repository discovery,
+pull-request association, checks, repository listing, and pull-request
+creation. Sift recognizes only credential-free HTTPS remotes on the explicit
+`github.com`, `gitlab.com`, and `bitbucket.org` host allowlist. Repository,
+branch, commit, and file links are constructed from validated path/ref segments;
+arbitrary remote URLs are never opened as provider API endpoints.
+
+GitHub implements API-backed repository picking, branch pull requests, commit
+checks, and pull-request creation. GitLab and Bitbucket initially provide safe
+browser links behind the same identity contract; unsupported API mutations
+fail explicitly. Provider HTTP calls use fixed API origins, bounded responses,
+timeouts, and disabled redirects. Hosting tokens are per-principal SecretStore
+values referenced by opaque SQLite handles in a namespace distinct from Git
+transport credentials. They never enter repository URLs, arguments, logs, Git
+environment, operation audit, or workspace files.
+
+Pull-request creation requires the current shared branch, current repository
+revision, enabled network policy, editor authority, and an explicit user
+action. Review-comment mutation remains deferred until local review has usage
+evidence and a separate typed comment contract; it is not simulated through a
+generic HTTP or shell escape hatch.
+
+**Consequences.** Hosting is optional and degrades to local Git plus safe links.
+Users can inspect and create review artifacts without widening Git credential
+scope. New providers can implement the typed boundary without changing the
+repository adapter or exposing arbitrary network requests.
