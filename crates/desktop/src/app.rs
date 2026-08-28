@@ -1219,16 +1219,118 @@ async fn run_query_executor(
             }
             ExecutorCommand::LoadAutomations { workspace_id } => {
                 let server = targets.borrow().clone();
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .run_configurations(sift_protocol::WorkspaceId(workspace_id))
-                        .await
-                        .map_err(|error| format!("loading automations failed: {error}")),
-                    Err(error) => Err(error),
+                let (result, nodes) = match server.client().await {
+                    Ok(client) => {
+                        let result = client
+                            .run_configurations(sift_protocol::WorkspaceId(workspace_id))
+                            .await
+                            .map_err(|error| format!("loading automations failed: {error}"));
+                        let nodes = client
+                            .workspace_nodes(sift_protocol::WorkspaceId(workspace_id))
+                            .await
+                            .map(|tree| tree.nodes)
+                            .map_err(|error| format!("loading automation scripts failed: {error}"));
+                        (result, nodes)
+                    }
+                    Err(error) => (Err(error.clone()), Err(error)),
                 };
                 if events
                     .send(ExecutorEvent::AutomationsLoaded {
                         workspace_id,
+                        result,
+                        nodes,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SaveRunConfiguration {
+                item_id,
+                workspace_id,
+                configuration_id,
+                expected_revision,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let saved = match configuration_id {
+                            Some(configuration_id) => {
+                                let Some(expected_revision) = expected_revision else {
+                                    let _ = events.send(ExecutorEvent::RunConfigurationSaved {
+                                        item_id,
+                                        result: Err(
+                                            "updating run configuration requires a revision".into(),
+                                        ),
+                                    });
+                                    continue;
+                                };
+                                client
+                                    .update_run_configuration(
+                                        configuration_id,
+                                        sift_api_types::UpdateRunConfigurationRequest {
+                                            expected_revision,
+                                            configuration: request,
+                                        },
+                                    )
+                                    .await
+                            }
+                            None => {
+                                client
+                                    .create_run_configuration(
+                                        sift_protocol::WorkspaceId(workspace_id),
+                                        request,
+                                    )
+                                    .await
+                            }
+                        };
+                        match saved {
+                            Ok(configuration) => {
+                                let validation = client
+                                    .validate_run_configuration(configuration.id)
+                                    .await
+                                    .map_err(|error| {
+                                        format!(
+                                            "configuration saved but validation failed: {error}"
+                                        )
+                                    });
+                                Ok((configuration, validation))
+                            }
+                            Err(error) => Err(format!("saving run configuration failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RunConfigurationSaved { item_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteRunConfiguration {
+                item_id,
+                configuration_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_run_configuration(
+                            configuration_id,
+                            sift_api_types::ExpectedRunConfigurationRevisionRequest {
+                                expected_revision,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("deleting run configuration failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RunConfigurationDeleted {
+                        item_id,
+                        configuration_id,
                         result,
                     })
                     .is_err()

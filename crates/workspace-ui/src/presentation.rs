@@ -97,6 +97,7 @@ impl BottomTool {
 pub enum ItemKind {
     Query,
     Configuration,
+    RunConfiguration,
     Problems,
     Notifications,
     Schema,

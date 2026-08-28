@@ -20,6 +20,14 @@ pub(super) fn render_bottom_panel(
     };
     div()
         .debug_selector(|| "bottom-dock".into())
+        .track_focus(&shell.automation_focus_handle)
+        .when(
+            shell.active_bottom_tool == BottomTool::Automations,
+            |dock| {
+                dock.key_context("SiftAutomations")
+                    .on_key_down(cx.listener(WorkspaceShell::handle_automation_key))
+            },
+        )
         .relative()
         .h(px(dock.presentation.size))
         .flex_none()
@@ -228,6 +236,7 @@ pub(super) fn render_bottom_panel(
                     .map(|(index, configuration)| {
                         let configuration_id = configuration.id.0;
                         let revision = configuration.revision;
+                        let edit_configuration = configuration.clone();
                         let run = shell.automation_runs.get(&configuration.id);
                         let running = run.is_some_and(|run| {
                             matches!(
@@ -252,6 +261,17 @@ pub(super) fn render_bottom_panel(
                             .gap_3()
                             .border_b_1()
                             .border_color(colors.subtle_border)
+                            .when(index == shell.automation_selected, |row| {
+                                row.bg(colors.active_surface)
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |shell, _, window, cx| {
+                                    shell.automation_selected = index;
+                                    shell.automation_focus_handle.focus(window, cx);
+                                    cx.notify();
+                                }),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -277,6 +297,17 @@ pub(super) fn render_bottom_panel(
                                     )
                                     .child(format!("{:?}", run.state))
                             }))
+                            .child(
+                                Button::new(("edit-automation", index), "Edit")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(move |shell, _, window, cx| {
+                                        shell.open_run_configuration_editor(
+                                            Some(edit_configuration.clone()),
+                                            window,
+                                            cx,
+                                        )
+                                    })),
+                            )
                             .when_some(run_id.filter(|_| running), |row, run_id| {
                                 row.child(
                                     Button::new(("cancel-automation", index), "Cancel")
@@ -315,11 +346,25 @@ pub(super) fn render_bottom_panel(
                             shell.automation_configurations.len()
                         ))
                         .child(
-                            Button::new("refresh-automations", "Refresh")
-                                .tone(ButtonTone::Ghost)
-                                .disabled(shell.automations_loading)
-                                .on_click(
-                                    cx.listener(|shell, _, _, cx| shell.request_automations(cx)),
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    Button::new("new-automation", "New")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(shell.selected_workspace_id.is_none())
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.open_run_configuration_editor(None, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("refresh-automations", "Refresh")
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(shell.automations_loading)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.request_automations(cx)
+                                        })),
                                 ),
                         ),
                 )

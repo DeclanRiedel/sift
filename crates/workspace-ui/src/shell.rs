@@ -14,8 +14,8 @@ use regex::{Regex, RegexBuilder};
 use sift_api_types::RoomId;
 use sift_ui::{
     database_logo, icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable,
-    ErrorBanner, Field, IconButton, IconName, KeyBinding, PaneTab, SectionLabel, TextInput, Theme,
-    ThemeMetrics, Toggleable, Tone, Tooltip,
+    ErrorBanner, Field, IconButton, IconName, KeyBinding, PaneTab, SectionLabel, TextInput,
+    TextInputEvent, Theme, ThemeMetrics, Toggleable, Tone, Tooltip,
 };
 
 use crate::editor::{
@@ -815,13 +815,86 @@ pub enum PaneDropTarget {
 /// results surface, and clean-point text move with the tab.
 struct TabTransfer {
     item: ItemPresentation,
-    editor: Entity<QueryEditor>,
+    editor: Option<Entity<QueryEditor>>,
+    run_configuration: Option<RunConfigurationEditorState>,
     results: Option<Entity<ResultsView>>,
     clean_text: String,
     database_item_view: Option<DatabaseItemView>,
     database_query_text: Option<String>,
     database_ddl_text: Option<String>,
     database_json_text: Option<String>,
+}
+
+struct RunVariableEditor {
+    name: Entity<TextInput>,
+    kind: sift_protocol::RunVariableKind,
+    required: bool,
+    persist_non_secret_value: bool,
+    secret_handle_present: bool,
+}
+
+struct RunConfigurationEditorState {
+    workspace_id: i64,
+    configuration_id: Option<sift_protocol::RunConfigurationId>,
+    revision: Option<u64>,
+    name: Entity<TextInput>,
+    target_schema: Entity<TextInput>,
+    connection_profile_id: Option<i64>,
+    profiles: Vec<ConnectionNavEntry>,
+    nodes: Vec<sift_protocol::WorkspaceNode>,
+    scripts: Vec<sift_protocol::RunScriptStep>,
+    variables: Vec<RunVariableEditor>,
+    pre_tasks: Vec<sift_protocol::RunPreTask>,
+    transaction_policy: sift_protocol::RunTransactionPolicy,
+    error_policy: sift_protocol::RunErrorPolicy,
+    adding_script: bool,
+    delete_armed: bool,
+    pending: bool,
+    validation: Option<Result<sift_protocol::RunManifest, String>>,
+}
+
+impl RunConfigurationEditorState {
+    fn request(&self, cx: &App) -> Result<sift_api_types::CreateRunConfigurationRequest, String> {
+        let name = self.name.read(cx).text().trim().to_owned();
+        if name.is_empty() {
+            return Err("Name is required".into());
+        }
+        let Some(connection_profile_id) = self.connection_profile_id else {
+            return Err("Connection profile is required".into());
+        };
+        if self.scripts.is_empty() {
+            return Err("Add at least one SQL script".into());
+        }
+        let mut variable_names = HashSet::new();
+        let mut variables = Vec::with_capacity(self.variables.len());
+        for variable in &self.variables {
+            let name = variable.name.read(cx).text().trim().to_owned();
+            if name.is_empty() {
+                return Err("Variable names cannot be empty".into());
+            }
+            if !variable_names.insert(name.clone()) {
+                return Err(format!("Variable {name:?} is duplicated"));
+            }
+            variables.push(sift_protocol::RunVariableDefinition {
+                name,
+                kind: variable.kind,
+                required: variable.required,
+                persist_non_secret_value: variable.persist_non_secret_value,
+                secret_handle_present: variable.secret_handle_present,
+            });
+        }
+        let target_schema = self.target_schema.read(cx).text().trim().to_owned();
+        Ok(sift_api_types::CreateRunConfigurationRequest {
+            name,
+            scripts: self.scripts.clone(),
+            connection_profile_id,
+            target_schema: (!target_schema.is_empty()).then_some(target_schema),
+            variables,
+            pre_tasks: self.pre_tasks.clone(),
+            transaction_policy: self.transaction_policy,
+            error_policy: self.error_policy,
+        })
+    }
 }
 
 fn optional_u32_field(
@@ -1148,6 +1221,15 @@ pub enum PaneEvent {
     },
     /// A configuration tab's dirty prompt requested a save.
     SaveItemRequested {
+        item_id: u64,
+    },
+    SaveRunConfigurationRequested {
+        item_id: u64,
+    },
+    DeleteRunConfigurationRequested {
+        item_id: u64,
+    },
+    RunConfigurationRequested {
         item_id: u64,
     },
     /// A tab was dropped onto this pane or one of its split targets.
@@ -1549,6 +1631,18 @@ pub enum ExecutorCommand {
     LoadAutomations {
         workspace_id: i64,
     },
+    SaveRunConfiguration {
+        item_id: u64,
+        workspace_id: i64,
+        configuration_id: Option<sift_protocol::RunConfigurationId>,
+        expected_revision: Option<u64>,
+        request: sift_api_types::CreateRunConfigurationRequest,
+    },
+    DeleteRunConfiguration {
+        item_id: u64,
+        configuration_id: sift_protocol::RunConfigurationId,
+        expected_revision: u64,
+    },
     StartAutomation {
         configuration_id: i64,
         expected_revision: u64,
@@ -1752,6 +1846,22 @@ pub enum ExecutorEvent {
     AutomationsLoaded {
         workspace_id: i64,
         result: Result<Vec<sift_protocol::RunConfiguration>, String>,
+        nodes: Result<Vec<sift_protocol::WorkspaceNode>, String>,
+    },
+    RunConfigurationSaved {
+        item_id: u64,
+        result: Result<
+            (
+                sift_protocol::RunConfiguration,
+                Result<sift_protocol::RunManifest, String>,
+            ),
+            String,
+        >,
+    },
+    RunConfigurationDeleted {
+        item_id: u64,
+        configuration_id: sift_protocol::RunConfigurationId,
+        result: Result<(), String>,
     },
     AutomationRunUpdated(Result<sift_protocol::Run, String>),
     CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
@@ -1933,6 +2043,8 @@ pub struct Pane {
     /// Live editor subscriptions, keyed by item. Stored (not detached) so a
     /// tab moved to another pane unsubscribes instead of double-reporting.
     editor_subscriptions: HashMap<u64, Subscription>,
+    run_configuration_editors: HashMap<u64, RunConfigurationEditorState>,
+    run_configuration_subscriptions: HashMap<u64, Vec<Subscription>>,
     /// The Data/Messages/Explain/History surface owned by each query item.
     results: HashMap<u64, Entity<ResultsView>>,
     /// Live results subscriptions, keyed by item, held for the same reason as
@@ -2008,6 +2120,7 @@ impl Pane {
             let language = match item.kind {
                 ItemKind::Configuration if item.title.ends_with(".json") => EditorLanguage::Json,
                 ItemKind::Configuration => EditorLanguage::Toml,
+                ItemKind::RunConfiguration => EditorLanguage::PlainText,
                 ItemKind::Problems | ItemKind::Notifications => EditorLanguage::PlainText,
                 ItemKind::Query | ItemKind::Schema | ItemKind::Welcome => EditorLanguage::Sql,
             };
@@ -2075,6 +2188,8 @@ impl Pane {
             editors,
             clean_documents,
             editor_subscriptions,
+            run_configuration_editors: HashMap::new(),
+            run_configuration_subscriptions: HashMap::new(),
             results,
             result_subscriptions,
             database_item_states,
@@ -2313,7 +2428,10 @@ impl Pane {
             .filter(|item| {
                 !matches!(
                     item.kind,
-                    ItemKind::Configuration | ItemKind::Problems | ItemKind::Notifications
+                    ItemKind::Configuration
+                        | ItemKind::RunConfiguration
+                        | ItemKind::Problems
+                        | ItemKind::Notifications
                 )
             })
             .cloned()
@@ -2562,6 +2680,8 @@ impl Pane {
         self.forward_items.retain(|id| *id != item_id);
         self.clean_documents.remove(&item_id);
         self.editor_subscriptions.remove(&item_id);
+        self.run_configuration_subscriptions.remove(&item_id);
+        self.run_configuration_editors.remove(&item_id);
         self.live_result_extents.remove(&item_id);
         self.database_item_views.remove(&item_id);
         self.database_query_texts.remove(&item_id);
@@ -2638,6 +2758,359 @@ impl Pane {
         self.database_item_states.remove(&item_id);
         self.pending_close_item = None;
         cx.notify();
+    }
+
+    fn subscribe_run_configuration_input(
+        &mut self,
+        item_id: u64,
+        input: &Entity<TextInput>,
+        updates_title: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let input = input.clone();
+        let subscription = cx.subscribe(&input.clone(), move |pane, _, event, cx| {
+            if !matches!(event, TextInputEvent::Changed) {
+                return;
+            }
+            if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
+                item.dirty = true;
+                if updates_title {
+                    let name = input.read(cx).text().trim();
+                    item.title = if name.is_empty() {
+                        "Untitled run".into()
+                    } else {
+                        name.into()
+                    };
+                }
+            }
+            if let Some(editor) = pane.run_configuration_editors.get_mut(&item_id) {
+                editor.validation = None;
+            }
+            cx.notify();
+        });
+        self.run_configuration_subscriptions
+            .entry(item_id)
+            .or_default()
+            .push(subscription);
+    }
+
+    fn open_run_configuration(
+        &mut self,
+        item: ItemPresentation,
+        state: RunConfigurationEditorState,
+        cx: &mut Context<Self>,
+    ) {
+        let item_id = item.id;
+        if let Some(index) = self
+            .items
+            .iter()
+            .position(|candidate| candidate.id == item_id)
+        {
+            self.items[index] = item;
+            self.activate_item(index, true);
+        } else {
+            if !self.replace_new_pane_placeholder() {
+                if let Some(current) = self.active_item().map(|item| item.id) {
+                    self.backward_items.push(current);
+                    self.forward_items.clear();
+                }
+            }
+            self.items.push(item);
+            self.active_item = self.items.len() - 1;
+        }
+        self.run_configuration_subscriptions.remove(&item_id);
+        self.subscribe_run_configuration_input(item_id, &state.name, true, cx);
+        self.subscribe_run_configuration_input(item_id, &state.target_schema, false, cx);
+        for variable in &state.variables {
+            self.subscribe_run_configuration_input(item_id, &variable.name, false, cx);
+        }
+        self.run_configuration_editors.insert(item_id, state);
+        self.editors.remove(&item_id);
+        self.results.remove(&item_id);
+        self.database_item_states.remove(&item_id);
+        self.pending_close_item = None;
+        cx.notify();
+    }
+
+    fn run_configuration_request(
+        &self,
+        item_id: u64,
+        cx: &App,
+    ) -> Result<
+        (
+            i64,
+            Option<sift_protocol::RunConfigurationId>,
+            Option<u64>,
+            sift_api_types::CreateRunConfigurationRequest,
+        ),
+        String,
+    > {
+        let state = self
+            .run_configuration_editors
+            .get(&item_id)
+            .ok_or_else(|| "Run configuration editor is unavailable".to_owned())?;
+        Ok((
+            state.workspace_id,
+            state.configuration_id,
+            state.revision,
+            state.request(cx)?,
+        ))
+    }
+
+    fn set_run_configuration_pending(
+        &mut self,
+        item_id: u64,
+        pending: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.run_configuration_editors.get_mut(&item_id) {
+            state.pending = pending;
+            if pending {
+                state.validation = None;
+            }
+            cx.notify();
+        }
+    }
+
+    fn apply_saved_run_configuration(
+        &mut self,
+        item_id: u64,
+        result: Result<
+            (
+                sift_protocol::RunConfiguration,
+                Result<sift_protocol::RunManifest, String>,
+            ),
+            String,
+        >,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.run_configuration_editors.get_mut(&item_id) else {
+            return;
+        };
+        state.pending = false;
+        match result {
+            Ok((configuration, validation)) => {
+                state.configuration_id = Some(configuration.id);
+                state.revision = Some(configuration.revision);
+                state.validation = Some(validation);
+                if let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) {
+                    item.dirty = false;
+                    item.title = configuration.name;
+                }
+                self.pending_close_item = None;
+            }
+            Err(message) => state.validation = Some(Err(message)),
+        }
+        cx.notify();
+    }
+
+    fn mark_run_configuration_dirty(&mut self, item_id: u64) {
+        if let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) {
+            item.dirty = true;
+        }
+        if let Some(state) = self.run_configuration_editors.get_mut(&item_id) {
+            state.validation = None;
+            state.delete_armed = false;
+        }
+    }
+
+    fn select_run_profile(&mut self, item_id: u64, profile_id: i64, cx: &mut Context<Self>) {
+        self.mark_run_configuration_dirty(item_id);
+        if let Some(state) = self.run_configuration_editors.get_mut(&item_id) {
+            state.connection_profile_id = Some(profile_id);
+        }
+        cx.notify();
+    }
+
+    fn toggle_run_script_picker(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        if let Some(state) = self.run_configuration_editors.get_mut(&item_id) {
+            state.adding_script = !state.adding_script;
+        }
+        cx.notify();
+    }
+
+    fn add_run_script(
+        &mut self,
+        item_id: u64,
+        node_id: sift_protocol::WorkspaceNodeId,
+        cx: &mut Context<Self>,
+    ) {
+        self.mark_run_configuration_dirty(item_id);
+        if let Some(state) = self.run_configuration_editors.get_mut(&item_id) {
+            if !state.scripts.iter().any(|script| script.node_id == node_id) {
+                state.scripts.push(sift_protocol::RunScriptStep {
+                    node_id,
+                    revision_policy: sift_protocol::ScriptRevisionPolicy::LatestAtRunStart,
+                    pinned_digest: None,
+                    transfer_recipe_id: None,
+                });
+            }
+            state.adding_script = false;
+        }
+        cx.notify();
+    }
+
+    fn move_run_script(
+        &mut self,
+        item_id: u64,
+        index: usize,
+        delta: isize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.run_configuration_editors.get_mut(&item_id) else {
+            return;
+        };
+        let target = index.saturating_add_signed(delta);
+        if target >= state.scripts.len() || target == index {
+            return;
+        }
+        state.scripts.swap(index, target);
+        self.mark_run_configuration_dirty(item_id);
+        cx.notify();
+    }
+
+    fn remove_run_script(&mut self, item_id: u64, index: usize, cx: &mut Context<Self>) {
+        let Some(state) = self.run_configuration_editors.get_mut(&item_id) else {
+            return;
+        };
+        if index < state.scripts.len() {
+            state.scripts.remove(index);
+            self.mark_run_configuration_dirty(item_id);
+            cx.notify();
+        }
+    }
+
+    fn toggle_run_script_revision(&mut self, item_id: u64, index: usize, cx: &mut Context<Self>) {
+        let Some(state) = self.run_configuration_editors.get_mut(&item_id) else {
+            return;
+        };
+        let Some(script) = state.scripts.get_mut(index) else {
+            return;
+        };
+        script.revision_policy = match script.revision_policy {
+            sift_protocol::ScriptRevisionPolicy::Pinned => {
+                script.pinned_digest = None;
+                sift_protocol::ScriptRevisionPolicy::LatestAtRunStart
+            }
+            sift_protocol::ScriptRevisionPolicy::LatestAtRunStart => {
+                sift_protocol::ScriptRevisionPolicy::Pinned
+            }
+        };
+        self.mark_run_configuration_dirty(item_id);
+        cx.notify();
+    }
+
+    fn add_run_variable(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let next = self
+            .run_configuration_editors
+            .get(&item_id)
+            .map_or(1, |state| state.variables.len() + 1);
+        let input = cx.new(|cx| TextInput::new(format!("variable_{next}"), "Variable name", cx));
+        self.subscribe_run_configuration_input(item_id, &input, false, cx);
+        if let Some(state) = self.run_configuration_editors.get_mut(&item_id) {
+            state.variables.push(RunVariableEditor {
+                name: input,
+                kind: sift_protocol::RunVariableKind::String,
+                required: true,
+                persist_non_secret_value: false,
+                secret_handle_present: false,
+            });
+        }
+        self.mark_run_configuration_dirty(item_id);
+        cx.notify();
+    }
+
+    fn remove_run_variable(&mut self, item_id: u64, index: usize, cx: &mut Context<Self>) {
+        let Some(state) = self.run_configuration_editors.get_mut(&item_id) else {
+            return;
+        };
+        if index < state.variables.len() {
+            state.variables.remove(index);
+            self.mark_run_configuration_dirty(item_id);
+            cx.notify();
+        }
+    }
+
+    fn cycle_run_variable_kind(&mut self, item_id: u64, index: usize, cx: &mut Context<Self>) {
+        let Some(variable) = self
+            .run_configuration_editors
+            .get_mut(&item_id)
+            .and_then(|state| state.variables.get_mut(index))
+        else {
+            return;
+        };
+        variable.kind = match variable.kind {
+            sift_protocol::RunVariableKind::String => sift_protocol::RunVariableKind::Integer,
+            sift_protocol::RunVariableKind::Integer => sift_protocol::RunVariableKind::Decimal,
+            sift_protocol::RunVariableKind::Decimal => sift_protocol::RunVariableKind::Boolean,
+            sift_protocol::RunVariableKind::Boolean => sift_protocol::RunVariableKind::Identifier,
+            sift_protocol::RunVariableKind::Identifier => sift_protocol::RunVariableKind::Secret,
+            sift_protocol::RunVariableKind::Secret => sift_protocol::RunVariableKind::String,
+        };
+        if variable.kind == sift_protocol::RunVariableKind::Secret {
+            variable.persist_non_secret_value = false;
+        }
+        self.mark_run_configuration_dirty(item_id);
+        cx.notify();
+    }
+
+    fn toggle_run_variable_required(&mut self, item_id: u64, index: usize, cx: &mut Context<Self>) {
+        if let Some(variable) = self
+            .run_configuration_editors
+            .get_mut(&item_id)
+            .and_then(|state| state.variables.get_mut(index))
+        {
+            variable.required = !variable.required;
+            self.mark_run_configuration_dirty(item_id);
+            cx.notify();
+        }
+    }
+
+    fn set_run_transaction_policy(
+        &mut self,
+        item_id: u64,
+        policy: sift_protocol::RunTransactionPolicy,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.run_configuration_editors.get_mut(&item_id) {
+            state.transaction_policy = policy;
+            self.mark_run_configuration_dirty(item_id);
+            cx.notify();
+        }
+    }
+
+    fn set_run_error_policy(
+        &mut self,
+        item_id: u64,
+        policy: sift_protocol::RunErrorPolicy,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.run_configuration_editors.get_mut(&item_id) {
+            state.error_policy = policy;
+            self.mark_run_configuration_dirty(item_id);
+            cx.notify();
+        }
+    }
+
+    fn toggle_run_pre_task(
+        &mut self,
+        item_id: u64,
+        task: sift_protocol::RunPreTask,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.run_configuration_editors.get_mut(&item_id) {
+            if let Some(index) = state
+                .pre_tasks
+                .iter()
+                .position(|candidate| *candidate == task)
+            {
+                state.pre_tasks.remove(index);
+            } else {
+                state.pre_tasks.push(task);
+            }
+            self.mark_run_configuration_dirty(item_id);
+            cx.notify();
+        }
     }
 
     fn open_query(
@@ -2894,7 +3367,12 @@ impl Pane {
     fn take_item(&mut self, item_id: u64) -> Option<TabTransfer> {
         let index = self.items.iter().position(|item| item.id == item_id)?;
         let item = self.items.remove(index);
-        let editor = self.editors.remove(&item_id)?;
+        let editor = self.editors.remove(&item_id);
+        let run_configuration = self.run_configuration_editors.remove(&item_id);
+        if editor.is_none() && run_configuration.is_none() {
+            self.items.insert(index, item);
+            return None;
+        }
         self.result_subscriptions.remove(&item_id);
         let results = self.results.remove(&item_id);
         let clean_text = self.clean_documents.remove(&item_id).unwrap_or_default();
@@ -2907,6 +3385,7 @@ impl Pane {
         Some(TabTransfer {
             item,
             editor,
+            run_configuration,
             results,
             clean_text,
             database_item_view,
@@ -2924,15 +3403,24 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         let item_id = transfer.item.id;
-        let editor = transfer.editor;
-        self.editor_subscriptions.insert(
-            item_id,
-            cx.subscribe(&editor, move |pane, _, event, cx| {
-                pane.on_editor_event(item_id, event, cx);
-            }),
-        );
-        self.clean_documents.insert(item_id, transfer.clean_text);
-        self.editors.insert(item_id, editor);
+        if let Some(editor) = transfer.editor {
+            self.editor_subscriptions.insert(
+                item_id,
+                cx.subscribe(&editor, move |pane, _, event, cx| {
+                    pane.on_editor_event(item_id, event, cx);
+                }),
+            );
+            self.clean_documents.insert(item_id, transfer.clean_text);
+            self.editors.insert(item_id, editor);
+        }
+        if let Some(state) = transfer.run_configuration {
+            self.subscribe_run_configuration_input(item_id, &state.name, true, cx);
+            self.subscribe_run_configuration_input(item_id, &state.target_schema, false, cx);
+            for variable in &state.variables {
+                self.subscribe_run_configuration_input(item_id, &variable.name, false, cx);
+            }
+            self.run_configuration_editors.insert(item_id, state);
+        }
         if let Some(view) = transfer.database_item_view {
             self.database_item_views.insert(item_id, view);
         }
@@ -3003,15 +3491,493 @@ impl Pane {
                 cx.notify();
             }
             "d" => cx.emit(PaneEvent::DiscardItemRequested { item_id }),
-            "s" if self
-                .active_item()
-                .is_some_and(|item| item.kind == ItemKind::Configuration) =>
+            "s" if self.active_item().is_some_and(|item| {
+                matches!(
+                    item.kind,
+                    ItemKind::Configuration | ItemKind::RunConfiguration
+                )
+            }) =>
             {
                 cx.emit(PaneEvent::SaveItemRequested { item_id });
             }
             _ => return,
         }
         cx.stop_propagation();
+    }
+
+    fn render_run_configuration(&self, item_id: u64, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let Some(state) = self.run_configuration_editors.get(&item_id) else {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(colors.muted_text)
+                .child("Run configuration editor is unavailable")
+                .into_any_element();
+        };
+        let pending = state.pending;
+        let saved = state.configuration_id.is_some();
+        let requires_variables = state.variables.iter().any(|variable| variable.required);
+        let validation_failed = state.validation.as_ref().is_some_and(Result::is_err);
+        let dirty = self
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .is_some_and(|item| item.dirty);
+        let profiles = state.profiles.clone();
+        let selected_profile = state.connection_profile_id;
+        let scripts = state.scripts.clone();
+        let nodes = state.nodes.clone();
+        let adding_script = state.adding_script;
+        let variables = state
+            .variables
+            .iter()
+            .map(|variable| {
+                (
+                    variable.name.clone(),
+                    variable.kind,
+                    variable.required,
+                    variable.secret_handle_present,
+                )
+            })
+            .collect::<Vec<_>>();
+        let transaction_policy = state.transaction_policy;
+        let error_policy = state.error_policy;
+        let pre_tasks = state.pre_tasks.clone();
+        let delete_armed = state.delete_armed;
+        let validation = state.validation.clone();
+        let node_path = |node_id: sift_protocol::WorkspaceNodeId| {
+            nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .map(|node| node.path.0.clone())
+                .unwrap_or_else(|| format!("Missing workspace node {}", node_id.0))
+        };
+        let section = |label: &'static str| {
+            div()
+                .pt_4()
+                .pb_2()
+                .border_b_1()
+                .border_color(colors.subtle_border)
+                .child(SectionLabel::new(label))
+        };
+        div()
+            .id(("run-configuration-editor", item_id as usize))
+            .size_full()
+            .min_h_0()
+            .overflow_y_scroll()
+            .bg(colors.background)
+            .child(
+                div()
+                    .h(px(42.))
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(colors.toolbar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(if saved {
+                                "Run configuration"
+                            } else {
+                                "New run configuration"
+                            }),
+                    )
+                    .child(KeyBinding::new("Ctrl+S"))
+                    .child(
+                        Button::new(
+                            ("save-run-configuration", item_id as usize),
+                            if pending {
+                                "Saving…"
+                            } else {
+                                "Save & validate"
+                            },
+                        )
+                        .debug_selector("save-run-configuration")
+                        .tone(ButtonTone::Accent)
+                        .disabled(pending)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(PaneEvent::SaveRunConfigurationRequested { item_id });
+                        })),
+                    )
+                    .children((saved && !dirty).then(|| {
+                        Button::new(
+                            ("run-configuration-now", item_id as usize),
+                            if requires_variables {
+                                "Run values required"
+                            } else {
+                                "Run"
+                            },
+                        )
+                        .tone(ButtonTone::Neutral)
+                        .disabled(pending || requires_variables || validation_failed)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(PaneEvent::RunConfigurationRequested { item_id });
+                        }))
+                    }))
+                    .children(saved.then(|| {
+                        Button::new(
+                            ("delete-run-configuration", item_id as usize),
+                            if delete_armed {
+                                "Confirm delete"
+                            } else {
+                                "Delete"
+                            },
+                        )
+                        .tone(ButtonTone::DangerGhost)
+                        .disabled(pending)
+                        .on_click(cx.listener(move |pane, _, _, cx| {
+                            if pane
+                                .run_configuration_editors
+                                .get(&item_id)
+                                .is_some_and(|state| state.delete_armed)
+                            {
+                                cx.emit(PaneEvent::DeleteRunConfigurationRequested { item_id });
+                            } else if let Some(state) =
+                                pane.run_configuration_editors.get_mut(&item_id)
+                            {
+                                state.delete_armed = true;
+                                cx.notify();
+                            }
+                        }))
+                    })),
+            )
+            .child(
+                div()
+                    .max_w(px(860.))
+                    .w_full()
+                    .mx_auto()
+                    .px_5()
+                    .pb_8()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(section("IDENTITY"))
+                    .child(Field::new(
+                        "Name",
+                        Some(state.name.focus_handle(cx)),
+                        state.name.clone(),
+                    ))
+                    .child(Field::new(
+                        "Target schema",
+                        Some(state.target_schema.focus_handle(cx)),
+                        state.target_schema.clone(),
+                    ))
+                    .child(section("CONNECTION"))
+                    .when(profiles.is_empty(), |view| {
+                        view.child(
+                            div()
+                                .text_color(colors.warning)
+                                .child("No connection profiles available in workspace tenant."),
+                        )
+                    })
+                    .children(profiles.into_iter().map(|profile| {
+                        let profile_id = profile.id;
+                        Button::new(
+                            ("run-profile", profile_id as usize),
+                            format!("{} · {}", profile.name, profile.provider_id),
+                        )
+                        .tone(if selected_profile == Some(profile_id) {
+                            ButtonTone::Accent
+                        } else {
+                            ButtonTone::Ghost
+                        })
+                        .on_click(cx.listener(move |pane, _, _, cx| {
+                            pane.select_run_profile(item_id, profile_id, cx)
+                        }))
+                    }))
+                    .child(section("SCRIPTS"))
+                    .when(scripts.is_empty(), |view| {
+                        view.child(
+                            div()
+                                .text_color(colors.warning)
+                                .child("Add at least one SQL document."),
+                        )
+                    })
+                    .children(scripts.into_iter().enumerate().map(|(index, script)| {
+                        let path = node_path(script.node_id);
+                        div()
+                            .id(("run-script", index))
+                            .h(px(34.))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(div().w(px(24.)).text_right().child((index + 1).to_string()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family("monospace")
+                                    .child(path),
+                            )
+                            .child(
+                                Button::new(
+                                    ("run-script-revision", index),
+                                    match script.revision_policy {
+                                        sift_protocol::ScriptRevisionPolicy::Pinned => "Pinned",
+                                        sift_protocol::ScriptRevisionPolicy::LatestAtRunStart => {
+                                            "Latest"
+                                        }
+                                    },
+                                )
+                                .tone(ButtonTone::Ghost)
+                                .on_click(cx.listener(
+                                    move |pane, _, _, cx| {
+                                        pane.toggle_run_script_revision(item_id, index, cx)
+                                    },
+                                )),
+                            )
+                            .child(
+                                Button::new(("run-script-up", index), "↑")
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(index == 0)
+                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                        pane.move_run_script(item_id, index, -1, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(("run-script-down", index), "↓")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                        pane.move_run_script(item_id, index, 1, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(("run-script-remove", index), "Remove")
+                                    .tone(ButtonTone::DangerGhost)
+                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                        pane.remove_run_script(item_id, index, cx)
+                                    })),
+                            )
+                    }))
+                    .child(
+                        Button::new(
+                            ("add-run-script", item_id as usize),
+                            if adding_script {
+                                "Cancel adding script"
+                            } else {
+                                "+ Add script"
+                            },
+                        )
+                        .debug_selector("add-run-script")
+                        .tone(ButtonTone::Neutral)
+                        .on_click(cx.listener(move |pane, _, _, cx| {
+                            pane.toggle_run_script_picker(item_id, cx)
+                        })),
+                    )
+                    .when(adding_script, |view| {
+                        let available = nodes
+                            .iter()
+                            .filter(|node| {
+                                node.kind == sift_protocol::WorkspaceNodeKind::SqlDocument
+                                    && !state.scripts.iter().any(|script| script.node_id == node.id)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        view.child(
+                            div()
+                                .id(("run-script-picker", item_id as usize))
+                                .p_2()
+                                .border_1()
+                                .border_color(colors.strong_border)
+                                .bg(colors.panel)
+                                .flex()
+                                .flex_col()
+                                .children(available.into_iter().map(|node| {
+                                    let node_id = node.id;
+                                    Button::new(
+                                        ("available-run-script", node_id.0 as usize),
+                                        node.path.0,
+                                    )
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(
+                                        move |pane, _, _, cx| {
+                                            pane.add_run_script(item_id, node_id, cx)
+                                        },
+                                    ))
+                                })),
+                        )
+                    })
+                    .child(section("VARIABLES"))
+                    .when(variables.is_empty(), |view| {
+                        view.child(div().text_color(colors.muted_text).child("No variables."))
+                    })
+                    .children(variables.into_iter().enumerate().map(
+                        |(index, (name, kind, required, secret_handle))| {
+                            div()
+                                .id(("run-variable", index))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().flex_1().min_w_0().child(name))
+                                .child(
+                                    Button::new(("run-variable-kind", index), format!("{kind:?}"))
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(move |pane, _, _, cx| {
+                                            pane.cycle_run_variable_kind(item_id, index, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(
+                                        ("run-variable-required", index),
+                                        if required { "Required" } else { "Optional" },
+                                    )
+                                    .tone(if required {
+                                        ButtonTone::Neutral
+                                    } else {
+                                        ButtonTone::Ghost
+                                    })
+                                    .on_click(cx.listener(
+                                        move |pane, _, _, cx| {
+                                            pane.toggle_run_variable_required(item_id, index, cx)
+                                        },
+                                    )),
+                                )
+                                .children((kind == sift_protocol::RunVariableKind::Secret).then(
+                                    || {
+                                        div()
+                                            .text_xs()
+                                            .text_color(if secret_handle {
+                                                colors.success
+                                            } else {
+                                                colors.warning
+                                            })
+                                            .child(if secret_handle {
+                                                "Secret set"
+                                            } else {
+                                                "Secret handle missing"
+                                            })
+                                    },
+                                ))
+                                .child(
+                                    Button::new(("run-variable-remove", index), "Remove")
+                                        .tone(ButtonTone::DangerGhost)
+                                        .on_click(cx.listener(move |pane, _, _, cx| {
+                                            pane.remove_run_variable(item_id, index, cx)
+                                        })),
+                                )
+                        },
+                    ))
+                    .child(
+                        Button::new(("add-run-variable", item_id as usize), "+ Add variable")
+                            .tone(ButtonTone::Neutral)
+                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                pane.add_run_variable(item_id, cx)
+                            })),
+                    )
+                    .child(section("EXECUTION"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().w(px(120.)).child("Transaction"))
+                            .children(
+                                [
+                                    (sift_protocol::RunTransactionPolicy::None, "None"),
+                                    (sift_protocol::RunTransactionPolicy::PerScript, "Per script"),
+                                    (
+                                        sift_protocol::RunTransactionPolicy::AllScripts,
+                                        "All scripts",
+                                    ),
+                                ]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, (policy, label))| {
+                                    Button::new(("run-transaction-policy", index), label)
+                                        .tone(if transaction_policy == policy {
+                                            ButtonTone::Accent
+                                        } else {
+                                            ButtonTone::Ghost
+                                        })
+                                        .on_click(cx.listener(move |pane, _, _, cx| {
+                                            pane.set_run_transaction_policy(item_id, policy, cx)
+                                        }))
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().w(px(120.)).child("On error"))
+                            .children(
+                                [
+                                    (sift_protocol::RunErrorPolicy::Stop, "Stop"),
+                                    (sift_protocol::RunErrorPolicy::Continue, "Continue"),
+                                ]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, (policy, label))| {
+                                    Button::new(("run-error-policy", index), label)
+                                        .tone(if error_policy == policy {
+                                            ButtonTone::Accent
+                                        } else {
+                                            ButtonTone::Ghost
+                                        })
+                                        .on_click(cx.listener(move |pane, _, _, cx| {
+                                            pane.set_run_error_policy(item_id, policy, cx)
+                                        }))
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().w(px(120.)).child("Pre-tasks"))
+                            .children(
+                                [
+                                    (sift_protocol::RunPreTask::PingTarget, "Ping target"),
+                                    (sift_protocol::RunPreTask::RefreshSchema, "Refresh schema"),
+                                ]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, (task, label))| {
+                                    let enabled = pre_tasks.contains(&task);
+                                    Button::new(("run-pre-task", index), label)
+                                        .tone(if enabled {
+                                            ButtonTone::Neutral
+                                        } else {
+                                            ButtonTone::Ghost
+                                        })
+                                        .on_click(cx.listener(move |pane, _, _, cx| {
+                                            pane.toggle_run_pre_task(item_id, task, cx)
+                                        }))
+                                }),
+                            ),
+                    )
+                    .child(section("VALIDATION"))
+                    .child(match validation {
+                        Some(Ok(manifest)) => div().text_color(colors.success).child(format!(
+                            "✓ {} script(s) resolved at workspace revision {}",
+                            manifest.scripts.len(),
+                            manifest.workspace_revision.0
+                        )),
+                        Some(Err(message)) => div()
+                            .text_color(colors.danger)
+                            .whitespace_normal()
+                            .child(message),
+                        None if dirty => div()
+                            .text_color(colors.muted_text)
+                            .child("Save to validate this draft."),
+                        None => div()
+                            .text_color(colors.muted_text)
+                            .child("Not validated yet."),
+                    }),
+            )
+            .into_any_element()
     }
 }
 
@@ -3317,7 +4283,10 @@ impl gpui::Render for Pane {
             }))
             .children(pending_close.map(|item| {
                 let item_id = item.id;
-                let is_configuration = item.kind == ItemKind::Configuration;
+                let is_configuration = matches!(
+                    item.kind,
+                    ItemKind::Configuration | ItemKind::RunConfiguration
+                );
                 div()
                     .id(("dirty-close-strip", item_id as usize))
                     .h(theme.metrics.toolbar_height)
@@ -3383,6 +4352,9 @@ impl gpui::Render for Pane {
                     .on_drag_move::<TabDrag>(cx.listener(Self::pane_drag_hover))
                     .on_drop::<TabDrag>(cx.listener(Self::finish_tab_drag));
                 let body = match active {
+                    Some(item) if item.kind == ItemKind::RunConfiguration => {
+                        body.child(self.render_run_configuration(item.id, cx))
+                    }
                     Some(item) if item.kind == ItemKind::Configuration => {
                         match self.editors.get(&item.id) {
                             Some(editor) => {
@@ -4322,7 +5294,10 @@ pub struct WorkspaceShell {
     repository_status_loading: bool,
     repository_status_error: Option<String>,
     automation_configurations: Vec<sift_protocol::RunConfiguration>,
+    automation_nodes: Vec<sift_protocol::WorkspaceNode>,
     automation_runs: HashMap<sift_protocol::RunConfigurationId, sift_protocol::Run>,
+    automation_focus_handle: FocusHandle,
+    automation_selected: usize,
     automations_loading: bool,
     automations_error: Option<String>,
     _lifecycle_task: Option<Task<()>>,
@@ -4818,7 +5793,10 @@ impl WorkspaceShell {
             repository_status_loading: false,
             repository_status_error: None,
             automation_configurations: Vec::new(),
+            automation_nodes: Vec::new(),
             automation_runs: HashMap::new(),
+            automation_focus_handle: cx.focus_handle(),
+            automation_selected: 0,
             automations_loading: false,
             automations_error: None,
             _lifecycle_task: None,
@@ -6680,6 +7658,7 @@ impl WorkspaceShell {
             ExecutorEvent::AutomationsLoaded {
                 workspace_id,
                 result,
+                nodes,
             } => {
                 if self.selected_workspace_id != Some(workspace_id) {
                     return;
@@ -6691,6 +7670,103 @@ impl WorkspaceShell {
                         self.automations_error = None;
                     }
                     Err(message) => self.automations_error = Some(message),
+                }
+                match nodes {
+                    Ok(nodes) => self.automation_nodes = nodes,
+                    Err(message) if self.automations_error.is_none() => {
+                        self.automations_error = Some(message)
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            }
+            ExecutorEvent::RunConfigurationSaved { item_id, result } => {
+                let validation_error = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|(_, validation)| validation.as_ref().err())
+                    .cloned();
+                let saved = result
+                    .as_ref()
+                    .ok()
+                    .map(|(configuration, _)| configuration.clone());
+                for pane in &self.panes {
+                    if pane.read(cx).contains_item(item_id) {
+                        pane.update(cx, |pane, cx| {
+                            pane.apply_saved_run_configuration(item_id, result.clone(), cx)
+                        });
+                        break;
+                    }
+                }
+                match saved {
+                    Some(configuration) => {
+                        if let Some(existing) = self
+                            .automation_configurations
+                            .iter_mut()
+                            .find(|candidate| candidate.id == configuration.id)
+                        {
+                            *existing = configuration;
+                        } else {
+                            self.automation_configurations.push(configuration);
+                        }
+                        self.automation_configurations
+                            .sort_by(|left, right| left.name.cmp(&right.name));
+                        if let Some(message) = validation_error {
+                            self.show_toast(message, cx);
+                        } else {
+                            self.show_success_toast(
+                                "Run configuration saved and validated".into(),
+                                cx,
+                            );
+                        }
+                    }
+                    None => self.show_toast("Run configuration save failed".into(), cx),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::RunConfigurationDeleted {
+                item_id,
+                configuration_id,
+                result,
+            } => {
+                match result {
+                    Ok(()) => {
+                        self.automation_configurations
+                            .retain(|configuration| configuration.id != configuration_id);
+                        for pane in &self.panes {
+                            pane.update(cx, |pane, cx| {
+                                let Some(index) =
+                                    pane.items.iter().position(|item| item.id == item_id)
+                                else {
+                                    return;
+                                };
+                                pane.items.remove(index);
+                                pane.editors.remove(&item_id);
+                                pane.results.remove(&item_id);
+                                pane.forget_item(item_id);
+                                pane.active_item =
+                                    pane.active_item.min(pane.items.len().saturating_sub(1));
+                                cx.notify();
+                            });
+                        }
+                        self.show_success_toast("Run configuration deleted".into(), cx);
+                    }
+                    Err(message) => {
+                        for pane in &self.panes {
+                            if pane
+                                .update(cx, |pane, cx| {
+                                    let state = pane.run_configuration_editors.get_mut(&item_id)?;
+                                    state.pending = false;
+                                    state.validation = Some(Err(message.clone()));
+                                    cx.notify();
+                                    Some(())
+                                })
+                                .is_some()
+                            {
+                                break;
+                            }
+                        }
+                    }
                 }
                 cx.notify();
             }
@@ -11266,6 +12342,52 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn focus_automations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_bottom_tool = BottomTool::Automations;
+        self.bottom_dock.presentation.open = true;
+        self.request_automations(cx);
+        self.automation_focus_handle.focus(window, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn handle_automation_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        let count = self.automation_configurations.len();
+        match event.keystroke.key.as_str() {
+            "j" | "down" if count > 0 => {
+                self.automation_selected = (self.automation_selected + 1).min(count - 1);
+            }
+            "k" | "up" if count > 0 => {
+                self.automation_selected = self.automation_selected.saturating_sub(1);
+            }
+            "g" if count > 0 => self.automation_selected = 0,
+            "G" if count > 0 => self.automation_selected = count - 1,
+            "enter" | "e" if count > 0 => {
+                let configuration =
+                    self.automation_configurations[self.automation_selected].clone();
+                self.open_run_configuration_editor(Some(configuration), window, cx);
+            }
+            "n" => self.open_run_configuration_editor(None, window, cx),
+            "r" if count > 0 => {
+                let configuration = &self.automation_configurations[self.automation_selected];
+                self.start_automation(configuration.id.0, configuration.revision, cx);
+            }
+            "R" => self.request_automations(cx),
+            "escape" => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn load_database_processes(&mut self, cx: &mut Context<Self>) {
         if self.database_processes_loading {
             return;
@@ -11300,6 +12422,245 @@ impl WorkspaceShell {
             self.automations_error = None;
         }
         cx.notify();
+    }
+
+    fn run_configuration_profiles(&self) -> Vec<ConnectionNavEntry> {
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return Vec::new();
+        };
+        self.lifecycle
+            .tenants
+            .iter()
+            .find(|tenant| {
+                tenant.rooms.iter().any(|room| {
+                    room.workspaces
+                        .iter()
+                        .any(|workspace| workspace.id == workspace_id)
+                })
+            })
+            .map(|tenant| tenant.connections.clone())
+            .unwrap_or_default()
+    }
+
+    fn open_run_configuration_editor(
+        &mut self,
+        configuration: Option<sift_protocol::RunConfiguration>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(configuration_id) = configuration.as_ref().map(|configuration| configuration.id)
+        {
+            if let Some((pane_index, item_index)) =
+                self.panes
+                    .iter()
+                    .enumerate()
+                    .find_map(|(pane_index, pane)| {
+                        let pane = pane.read(cx);
+                        pane.run_configuration_editors
+                            .iter()
+                            .find(|(_, state)| state.configuration_id == Some(configuration_id))
+                            .and_then(|(item_id, _)| {
+                                pane.items
+                                    .iter()
+                                    .position(|item| item.id == *item_id)
+                                    .map(|item_index| (pane_index, item_index))
+                            })
+                    })
+            {
+                self.active_pane = pane_index;
+                self.panes[pane_index].update(cx, |pane, _| pane.activate_item(item_index, true));
+                self.focus_active_pane(window, cx);
+                cx.notify();
+                return;
+            }
+        }
+        let Some(workspace_id) = self.selected_workspace_id else {
+            self.show_toast(
+                "Select a workspace before creating a run configuration".into(),
+                cx,
+            );
+            return;
+        };
+        let profiles = self.run_configuration_profiles();
+        let item_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let title = configuration
+            .as_ref()
+            .map(|configuration| configuration.name.clone())
+            .unwrap_or_else(|| "Untitled run".into());
+        let name = cx.new(|cx| TextInput::new(title.clone(), "Run configuration name", cx));
+        let target_schema = cx.new(|cx| {
+            TextInput::new(
+                configuration
+                    .as_ref()
+                    .and_then(|configuration| configuration.target_schema.clone())
+                    .unwrap_or_default(),
+                "Optional target schema",
+                cx,
+            )
+        });
+        let variables = configuration
+            .as_ref()
+            .map(|configuration| {
+                configuration
+                    .variables
+                    .iter()
+                    .map(|variable| RunVariableEditor {
+                        name: cx
+                            .new(|cx| TextInput::new(variable.name.clone(), "Variable name", cx)),
+                        kind: variable.kind,
+                        required: variable.required,
+                        persist_non_secret_value: variable.persist_non_secret_value,
+                        secret_handle_present: variable.secret_handle_present,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let state = RunConfigurationEditorState {
+            workspace_id,
+            configuration_id: configuration.as_ref().map(|configuration| configuration.id),
+            revision: configuration
+                .as_ref()
+                .map(|configuration| configuration.revision),
+            name,
+            target_schema,
+            connection_profile_id: configuration
+                .as_ref()
+                .map(|configuration| configuration.connection_profile_id)
+                .or_else(|| profiles.first().map(|profile| profile.id)),
+            profiles,
+            nodes: self.automation_nodes.clone(),
+            scripts: configuration
+                .as_ref()
+                .map(|configuration| configuration.scripts.clone())
+                .unwrap_or_default(),
+            variables,
+            pre_tasks: configuration
+                .as_ref()
+                .map(|configuration| configuration.pre_tasks.clone())
+                .unwrap_or_default(),
+            transaction_policy: configuration
+                .as_ref()
+                .map_or(sift_protocol::RunTransactionPolicy::None, |configuration| {
+                    configuration.transaction_policy
+                }),
+            error_policy: configuration
+                .as_ref()
+                .map_or(sift_protocol::RunErrorPolicy::Stop, |configuration| {
+                    configuration.error_policy
+                }),
+            adding_script: false,
+            delete_armed: false,
+            pending: false,
+            validation: None,
+        };
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_run_configuration(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::RunConfiguration,
+                        title,
+                        dirty: configuration.is_none(),
+                        source: None,
+                        last_result: None,
+                    },
+                    state,
+                    cx,
+                )
+            });
+        }
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
+    fn save_run_configuration(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let request = self.panes.iter().find_map(|pane| {
+            pane.read(cx)
+                .contains_item(item_id)
+                .then(|| pane.read(cx).run_configuration_request(item_id, cx))
+        });
+        let Some(request) = request else {
+            return;
+        };
+        let (workspace_id, configuration_id, expected_revision, request) = match request {
+            Ok(request) => request,
+            Err(message) => {
+                for pane in &self.panes {
+                    if pane.read(cx).contains_item(item_id) {
+                        pane.update(cx, |pane, cx| {
+                            if let Some(state) = pane.run_configuration_editors.get_mut(&item_id) {
+                                state.validation = Some(Err(message.clone()));
+                                cx.notify();
+                            }
+                        });
+                    }
+                }
+                return;
+            }
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::SaveRunConfiguration {
+                item_id,
+                workspace_id,
+                configuration_id,
+                expected_revision,
+                request,
+            })
+            .is_ok()
+        {
+            for pane in &self.panes {
+                pane.update(cx, |pane, cx| {
+                    pane.set_run_configuration_pending(item_id, true, cx)
+                });
+            }
+        }
+    }
+
+    fn delete_run_configuration(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let target = self.panes.iter().find_map(|pane| {
+            let pane = pane.read(cx);
+            let state = pane.run_configuration_editors.get(&item_id)?;
+            Some((state.configuration_id?, state.revision?))
+        });
+        let Some((configuration_id, expected_revision)) = target else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::DeleteRunConfiguration {
+                item_id,
+                configuration_id,
+                expected_revision,
+            })
+            .is_ok()
+        {
+            for pane in &self.panes {
+                pane.update(cx, |pane, cx| {
+                    pane.set_run_configuration_pending(item_id, true, cx)
+                });
+            }
+        }
+    }
+
+    fn run_configuration_from_editor(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let target = self.panes.iter().find_map(|pane| {
+            let pane = pane.read(cx);
+            let item = pane.items.iter().find(|item| item.id == item_id)?;
+            if item.dirty {
+                return None;
+            }
+            let state = pane.run_configuration_editors.get(&item_id)?;
+            Some((state.configuration_id?, state.revision?))
+        });
+        if let Some((configuration_id, revision)) = target {
+            self.start_automation(configuration_id.0, revision, cx);
+        }
     }
 
     fn start_automation(&mut self, configuration_id: i64, revision: u64, cx: &mut Context<Self>) {
@@ -12232,6 +13593,18 @@ impl WorkspaceShell {
                 });
                 self.save_active_item(&SaveActiveItem, window, cx);
             }
+            PaneEvent::SaveRunConfigurationRequested { item_id } => {
+                self.active_pane = index;
+                self.save_run_configuration(*item_id, cx);
+            }
+            PaneEvent::DeleteRunConfigurationRequested { item_id } => {
+                self.active_pane = index;
+                self.delete_run_configuration(*item_id, cx);
+            }
+            PaneEvent::RunConfigurationRequested { item_id } => {
+                self.active_pane = index;
+                self.run_configuration_from_editor(*item_id, cx);
+            }
             PaneEvent::MoveItemRequested { item_id, target } => {
                 // Match Zed's effect-cycle discipline: the drop callback only
                 // records intent. Entity/tree mutations run after event
@@ -12953,6 +14326,16 @@ impl WorkspaceShell {
             }
             self.focus_results(window, cx);
             self.apply_result_cell_edit(cx);
+            return;
+        }
+        let active_run_configuration = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            pane.active_item()
+                .filter(|item| item.kind == ItemKind::RunConfiguration)
+                .map(|item| item.id)
+        });
+        if let Some(item_id) = active_run_configuration {
+            self.save_run_configuration(item_id, cx);
             return;
         }
         let active_configuration = self.panes.get(self.active_pane).and_then(|pane| {
@@ -15265,6 +16648,8 @@ impl WorkspaceShell {
             CommandId::CopyResultWithHeaders => self.copy_active_result_with_headers(cx),
             CommandId::FocusResults => self.focus_results(window, cx),
             CommandId::FocusProblems => self.show_global_problems(window, cx),
+            CommandId::FocusAutomations => self.focus_automations(window, cx),
+            CommandId::NewRunConfiguration => self.open_run_configuration_editor(None, window, cx),
             CommandId::PreviousTab => self.focus_tab_delta(-1, window, cx),
             CommandId::NextTab => self.focus_tab_delta(1, window, cx),
             CommandId::ClosePane => self.close_active_pane(&CloseActivePane, window, cx),
@@ -28623,6 +30008,67 @@ mod tests {
             receiver.try_recv(),
             Ok(ExecutorCommand::LoadAutomations { workspace_id: 42 })
         ));
+    }
+
+    #[gpui::test]
+    fn new_run_configuration_opens_as_non_modal_pane_item(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.selected_workspace_id = Some(42);
+            shell.open_run_configuration_editor(None, window, cx);
+            assert!(shell.modal.is_none());
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert_eq!(
+                pane.active_item().map(|item| item.kind),
+                Some(ItemKind::RunConfiguration)
+            );
+            assert!(pane.active_item().is_some_and(|item| item.dirty));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("save-run-configuration").is_some());
+        assert!(cx.debug_bounds("add-run-script").is_some());
+    }
+
+    #[gpui::test]
+    fn saving_run_configuration_emits_typed_create_request(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_workspace_id = Some(42);
+            shell.open_run_configuration_editor(None, window, cx);
+            let pane = shell.panes[shell.active_pane].clone();
+            let item_id = pane.read(cx).active_item().unwrap().id;
+            pane.update(cx, |pane, _| {
+                let state = pane.run_configuration_editors.get_mut(&item_id).unwrap();
+                state.connection_profile_id = Some(7);
+                state.scripts.push(sift_protocol::RunScriptStep {
+                    node_id: sift_protocol::WorkspaceNodeId(9),
+                    revision_policy: sift_protocol::ScriptRevisionPolicy::LatestAtRunStart,
+                    pinned_digest: None,
+                    transfer_recipe_id: None,
+                });
+            });
+            shell.save_run_configuration(item_id, cx);
+        });
+        match receiver.try_recv().unwrap() {
+            ExecutorCommand::SaveRunConfiguration {
+                workspace_id,
+                configuration_id,
+                request,
+                ..
+            } => {
+                assert_eq!(workspace_id, 42);
+                assert!(configuration_id.is_none());
+                assert_eq!(request.connection_profile_id, 7);
+                assert_eq!(request.scripts.len(), 1);
+            }
+            _ => panic!("expected run configuration save"),
+        }
     }
 
     #[gpui::test]
