@@ -17616,7 +17616,6 @@ impl WorkspaceShell {
                                 )
                                 .square(px(26.))
                                 .icon_size(14.)
-                                .badge(self.unread_notifications)
                                 .toggle_state(self.notifications_tab_active(cx))
                                 .tooltip("Open notifications")
                                 .on_click(cx.listener(
