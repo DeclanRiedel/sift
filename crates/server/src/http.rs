@@ -55,11 +55,12 @@ use sift_protocol::{
     ScheduleOccurrence, ScheduleOccurrenceId, SchemaFilter, SchemaScope, SshProxyAccessGrant,
     SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, TransferRecipe,
     TransferRecipeAction, TransferRecipeId, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, VcsAction, VcsBranch, VcsCommitDetail, VcsCommitResult, VcsDiff,
-    VcsHeadMutationResult, VcsHistoricalFile, VcsHistoryPage, VcsPendingOperation, VcsRemoteResult,
-    VcsStatus, VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace,
-    WorkspaceAction, WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId,
-    WorkspaceNodeKind, WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    UpdateTenantLimitsRequest, VcsAction, VcsBranch, VcsCommitDetail, VcsCommitResult,
+    VcsConflictFile, VcsDiff, VcsHeadMutationResult, VcsHistoricalFile, VcsHistoryPage,
+    VcsPendingOperation, VcsRemoteResult, VcsStatus, VcsWorktreeMutationResult, WebAuthResponse,
+    WhoAmIResponse, Workspace, WorkspaceAction, WorkspaceCheckpoint, WorkspaceCheckpointId,
+    WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -556,6 +557,34 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/metadata/repositories/:id/revert-hunk",
             post_with(revert_repository_hunk, doc("revertRepositoryHunk", "Checkpoint and revert one worktree diff hunk into the canonical workspace")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/conflicts",
+            get_with(get_repository_conflict, doc("getRepositoryConflict", "Read conflict stages as bounded typed regions")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/conflicts/begin",
+            post_with(begin_repository_conflict_resolution, doc("beginRepositoryConflictResolution", "Checkpoint before manual conflict resolution")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/conflicts/resolve",
+            post_with(resolve_repository_conflict, doc("resolveRepositoryConflict", "Apply one typed conflict resolution")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/conflicts/mark-resolved",
+            post_with(mark_repository_conflict_resolved, doc("markRepositoryConflictResolved", "Stage a manually resolved conflict")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/operation/continue",
+            post_with(continue_repository_operation, doc("continueRepositoryOperation", "Continue a supported repository operation")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/operation/abort",
+            post_with(abort_repository_operation, doc("abortRepositoryOperation", "Checkpoint and abort a repository operation")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/repair",
+            post_with(repair_repository_binding, doc("repairRepositoryBinding", "Re-observe a moved or repaired repository projection")),
         )
         .api_route(
             "/v1/metadata/repositories/:id/commit",
@@ -1703,12 +1732,14 @@ use sift_metadata::http::{
     StartRunRequest, UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest,
     UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
     UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
-    VcsCommitRequest, VcsCompareQuery, VcsCreateBranchRequest, VcsDeleteBranchRequest,
-    VcsDiffQuery, VcsDiscardRequest, VcsHistoricalFileQuery, VcsHistoryQuery, VcsHunkRequest,
-    VcsPathsRequest, VcsRemoteRequest, VcsRenameBranchRequest, VcsRestoreHistoricalFileRequest,
-    VcsRevertCommitRequest, VcsRevertHunkRequest, VcsSetUpstreamRequest, VcsSwitchBranchRequest,
-    VcsUncommitRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
-    WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
+    VcsBeginConflictResolutionRequest, VcsCommitRequest, VcsCompareQuery, VcsConflictQuery,
+    VcsCreateBranchRequest, VcsDeleteBranchRequest, VcsDiffQuery, VcsDiscardRequest,
+    VcsHistoricalFileQuery, VcsHistoryQuery, VcsHunkRequest, VcsMarkConflictResolvedRequest,
+    VcsPathsRequest, VcsRemoteRequest, VcsRenameBranchRequest, VcsRepositoryOperationRequest,
+    VcsResolveConflictRequest, VcsRestoreHistoricalFileRequest, VcsRevertCommitRequest,
+    VcsRevertHunkRequest, VcsSetUpstreamRequest, VcsSwitchBranchRequest, VcsUncommitRequest,
+    WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest, WorkspaceCheckpointPageQuery,
+    WorkspaceTreeResponse,
 };
 
 fn metadata_room_kind(kind: sift_api_types::RoomKind) -> sift_metadata::RoomKind {
@@ -6321,6 +6352,8 @@ fn git_adapter_error(error: crate::git_adapter::GitAdapterError) -> ApiError {
         | GitAdapterError::ExecutableUnavailable
         | GitAdapterError::NotRepository
         | GitAdapterError::InvalidData
+        | GitAdapterError::UnsupportedOperation(_)
+        | GitAdapterError::CorruptState(_)
         | GitAdapterError::OutputLimit
         | GitAdapterError::NetworkDisabled
         | GitAdapterError::CredentialHelperUnavailable => ApiError::BadRequest(error.to_string()),
@@ -6440,6 +6473,46 @@ async fn load_repository_context(
             "Git adapter observation changed; rebind the repository".into(),
         ));
     }
+    let worktree = filesystem
+        .canonical_root_path(&projection.root_handle)
+        .map_err(workspace_adapter_error)?;
+    Ok(RepositoryContext {
+        record,
+        workspace,
+        worktree,
+        adapter,
+    })
+}
+
+async fn load_repository_context_for_repair(
+    state: &AppState,
+    metadata: MetadataStore,
+    actor: PrincipalId,
+    binding_id: RepositoryBindingId,
+) -> ApiResult<RepositoryContext> {
+    let (record, projection, workspace) = metadata_blocking(move || {
+        let record = metadata.repository_binding_for_principal(binding_id, actor, true)?;
+        let projection =
+            metadata.projection_binding_for_principal(record.binding.projection_id, actor, true)?;
+        let workspace =
+            metadata.get_workspace_for_principal(record.binding.workspace_id, actor, true)?;
+        Ok::<_, ApiError>((record, projection, workspace))
+    })
+    .await?;
+    let filesystem = state.rooms.workspace_adapter().ok_or_else(|| {
+        ApiError::BadRequest("workspace filesystem projections are disabled".into())
+    })?;
+    if projection.binding.adapter_generation
+        != crate::workspace_adapter::WorkspaceAdapter::generation(filesystem.as_ref())
+    {
+        return Err(ApiError::BadRequest(
+            "workspace projection adapter changed; rebind the projection first".into(),
+        ));
+    }
+    let adapter = state
+        .rooms
+        .git_adapter()
+        .ok_or_else(|| ApiError::BadRequest("Git integration is disabled".into()))?;
     let worktree = filesystem
         .canonical_root_path(&projection.root_handle)
         .map_err(workspace_adapter_error)?;
@@ -7591,6 +7664,429 @@ async fn revert_repository_commit(
         head,
         branch,
     }))
+}
+
+async fn get_repository_conflict(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<VcsConflictQuery>,
+) -> ApiResult<Json<VcsConflictFile>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context = load_repository_context(&state, metadata, actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::Conflicts,
+    )?;
+    let conflict = context
+        .adapter
+        .conflict_file(&context.worktree, &query.path)
+        .await
+        .map_err(git_adapter_error)?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::Conflicts,
+        context.workspace.id,
+        binding_id,
+    );
+    Ok(Json(conflict))
+}
+
+async fn begin_repository_conflict_resolution(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsBeginConflictResolutionRequest>,
+) -> ApiResult<Json<WorkspaceCheckpoint>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::ResolveConflict,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    context
+        .adapter
+        .conflict_file(&context.worktree, &req.path)
+        .await
+        .map_err(git_adapter_error)?;
+    let checkpoint = capture_before_vcs_checkpoint(
+        &state,
+        metadata,
+        actor,
+        context.workspace.id,
+        context.workspace.revision,
+    )
+    .await?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::ResolveConflict,
+        context.workspace.id,
+        binding_id,
+    );
+    Ok(Json(checkpoint))
+}
+
+async fn resolve_repository_conflict(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsResolveConflictRequest>,
+) -> ApiResult<Json<VcsWorktreeMutationResult>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::ResolveConflict,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    let conflict = context
+        .adapter
+        .conflict_file(&context.worktree, &req.path)
+        .await
+        .map_err(git_adapter_error)?;
+    if conflict.binary {
+        if !req.region_id.is_empty() {
+            return Err(ApiError::Conflict(
+                "binary conflict has no textual region".into(),
+            ));
+        }
+    } else if conflict.regions.len() != 1 || conflict.regions[0].id != req.region_id {
+        return Err(ApiError::Conflict(
+            "conflict changed; refresh and retry".into(),
+        ));
+    }
+    let checkpoint = capture_before_vcs_checkpoint(
+        &state,
+        metadata.clone(),
+        actor,
+        context.workspace.id,
+        context.workspace.revision,
+    )
+    .await?;
+    context
+        .adapter
+        .resolve_conflict(&context.worktree, &conflict, req.resolution)
+        .await
+        .map_err(git_adapter_error)?;
+    let workspace = reconcile_vcs_worktree_path(
+        &state,
+        metadata.clone(),
+        actor,
+        context.record.binding.projection_id,
+        &req.path,
+    )
+    .await?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = observe_repository_after_mutation(
+        metadata,
+        binding_id,
+        actor,
+        req.expected_revision,
+        observation,
+    )
+    .await?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::ResolveConflict,
+        workspace.id,
+        binding_id,
+    );
+    publish_repository_changed(&state, &workspace, binding_id, updated.binding.revision);
+    Ok(Json(VcsWorktreeMutationResult {
+        binding_id,
+        checkpoint_id: checkpoint.id,
+        workspace_revision: workspace.revision,
+        path: req.path,
+    }))
+}
+
+async fn mark_repository_conflict_resolved(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsMarkConflictResolvedRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::ResolveConflict,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    context
+        .adapter
+        .conflict_file(&context.worktree, &req.path)
+        .await
+        .map_err(git_adapter_error)?;
+    context
+        .adapter
+        .mark_conflict_resolved(&context.worktree, &req.path)
+        .await
+        .map_err(git_adapter_error)?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = observe_repository_after_mutation(
+        metadata,
+        binding_id,
+        actor,
+        req.expected_revision,
+        observation,
+    )
+    .await?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::ResolveConflict,
+        context.workspace.id,
+        binding_id,
+    );
+    publish_repository_changed(
+        &state,
+        &context.workspace,
+        binding_id,
+        updated.binding.revision,
+    );
+    Ok(Json(updated.binding))
+}
+
+async fn mutate_repository_operation(
+    state: AppState,
+    headers: HeaderMap,
+    id: i64,
+    req: VcsRepositoryOperationRequest,
+    abort: bool,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    let action = if abort {
+        VcsAction::AbortOperation
+    } else {
+        VcsAction::ContinueOperation
+    };
+    authorize_vcs_operation(&state, &auth, context.workspace.id, binding_id, action)?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    let status = context
+        .adapter
+        .status(
+            &context.worktree,
+            binding_id,
+            req.expected_revision,
+            context.workspace.revision,
+        )
+        .await
+        .map_err(git_adapter_error)?;
+    if status.operation.as_ref().map(|operation| operation.kind) != Some(req.kind) {
+        return Err(ApiError::Conflict(
+            "repository operation changed; refresh and retry".into(),
+        ));
+    }
+    if !abort
+        && status
+            .entries
+            .iter()
+            .any(|entry| entry.stage == sift_protocol::VcsStageState::Conflict)
+    {
+        return Err(ApiError::Conflict(
+            "resolve every conflict before continuing".into(),
+        ));
+    }
+    let paths = status
+        .entries
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    if abort {
+        capture_before_vcs_checkpoint(
+            &state,
+            metadata.clone(),
+            actor,
+            context.workspace.id,
+            context.workspace.revision,
+        )
+        .await?;
+    }
+    let observation = if abort {
+        context
+            .adapter
+            .abort_operation(&context.worktree, req.kind)
+            .await
+    } else {
+        context
+            .adapter
+            .continue_operation(&context.worktree, req.kind)
+            .await
+    }
+    .map_err(git_adapter_error)?;
+    let mut workspace = context.workspace.clone();
+    for path in &paths {
+        workspace = reconcile_vcs_worktree_path(
+            &state,
+            metadata.clone(),
+            actor,
+            context.record.binding.projection_id,
+            path,
+        )
+        .await?;
+    }
+    let updated = observe_repository_after_mutation(
+        metadata,
+        binding_id,
+        actor,
+        req.expected_revision,
+        observation,
+    )
+    .await?;
+    push_vcs_operation(&state, actor, action, workspace.id, binding_id);
+    publish_repository_changed(&state, &workspace, binding_id, updated.binding.revision);
+    Ok(Json(updated.binding))
+}
+
+async fn continue_repository_operation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRepositoryOperationRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    mutate_repository_operation(state, headers, id, req, false).await
+}
+
+async fn abort_repository_operation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRepositoryOperationRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    mutate_repository_operation(state, headers, id, req, true).await
+}
+
+async fn repair_repository_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<ExpectedRepositoryRevisionRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context_for_repair(&state, metadata.clone(), actor, binding_id).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::RepairBinding,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let adapter = context.adapter.clone();
+    let projection_id = context.record.binding.projection_id;
+    let updated = metadata_blocking(move || {
+        metadata
+            .repair_repository_binding(
+                binding_id,
+                actor,
+                req.expected_revision,
+                NewRepositoryBinding {
+                    projection_id,
+                    repository_identity: observation.identity,
+                    adapter_generation: adapter.generation().into(),
+                    executable_version: adapter.executable_version().into(),
+                    network_enabled: adapter.network_enabled(),
+                    branch: observation.branch,
+                    head: observation.head,
+                },
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::RepairBinding,
+        context.workspace.id,
+        binding_id,
+    );
+    publish_repository_changed(
+        &state,
+        &context.workspace,
+        binding_id,
+        updated.binding.revision,
+    );
+    Ok(Json(updated.binding))
 }
 
 async fn stage_repository_paths(

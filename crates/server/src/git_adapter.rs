@@ -13,10 +13,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sift_protocol::{
-    VcsBranch, VcsCommitDetail, VcsCommitFile, VcsCommitSummary, VcsConflictKind, VcsDiff,
-    VcsDiffFile, VcsDiffHunk, VcsDiffLine, VcsDiffLineKind, VcsDiffSide, VcsFileState,
-    VcsHistoricalFile, VcsHistoryPage, VcsStageState, VcsStatus, VcsStatusEntry, VcsUpstreamStatus,
-    WorkspacePath, WorkspaceRevision,
+    VcsBranch, VcsCommitDetail, VcsCommitFile, VcsCommitSummary, VcsConflictFile, VcsConflictKind,
+    VcsConflictRegion, VcsConflictResolution, VcsDiff, VcsDiffFile, VcsDiffHunk, VcsDiffLine,
+    VcsDiffLineKind, VcsDiffSide, VcsFileState, VcsHistoricalFile, VcsHistoryPage,
+    VcsRepositoryOperationKind, VcsRepositoryOperationState, VcsStageState, VcsStatus,
+    VcsStatusEntry, VcsUpstreamStatus, WorkspacePath, WorkspaceRevision,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
@@ -43,6 +44,10 @@ pub enum GitAdapterError {
     NotRepository,
     #[error("Git input or output is invalid")]
     InvalidData,
+    #[error("unsupported Git operation: {0}")]
+    UnsupportedOperation(&'static str),
+    #[error("corrupt Git operation state: {0}")]
+    CorruptState(&'static str),
     #[error("Git output exceeds the configured ceiling")]
     OutputLimit,
     #[error("Git operation timed out")]
@@ -125,6 +130,27 @@ pub trait VcsRepository: Send + Sync {
         old: Option<&str>,
         new: Option<&str>,
     ) -> Result<Vec<WorkspacePath>>;
+    async fn operation_state(&self, worktree: &Path)
+        -> Result<Option<VcsRepositoryOperationState>>;
+    async fn conflict_file(&self, worktree: &Path, path: &WorkspacePath)
+        -> Result<VcsConflictFile>;
+    async fn resolve_conflict(
+        &self,
+        worktree: &Path,
+        conflict: &VcsConflictFile,
+        resolution: VcsConflictResolution,
+    ) -> Result<()>;
+    async fn mark_conflict_resolved(&self, worktree: &Path, path: &WorkspacePath) -> Result<()>;
+    async fn continue_operation(
+        &self,
+        worktree: &Path,
+        kind: VcsRepositoryOperationKind,
+    ) -> Result<GitRepositoryObservation>;
+    async fn abort_operation(
+        &self,
+        worktree: &Path,
+        kind: VcsRepositoryOperationKind,
+    ) -> Result<GitRepositoryObservation>;
     async fn rename_branch(&self, worktree: &Path, old: &str, new: &str) -> Result<()>;
     async fn delete_branch(&self, worktree: &Path, name: &str, force: bool) -> Result<()>;
     async fn set_upstream(
@@ -288,6 +314,113 @@ impl GitAdapter {
             branch,
             head,
         })
+    }
+
+    async fn git_path(&self, worktree: &Path, name: &str) -> Result<PathBuf> {
+        let output = self
+            .run(worktree, ["rev-parse", "--git-path", name], false, &[])
+            .await?;
+        let value = String::from_utf8(output.stdout).map_err(|_| GitAdapterError::InvalidData)?;
+        let path = PathBuf::from(value.trim());
+        Ok(if path.is_absolute() {
+            path
+        } else {
+            worktree.join(path)
+        })
+    }
+
+    async fn git_path_exists(&self, worktree: &Path, name: &str) -> Result<bool> {
+        Ok(self.git_path(worktree, name).await?.exists())
+    }
+
+    async fn git_state_text(&self, worktree: &Path, name: &str) -> Result<Option<String>> {
+        let path = self.git_path(worktree, name).await?;
+        match tokio::fs::read_to_string(path).await {
+            Ok(value) => Ok(Some(value.trim().to_owned())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(GitAdapterError::Io(error)),
+        }
+    }
+
+    async fn conflict_stage_text(
+        &self,
+        worktree: &Path,
+        stage: u8,
+        path: &WorkspacePath,
+    ) -> Result<Option<Vec<u8>>> {
+        let spec = format!(":{stage}:{}", path.0);
+        match self
+            .run_truncated(worktree, ["show", spec.as_str()], false, &[])
+            .await
+        {
+            Ok(output) if output.truncated => Err(GitAdapterError::OutputLimit),
+            Ok(output) => Ok(Some(output.stdout)),
+            Err(GitAdapterError::CommandFailed(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn write_resolved_blob(
+        &self,
+        worktree: &Path,
+        path: &WorkspacePath,
+        content: Option<&[u8]>,
+    ) -> Result<()> {
+        let Some(content) = content else {
+            self.run(worktree, ["rm", "--", path.0.as_str()], false, &[])
+                .await?;
+            return Ok(());
+        };
+        let output = self
+            .run_with_input(worktree, ["hash-object", "-w", "--stdin"], content)
+            .await?;
+        let oid = String::from_utf8(output.stdout)
+            .map_err(|_| GitAdapterError::InvalidData)?
+            .trim()
+            .to_owned();
+        validate_oid(&oid)?;
+        self.run(
+            worktree,
+            [
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "100644",
+                oid.as_str(),
+                path.0.as_str(),
+            ],
+            false,
+            &[],
+        )
+        .await?;
+        self.run(
+            worktree,
+            ["checkout-index", "-f", "--", path.0.as_str()],
+            false,
+            &[],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn head_identity(&self, worktree: &Path) -> Result<Vec<(OsString, OsString)>> {
+        let output = self
+            .run(worktree, ["log", "-1", "--format=%an%x00%ae"], false, &[])
+            .await?;
+        let text = std::str::from_utf8(&output.stdout).map_err(|_| GitAdapterError::InvalidData)?;
+        let (name, email) = text
+            .trim_end()
+            .split_once('\0')
+            .ok_or(GitAdapterError::InvalidData)?;
+        if name.is_empty() || email.is_empty() {
+            return Err(GitAdapterError::InvalidData);
+        }
+        Ok(vec![
+            (OsString::from("GIT_AUTHOR_NAME"), OsString::from(name)),
+            (OsString::from("GIT_AUTHOR_EMAIL"), OsString::from(email)),
+            (OsString::from("GIT_COMMITTER_NAME"), OsString::from(name)),
+            (OsString::from("GIT_COMMITTER_EMAIL"), OsString::from(email)),
+        ])
     }
 
     async fn run<I, S>(
@@ -524,12 +657,14 @@ impl VcsRepository for GitAdapter {
                 &[],
             )
             .await?;
-        parse_status(
+        let mut status = parse_status(
             binding_id,
             binding_revision,
             workspace_revision,
             &output.stdout,
-        )
+        )?;
+        status.operation = self.operation_state(worktree).await?;
+        Ok(status)
     }
 
     async fn diff(
@@ -731,6 +866,256 @@ impl VcsRepository for GitAdapter {
         paths.sort_by(|left, right| left.0.cmp(&right.0));
         paths.dedup();
         Ok(paths)
+    }
+
+    async fn operation_state(
+        &self,
+        worktree: &Path,
+    ) -> Result<Option<VcsRepositoryOperationState>> {
+        let rebase_directory = if self.git_path_exists(worktree, "rebase-merge").await? {
+            Some("rebase-merge")
+        } else if self.git_path_exists(worktree, "rebase-apply").await? {
+            Some("rebase-apply")
+        } else {
+            None
+        };
+        if let Some(directory) = rebase_directory {
+            let field = |name: &str| format!("{directory}/{name}");
+            let step = self
+                .git_state_text(worktree, &field("msgnum"))
+                .await?
+                .map(|value| value.parse())
+                .transpose()
+                .map_err(|_| GitAdapterError::CorruptState("invalid rebase step"))?;
+            let total_steps = self
+                .git_state_text(worktree, &field("end"))
+                .await?
+                .map(|value| value.parse())
+                .transpose()
+                .map_err(|_| GitAdapterError::CorruptState("invalid rebase step count"))?;
+            let current_commit = self.git_state_text(worktree, &field("stopped-sha")).await?;
+            if current_commit.as_ref().is_some_and(|value| !is_oid(value)) {
+                return Err(GitAdapterError::CorruptState(
+                    "invalid rebase stopped commit",
+                ));
+            }
+            return Ok(Some(VcsRepositoryOperationState {
+                kind: VcsRepositoryOperationKind::Rebase,
+                current_commit,
+                step,
+                total_steps,
+            }));
+        }
+        for (reference, kind) in [
+            ("MERGE_HEAD", VcsRepositoryOperationKind::Merge),
+            ("CHERRY_PICK_HEAD", VcsRepositoryOperationKind::CherryPick),
+            ("REVERT_HEAD", VcsRepositoryOperationKind::Revert),
+        ] {
+            match self
+                .run(
+                    worktree,
+                    ["rev-parse", "--verify", "-q", reference],
+                    false,
+                    &[],
+                )
+                .await
+            {
+                Ok(output) => {
+                    let oid = String::from_utf8(output.stdout)
+                        .map_err(|_| GitAdapterError::InvalidData)?
+                        .trim()
+                        .to_owned();
+                    if !is_oid(&oid) {
+                        return Err(GitAdapterError::CorruptState(
+                            "operation head is not a valid object id",
+                        ));
+                    }
+                    return Ok(Some(VcsRepositoryOperationState {
+                        kind,
+                        current_commit: Some(oid),
+                        step: None,
+                        total_steps: None,
+                    }));
+                }
+                Err(GitAdapterError::CommandFailed(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
+    }
+
+    async fn conflict_file(
+        &self,
+        worktree: &Path,
+        path: &WorkspacePath,
+    ) -> Result<VcsConflictFile> {
+        validate_paths(std::slice::from_ref(path))?;
+        let status = self
+            .status(
+                worktree,
+                sift_protocol::RepositoryBindingId(1),
+                1,
+                WorkspaceRevision(1),
+            )
+            .await?;
+        let entry = status
+            .entries
+            .into_iter()
+            .find(|entry| entry.path == *path && entry.stage == VcsStageState::Conflict)
+            .ok_or(GitAdapterError::CorruptState(
+                "selected file is no longer conflicted",
+            ))?;
+        let base = self.conflict_stage_text(worktree, 1, path).await?;
+        let ours = self.conflict_stage_text(worktree, 2, path).await?;
+        let theirs = self.conflict_stage_text(worktree, 3, path).await?;
+        let binary = [base.as_ref(), ours.as_ref(), theirs.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|bytes| std::str::from_utf8(bytes).is_err());
+        let regions = if binary {
+            Vec::new()
+        } else {
+            let mut digest = Sha256::new();
+            for bytes in [base.as_ref(), ours.as_ref(), theirs.as_ref()] {
+                if let Some(bytes) = bytes {
+                    digest.update(bytes);
+                }
+                digest.update([0]);
+            }
+            vec![VcsConflictRegion {
+                id: format!("{:x}", digest.finalize()),
+                base: base.map(|bytes| String::from_utf8(bytes).expect("validated UTF-8")),
+                ours: ours.map(|bytes| String::from_utf8(bytes).expect("validated UTF-8")),
+                theirs: theirs.map(|bytes| String::from_utf8(bytes).expect("validated UTF-8")),
+            }]
+        };
+        Ok(VcsConflictFile {
+            path: path.clone(),
+            kind: entry.conflict.unwrap_or(VcsConflictKind::Unknown),
+            binary,
+            regions,
+            truncated: false,
+        })
+    }
+
+    async fn resolve_conflict(
+        &self,
+        worktree: &Path,
+        conflict: &VcsConflictFile,
+        resolution: VcsConflictResolution,
+    ) -> Result<()> {
+        validate_paths(std::slice::from_ref(&conflict.path))?;
+        if conflict.binary && resolution == VcsConflictResolution::Both {
+            return Err(GitAdapterError::UnsupportedOperation(
+                "binary conflicts cannot combine both sides",
+            ));
+        }
+        if conflict.binary {
+            let side = match resolution {
+                VcsConflictResolution::Ours => "--ours",
+                VcsConflictResolution::Theirs => "--theirs",
+                VcsConflictResolution::Both => unreachable!(),
+            };
+            self.run(
+                worktree,
+                ["checkout", side, "--", conflict.path.0.as_str()],
+                false,
+                &[],
+            )
+            .await?;
+            return self
+                .stage(worktree, std::slice::from_ref(&conflict.path))
+                .await;
+        }
+        let region = conflict.regions.first();
+        let content = match resolution {
+            VcsConflictResolution::Ours => region.and_then(|region| region.ours.as_deref()),
+            VcsConflictResolution::Theirs => region.and_then(|region| region.theirs.as_deref()),
+            VcsConflictResolution::Both => {
+                let region = region.ok_or(GitAdapterError::InvalidData)?;
+                let mut both = region.ours.clone().unwrap_or_default();
+                if !both.ends_with('\n') && !both.is_empty() {
+                    both.push('\n');
+                }
+                both.push_str(region.theirs.as_deref().unwrap_or_default());
+                return self
+                    .write_resolved_blob(worktree, &conflict.path, Some(both.as_bytes()))
+                    .await;
+            }
+        };
+        self.write_resolved_blob(worktree, &conflict.path, content.map(str::as_bytes))
+            .await
+    }
+
+    async fn mark_conflict_resolved(&self, worktree: &Path, path: &WorkspacePath) -> Result<()> {
+        self.stage(worktree, std::slice::from_ref(path)).await
+    }
+
+    async fn continue_operation(
+        &self,
+        worktree: &Path,
+        kind: VcsRepositoryOperationKind,
+    ) -> Result<GitRepositoryObservation> {
+        let current =
+            self.operation_state(worktree)
+                .await?
+                .ok_or(GitAdapterError::CorruptState(
+                    "no repository operation is active",
+                ))?;
+        if current.kind != kind {
+            return Err(GitAdapterError::InvalidData);
+        }
+        let environment = self.head_identity(worktree).await?;
+        match kind {
+            VcsRepositoryOperationKind::Merge => {
+                self.run(
+                    worktree,
+                    ["commit", "--no-edit", "--no-verify"],
+                    false,
+                    &environment,
+                )
+                .await?;
+            }
+            VcsRepositoryOperationKind::CherryPick => {
+                self.run(worktree, ["cherry-pick", "--continue"], false, &environment)
+                    .await?;
+            }
+            VcsRepositoryOperationKind::Revert => {
+                self.run(worktree, ["revert", "--continue"], false, &environment)
+                    .await?;
+            }
+            VcsRepositoryOperationKind::Rebase => {
+                return Err(GitAdapterError::UnsupportedOperation(
+                    "rebase continuation requires an editor; abort in Sift or finish with Git outside Sift",
+                ));
+            }
+        }
+        self.observation(worktree).await
+    }
+
+    async fn abort_operation(
+        &self,
+        worktree: &Path,
+        kind: VcsRepositoryOperationKind,
+    ) -> Result<GitRepositoryObservation> {
+        let current =
+            self.operation_state(worktree)
+                .await?
+                .ok_or(GitAdapterError::CorruptState(
+                    "no repository operation is active",
+                ))?;
+        if current.kind != kind {
+            return Err(GitAdapterError::InvalidData);
+        }
+        let subcommand = match kind {
+            VcsRepositoryOperationKind::Merge => "merge",
+            VcsRepositoryOperationKind::Rebase => "rebase",
+            VcsRepositoryOperationKind::CherryPick => "cherry-pick",
+            VcsRepositoryOperationKind::Revert => "revert",
+        };
+        self.run(worktree, [subcommand, "--abort"], false, &[])
+            .await?;
+        self.observation(worktree).await
     }
 
     async fn rename_branch(&self, worktree: &Path, old: &str, new: &str) -> Result<()> {
@@ -1341,6 +1726,7 @@ fn parse_status(
                 behind,
             }
         }),
+        operation: None,
         entries,
         truncated: false,
         observed_at: chrono::Utc::now(),
@@ -2227,6 +2613,193 @@ mod tests {
             .unwrap();
         assert!(observation.branch.is_none());
         assert_eq!(observation.head.as_deref(), Some(initial.as_str()));
+    }
+
+    #[tokio::test]
+    async fn conflict_regions_come_from_index_stages_and_operation_recovers() {
+        let adapter = GitAdapter::for_tests().await.unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        adapter.initialize(repository.path()).await.unwrap();
+        let path = WorkspacePath("query.sql".into());
+        std::fs::write(repository.path().join(&path.0), "select 1;\n").unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        adapter
+            .commit(
+                repository.path(),
+                "base",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap();
+        adapter
+            .create_branch(repository.path(), "side", None)
+            .await
+            .unwrap();
+        std::fs::write(repository.path().join(&path.0), "select 10;\n").unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        adapter
+            .commit(
+                repository.path(),
+                "main edit",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap();
+        adapter
+            .switch_branch(repository.path(), "side", false)
+            .await
+            .unwrap();
+        std::fs::write(repository.path().join(&path.0), "select 20;\n").unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        adapter
+            .commit(
+                repository.path(),
+                "side edit",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap();
+        let identity = adapter.head_identity(repository.path()).await.unwrap();
+        assert!(matches!(
+            adapter
+                .run(repository.path(), ["merge", "main"], false, &identity)
+                .await,
+            Err(GitAdapterError::CommandFailed(_))
+        ));
+        let operation = adapter
+            .operation_state(repository.path())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.kind, VcsRepositoryOperationKind::Merge);
+        let conflict = adapter
+            .conflict_file(repository.path(), &path)
+            .await
+            .unwrap();
+        assert_eq!(conflict.regions.len(), 1);
+        assert_eq!(conflict.regions[0].base.as_deref(), Some("select 1;\n"));
+        assert_eq!(conflict.regions[0].ours.as_deref(), Some("select 20;\n"));
+        assert_eq!(conflict.regions[0].theirs.as_deref(), Some("select 10;\n"));
+        adapter
+            .resolve_conflict(repository.path(), &conflict, VcsConflictResolution::Both)
+            .await
+            .unwrap();
+        let status = adapter
+            .status(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                1,
+                WorkspaceRevision(1),
+            )
+            .await
+            .unwrap();
+        assert!(!status
+            .entries
+            .iter()
+            .any(|entry| entry.stage == VcsStageState::Conflict));
+        adapter
+            .continue_operation(repository.path(), VcsRepositoryOperationKind::Merge)
+            .await
+            .unwrap();
+        assert!(adapter
+            .operation_state(repository.path())
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join(&path.0)).unwrap(),
+            "select 20;\nselect 10;\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_merge_recovers_the_pre_operation_worktree() {
+        let adapter = GitAdapter::for_tests().await.unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        adapter.initialize(repository.path()).await.unwrap();
+        let path = WorkspacePath("query.sql".into());
+        std::fs::write(repository.path().join(&path.0), "base\n").unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        adapter
+            .commit(
+                repository.path(),
+                "base",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap();
+        adapter
+            .create_branch(repository.path(), "side", None)
+            .await
+            .unwrap();
+        std::fs::write(repository.path().join(&path.0), "main\n").unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        adapter
+            .commit(
+                repository.path(),
+                "main",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap();
+        adapter
+            .switch_branch(repository.path(), "side", false)
+            .await
+            .unwrap();
+        std::fs::write(repository.path().join(&path.0), "side\n").unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        adapter
+            .commit(
+                repository.path(),
+                "side",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap();
+        let identity = adapter.head_identity(repository.path()).await.unwrap();
+        assert!(adapter
+            .run(repository.path(), ["merge", "main"], false, &identity)
+            .await
+            .is_err());
+
+        let observation = adapter
+            .abort_operation(repository.path(), VcsRepositoryOperationKind::Merge)
+            .await
+            .unwrap();
+        assert_eq!(observation.branch.as_deref(), Some("side"));
+        assert!(adapter
+            .operation_state(repository.path())
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join(&path.0)).unwrap(),
+            "side\n"
+        );
     }
 
     #[tokio::test]

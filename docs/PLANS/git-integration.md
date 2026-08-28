@@ -267,19 +267,19 @@ ways:
 
 ## Milestone G6 — Conflicts and recovery
 
-- [ ] Model merge/rebase/cherry-pick/revert operation state explicitly.
-- [ ] List conflicted files before ordinary changes.
-- [ ] Add conflict indicator and next/previous conflict navigation.
-- [ ] Parse conflict regions without trusting marker-shaped user text blindly.
-- [ ] Highlight ours, theirs, and common/base regions.
-- [ ] Add use-ours, use-theirs, use-both, and manual-edit controls beside text.
-- [ ] Mark file resolved only after all regions are resolved and saved.
-- [ ] Continue or abort supported repository operation explicitly.
-- [ ] Create checkpoint before conflict resolution begins.
-- [ ] Recover operation state after server/client restart.
-- [ ] Keep repository usable when one client disconnects mid-operation.
-- [ ] Explain unsupported or corrupt repository states without refresh loops.
-- [ ] Add repair/rebind workflow for missing or moved projections.
+- [x] Model merge/rebase/cherry-pick/revert operation state explicitly.
+- [x] List conflicted files before ordinary changes.
+- [x] Add conflict indicator and next/previous conflict navigation.
+- [x] Parse conflict regions without trusting marker-shaped user text blindly.
+- [x] Highlight ours, theirs, and common/base regions.
+- [x] Add use-ours, use-theirs, use-both, and manual-edit controls beside text.
+- [x] Mark file resolved only after all regions are resolved and saved.
+- [x] Continue or abort supported repository operation explicitly.
+- [x] Create checkpoint before conflict resolution begins.
+- [x] Recover operation state after server/client restart.
+- [x] Keep repository usable when one client disconnects mid-operation.
+- [x] Explain unsupported or corrupt repository states without refresh loops.
+- [x] Add repair/rebind workflow for missing or moved projections.
 
 ## Milestone G7 — Remotes and credentials
 

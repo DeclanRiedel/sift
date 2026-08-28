@@ -93,6 +93,11 @@ pub enum VcsAction {
     RenameBranch,
     DeleteBranch,
     SetUpstream,
+    Conflicts,
+    ResolveConflict,
+    ContinueOperation,
+    AbortOperation,
+    RepairBinding,
     Stage,
     Unstage,
     Commit,
@@ -727,9 +732,11 @@ impl Operation {
                 | WorkspaceAction::BatchMutate => OperationKind::ManageWorkspace,
             },
             Self::Vcs { action, .. } => match action {
-                VcsAction::Status | VcsAction::Diff | VcsAction::Branches | VcsAction::History => {
-                    OperationKind::ReadVcs
-                }
+                VcsAction::Status
+                | VcsAction::Diff
+                | VcsAction::Branches
+                | VcsAction::History
+                | VcsAction::Conflicts => OperationKind::ReadVcs,
                 VcsAction::Bind
                 | VcsAction::Unbind
                 | VcsAction::Stage
@@ -744,6 +751,10 @@ impl Operation {
                 | VcsAction::RenameBranch
                 | VcsAction::DeleteBranch
                 | VcsAction::SetUpstream
+                | VcsAction::ResolveConflict
+                | VcsAction::ContinueOperation
+                | VcsAction::AbortOperation
+                | VcsAction::RepairBinding
                 | VcsAction::SetCredential
                 | VcsAction::Fetch
                 | VcsAction::Push => OperationKind::WriteVcs,
@@ -1203,6 +1214,11 @@ single_word_audit_names!(VcsAction {
     RenameBranch => "rename_branch",
     DeleteBranch => "delete_branch",
     SetUpstream => "set_upstream",
+    Conflicts => "conflicts",
+    ResolveConflict => "resolve_conflict",
+    ContinueOperation => "continue_operation",
+    AbortOperation => "abort_operation",
+    RepairBinding => "repair_binding",
     Stage => "stage",
     Unstage => "unstage",
     Commit => "commit",

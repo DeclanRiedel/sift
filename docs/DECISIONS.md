@@ -1665,3 +1665,49 @@ stale clients fail rather than racing it, and history rendering cost is tied to
 the visible page. Sift deliberately does not automate merge or rebase here;
 dirty switching must first go through the visible workspace reconciliation
 workflow.
+
+---
+
+## ADR-047 — Index-Stage Conflict Resolution And Recoverable Git Operations
+
+**Context.** Merge, rebase, cherry-pick, and revert state lives in the shared
+repository, not in one desktop process. Conflict markers are ordinary file
+text and can be missing, edited, or deliberately marker-shaped, so parsing the
+worktree cannot establish the base/ours/theirs versions. A disconnected client
+must not own an operation that Git itself still considers active.
+
+**Decision.** Repository status includes a typed active-operation state derived
+from Git's operation metadata. Rebase state also reports its current commit and
+step when Git records them. Conflicted files are identified from porcelain
+status and their base, ours, and theirs content is read from index stages 1, 2,
+and 3. Conflict-region ids are content-derived preconditions; the server
+reloads the stages and rejects a stale id before mutation. Marker-shaped file
+text is never parsed as conflict authority.
+
+Use-ours, use-theirs, and use-both are typed, revision-guarded operations that
+capture a workspace checkpoint, write or remove the resolved worktree path,
+stage it, reconcile the canonical workspace projection, audit the actor, and
+broadcast the new binding revision. Binary conflicts permit only one side.
+Manual resolution first captures the same checkpoint; the desktop permits
+mark-resolved only after the workspace editor has been opened and is saved.
+Continue is disabled while index conflicts remain. Merge, cherry-pick, and
+revert continuation and every supported abort are explicit operations. Rebase
+continuation remains disabled until Sift has a non-interactive sequence-editor
+contract; the UI explains that limitation and still offers abort.
+
+Operation recovery has no client lease: every status request reconstructs the
+state from Git, so restart or disconnect does not strand it. Unsupported and
+corrupt states return stable actionable errors, and the desktop suspends its
+fallback status requests while such an error is displayed. Repair re-observes
+the configured projection and atomically refreshes repository identity and Git
+adapter metadata under the existing binding id and revision. If an operator
+moves a configured projection, they update the root mapping first and then run
+repair; changing the logical root handle remains the explicit rebind workflow.
+
+**Consequences.** Conflict UI does not confuse user SQL with Git structure,
+stale clients cannot resolve a newer conflict, and repository operations remain
+recoverable without an initiating desktop. Resolution is deliberately
+whole-file while the adapter exposes one stage-derived region; finer semantic
+regions may be added later without changing the trust boundary. Shared
+operation serialization and actor/in-flight collaboration presentation remain
+Milestone G8 work.

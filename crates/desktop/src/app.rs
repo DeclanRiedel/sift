@@ -1153,25 +1153,34 @@ async fn run_query_executor(
                 request_id,
             } => {
                 let server = targets.borrow().clone();
-                let result = match server.client().await {
+                let (binding, result) = match server.client().await {
                     Ok(client) => match client
                         .workspace_repository(sift_protocol::WorkspaceId(workspace_id))
                         .await
                     {
-                        Ok(Some(binding)) => client
-                            .repository_status(binding.id)
-                            .await
-                            .map(Some)
-                            .map_err(|error| format!("loading repository status failed: {error}")),
-                        Ok(None) => Ok(None),
-                        Err(error) => Err(format!("loading repository binding failed: {error}")),
+                        Ok(Some(binding)) => {
+                            let result = client
+                                .repository_status(binding.id)
+                                .await
+                                .map(Some)
+                                .map_err(|error| {
+                                    format!("loading repository status failed: {error}")
+                                });
+                            (Some(binding), result)
+                        }
+                        Ok(None) => (None, Ok(None)),
+                        Err(error) => (
+                            None,
+                            Err(format!("loading repository binding failed: {error}")),
+                        ),
                     },
-                    Err(error) => Err(error),
+                    Err(error) => (None, Err(error)),
                 };
                 if events
                     .send(ExecutorEvent::RepositoryStatusLoaded {
                         workspace_id,
                         request_id,
+                        binding,
                         result,
                     })
                     .is_err()
@@ -1548,6 +1557,214 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadRepositoryConflict {
+                workspace_id,
+                binding_id,
+                path,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .repository_conflict(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsConflictQuery { path },
+                        )
+                        .await
+                        .map_err(|error| format!("loading conflict failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryConflictLoaded {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ResolveRepositoryConflict {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                path,
+                region_id,
+                resolution,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .resolve_repository_conflict(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsResolveConflictRequest {
+                                expected_revision,
+                                path,
+                                region_id,
+                                resolution,
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("resolving conflict failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryConflictMutationFinished {
+                        workspace_id,
+                        action: "Conflict resolved",
+                        manual_path: None,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::BeginManualRepositoryConflict {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                path,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .begin_repository_conflict_resolution(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsBeginConflictResolutionRequest {
+                                expected_revision,
+                                path: path.clone(),
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("checkpointing conflict failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryConflictMutationFinished {
+                        workspace_id,
+                        action: "Conflict checkpoint created",
+                        manual_path: Some(path),
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::MarkRepositoryConflictResolved {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                path,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .mark_repository_conflict_resolved(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsMarkConflictResolvedRequest {
+                                expected_revision,
+                                path,
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("marking conflict resolved failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryConflictMutationFinished {
+                        workspace_id,
+                        action: "Conflict marked resolved",
+                        manual_path: None,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::MutateRepositoryOperation {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                kind,
+                abort,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let request = sift_api_types::VcsRepositoryOperationRequest {
+                            expected_revision,
+                            kind,
+                        };
+                        if abort {
+                            client
+                                .abort_repository_operation(
+                                    sift_protocol::RepositoryBindingId(binding_id),
+                                    request,
+                                )
+                                .await
+                        } else {
+                            client
+                                .continue_repository_operation(
+                                    sift_protocol::RepositoryBindingId(binding_id),
+                                    request,
+                                )
+                                .await
+                        }
+                        .map(|_| ())
+                        .map_err(|error| format!("updating repository operation failed: {error}"))
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryConflictMutationFinished {
+                        workspace_id,
+                        action: if abort {
+                            "Repository operation aborted"
+                        } else {
+                            "Repository operation continued"
+                        },
+                        manual_path: None,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RepairRepositoryBinding {
+                workspace_id,
+                binding_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .repair_repository_binding(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::ExpectedRepositoryRevisionRequest { expected_revision },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("repairing repository binding failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryConflictMutationFinished {
+                        workspace_id,
+                        action: "Repository binding repaired",
+                        manual_path: None,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadWorkspaceFiles {
                 workspace_id,
                 request_id,
@@ -1807,7 +2024,7 @@ async fn run_query_executor(
                 staged,
             } => {
                 let server = targets.borrow().clone();
-                let result = match server.client().await {
+                let (binding, result) = match server.client().await {
                     Ok(client) => {
                         let binding = sift_protocol::RepositoryBindingId(binding_id);
                         let request = VcsPathsRequest {
@@ -1820,22 +2037,28 @@ async fn run_query_executor(
                             client.unstage_repository_paths(binding, request).await
                         };
                         match changed {
-                            Ok(binding) => client
-                                .repository_status(binding.id)
-                                .await
-                                .map(Some)
-                                .map_err(|error| {
-                                    format!("refreshing repository status failed: {error}")
-                                }),
-                            Err(error) => Err(format!("updating staged paths failed: {error}")),
+                            Ok(binding) => {
+                                let result = client
+                                    .repository_status(binding.id)
+                                    .await
+                                    .map(Some)
+                                    .map_err(|error| {
+                                        format!("refreshing repository status failed: {error}")
+                                    });
+                                (Some(binding), result)
+                            }
+                            Err(error) => {
+                                (None, Err(format!("updating staged paths failed: {error}")))
+                            }
                         }
                     }
-                    Err(error) => Err(error),
+                    Err(error) => (None, Err(error)),
                 };
                 if events
                     .send(ExecutorEvent::RepositoryStatusLoaded {
                         workspace_id,
                         request_id,
+                        binding,
                         result,
                     })
                     .is_err()

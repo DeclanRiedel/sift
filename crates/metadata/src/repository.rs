@@ -137,6 +137,46 @@ impl MetadataStore {
         Ok(updated)
     }
 
+    pub fn repair_repository_binding(
+        &self,
+        id: RepositoryBindingId,
+        actor: PrincipalId,
+        expected_revision: u64,
+        input: NewRepositoryBinding,
+    ) -> Result<RepositoryBindingRecord> {
+        validate_new_binding(&input)?;
+        let now = now_text();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = repository_binding_by_id_locked(&tx, id)?;
+        let workspace = workspace_by_id_locked(&tx, current.binding.workspace_id)?;
+        ensure_room_owner(&tx, workspace.room_id, actor)?;
+        ensure_revision(&current.binding, expected_revision)?;
+        if current.binding.projection_id != input.projection_id {
+            return Err(MetadataError::InvalidRepositoryBinding);
+        }
+        tx.execute(
+            "UPDATE repository_binding
+             SET repository_identity = ?1, adapter_generation = ?2,
+                 executable_version = ?3, network_enabled = ?4, branch = ?5,
+                 head = ?6, revision = revision + 1, updated_at = ?7
+             WHERE id = ?8",
+            params![
+                input.repository_identity,
+                input.adapter_generation,
+                input.executable_version,
+                input.network_enabled,
+                input.branch,
+                input.head,
+                now,
+                id.0,
+            ],
+        )?;
+        let updated = repository_binding_by_id_locked(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
     pub fn record_repository_commit(
         &self,
         id: RepositoryBindingId,
@@ -411,6 +451,80 @@ mod tests {
         assert!(!debug.contains("alice-secret"));
         assert!(!debug.contains("password-secret"));
         assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn repository_repair_refreshes_adapter_observation_in_place() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("repository-test").unwrap();
+        let actor = PrincipalId(1);
+        let room = store
+            .create_room(
+                TenantId(1),
+                actor,
+                NewRoom {
+                    name: "room".into(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let workspace = store.create_workspace(room.id, actor, "database").unwrap();
+        let projection = store
+            .create_projection_binding(
+                workspace.id,
+                actor,
+                NewProjectionBinding {
+                    root_handle: "checkout".into(),
+                    mode: ProjectionMode::ReadWrite,
+                    adapter_generation: "filesystem-v1".into(),
+                    health: ProjectionHealth::Ready,
+                },
+            )
+            .unwrap();
+        let binding = store
+            .create_repository_binding(
+                workspace.id,
+                actor,
+                NewRepositoryBinding {
+                    projection_id: projection.binding.id,
+                    repository_identity: "a".repeat(64),
+                    adapter_generation: "git-v1".into(),
+                    executable_version: "git version old".into(),
+                    network_enabled: false,
+                    branch: Some("main".into()),
+                    head: None,
+                },
+            )
+            .unwrap();
+
+        let repaired = store
+            .repair_repository_binding(
+                binding.binding.id,
+                actor,
+                binding.binding.revision,
+                NewRepositoryBinding {
+                    projection_id: projection.binding.id,
+                    repository_identity: "b".repeat(64),
+                    adapter_generation: "git-v2".into(),
+                    executable_version: "git version new".into(),
+                    network_enabled: true,
+                    branch: Some("recovered".into()),
+                    head: Some("c".repeat(40)),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(repaired.binding.id, binding.binding.id);
+        assert_eq!(repaired.binding.revision, binding.binding.revision + 1);
+        assert_eq!(repaired.binding.repository_identity, "b".repeat(64));
+        assert_eq!(repaired.binding.adapter_generation, "git-v2");
+        assert_eq!(repaired.binding.executable_version, "git version new");
+        assert!(repaired.binding.network_enabled);
+        assert_eq!(repaired.binding.branch.as_deref(), Some("recovered"));
+        assert_eq!(
+            repaired.binding.head.as_deref(),
+            Some("c".repeat(40).as_str())
+        );
     }
 
     #[tokio::test]

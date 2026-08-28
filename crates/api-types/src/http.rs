@@ -355,6 +355,37 @@ pub struct VcsRevertCommitRequest {
     pub commit: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsConflictQuery {
+    pub path: WorkspacePath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsBeginConflictResolutionRequest {
+    pub expected_revision: u64,
+    pub path: WorkspacePath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsResolveConflictRequest {
+    pub expected_revision: u64,
+    pub path: WorkspacePath,
+    pub region_id: String,
+    pub resolution: sift_protocol::VcsConflictResolution,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsMarkConflictResolvedRequest {
+    pub expected_revision: u64,
+    pub path: WorkspacePath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRepositoryOperationRequest {
+    pub expected_revision: u64,
+    pub kind: sift_protocol::VcsRepositoryOperationKind,
+}
+
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SetVcsCredentialRequest {
     pub expected_revision: u64,

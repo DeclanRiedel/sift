@@ -257,6 +257,13 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "updateTransferRecipe",
     "validateRunConfiguration",
     "validateTransferRecipe",
+    "abortRepositoryOperation",
+    "beginRepositoryConflictResolution",
+    "continueRepositoryOperation",
+    "getRepositoryConflict",
+    "markRepositoryConflictResolved",
+    "repairRepositoryBinding",
+    "resolveRepositoryConflict",
     "whoAmI",
 ];
 
@@ -278,12 +285,13 @@ pub use sift_api_types::{
     UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateInstanceConfigurationRequest,
     UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
     UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
-    VcsCommitRequest, VcsCompareQuery, VcsCreateBranchRequest, VcsDeleteBranchRequest,
-    VcsDiffQuery, VcsDiscardRequest, VcsHistoryQuery, VcsHunkRequest, VcsPathsRequest,
-    VcsRemoteRequest, VcsRenameBranchRequest, VcsRestoreHistoricalFileRequest,
-    VcsRevertCommitRequest, VcsRevertHunkRequest, VcsSetUpstreamRequest, VcsSwitchBranchRequest,
-    VcsUncommitRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
-    WorkspaceTreeResponse,
+    VcsBeginConflictResolutionRequest, VcsCommitRequest, VcsCompareQuery, VcsConflictQuery,
+    VcsCreateBranchRequest, VcsDeleteBranchRequest, VcsDiffQuery, VcsDiscardRequest,
+    VcsHistoryQuery, VcsHunkRequest, VcsMarkConflictResolvedRequest, VcsPathsRequest,
+    VcsRemoteRequest, VcsRenameBranchRequest, VcsRepositoryOperationRequest,
+    VcsResolveConflictRequest, VcsRestoreHistoricalFileRequest, VcsRevertCommitRequest,
+    VcsRevertHunkRequest, VcsSetUpstreamRequest, VcsSwitchBranchRequest, VcsUncommitRequest,
+    WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest, WorkspaceTreeResponse,
 };
 use sift_api_types::{
     ApiTokenId, ApiTokenRow, ConnectionProfile, ConnectionProfileId, Document, DocumentId,
@@ -321,7 +329,7 @@ use sift_protocol::{
     TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
     TransactionState, TransferExecutionResult, TransferRecipe, TransferRecipeId, TxHandleRef, TxId,
     TxMode, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, ValidatedExtensionPackage,
-    Value, VcsBranch, VcsCommitDetail, VcsCommitResult, VcsDiff, VcsDiffSide,
+    Value, VcsBranch, VcsCommitDetail, VcsCommitResult, VcsConflictFile, VcsDiff, VcsDiffSide,
     VcsHeadMutationResult, VcsHistoricalFile, VcsHistoryPage, VcsRemoteResult, VcsStatus,
     VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceArtifactId,
     WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspacePath,
@@ -2799,6 +2807,94 @@ impl Client {
     ) -> Result<VcsHeadMutationResult> {
         self.post(
             &format!("/v1/metadata/repositories/{}/history/revert", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn repository_conflict(
+        &self,
+        binding: RepositoryBindingId,
+        query: VcsConflictQuery,
+    ) -> Result<VcsConflictFile> {
+        self.get(&format!(
+            "/v1/metadata/repositories/{}/conflicts?path={}",
+            binding.0,
+            urlencoding_replace(&query.path.0)
+        ))
+        .await
+    }
+
+    pub async fn begin_repository_conflict_resolution(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsBeginConflictResolutionRequest,
+    ) -> Result<WorkspaceCheckpoint> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/conflicts/begin", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn resolve_repository_conflict(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsResolveConflictRequest,
+    ) -> Result<VcsWorktreeMutationResult> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/conflicts/resolve", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn mark_repository_conflict_resolved(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsMarkConflictResolvedRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!(
+                "/v1/metadata/repositories/{}/conflicts/mark-resolved",
+                binding.0
+            ),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn continue_repository_operation(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRepositoryOperationRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/operation/continue", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn abort_repository_operation(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRepositoryOperationRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/operation/abort", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn repair_repository_binding(
+        &self,
+        binding: RepositoryBindingId,
+        request: ExpectedRepositoryRevisionRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/repair", binding.0),
             &request,
         )
         .await

@@ -1067,6 +1067,7 @@ pub enum Modal {
         name: String,
         force: bool,
     },
+    RepositoryConflict,
     WorkspaceCreateFile,
     WorkspaceCreateFolder,
     WorkspaceMove,
@@ -1800,6 +1801,43 @@ pub enum ExecutorCommand {
         branch: String,
         upstream: Option<String>,
     },
+    LoadRepositoryConflict {
+        workspace_id: i64,
+        binding_id: i64,
+        path: sift_protocol::WorkspacePath,
+    },
+    ResolveRepositoryConflict {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        path: sift_protocol::WorkspacePath,
+        region_id: String,
+        resolution: sift_protocol::VcsConflictResolution,
+    },
+    BeginManualRepositoryConflict {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        path: sift_protocol::WorkspacePath,
+    },
+    MarkRepositoryConflictResolved {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        path: sift_protocol::WorkspacePath,
+    },
+    MutateRepositoryOperation {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        kind: sift_protocol::VcsRepositoryOperationKind,
+        abort: bool,
+    },
+    RepairRepositoryBinding {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+    },
     LoadWorkspaceFiles {
         workspace_id: i64,
         request_id: u64,
@@ -2100,6 +2138,7 @@ pub enum ExecutorEvent {
     RepositoryStatusLoaded {
         workspace_id: i64,
         request_id: u64,
+        binding: Option<sift_protocol::RepositoryBinding>,
         result: Result<Option<sift_protocol::VcsStatus>, String>,
     },
     RepositoryBranchesLoaded {
@@ -2122,6 +2161,16 @@ pub enum ExecutorEvent {
     RepositoryComparisonLoaded {
         workspace_id: i64,
         result: Result<sift_protocol::VcsDiff, String>,
+    },
+    RepositoryConflictLoaded {
+        workspace_id: i64,
+        result: Result<sift_protocol::VcsConflictFile, String>,
+    },
+    RepositoryConflictMutationFinished {
+        workspace_id: i64,
+        action: &'static str,
+        manual_path: Option<sift_protocol::WorkspacePath>,
+        result: Result<(), String>,
     },
     RepositoryHistoryMutationFinished {
         workspace_id: i64,
@@ -4925,6 +4974,8 @@ pub struct WorkspaceShell {
     connection_nav_g_pending: bool,
     connection_row_menu: Option<i64>,
     repository_row_menu: Option<sift_protocol::WorkspacePath>,
+    manual_conflict_path: Option<sift_protocol::WorkspacePath>,
+    manual_conflict_opened: bool,
     repository_diff_prefix: Option<isize>,
     repository_hunk_move_next: bool,
     app_bar_expanded: bool,
@@ -5467,6 +5518,8 @@ impl WorkspaceShell {
             connection_nav_g_pending: false,
             connection_row_menu: None,
             repository_row_menu: None,
+            manual_conflict_path: None,
+            manual_conflict_opened: false,
             repository_diff_prefix: None,
             repository_hunk_move_next: false,
             app_bar_expanded: false,
@@ -7419,8 +7472,10 @@ impl WorkspaceShell {
             ExecutorEvent::RepositoryStatusLoaded {
                 workspace_id,
                 request_id,
+                binding,
                 result,
             } => {
+                self.repository.set_observed_binding(binding);
                 if self
                     .repository
                     .apply_status_result(workspace_id, request_id, result)
@@ -7487,6 +7542,44 @@ impl WorkspaceShell {
                     self.repository.set_comparison(result);
                     if loaded {
                         self.modal = Some(Modal::RepositoryComparison);
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryConflictLoaded {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    let loaded = result.is_ok();
+                    self.repository.set_conflict(result);
+                    if loaded {
+                        self.manual_conflict_path = None;
+                        self.manual_conflict_opened = false;
+                        self.modal = Some(Modal::RepositoryConflict);
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryConflictMutationFinished {
+                workspace_id,
+                action,
+                manual_path,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    match result {
+                        Ok(()) => {
+                            self.manual_conflict_path = manual_path;
+                            self.manual_conflict_opened = false;
+                            self.show_success_toast(action.into(), cx);
+                            if self.manual_conflict_path.is_none() {
+                                self.modal = None;
+                            }
+                            self.request_workspace_files(cx);
+                            self.request_repository_status(cx);
+                        }
+                        Err(message) => self.repository.set_error(message),
                     }
                     cx.notify();
                 }
@@ -12483,10 +12576,70 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         self.repository.select_path(path);
+        if self
+            .repository
+            .selected_entry()
+            .is_some_and(|entry| entry.stage == sift_protocol::VcsStageState::Conflict)
+        {
+            self.request_selected_repository_conflict(cx);
+            return;
+        }
         match self.settings.repository.primary_action {
             RepositoryPrimaryAction::OpenFile => self.open_selected_repository_file(window, cx),
             RepositoryPrimaryAction::OpenDiff => self.request_selected_repository_diff(cx),
         }
+    }
+
+    fn request_selected_repository_conflict(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.repository.selected_path().cloned() else {
+            self.repository.set_error("Select a conflicted file");
+            cx.notify();
+            return;
+        };
+        let Some(status) = self.repository.status() else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.repository
+                .set_error("Conflict resolution is unavailable");
+            cx.notify();
+            return;
+        };
+        let _ = sender.send(ExecutorCommand::LoadRepositoryConflict {
+            workspace_id,
+            binding_id: status.binding_id.0,
+            path,
+        });
+        cx.notify();
+    }
+
+    fn navigate_repository_conflict(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(path) = self.repository.move_conflict_selection(delta) {
+            if let Some(index) = self.repository.selected_row_index() {
+                self.repository_scroll_handle
+                    .scroll_to_item(index, ScrollStrategy::Nearest);
+            }
+            self.repository.select_path(path);
+            self.request_selected_repository_conflict(cx);
+        }
+    }
+
+    fn repository_conflict_editor_dirty(
+        &self,
+        path: &sift_protocol::WorkspacePath,
+        cx: &App,
+    ) -> bool {
+        let file_name = path.0.rsplit('/').next().unwrap_or(&path.0);
+        self.panes.iter().any(|pane| {
+            pane.read(cx).items.iter().any(|item| {
+                item.dirty
+                    && matches!(item.source, Some(ItemSource::RoomDocument(_)))
+                    && (item.title == path.0 || item.title == file_name)
+            })
+        })
     }
 
     fn open_selected_repository_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -13178,7 +13331,9 @@ impl WorkspaceShell {
                 .update(cx, |shell, cx| {
                     let open = shell.left_dock.presentation.open
                         && shell.active_left_panel == LeftPanel::Git;
-                    if open {
+                    // A rejected/corrupt binding requires explicit repair or refresh. Do not
+                    // hammer the same endpoint every five seconds while the error is visible.
+                    if open && shell.repository.error().is_none() {
                         shell.request_workspace_files(cx);
                         shell.request_repository_status(cx);
                     }
@@ -20672,7 +20827,11 @@ impl WorkspaceShell {
                     }))
                     .child(div().pl(px(depth as f32 * 12.)).child(icon(
                         state_icon,
-                        colors.muted_text,
+                        if conflicted {
+                            colors.warning
+                        } else {
+                            colors.muted_text
+                        },
                         11.,
                     )))
                     .child(div().flex_1().min_w_0().truncate().child(entry.path.0))
@@ -20691,16 +20850,32 @@ impl WorkspaceShell {
                     .child(
                         IconButton::new(
                             ("open-repository-diff", index),
-                            IconName::View,
-                            "Open file diff",
+                            if conflicted {
+                                IconName::Warning
+                            } else {
+                                IconName::View
+                            },
+                            if conflicted {
+                                "Resolve conflict"
+                            } else {
+                                "Open file diff"
+                            },
                         )
                         .square(px(22.))
                         .icon_size(11.)
-                        .tooltip("Open file diff")
+                        .tooltip(if conflicted {
+                            "Resolve conflict"
+                        } else {
+                            "Open file diff"
+                        })
                         .disabled(self.repository.diff_loading())
                         .on_click(cx.listener(move |shell, _, _, cx| {
                             shell.repository.select_path(diff_path.clone());
-                            shell.request_selected_repository_diff(cx)
+                            if conflicted {
+                                shell.request_selected_repository_conflict(cx)
+                            } else {
+                                shell.request_selected_repository_diff(cx)
+                            }
                         })),
                     )
                     .child(
@@ -21184,6 +21359,11 @@ impl WorkspaceShell {
                             && !self.repository.loading()
                             && !self.repository_commit_input.read(cx).text().trim().is_empty()
                     });
+                    let active_repository_operation = self
+                        .repository
+                        .status()
+                        .and_then(|status| status.operation.clone());
+                    let repository_conflict_count = self.repository.conflict_count();
                     dock_view
                         .child(
                             div()
@@ -21517,12 +21697,151 @@ impl WorkspaceShell {
                                 .border_color(colors.subtle_border)
                                 .child(SectionLabel::new(format!("CHANGES ({row_count})"))),
                         )
+                        .children(active_repository_operation.map(|operation| {
+                            let continue_operation = operation.clone();
+                            let abort_operation = operation.clone();
+                            let continue_disabled = repository_conflict_count > 0
+                                || operation.kind
+                                    == sift_protocol::VcsRepositoryOperationKind::Rebase;
+                            let label = match operation.kind {
+                                sift_protocol::VcsRepositoryOperationKind::Merge => "Merge",
+                                sift_protocol::VcsRepositoryOperationKind::Rebase => "Rebase",
+                                sift_protocol::VcsRepositoryOperationKind::CherryPick => {
+                                    "Cherry-pick"
+                                }
+                                sift_protocol::VcsRepositoryOperationKind::Revert => "Revert",
+                            };
+                            div()
+                                .mx_2()
+                                .mb_2()
+                                .p_2()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.warning)
+                                .bg(colors.surface)
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(format!("{label} in progress"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.warning)
+                                                .child(format!(
+                                                    "{repository_conflict_count} conflict(s)"
+                                                )),
+                                        ),
+                                )
+                                .when(repository_conflict_count > 0, |banner| {
+                                    banner.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child("Resolve and save every conflict before continuing."),
+                                    )
+                                })
+                                .when(
+                                    operation.kind
+                                        == sift_protocol::VcsRepositoryOperationKind::Rebase,
+                                    |banner| {
+                                        banner.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child("Rebase continuation is not supported in-app yet; abort here or finish with Git outside Sift."),
+                                        )
+                                    },
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            Button::new("previous-repository-conflict", "Previous")
+                                                .tone(ButtonTone::Ghost)
+                                                .disabled(repository_conflict_count == 0)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.navigate_repository_conflict(-1, cx)
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("next-repository-conflict", "Next")
+                                                .tone(ButtonTone::Ghost)
+                                                .disabled(repository_conflict_count == 0)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.navigate_repository_conflict(1, cx)
+                                                })),
+                                        )
+                                        .child(div().flex_1())
+                                        .child(
+                                            Button::new("abort-repository-operation", "Abort")
+                                                .tone(ButtonTone::DangerMuted)
+                                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                                    let Some(status) = shell.repository.status() else { return };
+                                                    let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                                    let Some(sender) = &shell.executor_sender else { return };
+                                                    let _ = sender.send(ExecutorCommand::MutateRepositoryOperation {
+                                                        workspace_id,
+                                                        binding_id: status.binding_id.0,
+                                                        expected_revision: status.binding_revision,
+                                                        kind: abort_operation.kind,
+                                                        abort: true,
+                                                    });
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("continue-repository-operation", "Continue")
+                                                .tone(ButtonTone::Accent)
+                                                .disabled(continue_disabled)
+                                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                                    let Some(status) = shell.repository.status() else { return };
+                                                    let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                                    let Some(sender) = &shell.executor_sender else { return };
+                                                    let _ = sender.send(ExecutorCommand::MutateRepositoryOperation {
+                                                        workspace_id,
+                                                        binding_id: status.binding_id.0,
+                                                        expected_revision: status.binding_revision,
+                                                        kind: continue_operation.kind,
+                                                        abort: false,
+                                                    });
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                )
+                        }))
                         .children(self.repository.error().map(|failure| {
-                            div().mx_2().mb_2().child(ErrorBanner::new(format!(
-                                "{}: {}",
-                                failure.kind.label(),
-                                failure.message
-                            )))
+                            let repair = self.repository.repair_target();
+                            div()
+                                .mx_2()
+                                .mb_2()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(ErrorBanner::new(format!(
+                                    "{}: {}",
+                                    failure.kind.label(),
+                                    failure.message
+                                )))
+                                .children(repair.map(|(binding_id, expected_revision)| {
+                                    Button::new("repair-repository-binding", "Repair binding")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(move |shell, _, _, _cx| {
+                                            let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                            let Some(sender) = &shell.executor_sender else { return };
+                                            let _ = sender.send(ExecutorCommand::RepairRepositoryBinding {
+                                                workspace_id,
+                                                binding_id,
+                                                expected_revision,
+                                            });
+                                        }))
+                                }))
                         }))
                         .children(self.repository.operation().map(|operation| {
                             div()
@@ -22095,6 +22414,7 @@ impl WorkspaceShell {
             let catalog_snapshots = matches!(modal, Modal::CatalogSnapshots);
             let csv_import = matches!(modal, Modal::CsvImport);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
+            let repository_conflict = matches!(modal, Modal::RepositoryConflict);
             let card_width = if data_results {
                 0.0
             } else if settings
@@ -22109,7 +22429,7 @@ impl WorkspaceShell {
                 720.0
             } else if catalog_diagram {
                 1040.0
-            } else if data_search || csv_import {
+            } else if data_search || csv_import || repository_conflict {
                 900.0
             } else if server_picker || account {
                 360.0
@@ -26432,6 +26752,292 @@ impl WorkspaceShell {
                                 }))
                                 .child(
                                     Button::new("close-repository-commit-detail", "Close")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Modal::RepositoryConflict => {
+                    let conflict = self
+                        .repository
+                        .conflict()
+                        .cloned()
+                        .expect("conflict modal requires loaded conflict");
+                    let status = self.repository.status().cloned();
+                    let region = conflict.regions.first().cloned();
+                    let region_id = region
+                        .as_ref()
+                        .map(|region| region.id.clone())
+                        .unwrap_or_default();
+                    let manual_ready = self.manual_conflict_path.as_ref() == Some(&conflict.path);
+                    let manual_opened = manual_ready && self.manual_conflict_opened;
+                    let manual_dirty = self.repository_conflict_editor_dirty(&conflict.path, cx);
+                    let ours_conflict = conflict.clone();
+                    let ours_status = status.clone();
+                    let ours_region_id = region_id.clone();
+                    let theirs_conflict = conflict.clone();
+                    let theirs_status = status.clone();
+                    let theirs_region_id = region_id.clone();
+                    let both_conflict = conflict.clone();
+                    let both_status = status.clone();
+                    let both_region_id = region_id.clone();
+                    let manual_conflict = conflict.clone();
+                    let manual_status = status.clone();
+                    let open_manual_path = conflict.path.clone();
+                    let mark_conflict = conflict.clone();
+                    let mark_status = status.clone();
+                    let side = |id: &'static str,
+                                title: &'static str,
+                                text: Option<String>,
+                                color: gpui::Hsla| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .border_1()
+                            .border_color(color)
+                            .rounded_sm()
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(color)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .id(id)
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .p_2()
+                                    .bg(colors.surface)
+                                    .font_family("monospace")
+                                    .text_xs()
+                                    .whitespace_normal()
+                                    .child(text.unwrap_or_else(|| "∅ no version on this side".into())),
+                            )
+                    };
+                    div()
+                        .debug_selector(|| "repository-conflict-modal".into())
+                        .w(px(860.))
+                        .h(px(650.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .child(format!("Resolve {}", conflict.path.0)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child(format!("{:?} · index stages 1/2/3", conflict.kind)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_1()
+                                        .child(
+                                            Button::new("previous-modal-conflict", "Previous")
+                                                .tone(ButtonTone::Ghost)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.navigate_repository_conflict(-1, cx)
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("next-modal-conflict", "Next")
+                                                .tone(ButtonTone::Ghost)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.navigate_repository_conflict(1, cx)
+                                                })),
+                                        ),
+                                ),
+                        )
+                        .when(conflict.binary, |panel| {
+                            panel.child(
+                                div()
+                                    .p_3()
+                                    .border_1()
+                                    .border_color(colors.warning)
+                                    .text_color(colors.warning)
+                                    .child("Binary conflict. Choose ours or theirs; combined and inline views are unavailable."),
+                            )
+                        })
+                        .when_some(region, |panel, region| {
+                            panel.child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .flex()
+                                    .gap_2()
+                                    .child(side(
+                                        "repository-conflict-base",
+                                        "BASE",
+                                        region.base,
+                                        colors.muted_text,
+                                    ))
+                                    .child(side(
+                                        "repository-conflict-ours",
+                                        "OURS",
+                                        region.ours,
+                                        colors.success,
+                                    ))
+                                    .child(side(
+                                        "repository-conflict-theirs",
+                                        "THEIRS",
+                                        region.theirs,
+                                        colors.warning,
+                                    )),
+                            )
+                        })
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child("Resolution is revision-guarded and creates a workspace checkpoint before changing the shared worktree."),
+                        )
+                        .when(manual_ready, |panel| {
+                            panel.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if manual_dirty {
+                                        colors.warning
+                                    } else {
+                                        colors.success
+                                    })
+                                    .child(if !manual_opened {
+                                        "Checkpoint ready. Open the workspace file, edit it, and save before marking resolved."
+                                    } else if manual_dirty {
+                                        "Manual resolution has unsaved edits. Save the file before marking it resolved."
+                                    } else {
+                                        "Manual resolution editor is saved and ready to mark resolved."
+                                    }),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    Button::new("use-ours-conflict", "Use ours")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(status.is_none())
+                                        .on_click(cx.listener(move |shell, _, _, _cx| {
+                                            let Some(status) = ours_status.as_ref() else { return };
+                                            let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                            let Some(sender) = &shell.executor_sender else { return };
+                                            let _ = sender.send(ExecutorCommand::ResolveRepositoryConflict {
+                                                workspace_id,
+                                                binding_id: status.binding_id.0,
+                                                expected_revision: status.binding_revision,
+                                                path: ours_conflict.path.clone(),
+                                                region_id: ours_region_id.clone(),
+                                                resolution: sift_protocol::VcsConflictResolution::Ours,
+                                            });
+                                        })),
+                                )
+                                .child(
+                                    Button::new("use-theirs-conflict", "Use theirs")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(status.is_none())
+                                        .on_click(cx.listener(move |shell, _, _, _cx| {
+                                            let Some(status) = theirs_status.as_ref() else { return };
+                                            let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                            let Some(sender) = &shell.executor_sender else { return };
+                                            let _ = sender.send(ExecutorCommand::ResolveRepositoryConflict {
+                                                workspace_id,
+                                                binding_id: status.binding_id.0,
+                                                expected_revision: status.binding_revision,
+                                                path: theirs_conflict.path.clone(),
+                                                region_id: theirs_region_id.clone(),
+                                                resolution: sift_protocol::VcsConflictResolution::Theirs,
+                                            });
+                                        })),
+                                )
+                                .child(
+                                    Button::new("use-both-conflict", "Use both")
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(conflict.binary || status.is_none())
+                                        .on_click(cx.listener(move |shell, _, _, _cx| {
+                                            let Some(status) = both_status.as_ref() else { return };
+                                            let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                            let Some(sender) = &shell.executor_sender else { return };
+                                            let _ = sender.send(ExecutorCommand::ResolveRepositoryConflict {
+                                                workspace_id,
+                                                binding_id: status.binding_id.0,
+                                                expected_revision: status.binding_revision,
+                                                path: both_conflict.path.clone(),
+                                                region_id: both_region_id.clone(),
+                                                resolution: sift_protocol::VcsConflictResolution::Both,
+                                            });
+                                        })),
+                                )
+                                .child(
+                                    Button::new(
+                                        "manual-conflict",
+                                        if manual_ready { "Open manual editor" } else { "Edit manually" },
+                                    )
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(status.is_none())
+                                    .on_click(cx.listener(move |shell, _, window, cx| {
+                                        if shell.manual_conflict_path.as_ref() == Some(&open_manual_path) {
+                                            shell.repository.select_path(open_manual_path.clone());
+                                            shell.manual_conflict_opened = true;
+                                            shell.open_selected_repository_file(window, cx);
+                                            return;
+                                        }
+                                        let Some(status) = manual_status.as_ref() else { return };
+                                        let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                        let Some(sender) = &shell.executor_sender else { return };
+                                        let _ = sender.send(ExecutorCommand::BeginManualRepositoryConflict {
+                                            workspace_id,
+                                            binding_id: status.binding_id.0,
+                                            expected_revision: status.binding_revision,
+                                            path: manual_conflict.path.clone(),
+                                        });
+                                    })),
+                                )
+                                .when(manual_ready, |actions| {
+                                    actions.child(
+                                        Button::new("mark-conflict-resolved", "Mark resolved")
+                                            .tone(ButtonTone::Accent)
+                                            .disabled(!manual_opened || manual_dirty || status.is_none())
+                                            .on_click(cx.listener(move |shell, _, _, _cx| {
+                                                let Some(status) = mark_status.as_ref() else { return };
+                                                let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                                let Some(sender) = &shell.executor_sender else { return };
+                                                let _ = sender.send(ExecutorCommand::MarkRepositoryConflictResolved {
+                                                    workspace_id,
+                                                    binding_id: status.binding_id.0,
+                                                    expected_revision: status.binding_revision,
+                                                    path: mark_conflict.path.clone(),
+                                                });
+                                            })),
+                                    )
+                                })
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new("close-repository-conflict", "Close")
                                         .tone(ButtonTone::Neutral)
                                         .on_click(cx.listener(|shell, _, window, cx| {
                                             shell.dismiss_modal(&DismissModal, window, cx)

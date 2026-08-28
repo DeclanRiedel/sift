@@ -95,9 +95,53 @@ pub struct VcsStatus {
     pub head_oid: Option<String>,
     pub branch: Option<String>,
     pub upstream: Option<VcsUpstreamStatus>,
+    #[serde(default)]
+    pub operation: Option<VcsRepositoryOperationState>,
     pub entries: Vec<VcsStatusEntry>,
     pub truncated: bool,
     pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VcsRepositoryOperationKind {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRepositoryOperationState {
+    pub kind: VcsRepositoryOperationKind,
+    pub current_commit: Option<String>,
+    pub step: Option<u32>,
+    pub total_steps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VcsConflictResolution {
+    Ours,
+    Theirs,
+    Both,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsConflictRegion {
+    pub id: String,
+    pub base: Option<String>,
+    pub ours: Option<String>,
+    pub theirs: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsConflictFile {
+    pub path: WorkspacePath,
+    pub kind: VcsConflictKind,
+    pub binary: bool,
+    pub regions: Vec<VcsConflictRegion>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]

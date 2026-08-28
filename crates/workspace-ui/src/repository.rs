@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use sift_protocol::{
-    VcsBranch, VcsCommitDetail, VcsCommitSummary, VcsDiff, VcsDiffSide, VcsFileState,
-    VcsHistoricalFile, VcsHistoryPage, VcsStageState, VcsStatus, VcsStatusEntry, WorkspacePath,
+    RepositoryBinding, VcsBranch, VcsCommitDetail, VcsCommitSummary, VcsConflictFile, VcsDiff,
+    VcsDiffSide, VcsFileState, VcsHistoricalFile, VcsHistoryPage, VcsStageState, VcsStatus,
+    VcsStatusEntry, WorkspacePath,
 };
 
 use crate::settings::{RepositoryGrouping, RepositorySort, RepositoryView};
@@ -109,6 +110,7 @@ pub(crate) struct RepositoryFailure {
 pub(crate) struct RepositoryProjection {
     workspace_id: Option<i64>,
     status: Option<VcsStatus>,
+    observed_binding: Option<RepositoryBinding>,
     visible_rows: Arc<[RepositoryRow]>,
     selected_path: Option<WorkspacePath>,
     pending_paths: HashSet<WorkspacePath>,
@@ -134,6 +136,7 @@ pub(crate) struct RepositoryProjection {
     historical_file: Option<VcsHistoricalFile>,
     comparison_base: Option<String>,
     comparison: Option<VcsDiff>,
+    conflict: Option<VcsConflictFile>,
 }
 
 impl RepositoryProjection {
@@ -150,6 +153,7 @@ impl RepositoryProjection {
         }
         self.workspace_id = workspace_id;
         self.status = None;
+        self.observed_binding = None;
         self.visible_rows = Arc::default();
         self.selected_path = None;
         self.pending_paths.clear();
@@ -171,6 +175,7 @@ impl RepositoryProjection {
         self.historical_file = None;
         self.comparison_base = None;
         self.comparison = None;
+        self.conflict = None;
     }
 
     pub(crate) fn branches(&self) -> Arc<[VcsBranch]> {
@@ -207,6 +212,17 @@ impl RepositoryProjection {
 
     pub(crate) fn comparison(&self) -> Option<&VcsDiff> {
         self.comparison.as_ref()
+    }
+
+    pub(crate) fn conflict(&self) -> Option<&VcsConflictFile> {
+        self.conflict.as_ref()
+    }
+
+    pub(crate) fn set_conflict(&mut self, result: Result<VcsConflictFile, String>) {
+        match result {
+            Ok(conflict) => self.conflict = Some(conflict),
+            Err(message) => self.set_error(message),
+        }
     }
 
     pub(crate) fn begin_history_load(&mut self, query: String, append: bool) -> bool {
@@ -554,6 +570,23 @@ impl RepositoryProjection {
         self.status.as_ref()
     }
 
+    pub(crate) fn set_observed_binding(&mut self, binding: Option<RepositoryBinding>) {
+        if binding.is_some() {
+            self.observed_binding = binding;
+        }
+    }
+
+    pub(crate) fn repair_target(&self) -> Option<(i64, u64)> {
+        self.status
+            .as_ref()
+            .map(|status| (status.binding_id.0, status.binding_revision))
+            .or_else(|| {
+                self.observed_binding
+                    .as_ref()
+                    .map(|binding| (binding.id.0, binding.revision))
+            })
+    }
+
     pub(crate) fn rows(&self) -> Arc<[RepositoryRow]> {
         self.visible_rows.clone()
     }
@@ -601,6 +634,35 @@ impl RepositoryProjection {
         let index = (current as isize + delta).rem_euclid(paths.len() as isize) as usize;
         self.selected_path = Some(paths[index].clone());
         self.selected_path.clone()
+    }
+
+    pub(crate) fn move_conflict_selection(&mut self, delta: isize) -> Option<WorkspacePath> {
+        let paths = self
+            .status
+            .iter()
+            .flat_map(|status| &status.entries)
+            .filter(|entry| entry.stage == VcsStageState::Conflict)
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return None;
+        }
+        let current = self
+            .selected_path
+            .as_ref()
+            .and_then(|selected| paths.iter().position(|path| path == selected))
+            .unwrap_or(0);
+        let index = (current as isize + delta).rem_euclid(paths.len() as isize) as usize;
+        self.selected_path = Some(paths[index].clone());
+        self.selected_path.clone()
+    }
+
+    pub(crate) fn conflict_count(&self) -> usize {
+        self.status
+            .iter()
+            .flat_map(|status| &status.entries)
+            .filter(|entry| entry.stage == VcsStageState::Conflict)
+            .count()
     }
 
     pub(crate) fn selected_row_index(&self) -> Option<usize> {
@@ -961,6 +1023,26 @@ mod tests {
         );
 
         assert_eq!(projection.selected_path().unwrap().0, "b.sql");
+    }
+
+    #[test]
+    fn conflict_navigation_only_visits_conflicted_paths() {
+        let mut projection = RepositoryProjection::new(Some(7));
+        let (_, request_id) = projection.begin_refresh().unwrap();
+        projection.apply_status_result(
+            7,
+            request_id,
+            Ok(Some(status(serde_json::json!([
+                entry("a.sql", "unmerged", "conflict"),
+                entry("ordinary.sql", "modified", "unstaged"),
+                entry("z.sql", "unmerged", "conflict")
+            ])))),
+        );
+
+        assert_eq!(projection.conflict_count(), 2);
+        assert_eq!(projection.move_conflict_selection(1).unwrap().0, "z.sql");
+        assert_eq!(projection.move_conflict_selection(1).unwrap().0, "a.sql");
+        assert_eq!(projection.move_conflict_selection(-1).unwrap().0, "z.sql");
     }
 
     #[test]
