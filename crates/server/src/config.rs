@@ -118,6 +118,14 @@ pub struct VcsConfig {
     pub executable: Option<String>,
     pub local_timeout_secs: u64,
     pub network_timeout_secs: u64,
+    pub max_output_bytes: usize,
+    pub max_file_bytes: usize,
+    pub max_status_entries: usize,
+    pub max_history_page: u32,
+    pub max_commit_files: usize,
+    pub max_diff_files: usize,
+    pub max_diff_hunks: usize,
+    pub max_diff_lines: usize,
 }
 
 impl Default for VcsConfig {
@@ -128,6 +136,14 @@ impl Default for VcsConfig {
             executable: None,
             local_timeout_secs: 30,
             network_timeout_secs: 120,
+            max_output_bytes: 8 * 1024 * 1024,
+            max_file_bytes: 8 * 1024 * 1024,
+            max_status_entries: 20_000,
+            max_history_page: 200,
+            max_commit_files: 5_000,
+            max_diff_files: 2_000,
+            max_diff_hunks: 4_000,
+            max_diff_lines: 200_000,
         }
     }
 }
@@ -489,6 +505,17 @@ impl Config {
             || !(1..=900).contains(&self.vcs.network_timeout_secs)
         {
             bail!("VCS timeouts must be positive and within their built-in ceilings");
+        }
+        if !(1..=64 * 1024 * 1024).contains(&self.vcs.max_output_bytes)
+            || !(1..=64 * 1024 * 1024).contains(&self.vcs.max_file_bytes)
+            || !(1..=100_000).contains(&self.vcs.max_status_entries)
+            || !(1..=1_000).contains(&self.vcs.max_history_page)
+            || !(1..=25_000).contains(&self.vcs.max_commit_files)
+            || !(1..=10_000).contains(&self.vcs.max_diff_files)
+            || !(1..=20_000).contains(&self.vcs.max_diff_hunks)
+            || !(1..=1_000_000).contains(&self.vcs.max_diff_lines)
+        {
+            bail!("VCS output, file, status, history, commit, and diff limits must be positive and within their built-in ceilings");
         }
         if let Some(executable) = &self.vcs.executable {
             let path = std::path::Path::new(executable);

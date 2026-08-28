@@ -72,6 +72,41 @@ an isolated state directory, so multiple local roots can run concurrently.
 Use `--state-dir PATH` consistently with apply, status, import, and startup to
 override the platform-native private state location.
 
+## Workspace Git policy
+
+Git requires at least one operator-owned workspace root. Its process and
+parser ceilings are portable instance policy rather than client preferences:
+
+```toml
+[server.workspaces]
+enabled = true
+
+[[server.workspaces.roots]]
+handle = "primary"
+path = "/srv/sift/workspaces"
+read_only = false
+
+[server.vcs]
+enabled = true
+network_enabled = false
+# Optional absolute fixed executable; omit to resolve `git` once at startup.
+# executable = "/usr/bin/git"
+local_timeout_secs = 30
+network_timeout_secs = 120
+max_output_bytes = 8388608
+max_file_bytes = 8388608
+max_status_entries = 20000
+max_history_page = 200
+max_commit_files = 5000
+max_diff_files = 2000
+max_diff_hunks = 4000
+max_diff_lines = 200000
+```
+
+Keep `network_enabled = false` for an offline instance. An instance admin can
+inspect the realized executable, version, helper state, health, and these
+effective limits through `/v1/admin/instance/vcs-diagnostics`.
+
 ## Security and portability boundary
 
 - Both files are UTF-8 TOML, strict, bounded, and cross-platform. Unknown

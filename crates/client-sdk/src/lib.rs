@@ -87,6 +87,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "getDurableMigrationRun",
     "getExtension",
     "getInstanceConfiguration",
+    "getVcsDiagnostics",
     "getMetadataConnectionPolicy",
     "getMetadataSavedQuery",
     "getMigrationRun",
@@ -350,8 +351,8 @@ use sift_protocol::{
     TenantUsageSnapshot, ToolContext, TransactionEndAction, TransactionInfo, TransactionPreview,
     TransactionPreviewRequest, TransactionState, TransferExecutionResult, TransferRecipe,
     TransferRecipeId, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value, VcsBranch, VcsCommitDetail,
-    VcsCommitResult, VcsConflictFile, VcsDiff, VcsDiffSide, VcsHeadMutationResult,
+    UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value, VcsAdapterDiagnostics, VcsBranch,
+    VcsCommitDetail, VcsCommitResult, VcsConflictFile, VcsDiff, VcsDiffSide, VcsHeadMutationResult,
     VcsHistoricalFile, VcsHistoryPage, VcsRemote, VcsRemoteResult, VcsStatus,
     VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceArtifactId,
     WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspacePath,
@@ -1263,6 +1264,10 @@ impl Client {
         request: UpdateInstanceConfigurationRequest,
     ) -> Result<InstanceConfigurationDocument> {
         self.put("/v1/admin/instance/configuration", &request).await
+    }
+
+    pub async fn vcs_diagnostics(&self) -> Result<VcsAdapterDiagnostics> {
+        self.get("/v1/admin/instance/vcs-diagnostics").await
     }
 
     /// Readiness probe. Returns the parsed [`Readiness`] on both `200` (ready)

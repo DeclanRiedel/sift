@@ -179,6 +179,7 @@ pub enum TransferRecipeAction {
 pub enum InstanceConfigurationAction {
     Read,
     Update,
+    DiagnoseVcs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

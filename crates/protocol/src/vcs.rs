@@ -4,6 +4,34 @@ use serde::{Deserialize, Serialize};
 
 use crate::{RepositoryBindingId, WorkspaceId, WorkspacePath, WorkspaceRevision};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsAdapterLimits {
+    pub local_timeout_secs: u64,
+    pub network_timeout_secs: u64,
+    pub max_output_bytes: u64,
+    pub max_file_bytes: u64,
+    pub max_status_entries: u32,
+    pub max_history_page: u32,
+    pub max_commit_files: u32,
+    pub max_diff_files: u32,
+    pub max_diff_hunks: u32,
+    pub max_diff_lines: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsAdapterDiagnostics {
+    pub enabled: bool,
+    pub healthy: bool,
+    pub adapter_id: Option<String>,
+    pub generation: Option<String>,
+    pub executable: Option<String>,
+    pub executable_version: Option<String>,
+    pub network_enabled: bool,
+    pub credential_helper_available: bool,
+    pub limits: Option<VcsAdapterLimits>,
+    pub diagnostic: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VcsFileState {

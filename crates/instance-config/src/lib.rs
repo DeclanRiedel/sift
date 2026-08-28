@@ -105,11 +105,42 @@ pub struct WorkspaceRootConfig {
     pub read_only: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VcsConfig {
     pub enabled: bool,
     pub network_enabled: bool,
+    pub executable: Option<String>,
+    pub local_timeout_secs: u64,
+    pub network_timeout_secs: u64,
+    pub max_output_bytes: u64,
+    pub max_file_bytes: u64,
+    pub max_status_entries: u32,
+    pub max_history_page: u32,
+    pub max_commit_files: u32,
+    pub max_diff_files: u32,
+    pub max_diff_hunks: u32,
+    pub max_diff_lines: u32,
+}
+
+impl Default for VcsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            network_enabled: false,
+            executable: None,
+            local_timeout_secs: 30,
+            network_timeout_secs: 120,
+            max_output_bytes: 8 * 1024 * 1024,
+            max_file_bytes: 8 * 1024 * 1024,
+            max_status_entries: 20_000,
+            max_history_page: 200,
+            max_commit_files: 5_000,
+            max_diff_files: 2_000,
+            max_diff_hunks: 4_000,
+            max_diff_lines: 200_000,
+        }
+    }
 }
 
 impl VcsConfig {
@@ -902,6 +933,30 @@ impl ServerConfig {
             return validation(
                 "server.vcs.network_enabled",
                 "requires VCS integration to be enabled",
+            );
+        }
+        if self
+            .vcs
+            .executable
+            .as_deref()
+            .is_some_and(|path| !std::path::Path::new(path).is_absolute())
+        {
+            return validation("server.vcs.executable", "must be an absolute path");
+        }
+        if !(1..=300).contains(&self.vcs.local_timeout_secs)
+            || !(1..=900).contains(&self.vcs.network_timeout_secs)
+            || !(1..=64 * 1024 * 1024).contains(&self.vcs.max_output_bytes)
+            || !(1..=64 * 1024 * 1024).contains(&self.vcs.max_file_bytes)
+            || !(1..=100_000).contains(&self.vcs.max_status_entries)
+            || !(1..=1_000).contains(&self.vcs.max_history_page)
+            || !(1..=25_000).contains(&self.vcs.max_commit_files)
+            || !(1..=10_000).contains(&self.vcs.max_diff_files)
+            || !(1..=20_000).contains(&self.vcs.max_diff_hunks)
+            || !(1..=1_000_000).contains(&self.vcs.max_diff_lines)
+        {
+            return validation(
+                "server.vcs",
+                "contains an unsafe timeout, output, file, status, history, commit, or diff limit",
             );
         }
         let mut root_handles = BTreeSet::new();

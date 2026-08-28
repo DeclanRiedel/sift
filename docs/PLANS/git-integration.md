@@ -418,24 +418,24 @@ but must label their identity source and confidence explicitly.
 
 ## Milestone G12 — Operations, compatibility, and graduation
 
-- [ ] Expose adapter executable/version and health diagnostics.
-- [ ] Configure time, output, file, history, and diff limits in instance policy.
-- [ ] Define checkout backup policy: protected data versus disposable projection.
-- [ ] Backup and restore bindings and credential handles without secret leakage.
-- [ ] Verify local, SSH-remote, network-hosted, and container behavior.
-- [ ] Verify read-only projection behavior.
-- [ ] Verify Git-disabled and network-disabled capability degradation.
-- [ ] Verify cross-platform path, case-folding, executable, and line-ending rules.
-- [ ] Verify repository ownership/trust failures have actionable diagnostics.
-- [ ] Verify malformed Git output always fails closed.
-- [ ] Verify no hooks, shell, pager, external diff, fsmonitor, protocol extension,
+- [x] Expose adapter executable/version and health diagnostics.
+- [x] Configure time, output, file, history, and diff limits in instance policy.
+- [x] Define checkout backup policy: protected data versus disposable projection.
+- [x] Backup and restore bindings and credential handles without secret leakage.
+- [x] Verify local, SSH-remote, network-hosted, and container behavior.
+- [x] Verify read-only projection behavior.
+- [x] Verify Git-disabled and network-disabled capability degradation.
+- [x] Verify cross-platform path, case-folding, executable, and line-ending rules.
+- [x] Verify repository ownership/trust failures have actionable diagnostics.
+- [x] Verify malformed Git output always fails closed.
+- [x] Verify no hooks, shell, pager, external diff, fsmonitor, protocol extension,
       or ambient credential helper executes.
-- [ ] Verify secret values never enter SQLite, logs, audit, URLs, arguments, or
+- [x] Verify secret values never enter SQLite, logs, audit, URLs, arguments, or
       inherited environment.
-- [ ] Verify stale/concurrent stage, commit, branch, fetch, and push operations.
-- [ ] Verify crash recovery during each mutating operation.
-- [ ] Keep `cargo fmt`, workspace clippy, and workspace tests green.
-- [ ] Record measured performance and security evidence in ADR-034 graduation.
+- [x] Verify stale/concurrent stage, commit, branch, fetch, and push operations.
+- [x] Verify crash recovery during each mutating operation.
+- [x] Keep `cargo fmt`, workspace clippy, and workspace tests green.
+- [x] Record measured performance and security evidence in ADR-034 graduation.
 
 ## Explicit non-goals
 

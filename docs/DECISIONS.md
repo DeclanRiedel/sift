@@ -1368,10 +1368,22 @@ typed VCS/run/recipe contracts, durable recovery state, capability discovery,
 and deployment/security graduation matrices. The normative implementation
 order is retained in git history.
 
-**Graduation.** Implemented and graduated on 2026-08-11. Deployment,
-collaboration, conflict, recovery, transfer, security, compatibility, backup,
-and measured budget evidence is recorded in
-repository tests.
+**Graduation.** Implemented and graduated on 2026-08-28. The deployment,
+checkout ownership, backup/restore, degradation, compatibility, trust,
+malformed-output, subprocess isolation, secret-flow, concurrency, and crash
+recovery matrix is recorded in `docs/GIT-OPERATIONS.md` and enforced by the
+Git adapter, workspace confinement, workspace HTTP, metadata, state-backup,
+and instance-runtime tests. Operators can inspect the fixed executable,
+observed version, helper state, health, and effective policy through the
+admin-only typed VCS diagnostics route. Time, output, file, status, history,
+commit-file, and diff ceilings are strict portable instance policy.
+
+The 2026-08-28 Linux/Git 2.51 baseline measured steady status at 3.324 ms for
+1,000 paths, 8.934 ms for 10,000, and 57.139 ms for 100,000. Identity-aware
+render reuse reduced unchanged maximal-status refresh p95 from 173.933 ms to
+61.669 ms (64.5%). These are bounded operational baselines, not a claim that a
+20,000-row first render meets 120 Hz; commands and reproduction details remain
+in `docs/PERFORMANCE.md`.
 
 ---
 

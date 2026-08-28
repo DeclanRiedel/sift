@@ -957,9 +957,13 @@ fn sync_dir(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use sift_metadata::{
-        MetadataError, NewRoom, NewTransferRecipe, PrincipalId, RoomKind, TenantId,
+        MetadataError, NewProjectionBinding, NewRepositoryBinding, NewRoom, NewTransferRecipe,
+        PrincipalId, RoomKind, TenantId,
     };
-    use sift_protocol::{TransferDirection, TransferEndpoint, WorkspaceArtifactId, WorkspaceId};
+    use sift_protocol::{
+        ProjectionHealth, ProjectionMode, TransferDirection, TransferEndpoint, WorkspaceArtifactId,
+        WorkspaceId,
+    };
 
     fn write_private_key(path: &Path, byte: &str) {
         let mut options = OpenOptions::new();
@@ -1032,6 +1036,42 @@ mod tests {
             .unwrap();
         let workspace = store
             .create_workspace(room.id, PrincipalId(1), "backup-workspace")
+            .unwrap();
+        let projection = store
+            .create_projection_binding(
+                workspace.id,
+                PrincipalId(1),
+                NewProjectionBinding {
+                    root_handle: "backup-root".into(),
+                    mode: ProjectionMode::ReadWrite,
+                    adapter_generation: "filesystem-v1".into(),
+                    health: ProjectionHealth::Ready,
+                },
+            )
+            .unwrap();
+        let repository = store
+            .create_repository_binding(
+                workspace.id,
+                PrincipalId(1),
+                NewRepositoryBinding {
+                    projection_id: projection.binding.id,
+                    repository_identity: "ab".repeat(32),
+                    adapter_generation: "git-v1".into(),
+                    executable_version: "git version test".into(),
+                    network_enabled: false,
+                    branch: Some("main".into()),
+                    head: None,
+                },
+            )
+            .unwrap();
+        store
+            .set_repository_credential(
+                repository.binding.id,
+                PrincipalId(1),
+                repository.binding.revision,
+                b"must-not-back-up",
+            )
+            .await
             .unwrap();
         store
             .create_transfer_recipe(
@@ -1221,6 +1261,13 @@ mod tests {
             1,
             "durable Phase L definitions survive backup and restore"
         );
+        let repository = restored
+            .repository_binding_for_workspace(WorkspaceId(1), PrincipalId(1))
+            .unwrap()
+            .expect("repository binding survives backup and restore");
+        assert_eq!(repository.binding.repository_identity, "ab".repeat(32));
+        assert!(!repository.binding.credential_handle_present);
+        assert!(repository.credential_handle.is_none());
         assert!(matches!(
             restored.workspace_artifact_for_principal(WorkspaceArtifactId(1), PrincipalId(1)),
             Err(MetadataError::WorkspaceArtifactNotFound(_))

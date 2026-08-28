@@ -13,11 +13,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sift_protocol::{
-    VcsBranch, VcsCommitDetail, VcsCommitFile, VcsCommitSummary, VcsConflictFile, VcsConflictKind,
-    VcsConflictRegion, VcsConflictResolution, VcsDiff, VcsDiffFile, VcsDiffHunk, VcsDiffLine,
-    VcsDiffLineKind, VcsDiffSide, VcsFileState, VcsHistoricalFile, VcsHistoryPage, VcsRemote,
-    VcsRepositoryOperationKind, VcsRepositoryOperationState, VcsStageState, VcsStatus,
-    VcsStatusEntry, VcsUpstreamStatus, WorkspacePath, WorkspaceRevision,
+    VcsAdapterDiagnostics, VcsAdapterLimits, VcsBranch, VcsCommitDetail, VcsCommitFile,
+    VcsCommitSummary, VcsConflictFile, VcsConflictKind, VcsConflictRegion, VcsConflictResolution,
+    VcsDiff, VcsDiffFile, VcsDiffHunk, VcsDiffLine, VcsDiffLineKind, VcsDiffSide, VcsFileState,
+    VcsHistoricalFile, VcsHistoryPage, VcsRemote, VcsRepositoryOperationKind,
+    VcsRepositoryOperationState, VcsStageState, VcsStatus, VcsStatusEntry, VcsUpstreamStatus,
+    WorkspacePath, WorkspaceRevision,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
@@ -26,14 +27,6 @@ use crate::config::VcsConfig;
 
 pub const GIT_ADAPTER_ID: &str = "sift/git";
 pub const GIT_ADAPTER_GENERATION: &str = "git-v1";
-const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_STATUS_ENTRIES: usize = 20_000;
-const MAX_DIFF_FILES: usize = 2_000;
-const MAX_DIFF_HUNKS: usize = 4_000;
-const MAX_DIFF_LINES: usize = 200_000;
-const MAX_HISTORY_PAGE: u32 = 200;
-const MAX_COMMIT_FILES: usize = 5_000;
-
 #[derive(Debug, thiserror::Error)]
 pub enum GitAdapterError {
     #[error("Git integration is disabled")]
@@ -42,6 +35,8 @@ pub enum GitAdapterError {
     ExecutableUnavailable,
     #[error("the projection is not a Git repository")]
     NotRepository,
+    #[error("Git rejected the repository ownership; verify the projection owner and operator-configured root")]
+    UntrustedRepository,
     #[error("Git input or output is invalid")]
     InvalidData,
     #[error("unsupported Git operation: {0}")]
@@ -82,6 +77,7 @@ pub struct GitAdapter {
     network_timeout: Duration,
     network_enabled: bool,
     askpass_executable: Option<PathBuf>,
+    limits: VcsAdapterLimits,
 }
 
 #[derive(Clone)]
@@ -269,11 +265,47 @@ impl GitAdapter {
             network_timeout: Duration::from_secs(config.network_timeout_secs),
             network_enabled: config.network_enabled,
             askpass_executable: find_sibling_askpass(),
+            limits: VcsAdapterLimits {
+                local_timeout_secs: config.local_timeout_secs,
+                network_timeout_secs: config.network_timeout_secs,
+                max_output_bytes: config.max_output_bytes as u64,
+                max_file_bytes: config.max_file_bytes as u64,
+                max_status_entries: config.max_status_entries as u32,
+                max_history_page: config.max_history_page,
+                max_commit_files: config.max_commit_files as u32,
+                max_diff_files: config.max_diff_files as u32,
+                max_diff_hunks: config.max_diff_hunks as u32,
+                max_diff_lines: config.max_diff_lines as u32,
+            },
         };
-        let output = probe.run(Path::new("/"), ["--version"], false, &[]).await?;
+        let probe_directory = std::env::temp_dir();
+        let output = probe
+            .run(&probe_directory, ["--version"], false, &[])
+            .await?;
         let version = String::from_utf8(output.stdout).map_err(|_| GitAdapterError::InvalidData)?;
         probe.executable_version = version.trim().to_string();
         Ok(Some(probe))
+    }
+
+    pub async fn diagnostics(&self) -> VcsAdapterDiagnostics {
+        let probe_directory = std::env::temp_dir();
+        let result = self.run(&probe_directory, ["--version"], false, &[]).await;
+        let healthy = result.as_ref().is_ok_and(|output| {
+            std::str::from_utf8(&output.stdout)
+                .is_ok_and(|version| version.trim() == self.executable_version)
+        });
+        VcsAdapterDiagnostics {
+            enabled: true,
+            healthy,
+            adapter_id: Some(GIT_ADAPTER_ID.into()),
+            generation: Some(GIT_ADAPTER_GENERATION.into()),
+            executable: Some(self.executable.display().to_string()),
+            executable_version: Some(self.executable_version.clone()),
+            network_enabled: self.network_enabled(),
+            credential_helper_available: self.askpass_executable.is_some(),
+            limits: Some(self.limits.clone()),
+            diagnostic: (!healthy).then(|| "fixed Git executable health probe failed".into()),
+        }
     }
 
     #[cfg(test)]
@@ -546,8 +578,8 @@ impl GitAdapter {
         let result = tokio::time::timeout(timeout, async {
             let (status, stdout, stderr) = tokio::try_join!(
                 child.wait(),
-                read_bounded(stdout, MAX_GIT_OUTPUT_BYTES),
-                read_bounded(stderr, MAX_GIT_OUTPUT_BYTES),
+                read_bounded(stdout, self.limits.max_output_bytes as usize),
+                read_bounded(stderr, self.limits.max_output_bytes as usize),
             )?;
             Ok::<_, std::io::Error>((status, stdout, stderr))
         })
@@ -560,7 +592,7 @@ impl GitAdapter {
             if network {
                 return Err(classify_network_error(&result.2 .0));
             }
-            return Err(GitAdapterError::CommandFailed(result.0.code()));
+            return Err(classify_local_error(result.0.code(), &result.2 .0));
         }
         Ok(GitOutput {
             stdout: result.1 .0,
@@ -777,6 +809,7 @@ impl VcsRepository for GitAdapter {
             binding_revision,
             workspace_revision,
             &output.stdout,
+            self.limits.max_status_entries as usize,
         )?;
         status.operation = self.operation_state(worktree).await?;
         Ok(status)
@@ -822,7 +855,13 @@ impl VcsRepository for GitAdapter {
             stat_args.push(OsString::from(&path.0));
         }
         let stats = self.run(worktree, stat_args, false, &[]).await?;
-        let mut diff = parse_diff(binding_id, side, &names.stdout, &stats.stdout)?;
+        let mut diff = parse_diff(
+            binding_id,
+            side,
+            &names.stdout,
+            &stats.stdout,
+            self.limits.max_diff_files as usize,
+        )?;
         if let Some(path) = path {
             let binary = diff.files.first().is_some_and(|file| file.binary);
             if !binary {
@@ -841,8 +880,14 @@ impl VcsRepository for GitAdapter {
                 patch_args.push(OsString::from("--"));
                 patch_args.push(OsString::from(&path.0));
                 let patch = self.run_truncated(worktree, patch_args, false, &[]).await?;
-                let (hunks, parsed_truncated) =
-                    parse_patch(side, path, &patch.stdout, patch.truncated)?;
+                let (hunks, parsed_truncated) = parse_patch(
+                    side,
+                    path,
+                    &patch.stdout,
+                    patch.truncated,
+                    self.limits.max_diff_hunks as usize,
+                    self.limits.max_diff_lines as usize,
+                )?;
                 if let Some(file) = diff.files.first_mut() {
                     file.hunks = hunks;
                     file.content_truncated = parsed_truncated;
@@ -1288,7 +1333,7 @@ impl VcsRepository for GitAdapter {
         limit: u32,
         query: Option<&str>,
     ) -> Result<VcsHistoryPage> {
-        let limit = limit.clamp(1, MAX_HISTORY_PAGE);
+        let limit = limit.clamp(1, self.limits.max_history_page);
         let skip = cursor
             .unwrap_or("0")
             .parse::<u32>()
@@ -1384,7 +1429,12 @@ impl VcsRepository for GitAdapter {
                 &[],
             )
             .await?;
-        parse_commit_detail(&metadata.stdout, &stats.stdout, stats.truncated)
+        parse_commit_detail(
+            &metadata.stdout,
+            &stats.stdout,
+            stats.truncated,
+            self.limits.max_commit_files as usize,
+        )
     }
 
     async fn historical_file(
@@ -1399,6 +1449,9 @@ impl VcsRepository for GitAdapter {
         let output = self
             .run_truncated(worktree, ["show", spec.as_str()], false, &[])
             .await?;
+        if output.stdout.len() > self.limits.max_file_bytes as usize {
+            return Err(GitAdapterError::OutputLimit);
+        }
         let text = String::from_utf8(output.stdout).map_err(|_| GitAdapterError::InvalidData)?;
         Ok(VcsHistoricalFile {
             commit: oid.to_owned(),
@@ -1456,6 +1509,7 @@ impl VcsRepository for GitAdapter {
             VcsDiffSide::HeadToWorktree,
             &names.stdout,
             &stats.stdout,
+            self.limits.max_diff_files as usize,
         )?;
         diff.base_revision = Some(base.to_owned());
         diff.target_revision = Some(target.to_owned());
@@ -1548,7 +1602,7 @@ impl VcsRepository for GitAdapter {
             return Err(GitAdapterError::InvalidData);
         }
         let patch = patch_for_hunk(file, hunk);
-        if patch.len() > MAX_GIT_OUTPUT_BYTES {
+        if patch.len() > self.limits.max_file_bytes as usize {
             return Err(GitAdapterError::OutputLimit);
         }
         let mut args = vec![
@@ -1576,7 +1630,7 @@ impl VcsRepository for GitAdapter {
     ) -> Result<()> {
         validate_paths(std::slice::from_ref(&file.path))?;
         let patch = patch_for_lines(file, hunk, line_indices, stage)?;
-        if patch.len() > MAX_GIT_OUTPUT_BYTES {
+        if patch.len() > self.limits.max_file_bytes as usize {
             return Err(GitAdapterError::OutputLimit);
         }
         self.run_with_input(
@@ -1605,7 +1659,7 @@ impl VcsRepository for GitAdapter {
             return Err(GitAdapterError::InvalidData);
         }
         let patch = patch_for_hunk(file, hunk);
-        if patch.len() > MAX_GIT_OUTPUT_BYTES {
+        if patch.len() > self.limits.max_file_bytes as usize {
             return Err(GitAdapterError::OutputLimit);
         }
         self.run_with_input(
@@ -1790,6 +1844,7 @@ fn parse_status(
     binding_revision: u64,
     workspace_revision: WorkspaceRevision,
     bytes: &[u8],
+    max_entries: usize,
 ) -> Result<VcsStatus> {
     let mut branch = None;
     let mut head = None;
@@ -1845,7 +1900,7 @@ fn parse_status(
                 Some(conflict_kind(parts[1])),
             )?);
         }
-        if entries.len() > MAX_STATUS_ENTRIES {
+        if entries.len() > max_entries {
             return Err(GitAdapterError::OutputLimit);
         }
     }
@@ -1946,6 +2001,7 @@ fn parse_diff(
     side: VcsDiffSide,
     names: &[u8],
     stats: &[u8],
+    max_files: usize,
 ) -> Result<VcsDiff> {
     let mut counts = BTreeMap::<String, (u32, u32, bool)>::new();
     for field in stats
@@ -2018,7 +2074,7 @@ fn parse_diff(
             hunks: Vec::new(),
             content_truncated: false,
         });
-        if files.len() > MAX_DIFF_FILES {
+        if files.len() > max_files {
             return Err(GitAdapterError::OutputLimit);
         }
     }
@@ -2038,6 +2094,8 @@ fn parse_patch(
     path: &WorkspacePath,
     bytes: &[u8],
     output_truncated: bool,
+    max_hunks: usize,
+    max_lines: usize,
 ) -> Result<(Vec<VcsDiffHunk>, bool)> {
     let text = match std::str::from_utf8(bytes) {
         Ok(text) => text,
@@ -2055,7 +2113,7 @@ fn parse_patch(
             if let Some(hunk) = current.take() {
                 hunks.push(finalize_hunk(side, path, hunk));
             }
-            if hunks.len() >= MAX_DIFF_HUNKS {
+            if hunks.len() >= max_hunks {
                 truncated = true;
                 break;
             }
@@ -2077,7 +2135,7 @@ fn parse_patch(
         let Some(hunk) = current.as_mut() else {
             continue;
         };
-        if line_count >= MAX_DIFF_LINES {
+        if line_count >= max_lines {
             hunk.truncated = true;
             truncated = true;
             break;
@@ -2360,7 +2418,12 @@ fn parse_history(bytes: &[u8], skip: u32, limit: u32, truncated: bool) -> Result
     })
 }
 
-fn parse_commit_detail(metadata: &[u8], stats: &[u8], truncated: bool) -> Result<VcsCommitDetail> {
+fn parse_commit_detail(
+    metadata: &[u8],
+    stats: &[u8],
+    truncated: bool,
+    max_files: usize,
+) -> Result<VcsCommitDetail> {
     let text = std::str::from_utf8(metadata).map_err(|_| GitAdapterError::InvalidData)?;
     let fields = text.splitn(9, '\0').collect::<Vec<_>>();
     if fields.len() < 9 || !is_oid(fields[0]) || !fields[1].split_whitespace().all(is_oid) {
@@ -2384,7 +2447,7 @@ fn parse_commit_detail(metadata: &[u8], stats: &[u8], truncated: bool) -> Result
     };
     let stats = std::str::from_utf8(stats).map_err(|_| GitAdapterError::InvalidData)?;
     let mut files = Vec::new();
-    for line in stats.lines().take(MAX_COMMIT_FILES) {
+    for line in stats.lines().take(max_files) {
         let mut parts = line.splitn(3, '\t');
         let additions = parts.next().ok_or(GitAdapterError::InvalidData)?;
         let deletions = parts.next().ok_or(GitAdapterError::InvalidData)?;
@@ -2406,7 +2469,7 @@ fn parse_commit_detail(metadata: &[u8], stats: &[u8], truncated: bool) -> Result
     Ok(VcsCommitDetail {
         commit,
         message: fields[7].trim_end_matches('\n').to_owned(),
-        files_truncated: truncated || stats.lines().count() > MAX_COMMIT_FILES,
+        files_truncated: truncated || stats.lines().count() > max_files,
         files,
         checkpoint_id: None,
         workspace_revision: None,
@@ -2531,6 +2594,15 @@ fn classify_network_error(stderr: &[u8]) -> GitAdapterError {
     }
 }
 
+fn classify_local_error(code: Option<i32>, stderr: &[u8]) -> GitAdapterError {
+    let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    if stderr.contains("dubious ownership") || stderr.contains("unsafe repository") {
+        GitAdapterError::UntrustedRepository
+    } else {
+        GitAdapterError::CommandFailed(code)
+    }
+}
+
 fn validate_ref(value: &str) -> Result<()> {
     if valid_ref_component(value)
         && !value.contains("..")
@@ -2623,6 +2695,28 @@ async fn serve_credential(listener: tokio::net::UnixListener, mut credential: Gi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn diagnostics_report_fixed_executable_and_effective_limits() {
+        let adapter = GitAdapter::from_config(&VcsConfig {
+            enabled: true,
+            max_history_page: 17,
+            max_diff_files: 23,
+            ..VcsConfig::default()
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let diagnostics = adapter.diagnostics().await;
+        assert!(diagnostics.enabled);
+        assert!(diagnostics.healthy);
+        assert_eq!(diagnostics.adapter_id.as_deref(), Some(GIT_ADAPTER_ID));
+        assert!(diagnostics
+            .executable
+            .as_deref()
+            .is_some_and(|path| Path::new(path).is_absolute()));
+        assert_eq!(diagnostics.limits.unwrap().max_history_page, 17);
+    }
 
     #[tokio::test]
     async fn local_status_diff_stage_and_commit_are_typed() {
@@ -3073,6 +3167,16 @@ mod tests {
     }
 
     #[test]
+    fn repository_ownership_failure_is_actionable_and_redacted() {
+        let error = classify_local_error(
+            Some(128),
+            b"fatal: detected dubious ownership in repository at '/secret/checkout'",
+        );
+        assert!(matches!(error, GitAdapterError::UntrustedRepository));
+        assert!(!error.to_string().contains("/secret/checkout"));
+    }
+
+    #[test]
     fn first_push_sets_upstream_without_enabling_force() {
         assert_eq!(
             push_arguments("origin", Some("feature/a"), true),
@@ -3443,8 +3547,15 @@ mod tests {
     fn typed_patch_parser_preserves_coordinates_and_marks_truncation() {
         let path = WorkspacePath("queries/report.sql".into());
         let patch = b"diff --git a/queries/report.sql b/queries/report.sql\n--- a/queries/report.sql\n+++ b/queries/report.sql\n@@ -2,2 +2,3 @@ report\n keep\n-old\n+new\n+extra\n";
-        let (hunks, truncated) =
-            parse_patch(VcsDiffSide::IndexToWorktree, &path, patch, true).unwrap();
+        let (hunks, truncated) = parse_patch(
+            VcsDiffSide::IndexToWorktree,
+            &path,
+            patch,
+            true,
+            4_000,
+            200_000,
+        )
+        .unwrap();
 
         assert!(truncated);
         assert_eq!(hunks.len(), 1);

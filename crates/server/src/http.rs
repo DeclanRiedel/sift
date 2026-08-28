@@ -175,6 +175,10 @@ pub fn app(state: AppState) -> Router {
                 .put_with(update_instance_configuration, doc("updateInstanceConfiguration", "Validate and replace instance desired-state TOML using an optimistic source revision")),
         )
         .api_route(
+            "/v1/admin/instance/vcs-diagnostics",
+            get_with(get_vcs_diagnostics, doc("getVcsDiagnostics", "Probe the fixed Git adapter and report its effective safety policy")),
+        )
+        .api_route(
             "/v1/operations",
             get_with(list_operations, doc("listOperations", "List replayable operation audit rows")),
         )
@@ -4401,6 +4405,35 @@ async fn update_instance_configuration(
     result.map(Json)
 }
 
+async fn get_vcs_diagnostics(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+) -> ApiResult<Json<sift_protocol::VcsAdapterDiagnostics>> {
+    let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    let diagnostics = match state.rooms.git_adapter() {
+        Some(adapter) => adapter.diagnostics().await,
+        None => sift_protocol::VcsAdapterDiagnostics {
+            enabled: false,
+            healthy: true,
+            adapter_id: None,
+            generation: None,
+            executable: None,
+            executable_version: None,
+            network_enabled: false,
+            credential_helper_available: false,
+            limits: None,
+            diagnostic: Some("Git integration is disabled by instance policy".into()),
+        },
+    };
+    record_instance_configuration_operation(
+        &state,
+        auth,
+        sift_protocol::InstanceConfigurationAction::DiagnoseVcs,
+        None,
+    );
+    Ok(Json(diagnostics))
+}
+
 fn record_instance_configuration_operation(
     state: &AppState,
     auth: &AuthContext,
@@ -7010,6 +7043,7 @@ fn git_adapter_error(error: crate::git_adapter::GitAdapterError) -> ApiError {
         GitAdapterError::Disabled
         | GitAdapterError::ExecutableUnavailable
         | GitAdapterError::NotRepository
+        | GitAdapterError::UntrustedRepository
         | GitAdapterError::InvalidData
         | GitAdapterError::UnsupportedOperation(_)
         | GitAdapterError::CorruptState(_)

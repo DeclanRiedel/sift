@@ -163,6 +163,25 @@ impl InstanceRoot {
             .collect();
         config.vcs.enabled = self.manifest.server.vcs.enabled;
         config.vcs.network_enabled = self.manifest.server.vcs.network_enabled;
+        config.vcs.executable = self.manifest.server.vcs.executable.clone();
+        config.vcs.local_timeout_secs = self.manifest.server.vcs.local_timeout_secs;
+        config.vcs.network_timeout_secs = self.manifest.server.vcs.network_timeout_secs;
+        config.vcs.max_output_bytes = usize::try_from(self.manifest.server.vcs.max_output_bytes)
+            .context("vcs.max_output_bytes does not fit this platform")?;
+        config.vcs.max_file_bytes = usize::try_from(self.manifest.server.vcs.max_file_bytes)
+            .context("vcs.max_file_bytes does not fit this platform")?;
+        config.vcs.max_status_entries =
+            usize::try_from(self.manifest.server.vcs.max_status_entries)
+                .context("vcs.max_status_entries does not fit this platform")?;
+        config.vcs.max_history_page = self.manifest.server.vcs.max_history_page;
+        config.vcs.max_commit_files = usize::try_from(self.manifest.server.vcs.max_commit_files)
+            .context("vcs.max_commit_files does not fit this platform")?;
+        config.vcs.max_diff_files = usize::try_from(self.manifest.server.vcs.max_diff_files)
+            .context("vcs.max_diff_files does not fit this platform")?;
+        config.vcs.max_diff_hunks = usize::try_from(self.manifest.server.vcs.max_diff_hunks)
+            .context("vcs.max_diff_hunks does not fit this platform")?;
+        config.vcs.max_diff_lines = usize::try_from(self.manifest.server.vcs.max_diff_lines)
+            .context("vcs.max_diff_lines does not fit this platform")?;
         config.tenant_limits.ceilings.connections =
             Some(u64::from(self.manifest.server.limits.max_connections));
         config.tenant_limits.ceilings.concurrent_queries = Some(u64::from(
