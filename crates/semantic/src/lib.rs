@@ -9,9 +9,9 @@ use sift_protocol::{
     completion::CompletionContext, DiagnosticSeverity, DiagnosticsResponse, DocumentEdit,
     FindSqlUsagesRequest, FormatSqlRequest, KeywordCase, PrepareSqlRefactorRequest,
     SelectStatementRequest, SemanticDiagnostic, SemanticDocumentId, SemanticDocumentState,
-    SemanticParseStatus, SemanticSource, SemanticStatement, SqlRefactor, SqlSymbolTarget, SqlUsage,
-    SqlUsageKind, SqlUsagePage, StatementKind, StatementSelection, TextEdit, TextRange,
-    WorkspaceEdit,
+    SemanticOutlineSymbol, SemanticOutlineSymbolKind, SemanticParseStatus, SemanticSource,
+    SemanticStatement, SqlRefactor, SqlSymbolTarget, SqlUsage, SqlUsageKind, SqlUsagePage,
+    StatementKind, StatementSelection, TextEdit, TextRange, WorkspaceEdit,
 };
 use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
@@ -471,7 +471,9 @@ impl SemanticRegistry {
                 let token = tokens
                     .iter()
                     .find(|token| {
-                        !token.dot && token.range.start <= *position && *position <= token.range.end
+                        token.is_word()
+                            && token.range.start <= *position
+                            && *position <= token.range.end
                     })
                     .ok_or(Error::InvalidRequest)?;
                 if is_format_keyword(&token.text) {
@@ -503,7 +505,7 @@ impl SemanticRegistry {
         let all = tokens
             .iter()
             .filter(|token| {
-                !token.dot && identifier_matches(&target_name, &token.text, target_quoted)
+                token.is_word() && identifier_matches(&target_name, &token.text, target_quoted)
             })
             .map(|token| SqlUsage {
                 range: token.range,
@@ -562,7 +564,9 @@ impl SemanticRegistry {
                 let target = tokens
                     .iter()
                     .find(|token| {
-                        !token.dot && token.range.start <= position && position <= token.range.end
+                        token.is_word()
+                            && token.range.start <= position
+                            && position <= token.range.end
                     })
                     .ok_or(Error::InvalidRequest)?;
                 if is_format_keyword(&target.text) {
@@ -572,7 +576,8 @@ impl SemanticRegistry {
                 let edits = tokens
                     .iter()
                     .filter(|token| {
-                        !token.dot && identifier_matches(&target.text, &token.text, target.quoted)
+                        token.is_word()
+                            && identifier_matches(&target.text, &token.text, target.quoted)
                     })
                     .map(|token| TextEdit {
                         range: token.range,
@@ -590,7 +595,9 @@ impl SemanticRegistry {
                 let target = tokens
                     .iter()
                     .find(|token| {
-                        !token.dot && token.range.start <= position && position <= token.range.end
+                        token.is_word()
+                            && token.range.start <= position
+                            && position <= token.range.end
                     })
                     .ok_or(Error::InvalidRequest)?;
                 let matches = catalog
@@ -669,12 +676,14 @@ impl SemanticRegistry {
                 .iter()
                 .filter(|statement| ranges_intersect(statement.full_range, range))
                 .cloned()
-                .collect();
+                .collect::<Vec<_>>();
+            let symbols = outline_symbols(&document.source, &statements);
             return Ok(StatementSelection {
                 document_id: id,
                 revision: request.revision,
                 selection: Some(range),
                 statements,
+                symbols,
             });
         }
         let cursor = request.cursor;
@@ -693,11 +702,16 @@ impl SemanticRegistry {
             })
             .or_else(|| document.statements.last())
             .cloned();
+        let statements = chosen.into_iter().collect::<Vec<_>>();
+        let symbols = outline_symbols(&document.source, &statements);
         Ok(StatementSelection {
             document_id: id,
             revision: request.revision,
-            selection: chosen.as_ref().map(|statement| statement.executable_range),
-            statements: chosen.into_iter().collect(),
+            selection: statements
+                .first()
+                .map(|statement| statement.executable_range),
+            statements,
+            symbols,
         })
     }
 
@@ -1130,7 +1144,26 @@ struct BindingToken {
     text: String,
     range: TextRange,
     quoted: bool,
-    dot: bool,
+    kind: BindingTokenKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingTokenKind {
+    Word,
+    Dot,
+    LeftParen,
+    RightParen,
+    Comma,
+}
+
+impl BindingToken {
+    const fn is_word(&self) -> bool {
+        matches!(self.kind, BindingTokenKind::Word)
+    }
+
+    const fn is_dot(&self) -> bool {
+        matches!(self.kind, BindingTokenKind::Dot)
+    }
 }
 
 fn bind_catalog_references(
@@ -1142,19 +1175,19 @@ fn bind_catalog_references(
     let mut diagnostics = Vec::new();
     let mut index = 0usize;
     while index < tokens.len() {
-        if tokens[index].dot
+        if !tokens[index].is_word()
             || !matches_ci(&tokens[index].text, &["FROM", "JOIN", "UPDATE", "INTO"])
         {
             index += 1;
             continue;
         }
-        let Some(first) = tokens.get(index + 1).filter(|token| !token.dot) else {
+        let Some(first) = tokens.get(index + 1).filter(|token| token.is_word()) else {
             index += 1;
             continue;
         };
         let (schema, object, range, qualified) =
-            if tokens.get(index + 2).is_some_and(|token| token.dot) {
-                let Some(second) = tokens.get(index + 3).filter(|token| !token.dot) else {
+            if tokens.get(index + 2).is_some_and(BindingToken::is_dot) {
+                let Some(second) = tokens.get(index + 3).filter(|token| token.is_word()) else {
                     index += 1;
                     continue;
                 };
@@ -1345,7 +1378,7 @@ fn binding_tokens(source: &str) -> Vec<BindingToken> {
                     end: index as u32,
                 },
                 quoted: true,
-                dot: false,
+                kind: BindingTokenKind::Word,
             });
         } else if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
             let start = index;
@@ -1368,17 +1401,24 @@ fn binding_tokens(source: &str) -> Vec<BindingToken> {
                     end: index as u32,
                 },
                 quoted: false,
-                dot: false,
+                kind: BindingTokenKind::Word,
             });
-        } else if bytes[index] == b'.' {
+        } else if matches!(bytes[index], b'.' | b'(' | b')' | b',') {
+            let kind = match bytes[index] {
+                b'.' => BindingTokenKind::Dot,
+                b'(' => BindingTokenKind::LeftParen,
+                b')' => BindingTokenKind::RightParen,
+                b',' => BindingTokenKind::Comma,
+                _ => unreachable!(),
+            };
             tokens.push(BindingToken {
-                text: ".".into(),
+                text: (bytes[index] as char).to_string(),
                 range: TextRange {
                     start: index as u32,
                     end: index as u32 + 1,
                 },
                 quoted: false,
-                dot: true,
+                kind,
             });
             index += 1;
         } else {
@@ -1386,6 +1426,226 @@ fn binding_tokens(source: &str) -> Vec<BindingToken> {
         }
     }
     tokens
+}
+
+fn outline_symbols(source: &str, statements: &[SemanticStatement]) -> Vec<SemanticOutlineSymbol> {
+    let tokens = binding_tokens(source);
+    let mut symbols = Vec::new();
+    for statement in statements {
+        let statement_tokens = tokens
+            .iter()
+            .filter(|token| {
+                statement.executable_range.start <= token.range.start
+                    && token.range.end <= statement.executable_range.end
+            })
+            .collect::<Vec<_>>();
+        let ctes = outline_cte_definitions(&statement_tokens);
+        for (name, range) in &ctes {
+            symbols.push(SemanticOutlineSymbol {
+                symbol_id: format!("{}:cte:{}", statement.statement_id, range.start),
+                statement_id: statement.statement_id.clone(),
+                kind: SemanticOutlineSymbolKind::Cte,
+                name: name.clone(),
+                range: *range,
+                definition_range: Some(*range),
+                alias: None,
+                target: None,
+                usage_kind: SqlUsageKind::Definition,
+            });
+        }
+        let cte_map = ctes
+            .iter()
+            .map(|(name, range)| (name.to_lowercase(), *range))
+            .collect::<HashMap<_, _>>();
+        let mut index = 0usize;
+        while index < statement_tokens.len() {
+            let token = statement_tokens[index];
+            if !token.is_word() {
+                index += 1;
+                continue;
+            }
+            let usage_kind = if token.text.eq_ignore_ascii_case("FROM")
+                && statement.kind == StatementKind::Delete
+            {
+                SqlUsageKind::Write
+            } else if matches_ci(&token.text, &["FROM", "JOIN", "USING"]) {
+                SqlUsageKind::Read
+            } else if matches_ci(&token.text, &["UPDATE", "INTO"]) {
+                SqlUsageKind::Write
+            } else if matches_ci(&token.text, &["CALL", "EXEC", "EXECUTE"]) {
+                SqlUsageKind::Call
+            } else {
+                index += 1;
+                continue;
+            };
+            let Some((target, target_name, range, next)) =
+                outline_relation_target(&statement_tokens, index + 1)
+            else {
+                index += 1;
+                continue;
+            };
+            let (alias, next) = outline_relation_alias(&statement_tokens, next);
+            let cte_definition = (!target.contains('.'))
+                .then(|| cte_map.get(&target_name.to_lowercase()).copied())
+                .flatten();
+            let kind = if cte_definition.is_some() {
+                SemanticOutlineSymbolKind::Cte
+            } else {
+                SemanticOutlineSymbolKind::Object
+            };
+            symbols.push(SemanticOutlineSymbol {
+                symbol_id: format!(
+                    "{}:{}:{}",
+                    statement.statement_id,
+                    if kind == SemanticOutlineSymbolKind::Cte {
+                        "cte-ref"
+                    } else {
+                        "object"
+                    },
+                    range.start
+                ),
+                statement_id: statement.statement_id.clone(),
+                kind,
+                name: alias
+                    .as_ref()
+                    .map_or_else(|| target_name.clone(), |(alias, _)| alias.clone()),
+                range: TextRange {
+                    start: range.start,
+                    end: alias.as_ref().map_or(range.end, |(_, range)| range.end),
+                },
+                definition_range: cte_definition,
+                alias: alias.map(|(alias, _)| alias),
+                target: Some(target),
+                usage_kind,
+            });
+            index = next.max(index + 1);
+        }
+    }
+    symbols
+}
+
+fn outline_cte_definitions(tokens: &[&BindingToken]) -> Vec<(String, TextRange)> {
+    let Some(mut index) = tokens
+        .iter()
+        .position(|token| token.is_word() && token.text.eq_ignore_ascii_case("WITH"))
+    else {
+        return Vec::new();
+    };
+    index += 1;
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.is_word() && token.text.eq_ignore_ascii_case("RECURSIVE"))
+    {
+        index += 1;
+    }
+    let mut definitions = Vec::new();
+    while let Some(name) = tokens.get(index).filter(|token| token.is_word()) {
+        let definition = (name.text.clone(), name.range);
+        index += 1;
+        if tokens
+            .get(index)
+            .is_some_and(|token| token.kind == BindingTokenKind::LeftParen)
+        {
+            let Some(next) = outline_after_balanced_parens(tokens, index) else {
+                break;
+            };
+            index = next;
+        }
+        if !tokens
+            .get(index)
+            .is_some_and(|token| token.is_word() && token.text.eq_ignore_ascii_case("AS"))
+        {
+            break;
+        }
+        index += 1;
+        if !tokens
+            .get(index)
+            .is_some_and(|token| token.kind == BindingTokenKind::LeftParen)
+        {
+            break;
+        }
+        definitions.push(definition);
+        let Some(next) = outline_after_balanced_parens(tokens, index) else {
+            break;
+        };
+        index = next;
+        if !tokens
+            .get(index)
+            .is_some_and(|token| token.kind == BindingTokenKind::Comma)
+        {
+            break;
+        }
+        index += 1;
+    }
+    definitions
+}
+
+fn outline_after_balanced_parens(tokens: &[&BindingToken], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match token.kind {
+            BindingTokenKind::LeftParen => depth += 1,
+            BindingTokenKind::RightParen => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn outline_relation_target(
+    tokens: &[&BindingToken],
+    start: usize,
+) -> Option<(String, String, TextRange, usize)> {
+    let first = *tokens.get(start)?;
+    if !first.is_word() {
+        return None;
+    }
+    let mut parts = vec![first.text.clone()];
+    let mut end = first.range.end;
+    let mut index = start + 1;
+    while parts.len() < 3
+        && tokens.get(index).is_some_and(|token| token.is_dot())
+        && tokens.get(index + 1).is_some_and(|token| token.is_word())
+    {
+        let word = tokens[index + 1];
+        parts.push(word.text.clone());
+        end = word.range.end;
+        index += 2;
+    }
+    Some((
+        parts.join("."),
+        parts.last().cloned().unwrap_or_default(),
+        TextRange {
+            start: first.range.start,
+            end,
+        },
+        index,
+    ))
+}
+
+fn outline_relation_alias(
+    tokens: &[&BindingToken],
+    mut index: usize,
+) -> (Option<(String, TextRange)>, usize) {
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.is_word() && token.text.eq_ignore_ascii_case("AS"))
+    {
+        index += 1;
+    }
+    let alias = tokens
+        .get(index)
+        .filter(|token| token.is_word() && !is_alias_stop(&token.text))
+        .map(|token| (token.text.clone(), token.range));
+    if alias.is_some() {
+        index += 1;
+    }
+    (alias, index)
 }
 
 fn split_statements(
@@ -1923,6 +2183,71 @@ mod tests {
             )
             .unwrap();
         assert_eq!(selected.statements[0].ordinal, 2);
+    }
+
+    #[test]
+    fn statement_selection_describes_ctes_objects_aliases_and_usage() {
+        let registry = SemanticRegistry::default();
+        let scope = DocumentScope {
+            session: 1,
+            connection: 1,
+        };
+        let source = "WITH recent AS (SELECT * FROM jobs j), older AS (SELECT * FROM archive.jobs a) SELECT * FROM recent r JOIN public.users u ON u.id = r.user_id; UPDATE jobs j SET done = true; CALL refresh_jobs()";
+        let state = registry
+            .create(
+                scope,
+                dialect("sift/postgresql"),
+                source.into(),
+                None,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let selected = registry
+            .select_statement(
+                scope,
+                state.document_id,
+                SelectStatementRequest {
+                    revision: 1,
+                    cursor: 0,
+                    selection: Some(TextRange {
+                        start: 0,
+                        end: source.len() as u32,
+                    }),
+                },
+            )
+            .unwrap();
+
+        let recent_definition = selected
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.kind == SemanticOutlineSymbolKind::Cte
+                    && symbol.name == "recent"
+                    && symbol.usage_kind == SqlUsageKind::Definition
+            })
+            .unwrap();
+        assert!(selected.symbols.iter().any(|symbol| {
+            symbol.kind == SemanticOutlineSymbolKind::Cte
+                && symbol.target.as_deref() == Some("recent")
+                && symbol.alias.as_deref() == Some("r")
+                && symbol.definition_range == recent_definition.definition_range
+                && symbol.usage_kind == SqlUsageKind::Read
+        }));
+        for (target, alias) in [("jobs", "j"), ("archive.jobs", "a"), ("public.users", "u")] {
+            assert!(selected.symbols.iter().any(|symbol| {
+                symbol.kind == SemanticOutlineSymbolKind::Object
+                    && symbol.target.as_deref() == Some(target)
+                    && symbol.alias.as_deref() == Some(alias)
+                    && symbol.usage_kind == SqlUsageKind::Read
+            }));
+        }
+        assert!(selected.symbols.iter().any(|symbol| {
+            symbol.target.as_deref() == Some("jobs") && symbol.usage_kind == SqlUsageKind::Write
+        }));
+        assert!(selected.symbols.iter().any(|symbol| {
+            symbol.target.as_deref() == Some("refresh_jobs")
+                && symbol.usage_kind == SqlUsageKind::Call
+        }));
     }
 
     #[test]

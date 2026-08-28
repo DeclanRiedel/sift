@@ -3273,6 +3273,7 @@ async fn semantic_outcome(
             if end == 0 {
                 return SemanticOutcome::Outline {
                     statements: Vec::new(),
+                    symbols: Vec::new(),
                 };
             }
             match client
@@ -3290,6 +3291,7 @@ async fn semantic_outcome(
             {
                 Ok(selection) => SemanticOutcome::Outline {
                     statements: selection.statements,
+                    symbols: selection.symbols,
                 },
                 Err(error) => {
                     SemanticOutcome::OutlineFailed(format!("loading query outline failed: {error}"))

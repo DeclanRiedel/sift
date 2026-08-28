@@ -1635,6 +1635,33 @@ struct DatabaseObjectTarget {
     object_kind: sift_protocol::ObjectKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum QueryOutlineGroup {
+    Statements,
+    Ctes,
+    Objects,
+}
+
+#[derive(Debug, Clone)]
+enum QueryOutlineEntry {
+    Group {
+        group: QueryOutlineGroup,
+        count: usize,
+    },
+    Statement(sift_protocol::SemanticStatement),
+    Symbol(sift_protocol::SemanticOutlineSymbol),
+}
+
+impl QueryOutlineEntry {
+    fn key(&self) -> String {
+        match self {
+            Self::Group { group, .. } => format!("group:{group:?}"),
+            Self::Statement(statement) => format!("statement:{}", statement.statement_id),
+            Self::Symbol(symbol) => format!("symbol:{}", symbol.symbol_id),
+        }
+    }
+}
+
 /// Live state of the desktop's database connection. Owned by the shell,
 /// updated from executor events.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5716,6 +5743,8 @@ pub struct WorkspaceShell {
     query_outline_item_id: Option<u64>,
     query_outline_revision: Option<u64>,
     query_outline_statements: Vec<sift_protocol::SemanticStatement>,
+    query_outline_symbols: Vec<sift_protocol::SemanticOutlineSymbol>,
+    query_outline_collapsed: HashSet<QueryOutlineGroup>,
     query_outline_loading: bool,
     query_outline_error: Option<String>,
     pending_semantic_rename: Option<PendingSemanticRename>,
@@ -6412,6 +6441,8 @@ impl WorkspaceShell {
             query_outline_item_id: None,
             query_outline_revision: None,
             query_outline_statements: Vec::new(),
+            query_outline_symbols: Vec::new(),
+            query_outline_collapsed: HashSet::new(),
             query_outline_loading: false,
             query_outline_error: None,
             pending_semantic_rename: None,
@@ -7841,7 +7872,10 @@ impl WorkspaceShell {
                 text_revision,
                 outcome,
             } => match *outcome {
-                SemanticOutcome::Outline { statements } => {
+                SemanticOutcome::Outline {
+                    statements,
+                    symbols,
+                } => {
                     if self.query_outline_item_id != Some(item_id)
                         || self.query_outline_revision != Some(text_revision)
                         || self
@@ -7851,19 +7885,23 @@ impl WorkspaceShell {
                         return;
                     }
                     let selected_id = self
-                        .filtered_query_outline(cx)
+                        .filtered_query_outline_entries(cx)
                         .get(self.query_outline_selected)
-                        .map(|statement| statement.statement_id.clone());
+                        .map(QueryOutlineEntry::key);
                     self.query_outline_statements = statements;
+                    self.query_outline_symbols = symbols;
                     self.query_outline_selected = selected_id
                         .and_then(|id| {
-                            self.filtered_query_outline(cx)
+                            self.filtered_query_outline_entries(cx)
                                 .iter()
-                                .position(|statement| statement.statement_id == id)
+                                .position(|entry| entry.key() == id)
                         })
                         .unwrap_or_else(|| {
-                            self.query_outline_selected
-                                .min(self.filtered_query_outline(cx).len().saturating_sub(1))
+                            self.query_outline_selected.min(
+                                self.filtered_query_outline_entries(cx)
+                                    .len()
+                                    .saturating_sub(1),
+                            )
                         });
                     self.query_outline_loading = false;
                     self.query_outline_error = None;
@@ -18350,6 +18388,24 @@ impl WorkspaceShell {
         }
     }
 
+    const fn query_outline_group_label(group: QueryOutlineGroup) -> &'static str {
+        match group {
+            QueryOutlineGroup::Statements => "STATEMENTS",
+            QueryOutlineGroup::Ctes => "CTES",
+            QueryOutlineGroup::Objects => "OBJECTS",
+        }
+    }
+
+    const fn query_outline_usage_label(kind: sift_protocol::SqlUsageKind) -> &'static str {
+        match kind {
+            sift_protocol::SqlUsageKind::Definition => "DEFINE",
+            sift_protocol::SqlUsageKind::Read => "READ",
+            sift_protocol::SqlUsageKind::Write => "WRITE",
+            sift_protocol::SqlUsageKind::Call => "CALL",
+            sift_protocol::SqlUsageKind::TypeReference => "TYPE",
+        }
+    }
+
     fn active_query_outline_editor(&self, cx: &App) -> Option<(u64, Entity<QueryEditor>)> {
         let pane = self.panes.get(self.active_pane)?.read(cx);
         let item = pane.active_item()?;
@@ -18364,6 +18420,7 @@ impl WorkspaceShell {
             self.query_outline_item_id = None;
             self.query_outline_revision = None;
             self.query_outline_statements.clear();
+            self.query_outline_symbols.clear();
             self.query_outline_loading = false;
             self.query_outline_error = None;
             cx.notify();
@@ -18386,6 +18443,8 @@ impl WorkspaceShell {
         if self.query_outline_item_id != Some(item_id) {
             self.query_outline_selected = 0;
             self.query_outline_statements.clear();
+            self.query_outline_symbols.clear();
+            self.query_outline_collapsed.clear();
         }
         self.query_outline_item_id = Some(item_id);
         self.query_outline_revision = Some(revision);
@@ -18442,14 +18501,15 @@ impl WorkspaceShell {
             .replace(['\n', '\r'], " ")
     }
 
-    fn filtered_query_outline(&self, cx: &App) -> Vec<sift_protocol::SemanticStatement> {
+    fn filtered_query_outline_entries(&self, cx: &App) -> Vec<QueryOutlineEntry> {
         let query = self
             .query_outline_filter_input
             .read(cx)
             .text()
             .trim()
             .to_lowercase();
-        self.query_outline_statements
+        let statements = self
+            .query_outline_statements
             .iter()
             .filter(|statement| {
                 query.is_empty()
@@ -18462,17 +18522,68 @@ impl WorkspaceShell {
                         .contains(&query)
             })
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        let matching_symbols = |kind| {
+            self.query_outline_symbols
+                .iter()
+                .filter(|symbol| {
+                    symbol.kind == kind
+                        && (query.is_empty()
+                            || symbol.name.to_lowercase().contains(&query)
+                            || symbol
+                                .target
+                                .as_deref()
+                                .is_some_and(|target| target.to_lowercase().contains(&query))
+                            || symbol
+                                .alias
+                                .as_deref()
+                                .is_some_and(|alias| alias.to_lowercase().contains(&query))
+                            || Self::query_outline_usage_label(symbol.usage_kind)
+                                .to_lowercase()
+                                .contains(&query))
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let ctes = matching_symbols(sift_protocol::SemanticOutlineSymbolKind::Cte);
+        let objects = matching_symbols(sift_protocol::SemanticOutlineSymbolKind::Object);
+        let mut entries = Vec::new();
+        for (group, statements, symbols) in [
+            (QueryOutlineGroup::Statements, Some(statements), None),
+            (QueryOutlineGroup::Ctes, None, Some(ctes)),
+            (QueryOutlineGroup::Objects, None, Some(objects)),
+        ] {
+            let count = statements
+                .as_ref()
+                .map_or_else(|| symbols.as_ref().map_or(0, Vec::len), Vec::len);
+            if count == 0 {
+                continue;
+            }
+            entries.push(QueryOutlineEntry::Group { group, count });
+            if self.query_outline_collapsed.contains(&group) {
+                continue;
+            }
+            if let Some(statements) = statements {
+                entries.extend(statements.into_iter().map(QueryOutlineEntry::Statement));
+            }
+            if let Some(symbols) = symbols {
+                entries.extend(symbols.into_iter().map(QueryOutlineEntry::Symbol));
+            }
+        }
+        entries
     }
 
-    fn selected_query_outline(&self, cx: &App) -> Option<sift_protocol::SemanticStatement> {
-        self.filtered_query_outline(cx)
+    fn selected_query_outline(&self, cx: &App) -> Option<QueryOutlineEntry> {
+        self.filtered_query_outline_entries(cx)
             .get(self.query_outline_selected)
             .cloned()
     }
 
     fn move_query_outline_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let last = self.filtered_query_outline(cx).len().saturating_sub(1);
+        let last = self
+            .filtered_query_outline_entries(cx)
+            .len()
+            .saturating_sub(1);
         self.query_outline_selected = self
             .query_outline_selected
             .saturating_add_signed(delta)
@@ -18482,10 +18593,123 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn jump_to_selected_query_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(statement) = self.selected_query_outline(cx) else {
+    fn query_outline_entry_group(entry: &QueryOutlineEntry) -> QueryOutlineGroup {
+        match entry {
+            QueryOutlineEntry::Group { group, .. } => *group,
+            QueryOutlineEntry::Statement(_) => QueryOutlineGroup::Statements,
+            QueryOutlineEntry::Symbol(symbol) => match symbol.kind {
+                sift_protocol::SemanticOutlineSymbolKind::Cte => QueryOutlineGroup::Ctes,
+                sift_protocol::SemanticOutlineSymbolKind::Object => QueryOutlineGroup::Objects,
+            },
+        }
+    }
+
+    fn set_query_outline_group_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_query_outline(cx) else {
             return;
         };
+        let group = Self::query_outline_entry_group(&entry);
+        if collapsed {
+            self.query_outline_collapsed.insert(group);
+        } else {
+            self.query_outline_collapsed.remove(&group);
+        }
+        self.query_outline_selected = self
+            .filtered_query_outline_entries(cx)
+            .iter()
+            .position(|entry| {
+                matches!(entry, QueryOutlineEntry::Group { group: candidate, .. } if *candidate == group)
+            })
+            .unwrap_or(0);
+        self.query_outline_scroll_handle
+            .scroll_to_item(self.query_outline_selected, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    fn query_outline_object_target(
+        &self,
+        symbol: &sift_protocol::SemanticOutlineSymbol,
+    ) -> Option<DatabaseObjectTarget> {
+        let target = symbol.target.as_deref().unwrap_or(&symbol.name);
+        let parts = target.split('.').collect::<Vec<_>>();
+        if parts.is_empty() || parts.len() > 3 {
+            return None;
+        }
+        let profile_id = match self.connection_status {
+            ConnectionStatus::Connected { profile_id, .. } => profile_id,
+            _ => return None,
+        };
+        let ConnectionSchemaState::Ready {
+            profile_id: ready,
+            snapshot,
+        } = &self.connection_schema
+        else {
+            return None;
+        };
+        if *ready != profile_id {
+            return None;
+        }
+        let object_name = parts[parts.len() - 1];
+        let schema_name = (parts.len() >= 2).then(|| parts[parts.len() - 2]);
+        let catalog_name = (parts.len() == 3).then(|| parts[0]);
+        let mut matches = snapshot
+            .trees
+            .iter()
+            .flat_map(|catalog| {
+                catalog.schemas.iter().flat_map(move |schema| {
+                    schema
+                        .objects
+                        .iter()
+                        .filter(move |object| {
+                            object.name.eq_ignore_ascii_case(object_name)
+                                && schema_name
+                                    .is_none_or(|name| schema.name.eq_ignore_ascii_case(name))
+                                && catalog_name
+                                    .is_none_or(|name| catalog.name.eq_ignore_ascii_case(name))
+                        })
+                        .map(move |object| {
+                            (
+                                catalog.name.clone(),
+                                schema.name.clone(),
+                                object.name.clone(),
+                                object.kind,
+                            )
+                        })
+                })
+            })
+            .collect::<Vec<_>>();
+        matches.dedup();
+        if matches.len() != 1 {
+            return None;
+        }
+        let resolved = matches.pop().unwrap();
+        let connection = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| tenant.connections.iter())
+            .find(|connection| connection.id == profile_id)?
+            .clone();
+        Some(DatabaseObjectTarget {
+            connection,
+            catalog: resolved.0,
+            schema: resolved.1,
+            object: resolved.2,
+            object_kind: resolved.3,
+        })
+    }
+
+    fn jump_to_selected_query_outline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_query_outline(cx) else {
+            return;
+        };
+        if let QueryOutlineEntry::Group { group, .. } = entry {
+            if !self.query_outline_collapsed.remove(&group) {
+                self.query_outline_collapsed.insert(group);
+            }
+            cx.notify();
+            return;
+        }
         let Some(item_id) = self.query_outline_item_id else {
             return;
         };
@@ -18496,8 +18720,35 @@ impl WorkspaceShell {
             self.request_query_outline(cx);
             return;
         }
+        let range = match entry {
+            QueryOutlineEntry::Statement(statement) => statement.executable_range,
+            QueryOutlineEntry::Symbol(symbol)
+                if symbol.kind == sift_protocol::SemanticOutlineSymbolKind::Cte =>
+            {
+                symbol.definition_range.unwrap_or(symbol.range)
+            }
+            QueryOutlineEntry::Symbol(symbol) => {
+                if let Some(target) = self.query_outline_object_target(&symbol) {
+                    self.open_schema_search_target(target, window, cx);
+                } else {
+                    let target = symbol.target.as_deref().unwrap_or(&symbol.name);
+                    let message = format!(
+                        "{target} is not uniquely available in the loaded schema; refresh the connection schema or qualify the object"
+                    );
+                    self.query_outline_error = Some(message.clone());
+                    self.record_runtime_error(
+                        Some(item_id),
+                        "Open query-outline object",
+                        message,
+                        cx,
+                    );
+                }
+                return;
+            }
+            QueryOutlineEntry::Group { .. } => unreachable!(),
+        };
         editor.update(cx, |editor, cx| {
-            editor.set_cursor_offset(statement.executable_range.start as usize, cx)
+            editor.set_cursor_offset(range.start as usize, cx)
         });
         self.focus_active_pane(window, cx);
         self.focused_surface = WorkspaceSurface::Editor;
@@ -18505,7 +18756,7 @@ impl WorkspaceShell {
     }
 
     fn execute_selected_query_outline(&mut self, cx: &mut Context<Self>) {
-        let Some(statement) = self.selected_query_outline(cx) else {
+        let Some(QueryOutlineEntry::Statement(statement)) = self.selected_query_outline(cx) else {
             return;
         };
         let Some(item_id) = self.query_outline_item_id else {
@@ -18552,6 +18803,8 @@ impl WorkspaceShell {
         match event.keystroke.key.as_str() {
             "j" | "down" => self.move_query_outline_selection(1, cx),
             "k" | "up" => self.move_query_outline_selection(-1, cx),
+            "h" | "left" => self.set_query_outline_group_collapsed(true, cx),
+            "l" | "right" => self.set_query_outline_group_collapsed(false, cx),
             "enter" => self.jump_to_selected_query_outline(window, cx),
             "x" => self.execute_selected_query_outline(cx),
             "/" => self.open_query_outline_filter(window, cx),
@@ -22456,8 +22709,12 @@ impl WorkspaceShell {
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::QueryOutline,
                 |dock_view| {
-                    let statements = self.filtered_query_outline(cx);
-                    let statement_count = statements.len();
+                    let outline_entries = self.filtered_query_outline_entries(cx);
+                    let outline_count = outline_entries.len();
+                    let outline_item_count = outline_entries
+                        .iter()
+                        .filter(|entry| !matches!(entry, QueryOutlineEntry::Group { .. }))
+                        .count();
                     let active_item = self.active_query_outline_editor(cx);
                     dock_view
                         .child(
@@ -22477,7 +22734,7 @@ impl WorkspaceShell {
                                             div()
                                                 .text_xs()
                                                 .text_color(colors.disabled_text)
-                                                .child(statement_count.to_string()),
+                                                .child(outline_item_count.to_string()),
                                         ),
                                 )
                                 .child(
@@ -22545,7 +22802,7 @@ impl WorkspaceShell {
                                         div()
                                             .text_xs()
                                             .text_color(colors.muted_text)
-                                            .child(format!("{statement_count} match(es)")),
+                                            .child(format!("{outline_item_count} match(es)")),
                                     ),
                             )
                         })
@@ -22588,49 +22845,121 @@ impl WorkspaceShell {
                             },
                         )
                         .when(
-                            !self.query_outline_statements.is_empty() && statement_count == 0,
+                            (!self.query_outline_statements.is_empty()
+                                || !self.query_outline_symbols.is_empty())
+                                && outline_count == 0,
                             |panel| {
                                 panel.child(
                                     div()
                                         .p_3()
                                         .text_color(colors.muted_text)
-                                        .child("No matching statements."),
+                                        .child("No matching statements or symbols."),
                                 )
                             },
                         )
                         .child(
                             uniform_list(
                                 "query-outline-scroll",
-                                statement_count,
+                                outline_count,
                                 cx.processor(move |shell, range: Range<usize>, _, cx| {
-                                    let statements = shell.filtered_query_outline(cx);
+                                    let entries = shell.filtered_query_outline_entries(cx);
                                     let cursor = shell
                                         .active_query_outline_editor(cx)
                                         .map(|(_, editor)| editor.read(cx).cursor_offset());
                                     range
                                         .filter_map(|index| {
-                                            statements
-                                                .get(index)
-                                                .cloned()
-                                                .map(|statement| (index, statement))
+                                            entries.get(index).cloned().map(|entry| (index, entry))
                                         })
-                                        .map(|(index, statement)| {
+                                        .map(|(index, entry)| {
                                             let selected = index == shell.query_outline_selected;
-                                            let contains_cursor = cursor.is_some_and(|cursor| {
-                                                statement.executable_range.start as usize <= cursor
-                                                    && cursor
-                                                        < statement.executable_range.end as usize
-                                            });
-                                            let kind =
-                                                Self::query_outline_kind_label(statement.kind);
-                                            let preview = shell.query_outline_sql(&statement, cx);
-                                            let recovered = statement.recovered;
+                                            let (contains_cursor, heading, detail, tone) =
+                                                match &entry {
+                                                    QueryOutlineEntry::Group { group, count } => {
+                                                        let marker = if shell
+                                                            .query_outline_collapsed
+                                                            .contains(group)
+                                                        {
+                                                            "▸"
+                                                        } else {
+                                                            "▾"
+                                                        };
+                                                        (
+                                                            false,
+                                                            format!(
+                                                                "{marker} {}",
+                                                                Self::query_outline_group_label(
+                                                                    *group
+                                                                )
+                                                            ),
+                                                            format!("{count} item(s)"),
+                                                            colors.muted_text,
+                                                        )
+                                                    }
+                                                    QueryOutlineEntry::Statement(statement) => {
+                                                        let contains = cursor.is_some_and(|cursor| {
+                                                            statement.executable_range.start as usize
+                                                                <= cursor
+                                                                && cursor
+                                                                    < statement.executable_range.end
+                                                                        as usize
+                                                        });
+                                                        (
+                                                            contains,
+                                                            format!(
+                                                                "{} · #{}{}",
+                                                                Self::query_outline_kind_label(
+                                                                    statement.kind
+                                                                ),
+                                                                statement.ordinal + 1,
+                                                                if statement.recovered {
+                                                                    " · RECOVERED"
+                                                                } else {
+                                                                    ""
+                                                                }
+                                                            ),
+                                                            shell.query_outline_sql(statement, cx),
+                                                            if statement.recovered {
+                                                                colors.warning
+                                                            } else {
+                                                                colors.accent
+                                                            },
+                                                        )
+                                                    }
+                                                    QueryOutlineEntry::Symbol(symbol) => {
+                                                        let contains = cursor.is_some_and(|cursor| {
+                                                            symbol.range.start as usize <= cursor
+                                                                && cursor
+                                                                    < symbol.range.end as usize
+                                                        });
+                                                        let kind = match symbol.kind {
+                                                            sift_protocol::SemanticOutlineSymbolKind::Cte => "CTE",
+                                                            sift_protocol::SemanticOutlineSymbolKind::Object => "OBJECT",
+                                                        };
+                                                        let target = symbol
+                                                            .target
+                                                            .as_deref()
+                                                            .unwrap_or(&symbol.name);
+                                                        let detail = symbol.alias.as_ref().map_or_else(
+                                                            || target.to_owned(),
+                                                            |alias| format!("{alias} → {target}"),
+                                                        );
+                                                        (
+                                                            contains,
+                                                            format!(
+                                                                "{kind} · {}",
+                                                                Self::query_outline_usage_label(
+                                                                    symbol.usage_kind
+                                                                )
+                                                            ),
+                                                            detail,
+                                                            colors.accent,
+                                                        )
+                                                    }
+                                                };
                                             div()
                                                 .id(("query-outline-row", index))
-                                                .debug_selector(move || {
-                                                    format!("query-outline-row-{index}")
-                                                })
-                                                .h(px(58.))
+                                                .debug_selector(move || format!("query-outline-row-{index}"))
+                                                .h(px(52.))
                                                 .mx_2()
                                                 .px_2()
                                                 .py_1()
@@ -22641,72 +22970,28 @@ impl WorkspaceShell {
                                                 .rounded_sm()
                                                 .border_b_1()
                                                 .border_color(colors.subtle_border)
-                                                .when(contains_cursor, |row| {
-                                                    row.border_l_2().border_color(colors.accent)
-                                                })
-                                                .when(selected, |row| {
-                                                    row.bg(colors.active_surface)
-                                                })
+                                                .when(contains_cursor, |row| row.border_l_2().border_color(colors.accent))
+                                                .when(selected, |row| row.bg(colors.active_surface))
                                                 .hover(|row| row.bg(colors.hovered_surface))
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(
-                                                        move |shell,
-                                                              event: &gpui::MouseDownEvent,
-                                                              window,
-                                                              cx| {
-                                                            shell.query_outline_selected = index;
-                                                            shell.focused_surface =
-                                                                WorkspaceSurface::QueryOutline;
-                                                            shell
-                                                                .query_outline_focus_handle
-                                                                .focus(window, cx);
-                                                            if event.click_count >= 2 {
-                                                                shell
-                                                                    .jump_to_selected_query_outline(
-                                                                        window, cx,
-                                                                    );
-                                                            }
-                                                            cx.notify();
-                                                        },
-                                                    ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_2()
-                                                        .text_xs()
-                                                        .child(
-                                                            div()
-                                                                .text_color(if recovered {
-                                                                    colors.warning
-                                                                } else {
-                                                                    colors.accent
-                                                                })
-                                                                .child(kind),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_color(colors.disabled_text)
-                                                                .child(format!(
-                                                                    "#{}{}",
-                                                                    statement.ordinal + 1,
-                                                                    if recovered {
-                                                                        " · RECOVERED"
-                                                                    } else {
-                                                                        ""
-                                                                    }
-                                                                )),
-                                                        ),
-                                                )
+                                                .on_mouse_down(MouseButton::Left, cx.listener(
+                                                    move |shell, event: &gpui::MouseDownEvent, window, cx| {
+                                                        shell.query_outline_selected = index;
+                                                        shell.focused_surface = WorkspaceSurface::QueryOutline;
+                                                        shell.query_outline_focus_handle.focus(window, cx);
+                                                        if event.click_count >= 2 {
+                                                            shell.jump_to_selected_query_outline(window, cx);
+                                                        }
+                                                        cx.notify();
+                                                    },
+                                                ))
+                                                .child(div().text_xs().text_color(tone).child(heading))
                                                 .child(
                                                     div()
                                                         .min_w_0()
                                                         .truncate()
                                                         .font_family("monospace")
                                                         .text_color(colors.muted_text)
-                                                        .child(preview),
+                                                        .child(detail),
                                                 )
                                                 .into_any_element()
                                         })
@@ -22731,8 +23016,8 @@ impl WorkspaceShell {
                                 .border_color(colors.subtle_border)
                                 .text_xs()
                                 .text_color(colors.muted_text)
-                                .child("j/k navigate · Enter jump · / filter")
-                                .child("x execute · r refresh"),
+                                .child("j/k navigate · h/l fold · Enter open")
+                                .child("x execute statement · / filter · r refresh"),
                         )
                 },
             )
@@ -34521,6 +34806,30 @@ mod tests {
                 recovered: true,
             },
         ];
+        let symbols = vec![
+            sift_protocol::SemanticOutlineSymbol {
+                symbol_id: "cte-1".into(),
+                statement_id: "statement-1".into(),
+                kind: sift_protocol::SemanticOutlineSymbolKind::Cte,
+                name: "recent".into(),
+                range: sift_protocol::TextRange { start: 0, end: 6 },
+                definition_range: Some(sift_protocol::TextRange { start: 0, end: 6 }),
+                alias: None,
+                target: None,
+                usage_kind: sift_protocol::SqlUsageKind::Definition,
+            },
+            sift_protocol::SemanticOutlineSymbol {
+                symbol_id: "object-1".into(),
+                statement_id: "statement-2".into(),
+                kind: sift_protocol::SemanticOutlineSymbolKind::Object,
+                name: "jobs".into(),
+                range: sift_protocol::TextRange { start: 17, end: 21 },
+                definition_range: None,
+                alias: None,
+                target: Some("jobs".into()),
+                usage_kind: sift_protocol::SqlUsageKind::Write,
+            },
+        ];
         workspace.update(&mut cx, |shell, cx| {
             shell.on_executor_event(
                 ExecutorEvent::Semantic {
@@ -34528,6 +34837,7 @@ mod tests {
                     text_revision: revision.wrapping_add(1),
                     outcome: Box::new(SemanticOutcome::Outline {
                         statements: statements.clone(),
+                        symbols: symbols.clone(),
                     }),
                 },
                 cx,
@@ -34540,12 +34850,14 @@ mod tests {
                     text_revision: revision,
                     outcome: Box::new(SemanticOutcome::Outline {
                         statements: statements.clone(),
+                        symbols: symbols.clone(),
                     }),
                 },
                 cx,
             );
             assert!(!shell.query_outline_loading);
             assert_eq!(shell.query_outline_statements, statements);
+            assert_eq!(shell.query_outline_symbols, symbols);
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("query-outline-row-0").is_some());
@@ -34556,10 +34868,10 @@ mod tests {
             shell
                 .query_outline_filter_input
                 .update(cx, |input, cx| input.set_text("update", cx));
-            assert_eq!(shell.filtered_query_outline(cx).len(), 1);
+            assert_eq!(shell.filtered_query_outline_entries(cx).len(), 2);
         });
         cx.simulate_keystrokes("escape");
-        cx.simulate_keystrokes("j enter");
+        cx.simulate_keystrokes("j j enter");
         workspace.read_with(&cx, |shell, cx| {
             let editor = shell.editor_for_item(item_id, cx).unwrap();
             assert_eq!(editor.read(cx).cursor_offset(), 10);
@@ -34578,6 +34890,35 @@ mod tests {
             )
         });
         assert!(executed);
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .query_outline_filter_input
+                .update(cx, |input, cx| input.set_text("write", cx));
+            let entries = shell.filtered_query_outline_entries(cx);
+            assert_eq!(entries.len(), 2);
+            assert!(matches!(
+                entries[1],
+                QueryOutlineEntry::Symbol(ref symbol) if symbol.symbol_id == "object-1"
+            ));
+            shell
+                .query_outline_filter_input
+                .update(cx, |input, cx| input.set_text("", cx));
+            shell.query_outline_selected = 3;
+            shell.set_query_outline_group_collapsed(true, cx);
+            assert!(shell
+                .query_outline_collapsed
+                .contains(&QueryOutlineGroup::Ctes));
+            assert_eq!(shell.filtered_query_outline_entries(cx).len(), 6);
+            shell.set_query_outline_group_collapsed(false, cx);
+            assert_eq!(shell.filtered_query_outline_entries(cx).len(), 7);
+        });
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.query_outline_selected = 4;
+            shell.jump_to_selected_query_outline(window, cx);
+            let editor = shell.editor_for_item(item_id, cx).unwrap();
+            assert_eq!(editor.read(cx).cursor_offset(), 0);
+        });
 
         workspace.update(&mut cx, |shell, cx| {
             shell.request_query_outline(cx);
@@ -34599,6 +34940,79 @@ mod tests {
                 problem.title.starts_with("Load query outline")
                     && problem.message == "outline permission denied"
             }));
+        });
+    }
+
+    #[gpui::test]
+    fn query_outline_resolves_loaded_schema_objects_without_guessing(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let symbol = |target: &str| sift_protocol::SemanticOutlineSymbol {
+            symbol_id: format!("object-{target}"),
+            statement_id: "statement-1".into(),
+            kind: sift_protocol::SemanticOutlineSymbolKind::Object,
+            name: "jobs".into(),
+            range: sift_protocol::TextRange { start: 7, end: 11 },
+            definition_range: None,
+            alias: None,
+            target: Some(target.into()),
+            usage_kind: sift_protocol::SqlUsageKind::Read,
+        };
+        workspace.update(&mut cx, |shell, _| {
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: vec![ConnectionNavEntry {
+                    id: 2,
+                    tenant_id: 1,
+                    name: "Warehouse".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                }],
+            }];
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Warehouse".into(),
+            };
+            let mut snapshot =
+                sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
+            snapshot.trees.push(sift_protocol::CatalogTree {
+                name: "warehouse".into(),
+                schemas: vec![sift_protocol::SchemaTree {
+                    name: "public".into(),
+                    objects: vec![sift_protocol::ObjectInfo::new(
+                        "jobs",
+                        sift_protocol::ObjectKind::Table,
+                    )],
+                }],
+            });
+            shell.connection_schema = ConnectionSchemaState::Ready {
+                profile_id: 2,
+                snapshot: Box::new(snapshot),
+            };
+            let target = shell
+                .query_outline_object_target(&symbol("public.jobs"))
+                .unwrap();
+            assert_eq!(target.catalog, "warehouse");
+            assert_eq!(target.schema, "public");
+            assert_eq!(target.object, "jobs");
+            assert!(shell.query_outline_object_target(&symbol("jobs")).is_some());
+
+            let ConnectionSchemaState::Ready { snapshot, .. } = &mut shell.connection_schema else {
+                unreachable!();
+            };
+            snapshot.trees[0].schemas.push(sift_protocol::SchemaTree {
+                name: "archive".into(),
+                objects: vec![sift_protocol::ObjectInfo::new(
+                    "jobs",
+                    sift_protocol::ObjectKind::View,
+                )],
+            });
+            assert!(shell.query_outline_object_target(&symbol("jobs")).is_none());
+            assert!(shell
+                .query_outline_object_target(&symbol("archive.jobs"))
+                .is_some());
         });
     }
 

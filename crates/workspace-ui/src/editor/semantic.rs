@@ -96,6 +96,7 @@ pub enum SemanticOutcome {
     },
     Outline {
         statements: Vec<sift_protocol::SemanticStatement>,
+        symbols: Vec<sift_protocol::SemanticOutlineSymbol>,
     },
     OutlineFailed(String),
     Failed(String),
