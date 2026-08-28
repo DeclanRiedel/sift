@@ -120,6 +120,10 @@ struct GlobalProblem {
     transient: bool,
 }
 
+fn room_member_can_be_removed(member_count: usize, role: &sift_api_types::RoomRole) -> bool {
+    member_count > 1 && !matches!(role, sift_api_types::RoomRole::Owner)
+}
+
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -7822,7 +7826,10 @@ impl WorkspaceShell {
                             .retain(|member| member.principal_id.0 != principal_id);
                         self.show_success_toast(format!("Removed member {principal_id}"), cx);
                     }
-                    Err(message) => self.room_members_error = Some(message),
+                    Err(message) => {
+                        self.room_members_error = Some(message.clone());
+                        self.record_runtime_error(None, "Remove room member", message, cx);
+                    }
                 }
                 if self.selected_workspace().map(|workspace| workspace.room_id) == Some(room_id) {
                     cx.notify();
@@ -12412,7 +12419,9 @@ impl WorkspaceShell {
 
     fn remove_room_member(&mut self, room_id: i64, principal_id: i64, cx: &mut Context<Self>) {
         let Some(sender) = &self.executor_sender else {
-            self.room_members_error = Some("Room manager is unavailable".into());
+            let message = "Room manager is unavailable".to_owned();
+            self.room_members_error = Some(message.clone());
+            self.record_runtime_error(None, "Remove room member", message, cx);
             cx.notify();
             return;
         };
@@ -20219,9 +20228,11 @@ impl WorkspaceShell {
                             .child(format!("Participant {}", participant.principal_id))
                     });
                     let room_id = self.selected_workspace().map(|workspace| workspace.room_id);
+                    let member_count = self.room_members.len();
                     let member_rows = self.room_members.iter().enumerate().map(|(index, member)| {
                         let principal_id = member.principal_id.0;
                         let member_room_id = member.room_id.0;
+                        let can_remove = room_member_can_be_removed(member_count, &member.role);
                         div()
                             .id(("room-member", index))
                             .mx_2()
@@ -20245,18 +20256,20 @@ impl WorkspaceShell {
                                     .text_color(colors.muted_text)
                                     .child(format!("{:?}", member.role)),
                             )
-                            .child(
-                                Button::new(("remove-room-member", index), "Remove")
-                                    .tone(ButtonTone::DangerGhost)
-                                    .disabled(self.room_members_loading)
-                                    .on_click(cx.listener(move |shell, _, _, cx| {
-                                        shell.remove_room_member(
-                                            member_room_id,
-                                            principal_id,
-                                            cx,
-                                        )
-                                    })),
-                            )
+                            .when(can_remove, |row| {
+                                row.child(
+                                    Button::new(("remove-room-member", index), "Remove")
+                                        .tone(ButtonTone::DangerGhost)
+                                        .disabled(self.room_members_loading)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.remove_room_member(
+                                                member_room_id,
+                                                principal_id,
+                                                cx,
+                                            )
+                                        })),
+                                )
+                            })
                     });
                     dock_view
                         .child(
@@ -29977,6 +29990,46 @@ mod tests {
             assert_eq!(shell.global_problems[0].title, "Save database connection");
             assert!(!shell.global_problems[0].transient);
         });
+    }
+
+    #[gpui::test]
+    fn room_member_removal_failures_remain_inline_and_in_problems(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::RoomMemberRemoved {
+                    room_id: 7,
+                    principal_id: 42,
+                    result: Err("server error 409 Conflict".into()),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell.room_members_error.as_deref(),
+                Some("server error 409 Conflict")
+            );
+            assert_eq!(shell.global_problems.len(), 1);
+            assert_eq!(shell.global_problems[0].title, "Remove room member");
+            assert_eq!(
+                shell.global_problems[0].message,
+                "server error 409 Conflict"
+            );
+            assert!(!shell.global_problems[0].transient);
+        });
+    }
+
+    #[test]
+    fn room_member_removal_is_hidden_for_owners_and_single_member_rooms() {
+        use sift_api_types::RoomRole;
+
+        assert!(!room_member_can_be_removed(2, &RoomRole::Owner));
+        assert!(room_member_can_be_removed(2, &RoomRole::Editor));
+        assert!(room_member_can_be_removed(2, &RoomRole::Viewer));
+        assert!(!room_member_can_be_removed(1, &RoomRole::Editor));
+        assert!(!room_member_can_be_removed(1, &RoomRole::Viewer));
     }
 
     #[gpui::test]
