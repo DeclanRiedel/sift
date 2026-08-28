@@ -536,6 +536,20 @@ mod tests {
         assert_eq!(runtime.documents().current_event_seq(), before + 1);
     }
 
+    #[tokio::test]
+    async fn workspace_mutation_locks_are_shared_per_workspace() {
+        let runtime = RoomRuntime::default();
+        let first = runtime.workspace_lock(7);
+        let same_workspace = runtime.workspace_lock(7);
+        let other_workspace = runtime.workspace_lock(8);
+
+        let guard = first.lock().await;
+        assert!(same_workspace.try_lock().is_err());
+        assert!(other_workspace.try_lock().is_ok());
+        drop(guard);
+        assert!(same_workspace.try_lock().is_ok());
+    }
+
     #[test]
     fn dropping_an_attachment_clears_presence() {
         let runtime = RoomRuntime::default();

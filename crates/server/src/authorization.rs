@@ -325,6 +325,27 @@ mod tests {
     }
 
     #[test]
+    fn vcs_role_matrix_allows_reads_but_requires_editor_for_mutations() {
+        let mut scope = AuthorizationScope {
+            authenticated: true,
+            tenant_role: Some(TenantRole::Member),
+            room_role: Some(AuthorizationRoomRole::Viewer),
+            ..AuthorizationScope::default()
+        };
+        assert!(authorize(&scope, OperationKind::ReadVcs).is_ok());
+        assert_eq!(
+            authorize(&scope, OperationKind::WriteVcs),
+            Err(AuthorizationDenial::RoomEditorRequired)
+        );
+
+        for role in [AuthorizationRoomRole::Editor, AuthorizationRoomRole::Owner] {
+            scope.room_role = Some(role);
+            assert!(authorize(&scope, OperationKind::ReadVcs).is_ok());
+            assert!(authorize(&scope, OperationKind::WriteVcs).is_ok());
+        }
+    }
+
+    #[test]
     fn tenant_role_and_profile_minimum_matrix_is_deny_wins() {
         for (role, default_allowed, admin_policy_allowed) in [
             (TenantRole::Viewer, false, false),

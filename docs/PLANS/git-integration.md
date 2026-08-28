@@ -306,19 +306,21 @@ ways:
 
 ## Milestone G8 — Collaboration semantics
 
-- [ ] Document shared repository/index/branch behavior in product UI.
-- [ ] Serialize repository mutations server-side per binding.
-- [ ] Show actor and in-flight operation to attached clients.
-- [ ] Broadcast status, branch, HEAD, credential-presence, and operation changes.
-- [ ] Revision-guard every mutating desktop command.
-- [ ] Rebase optimistic UI on authoritative operation results.
-- [ ] Enforce room role matrix for view, stage, commit, branch, fetch, and push.
-- [ ] Audit every user-visible Git action as an `Operation`.
-- [ ] Notify collaborators about commits, branch switches, and remote updates.
-- [ ] Prevent edits arriving after checkpoint from entering an in-flight commit.
-- [ ] Leave later edits visible as new uncommitted work.
-- [ ] Define disconnect/crash ownership transfer for active operations.
-- [ ] Evaluate per-user branches/worktrees only after shared workflow graduates.
+- [x] Document shared repository/index/branch behavior in product UI.
+- [x] Serialize repository mutations server-side per binding.
+- [x] Show actor and in-flight operation to attached clients.
+- [x] Broadcast status, branch, HEAD, credential-presence, and operation changes.
+- [x] Revision-guard every mutating desktop command.
+- [x] Rebase optimistic UI on authoritative operation results.
+- [x] Enforce room role matrix for view, stage, commit, branch, fetch, and push.
+- [x] Audit every user-visible Git action as an `Operation`.
+- [x] Notify collaborators about commits, branch switches, and remote updates.
+- [x] Prevent edits arriving after checkpoint from entering an in-flight commit.
+- [x] Leave later edits visible as new uncommitted work.
+- [x] Define disconnect/crash ownership transfer for active operations.
+- [x] Evaluate per-user branches/worktrees only after shared workflow graduates;
+      retain one shared worktree until a concrete isolation requirement justifies
+      the storage, projection, and reconciliation cost (ADR-049).
 
 ## Milestone G9 — Database-aware Git
 

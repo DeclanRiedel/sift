@@ -90,6 +90,12 @@ pub(crate) enum RepositoryFailureKind {
     Command,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SharedRepositoryOperation {
+    pub(crate) actor_principal_id: i64,
+    pub(crate) action: sift_protocol::VcsAction,
+}
+
 impl RepositoryFailureKind {
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -141,6 +147,7 @@ pub(crate) struct RepositoryProjection {
     conflict: Option<VcsConflictFile>,
     remotes: Arc<[VcsRemote]>,
     remote_result: Option<VcsRemoteResult>,
+    shared_operation: Option<SharedRepositoryOperation>,
 }
 
 impl RepositoryProjection {
@@ -182,6 +189,7 @@ impl RepositoryProjection {
         self.conflict = None;
         self.remotes = Arc::default();
         self.remote_result = None;
+        self.shared_operation = None;
     }
 
     pub(crate) fn branches(&self) -> Arc<[VcsBranch]> {
@@ -232,6 +240,30 @@ impl RepositoryProjection {
         self.remote_result.as_ref()
     }
 
+    pub(crate) fn shared_operation(&self) -> Option<SharedRepositoryOperation> {
+        self.shared_operation
+    }
+
+    pub(crate) fn apply_shared_operation(
+        &mut self,
+        actor_principal_id: i64,
+        action: sift_protocol::VcsAction,
+        phase: sift_protocol::RepositoryOperationPhase,
+    ) {
+        match phase {
+            sift_protocol::RepositoryOperationPhase::Started => {
+                self.shared_operation = Some(SharedRepositoryOperation {
+                    actor_principal_id,
+                    action,
+                });
+            }
+            sift_protocol::RepositoryOperationPhase::Succeeded
+            | sift_protocol::RepositoryOperationPhase::Failed => {
+                self.shared_operation = None;
+            }
+        }
+    }
+
     pub(crate) fn apply_remotes(&mut self, result: Result<Vec<VcsRemote>, String>) {
         match result {
             Ok(remotes) => self.remotes = remotes.into(),
@@ -240,7 +272,7 @@ impl RepositoryProjection {
     }
 
     pub(crate) fn begin_network_operation(&mut self) -> bool {
-        if self.loading {
+        if self.mutation_in_flight() {
             return false;
         }
         self.loading = true;
@@ -349,7 +381,7 @@ impl RepositoryProjection {
     }
 
     pub(crate) fn begin_refresh(&mut self) -> Option<(i64, u64)> {
-        if self.loading {
+        if self.mutation_in_flight() {
             self.refresh_queued = true;
             return None;
         }
@@ -367,7 +399,7 @@ impl RepositoryProjection {
         paths: Vec<WorkspacePath>,
         staged: bool,
     ) -> Option<(i64, i64, u64, u64, Vec<WorkspacePath>)> {
-        if self.loading || paths.is_empty() {
+        if self.mutation_in_flight() || paths.is_empty() {
             return None;
         }
         let workspace_id = self.workspace_id?;
@@ -394,7 +426,7 @@ impl RepositoryProjection {
     }
 
     pub(crate) fn begin_commit(&mut self) -> Option<(i64, i64, u64, u64)> {
-        if self.loading || !self.has_staged_changes() {
+        if self.mutation_in_flight() || !self.has_staged_changes() {
             return None;
         }
         let workspace_id = self.workspace_id?;
@@ -410,7 +442,7 @@ impl RepositoryProjection {
     }
 
     pub(crate) fn begin_uncommit(&mut self) -> Option<(i64, i64, u64, u64, String)> {
-        if self.loading {
+        if self.mutation_in_flight() {
             return None;
         }
         let workspace_id = self.workspace_id?;
@@ -447,7 +479,7 @@ impl RepositoryProjection {
         path: WorkspacePath,
         staged: bool,
     ) -> Option<(i64, i64, u64, u64)> {
-        if self.loading || self.diff_loading {
+        if self.mutation_in_flight() || self.diff_loading {
             return None;
         }
         let workspace_id = self.workspace_id?;
@@ -480,7 +512,7 @@ impl RepositoryProjection {
         path: WorkspacePath,
         operation: RepositoryOperation,
     ) -> Option<(i64, i64, u64, u64)> {
-        if self.loading || self.diff_loading {
+        if self.mutation_in_flight() || self.diff_loading {
             return None;
         }
         let workspace_id = self.workspace_id?;
@@ -727,7 +759,11 @@ impl RepositoryProjection {
     }
 
     pub(crate) fn loading(&self) -> bool {
-        self.loading
+        self.mutation_in_flight()
+    }
+
+    fn mutation_in_flight(&self) -> bool {
+        self.loading || self.shared_operation.is_some()
     }
 
     pub(crate) fn loaded(&self) -> bool {
@@ -1169,5 +1205,44 @@ mod tests {
             .unwrap()
             .is_ok());
         assert!(!projection.diff_loading());
+    }
+
+    #[test]
+    fn shared_mutation_blocks_local_mutations_until_terminal_event() {
+        let mut projection = RepositoryProjection::new(Some(7));
+        let (_, request_id) = projection.begin_refresh().unwrap();
+        projection.apply_status_result(
+            7,
+            request_id,
+            Ok(Some(status(serde_json::json!([entry(
+                "query.sql",
+                "modified",
+                "staged"
+            )])))),
+        );
+
+        projection.apply_shared_operation(
+            41,
+            sift_protocol::VcsAction::Commit,
+            sift_protocol::RepositoryOperationPhase::Started,
+        );
+        assert_eq!(
+            projection.shared_operation(),
+            Some(SharedRepositoryOperation {
+                actor_principal_id: 41,
+                action: sift_protocol::VcsAction::Commit,
+            })
+        );
+        assert!(projection.loading());
+        assert!(projection.begin_commit().is_none());
+
+        projection.apply_shared_operation(
+            41,
+            sift_protocol::VcsAction::Commit,
+            sift_protocol::RepositoryOperationPhase::Succeeded,
+        );
+        assert!(projection.shared_operation().is_none());
+        assert!(!projection.loading());
+        assert!(projection.begin_commit().is_some());
     }
 }

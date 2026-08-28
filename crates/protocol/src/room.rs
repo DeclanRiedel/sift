@@ -152,6 +152,16 @@ pub enum RoomServerMessage {
         binding_id: i64,
         revision: u64,
     },
+    /// A shared repository mutation began or reached a terminal outcome. The
+    /// server owns its lock; disconnecting the initiating client never hands
+    /// authority to another client or leaves a client-side lease behind.
+    RepositoryOperation {
+        workspace_id: i64,
+        binding_id: i64,
+        actor_principal_id: i64,
+        action: crate::VcsAction,
+        phase: RepositoryOperationPhase,
+    },
     DdlSourceChanged {
         workspace_id: i64,
         source_id: i64,
@@ -222,4 +232,12 @@ pub enum RoomServerMessage {
     RateLimited {
         retry_after_ms: u64,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryOperationPhase {
+    Started,
+    Succeeded,
+    Failed,
 }

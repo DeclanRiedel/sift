@@ -114,8 +114,9 @@ pub use result::{
     ResultFilterOperator, ResultSort, ResultSortDirection, ResultTransform, Row,
 };
 pub use room::{
-    DocumentErrorCode, DocumentTransferKind, RoomClientMessage, RoomPresence, RoomQueryResult,
-    RoomQueryStatus, RoomResultPage, RoomResultPages, RoomSelection, RoomServerMessage,
+    DocumentErrorCode, DocumentTransferKind, RepositoryOperationPhase, RoomClientMessage,
+    RoomPresence, RoomQueryResult, RoomQueryStatus, RoomResultPage, RoomResultPages, RoomSelection,
+    RoomServerMessage,
 };
 pub use run::*;
 pub use schema::{

@@ -1757,3 +1757,48 @@ actionable without leaking provider text or secrets. SSH and pull have explicit
 security and review prerequisites instead of incomplete fallbacks. A remote
 rename followed by URL replacement is two individually revisioned and audited
 mutations, so partial completion remains visible and recoverable by refresh.
+
+---
+
+## ADR-049 — Server-Owned Shared Repository Mutation Lease
+
+**Context.** A room workspace projects one canonical document tree into one Git
+worktree. Its index, checked-out branch, HEAD, remotes, and active Git operation
+are therefore shared even though credentials remain principal-scoped. Revision
+guards reject stale clients, but guards alone do not prevent two requests from
+passing observation concurrently and then racing filesystem or index changes.
+A desktop-owned lease would also disappear on disconnect and could strand the
+other collaborators behind state they cannot inspect.
+
+**Decision.** The server serializes every repository mutation with the existing
+per-workspace lock and reloads the binding after acquiring it before checking
+the expected binding revision. The handler owns the lock through Git mutation,
+metadata observation, audit, and room publication. A typed room event announces
+the authenticated actor, action, and started/succeeded/failed phase. Attached
+desktops show that operation, disable competing mutation controls, and refresh
+workspace files and repository status from the authoritative server result at
+the terminal phase. Repository-change events cover binding revision, branch,
+HEAD, remote, and principal-visible credential-presence changes; explicit Git
+actions remain typed `Operation::Vcs` audit records.
+
+Commit preparation creates a canonical workspace checkpoint while holding this
+same lock, then stages the checkpoint projection. Document edits accepted after
+that frontier remain visible in the room and reconcile as later uncommitted
+work; they cannot leak into the in-flight commit. The server guard is released
+when a handler finishes or is cancelled, so client disconnect needs no
+ownership transfer. After process failure, no lease survives; status reconstructs
+Git-native merge/rebase/cherry-pick/revert state as defined by ADR-047, while
+ordinary interrupted commands are recovered through a fresh authoritative
+status observation.
+
+Viewers may inspect status, diffs, branches, history, conflicts, and remotes.
+Editors and owners may mutate the shared repository; binding remains an
+owner-only workspace-projection action. Per-user branches or worktrees are
+deferred: adding them now would split the canonical projection and require an
+explicit publication/reconciliation model that the product does not yet need.
+
+**Consequences.** Repository mutations have one server-defined order, stale
+desktop intentions fail safely, and collaborators can see who currently owns
+the operation without granting that client durable authority. Optimistic local
+state is presentation only and always yields to terminal status. Separate
+per-user credentials do not imply separate branches or indexes.

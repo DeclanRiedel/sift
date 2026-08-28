@@ -6455,6 +6455,109 @@ fn publish_repository_changed(
     );
 }
 
+struct RepositoryMutationLease {
+    state: AppState,
+    workspace: sift_metadata::WorkspaceRecord,
+    binding_id: RepositoryBindingId,
+    actor: PrincipalId,
+    action: VcsAction,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    completed: bool,
+}
+
+impl RepositoryMutationLease {
+    async fn acquire(
+        state: &AppState,
+        workspace: &sift_metadata::WorkspaceRecord,
+        binding_id: RepositoryBindingId,
+        actor: PrincipalId,
+        action: VcsAction,
+    ) -> Self {
+        let guard = state
+            .rooms
+            .workspace_lock(workspace.id.0)
+            .lock_owned()
+            .await;
+        publish_repository_operation(
+            state,
+            workspace,
+            binding_id,
+            actor,
+            action,
+            sift_protocol::RepositoryOperationPhase::Started,
+        );
+        Self {
+            state: state.clone(),
+            workspace: workspace.clone(),
+            binding_id,
+            actor,
+            action,
+            _guard: guard,
+            completed: false,
+        }
+    }
+
+    fn succeed(mut self) {
+        publish_repository_operation(
+            &self.state,
+            &self.workspace,
+            self.binding_id,
+            self.actor,
+            self.action,
+            sift_protocol::RepositoryOperationPhase::Succeeded,
+        );
+        self.completed = true;
+    }
+}
+
+impl Drop for RepositoryMutationLease {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.state.sessions.push_operation_full(
+            Operation::Vcs {
+                action: self.action,
+                workspace_id: self.workspace.id,
+                binding_id: self.binding_id,
+            },
+            OperationStatus::Failed,
+            Some(self.actor.0),
+            None,
+            None,
+            None,
+        );
+        publish_repository_operation(
+            &self.state,
+            &self.workspace,
+            self.binding_id,
+            self.actor,
+            self.action,
+            sift_protocol::RepositoryOperationPhase::Failed,
+        );
+    }
+}
+
+fn publish_repository_operation(
+    state: &AppState,
+    workspace: &sift_metadata::WorkspaceRecord,
+    binding_id: RepositoryBindingId,
+    actor: PrincipalId,
+    action: VcsAction,
+    phase: sift_protocol::RepositoryOperationPhase,
+) {
+    state.rooms.publish_presence(
+        workspace.room_id.0,
+        RoomServerMessage::RepositoryOperation {
+            workspace_id: workspace.id.0,
+            binding_id: binding_id.0,
+            actor_principal_id: actor.0,
+            action,
+            phase,
+        },
+    );
+}
+
 struct RepositoryContext {
     record: sift_metadata::RepositoryBindingRecord,
     workspace: sift_metadata::WorkspaceRecord,
@@ -6620,6 +6723,11 @@ async fn bind_workspace_projection(
         Some(workspace_id),
         WorkspaceAction::BindProjection,
     )?;
+    let _guard = state
+        .rooms
+        .workspace_lock(workspace_id.0)
+        .lock_owned()
+        .await;
     let adapter = state.rooms.workspace_adapter().ok_or_else(|| {
         ApiError::BadRequest("workspace filesystem projections are disabled".into())
     })?;
@@ -6753,6 +6861,11 @@ async fn bind_workspace_repository(
         Some(workspace_id),
         WorkspaceAction::BindProjection,
     )?;
+    let _guard = state
+        .rooms
+        .workspace_lock(workspace_id.0)
+        .lock_owned()
+        .await;
     let actor = auth.principal_id;
     let projection = metadata_blocking({
         let metadata = metadata.clone();
@@ -6793,14 +6906,24 @@ async fn bind_workspace_repository(
         branch: observation.branch,
         head: observation.head,
     };
-    let binding = metadata_blocking(move || {
-        metadata
-            .create_repository_binding(workspace_id, actor, input)
-            .map(|record| record.binding)
-            .map_err(Into::into)
+    let binding = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .create_repository_binding(workspace_id, actor, input)
+                .map(|record| record.binding)
+                .map_err(Into::into)
+        }
     })
     .await?;
     push_vcs_operation(&state, actor, VcsAction::Bind, workspace_id, binding.id);
+    let workspace = metadata_blocking(move || {
+        metadata
+            .get_workspace_for_principal(workspace_id, actor, false)
+            .map_err(Into::into)
+    })
+    .await?;
+    publish_repository_changed(&state, &workspace, binding.id, binding.revision);
     Ok(Json(binding))
 }
 
@@ -6821,6 +6944,11 @@ async fn clone_workspace_repository(
         Some(workspace_id),
         WorkspaceAction::BindProjection,
     )?;
+    let _guard = state
+        .rooms
+        .workspace_lock(workspace_id.0)
+        .lock_owned()
+        .await;
     let actor = auth.principal_id;
     let existing = metadata_blocking({
         let metadata = metadata.clone();
@@ -6927,6 +7055,13 @@ async fn clone_workspace_repository(
         None,
     );
     push_vcs_operation(&state, actor, VcsAction::Bind, workspace_id, binding.id);
+    let workspace = metadata_blocking(move || {
+        metadata
+            .get_workspace_for_principal(workspace_id, actor, false)
+            .map_err(Into::into)
+    })
+    .await?;
+    publish_repository_changed(&state, &workspace, binding.id, binding.revision);
     Ok(Json(binding))
 }
 
@@ -6940,13 +7075,15 @@ async fn delete_workspace_repository(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let binding_id = repository_binding_id(id)?;
     let actor = auth.principal_id;
-    let binding = metadata_blocking({
+    let (binding, workspace) = metadata_blocking({
         let metadata = metadata.clone();
         move || {
-            metadata
-                .repository_binding_for_principal(binding_id, actor, false)
-                .map(|record| record.binding)
-                .map_err(Into::into)
+            let binding = metadata
+                .repository_binding_for_principal(binding_id, actor, false)?
+                .binding;
+            let workspace =
+                metadata.get_workspace_for_principal(binding.workspace_id, actor, true)?;
+            Ok::<_, ApiError>((binding, workspace))
         }
     })
     .await?;
@@ -6957,6 +7094,9 @@ async fn delete_workspace_repository(
         binding_id,
         VcsAction::Unbind,
     )?;
+    let lease =
+        RepositoryMutationLease::acquire(&state, &workspace, binding_id, actor, VcsAction::Unbind)
+            .await;
     metadata
         .delete_repository_binding(binding_id, actor, req.expected_revision)
         .await?;
@@ -6967,6 +7107,7 @@ async fn delete_workspace_repository(
         binding.workspace_id,
         binding_id,
     );
+    lease.succeed();
     Ok(Json(json!({"ok": true})))
 }
 
@@ -7267,6 +7408,16 @@ async fn create_repository_branch(
         binding_id,
         VcsAction::CreateBranch,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::CreateBranch,
+    )
+    .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -7324,6 +7475,7 @@ async fn create_repository_branch(
         binding_id,
         updated.binding.revision,
     );
+    lease.succeed();
     Ok(Json(updated.binding))
 }
 
@@ -7347,6 +7499,16 @@ async fn switch_repository_branch(
         binding_id,
         VcsAction::SwitchBranch,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::SwitchBranch,
+    )
+    .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -7461,6 +7623,7 @@ async fn switch_repository_branch(
         binding_id,
     );
     publish_repository_changed(&state, &workspace, binding_id, updated.binding.revision);
+    lease.succeed();
     Ok(Json(updated.binding))
 }
 
@@ -7484,6 +7647,16 @@ async fn rename_repository_branch(
         binding_id,
         VcsAction::RenameBranch,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::RenameBranch,
+    )
+    .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -7520,6 +7693,7 @@ async fn rename_repository_branch(
         binding_id,
         updated.binding.revision,
     );
+    lease.succeed();
     Ok(Json(updated.binding))
 }
 
@@ -7548,6 +7722,16 @@ async fn delete_repository_branch(
         binding_id,
         VcsAction::DeleteBranch,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::DeleteBranch,
+    )
+    .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -7584,6 +7768,7 @@ async fn delete_repository_branch(
         binding_id,
         updated.binding.revision,
     );
+    lease.succeed();
     Ok(Json(updated.binding))
 }
 
@@ -7607,6 +7792,16 @@ async fn set_repository_upstream(
         binding_id,
         VcsAction::SetUpstream,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::SetUpstream,
+    )
+    .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -7643,6 +7838,7 @@ async fn set_repository_upstream(
         binding_id,
         updated.binding.revision,
     );
+    lease.succeed();
     Ok(Json(updated.binding))
 }
 
@@ -7666,6 +7862,16 @@ async fn restore_repository_historical_file(
         binding_id,
         VcsAction::Revert,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::Revert,
+    )
+    .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -7707,6 +7913,7 @@ async fn restore_repository_historical_file(
     .await?;
     push_vcs_operation(&state, actor, VcsAction::Revert, workspace.id, binding_id);
     publish_repository_changed(&state, &workspace, binding_id, updated.binding.revision);
+    lease.succeed();
     Ok(Json(VcsWorktreeMutationResult {
         binding_id,
         checkpoint_id: checkpoint.id,
@@ -7735,6 +7942,16 @@ async fn revert_repository_commit(
         binding_id,
         VcsAction::Revert,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::Revert,
+    )
+    .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -7812,6 +8029,7 @@ async fn revert_repository_commit(
     .await?;
     push_vcs_operation(&state, actor, VcsAction::Revert, workspace.id, binding_id);
     publish_repository_changed(&state, &workspace, binding_id, updated.binding.revision);
+    lease.succeed();
     Ok(Json(VcsHeadMutationResult {
         binding_id,
         checkpoint_id: checkpoint.id,
@@ -7876,6 +8094,16 @@ async fn begin_repository_conflict_resolution(
         binding_id,
         VcsAction::ResolveConflict,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::ResolveConflict,
+    )
+    .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -7901,6 +8129,7 @@ async fn begin_repository_conflict_resolution(
         context.workspace.id,
         binding_id,
     );
+    lease.succeed();
     Ok(Json(checkpoint))
 }
 
@@ -7924,6 +8153,16 @@ async fn resolve_repository_conflict(
         binding_id,
         VcsAction::ResolveConflict,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::ResolveConflict,
+    )
+    .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -7987,6 +8226,7 @@ async fn resolve_repository_conflict(
         binding_id,
     );
     publish_repository_changed(&state, &workspace, binding_id, updated.binding.revision);
+    lease.succeed();
     Ok(Json(VcsWorktreeMutationResult {
         binding_id,
         checkpoint_id: checkpoint.id,
@@ -8015,6 +8255,16 @@ async fn mark_repository_conflict_resolved(
         binding_id,
         VcsAction::ResolveConflict,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::ResolveConflict,
+    )
+    .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -8056,6 +8306,7 @@ async fn mark_repository_conflict_resolved(
         binding_id,
         updated.binding.revision,
     );
+    lease.succeed();
     Ok(Json(updated.binding))
 }
 
@@ -8079,6 +8330,11 @@ async fn mutate_repository_operation(
         VcsAction::ContinueOperation
     };
     authorize_vcs_operation(&state, &auth, context.workspace.id, binding_id, action)?;
+    let lease =
+        RepositoryMutationLease::acquire(&state, &context.workspace, binding_id, actor, action)
+            .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -8157,6 +8413,7 @@ async fn mutate_repository_operation(
     .await?;
     push_vcs_operation(&state, actor, action, workspace.id, binding_id);
     publish_repository_changed(&state, &workspace, binding_id, updated.binding.revision);
+    lease.succeed();
     Ok(Json(updated.binding))
 }
 
@@ -8198,6 +8455,16 @@ async fn repair_repository_binding(
         binding_id,
         VcsAction::RepairBinding,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::RepairBinding,
+    )
+    .await;
+    let context =
+        load_repository_context_for_repair(&state, metadata.clone(), actor, binding_id).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -8242,6 +8509,7 @@ async fn repair_repository_binding(
         binding_id,
         updated.binding.revision,
     );
+    lease.succeed();
     Ok(Json(updated.binding))
 }
 
@@ -8302,8 +8570,14 @@ async fn discard_repository_path(
         VcsAction::Discard,
     )?;
     let workspace_id = initial.record.binding.workspace_id;
-    let lock = state.rooms.workspace_lock(workspace_id.0);
-    let _guard = lock.lock().await;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &initial.workspace,
+        binding_id,
+        actor,
+        VcsAction::Discard,
+    )
+    .await;
     let context =
         load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
@@ -8396,6 +8670,7 @@ async fn discard_repository_path(
         true,
     );
     publish_repository_changed(&state, &workspace, binding_id, updated.revision);
+    lease.succeed();
     Ok(Json(VcsWorktreeMutationResult {
         binding_id,
         checkpoint_id: checkpoint.id,
@@ -8430,8 +8705,14 @@ async fn revert_repository_hunk(
         ));
     }
     let workspace_id = initial.record.binding.workspace_id;
-    let lock = state.rooms.workspace_lock(workspace_id.0);
-    let _guard = lock.lock().await;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &initial.workspace,
+        binding_id,
+        actor,
+        VcsAction::Revert,
+    )
+    .await;
     let context =
         load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
@@ -8512,6 +8793,7 @@ async fn revert_repository_hunk(
         true,
     );
     publish_repository_changed(&state, &workspace, binding_id, updated.revision);
+    lease.succeed();
     Ok(Json(VcsWorktreeMutationResult {
         binding_id,
         checkpoint_id: checkpoint.id,
@@ -8546,6 +8828,11 @@ async fn mutate_repository_hunk(
         binding_id,
         action,
     )?;
+    let lease =
+        RepositoryMutationLease::acquire(&state, &context.workspace, binding_id, actor, action)
+            .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
             expected: req.expected_revision,
@@ -8629,6 +8916,7 @@ async fn mutate_repository_hunk(
     .await?;
     push_vcs_operation(&state, actor, action, updated.workspace_id, binding_id);
     publish_repository_changed(&state, &context.workspace, binding_id, updated.revision);
+    lease.succeed();
     Ok(Json(updated))
 }
 
@@ -8658,6 +8946,11 @@ async fn mutate_repository_paths(
         binding_id,
         action,
     )?;
+    let lease =
+        RepositoryMutationLease::acquire(&state, &context.workspace, binding_id, actor, action)
+            .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
             expected: req.expected_revision,
@@ -8702,6 +8995,7 @@ async fn mutate_repository_paths(
     .await?;
     push_vcs_operation(&state, actor, action, updated.workspace_id, binding_id);
     publish_repository_changed(&state, &context.workspace, binding_id, updated.revision);
+    lease.succeed();
     Ok(Json(updated))
 }
 
@@ -8738,17 +9032,23 @@ async fn mutate_repository_commit(
     let actor = auth.principal_id;
     let context =
         load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    let action = if amend {
+        VcsAction::Amend
+    } else {
+        VcsAction::Commit
+    };
     authorize_vcs_operation(
         &state,
         &auth,
         context.record.binding.workspace_id,
         binding_id,
-        if amend {
-            VcsAction::Amend
-        } else {
-            VcsAction::Commit
-        },
+        action,
     )?;
+    let lease =
+        RepositoryMutationLease::acquire(&state, &context.workspace, binding_id, actor, action)
+            .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
             expected: req.expected_revision,
@@ -8765,8 +9065,6 @@ async fn mutate_repository_commit(
         ));
     }
     let workspace_id = context.record.binding.workspace_id;
-    let lock = state.rooms.workspace_lock(workspace_id.0);
-    let _guard = lock.lock().await;
     let filesystem = state.rooms.workspace_adapter().ok_or_else(|| {
         ApiError::BadRequest("workspace filesystem projections are disabled".into())
     })?;
@@ -8912,23 +9210,14 @@ async fn mutate_repository_commit(
             .map_err(Into::into)
     })
     .await?;
-    push_vcs_operation(
-        &state,
-        actor,
-        if amend {
-            VcsAction::Amend
-        } else {
-            VcsAction::Commit
-        },
-        workspace_id,
-        binding_id,
-    );
+    push_vcs_operation(&state, actor, action, workspace_id, binding_id);
     publish_repository_changed(
         &state,
         &context.workspace,
         binding_id,
         req.expected_revision.saturating_add(1),
     );
+    lease.succeed();
     Ok(Json(VcsCommitResult {
         binding_id,
         checkpoint_id: checkpoint.id,
@@ -8958,6 +9247,16 @@ async fn uncommit_repository(
         binding_id,
         VcsAction::Uncommit,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &context.workspace,
+        binding_id,
+        actor,
+        VcsAction::Uncommit,
+    )
+    .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
             expected: req.expected_revision,
@@ -8971,8 +9270,6 @@ async fn uncommit_repository(
         ));
     }
     let workspace_id = context.record.binding.workspace_id;
-    let lock = state.rooms.workspace_lock(workspace_id.0);
-    let _guard = lock.lock().await;
     let checkpoint = capture_before_vcs_checkpoint(
         &state,
         metadata.clone(),
@@ -9013,6 +9310,7 @@ async fn uncommit_repository(
     .await?;
     push_vcs_operation(&state, actor, VcsAction::Uncommit, workspace_id, binding_id);
     publish_repository_changed(&state, &context.workspace, binding_id, updated.revision);
+    lease.succeed();
     Ok(Json(VcsHeadMutationResult {
         binding_id,
         checkpoint_id: checkpoint.id,
@@ -9095,13 +9393,15 @@ async fn set_repository_credential(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let binding_id = repository_binding_id(id)?;
     let actor = auth.principal_id;
-    let binding = metadata_blocking({
+    let (binding, workspace) = metadata_blocking({
         let metadata = metadata.clone();
         move || {
-            metadata
-                .repository_binding_for_principal(binding_id, actor, true)
-                .map(|record| record.binding)
-                .map_err(Into::into)
+            let binding = metadata
+                .repository_binding_for_principal(binding_id, actor, true)?
+                .binding;
+            let workspace =
+                metadata.get_workspace_for_principal(binding.workspace_id, actor, true)?;
+            Ok::<_, ApiError>((binding, workspace))
         }
     })
     .await?;
@@ -9112,6 +9412,14 @@ async fn set_repository_credential(
         binding_id,
         VcsAction::SetCredential,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &workspace,
+        binding_id,
+        actor,
+        VcsAction::SetCredential,
+    )
+    .await;
     let mut secret = serde_json::to_vec(&StoredGitCredential {
         username: req.username.0,
         password: req.password.0,
@@ -9129,6 +9437,8 @@ async fn set_repository_credential(
         updated.workspace_id,
         binding_id,
     );
+    publish_repository_changed(&state, &workspace, binding_id, updated.revision);
+    lease.succeed();
     Ok(Json(updated))
 }
 
@@ -9142,13 +9452,15 @@ async fn delete_repository_credential(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let binding_id = repository_binding_id(id)?;
     let actor = auth.principal_id;
-    let binding = metadata_blocking({
+    let (binding, workspace) = metadata_blocking({
         let metadata = metadata.clone();
         move || {
-            metadata
-                .repository_binding_for_principal(binding_id, actor, true)
-                .map(|record| record.binding)
-                .map_err(Into::into)
+            let binding = metadata
+                .repository_binding_for_principal(binding_id, actor, true)?
+                .binding;
+            let workspace =
+                metadata.get_workspace_for_principal(binding.workspace_id, actor, true)?;
+            Ok::<_, ApiError>((binding, workspace))
         }
     })
     .await?;
@@ -9159,6 +9471,14 @@ async fn delete_repository_credential(
         binding_id,
         VcsAction::RemoveCredential,
     )?;
+    let lease = RepositoryMutationLease::acquire(
+        &state,
+        &workspace,
+        binding_id,
+        actor,
+        VcsAction::RemoveCredential,
+    )
+    .await;
     let updated = metadata
         .delete_repository_credential(binding_id, actor, req.expected_revision)
         .await?
@@ -9170,6 +9490,8 @@ async fn delete_repository_credential(
         updated.workspace_id,
         binding_id,
     );
+    publish_repository_changed(&state, &workspace, binding_id, updated.revision);
+    lease.succeed();
     Ok(Json(updated))
 }
 
@@ -9273,6 +9595,11 @@ async fn mutate_repository_remote(
         RepositoryRemoteMutation::Remove { .. } => VcsAction::RemoveRemote,
     };
     authorize_vcs_operation(&state, &auth, context.workspace.id, binding_id, action)?;
+    let lease =
+        RepositoryMutationLease::acquire(&state, &context.workspace, binding_id, actor, action)
+            .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != expected_revision {
         return Err(ApiError::Conflict(
             "repository binding changed; refresh and retry".into(),
@@ -9325,6 +9652,7 @@ async fn mutate_repository_remote(
         binding_id,
         updated.binding.revision,
     );
+    lease.succeed();
     Ok(Json(updated.binding))
 }
 
@@ -9465,6 +9793,11 @@ async fn remote_repository_operation(
         binding_id,
         action,
     )?;
+    let lease =
+        RepositoryMutationLease::acquire(&state, &context.workspace, binding_id, actor, action)
+            .await;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
     if context.record.binding.revision != req.expected_revision {
         return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
             expected: req.expected_revision,
@@ -9551,6 +9884,13 @@ async fn remote_repository_operation(
         context.record.binding.workspace_id,
         binding_id,
     );
+    publish_repository_changed(
+        &state,
+        &context.workspace,
+        binding_id,
+        req.expected_revision.saturating_add(1),
+    );
+    lease.succeed();
     Ok(Json(VcsRemoteResult {
         binding_id,
         operation: if push { "push" } else { "fetch" }.into(),

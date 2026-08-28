@@ -4960,6 +4960,44 @@ fn repository_diff_editor_language(path: &sift_protocol::WorkspacePath) -> Edito
     }
 }
 
+fn vcs_action_label(action: sift_protocol::VcsAction) -> &'static str {
+    use sift_protocol::VcsAction;
+    match action {
+        VcsAction::Bind => "repository bind",
+        VcsAction::Unbind => "repository unbind",
+        VcsAction::Status => "status refresh",
+        VcsAction::Diff => "diff load",
+        VcsAction::Branches => "branch load",
+        VcsAction::History => "history load",
+        VcsAction::CreateBranch => "branch creation",
+        VcsAction::SwitchBranch => "branch switch",
+        VcsAction::RenameBranch => "branch rename",
+        VcsAction::DeleteBranch => "branch deletion",
+        VcsAction::SetUpstream => "upstream update",
+        VcsAction::Conflicts => "conflict load",
+        VcsAction::ResolveConflict => "conflict resolution",
+        VcsAction::ContinueOperation => "Git continue",
+        VcsAction::AbortOperation => "Git abort",
+        VcsAction::RepairBinding => "repository repair",
+        VcsAction::Remotes => "remote load",
+        VcsAction::AddRemote => "remote creation",
+        VcsAction::EditRemote => "remote update",
+        VcsAction::RemoveRemote => "remote removal",
+        VcsAction::Stage => "stage",
+        VcsAction::Unstage => "unstage",
+        VcsAction::Commit => "commit",
+        VcsAction::Amend => "amend",
+        VcsAction::Uncommit => "uncommit",
+        VcsAction::Discard => "discard",
+        VcsAction::Revert => "revert",
+        VcsAction::SetCredential => "credential update",
+        VcsAction::TestCredential => "credential test",
+        VcsAction::RemoveCredential => "credential removal",
+        VcsAction::Fetch => "fetch",
+        VcsAction::Push => "push",
+    }
+}
+
 fn project_diff_text(side: sift_protocol::VcsDiffSide, diff: &sift_protocol::VcsDiff) -> String {
     let side_label = match side {
         sift_protocol::VcsDiffSide::HeadToIndex => "HEAD → index",
@@ -6242,6 +6280,20 @@ impl WorkspaceShell {
             while let Some(event) = receiver.recv().await {
                 if shell
                     .update(cx, |shell, cx| {
+                        let shared_operation = match &event {
+                            PresenceEvent::Message(
+                                sift_protocol::RoomServerMessage::RepositoryOperation {
+                                    workspace_id,
+                                    actor_principal_id,
+                                    action,
+                                    phase,
+                                    ..
+                                },
+                            ) if shell.selected_workspace_id == Some(*workspace_id) => {
+                                Some((*actor_principal_id, *action, *phase))
+                            }
+                            _ => None,
+                        };
                         let workspace_changed = match &event {
                             PresenceEvent::Message(
                                 sift_protocol::RoomServerMessage::RepositoryChanged {
@@ -6256,9 +6308,54 @@ impl WorkspaceShell {
                                 shell.active_left_panel == LeftPanel::Git
                                     && shell.selected_workspace_id == Some(*workspace_id)
                             }
+                            PresenceEvent::Message(
+                                sift_protocol::RoomServerMessage::RepositoryOperation {
+                                    workspace_id,
+                                    phase,
+                                    ..
+                                },
+                            ) => {
+                                *phase != sift_protocol::RepositoryOperationPhase::Started
+                                    && shell.active_left_panel == LeftPanel::Git
+                                    && shell.selected_workspace_id == Some(*workspace_id)
+                            }
                             _ => false,
                         };
                         shell.presence.apply(event);
+                        if let Some((actor, action, phase)) = shared_operation {
+                            shell
+                                .repository
+                                .apply_shared_operation(actor, action, phase);
+                            if phase == sift_protocol::RepositoryOperationPhase::Succeeded
+                                && matches!(
+                                    action,
+                                    sift_protocol::VcsAction::Commit
+                                        | sift_protocol::VcsAction::Amend
+                                        | sift_protocol::VcsAction::SwitchBranch
+                                        | sift_protocol::VcsAction::Fetch
+                                        | sift_protocol::VcsAction::Push
+                                        | sift_protocol::VcsAction::AddRemote
+                                        | sift_protocol::VcsAction::EditRemote
+                                        | sift_protocol::VcsAction::RemoveRemote
+                                )
+                            {
+                                shell.show_success_toast(
+                                    format!(
+                                        "Principal {actor} completed {}",
+                                        vcs_action_label(action)
+                                    ),
+                                    cx,
+                                );
+                            } else if phase == sift_protocol::RepositoryOperationPhase::Failed {
+                                shell.show_toast(
+                                    format!(
+                                        "Principal {actor}'s {} failed",
+                                        vcs_action_label(action)
+                                    ),
+                                    cx,
+                                );
+                            }
+                        }
                         if workspace_changed {
                             shell.request_workspace_files(cx);
                             shell.request_repository_status(cx);
@@ -21795,6 +21892,7 @@ impl WorkspaceShell {
                     let subject_limit = self.settings.repository.commit_subject_limit.max(1);
                     let (commit_author_name, commit_author_email) =
                         self.repository_commit_identity();
+                    let shared_repository_operation = self.repository.shared_operation();
                     let recent_commit = self.recent_repository_commit.clone();
                     let recovery_notice = self.repository_recovery_notice.clone();
                     let commit_button_label = if self
@@ -21920,6 +22018,31 @@ impl WorkspaceShell {
                                             })),
                                         ),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .flex_none()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .when_some(shared_repository_operation, |notice, operation| {
+                                    notice
+                                        .bg(colors.active_surface)
+                                        .text_color(colors.text)
+                                        .child(format!(
+                                            "Principal {} is running {}…",
+                                            operation.actor_principal_id,
+                                            vcs_action_label(operation.action)
+                                        ))
+                                })
+                                .when(shared_repository_operation.is_none(), |notice| {
+                                    notice.child(
+                                        "Shared branch, index, HEAD, and remotes · credentials are per user",
+                                    )
+                                }),
                         )
                         .child(
                             div()
