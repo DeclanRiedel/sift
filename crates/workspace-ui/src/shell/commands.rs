@@ -397,7 +397,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
     ),
     command(
         CommandId::OpenQueryHistory,
-        "Open Query History…",
+        "Open Query History",
         "",
         "<leader> q h",
         true,

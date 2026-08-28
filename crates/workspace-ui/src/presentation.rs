@@ -59,6 +59,7 @@ pub enum LeftPanel {
     Collaboration,
     QueryOutline,
     SavedQueries,
+    QueryHistory,
 }
 
 impl LeftPanel {
@@ -69,6 +70,7 @@ impl LeftPanel {
             Self::Collaboration => "Collab",
             Self::QueryOutline => "Query Outline",
             Self::SavedQueries => "Saved Queries",
+            Self::QueryHistory => "Query History",
         }
     }
 }

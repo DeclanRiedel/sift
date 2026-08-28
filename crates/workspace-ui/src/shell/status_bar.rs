@@ -223,6 +223,26 @@ pub(super) fn render_status_bar(
                                 },
                             )),
                         ),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "footer-query-history".into())
+                        .child(
+                            button(
+                                "footer-query-history",
+                                IconName::Activity,
+                                "Query history".into(),
+                                shell.left_dock.presentation.open
+                                    && shell.active_left_panel == LeftPanel::QueryHistory,
+                                None,
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                |shell, _, window, cx| {
+                                    shell.select_left_panel(LeftPanel::QueryHistory, window, cx)
+                                },
+                            )),
+                        ),
                 ),
         )
         .child(separator())
