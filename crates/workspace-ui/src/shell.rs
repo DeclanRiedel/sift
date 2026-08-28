@@ -484,9 +484,31 @@ enum ObjectGroupKind {
 enum WorkspaceSurface {
     Editor,
     Connections,
+    SavedQueries,
     Inspector,
     Results,
     Problems,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SavedQueryPanelEdit {
+    Rename(sift_api_types::SavedQueryId),
+    Tags(sift_api_types::SavedQueryId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SavedQueryMetadataOrigin {
+    SwitcherTags,
+    PanelRename,
+    PanelTags,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSavedQueryMetadataUpdate {
+    instance_id: String,
+    id: sift_api_types::SavedQueryId,
+    item_id: Option<u64>,
+    origin: SavedQueryMetadataOrigin,
 }
 
 fn is_read_only_feed(kind: ItemKind) -> bool {
@@ -5511,6 +5533,11 @@ pub struct WorkspaceShell {
     connections_find_input: Entity<TextInput>,
     connections_find_open: bool,
     connections_find_query: String,
+    saved_queries_focus_handle: FocusHandle,
+    saved_queries_filter_input: Entity<TextInput>,
+    saved_queries_filter_open: bool,
+    saved_queries_selected: usize,
+    saved_queries_scroll_handle: UniformListScrollHandle,
     inspector_focus_handle: FocusHandle,
     connections_scroll_handle: UniformListScrollHandle,
     query_input: Entity<TextInput>,
@@ -5651,10 +5678,11 @@ pub struct WorkspaceShell {
     saved_queries_tenant: Option<i64>,
     saved_queries_loading: bool,
     saved_queries_error: Option<String>,
-    saved_query_editing: Option<sift_api_types::SavedQueryId>,
+    saved_query_panel_edit: Option<SavedQueryPanelEdit>,
+    saved_query_panel_tags_input: Entity<TextInput>,
     pending_saved_query_renames: HashMap<u64, String>,
     saved_query_tag_editing: Option<sift_api_types::SavedQueryId>,
-    pending_saved_query_tag_update: Option<(String, sift_api_types::SavedQueryId, Option<u64>)>,
+    pending_saved_query_metadata_update: Option<PendingSavedQueryMetadataUpdate>,
     saved_query_delete_confirmation: Option<sift_api_types::SavedQueryId>,
     pending_saved_query_deletion: Option<(String, sift_api_types::SavedQueryId)>,
     query_history_rows: Vec<sift_api_types::QueryHistory>,
@@ -5894,9 +5922,15 @@ impl WorkspaceShell {
         });
         let semantic_rename_input = cx.new(|cx| TextInput::new("", "New symbol name", cx));
         let saved_query_name_input = cx.new(|cx| TextInput::new("", "Saved query name…", cx));
+        let saved_query_panel_tags_input = cx.new(|cx| {
+            TextInput::new("", "finance, reporting", cx).aria_label("Saved query panel tags")
+        });
         let result_cell_edit_input = cx.new(|cx| TextInput::new("", "New value…", cx));
         let connections_find_input = cx.new(|cx| {
             TextInput::new("", "Find in connections…", cx).aria_label("Find in connections")
+        });
+        let saved_queries_filter_input = cx.new(|cx| {
+            TextInput::new("", "Filter saved queries…", cx).aria_label("Filter saved queries")
         });
         let schema_search_input = cx.new(|cx| {
             TextInput::new("", "Search schema…", cx).aria_label("Search database schema")
@@ -6051,6 +6085,44 @@ impl WorkspaceShell {
             },
         )
         .detach();
+        cx.observe(&saved_queries_filter_input, |shell, _, cx| {
+            shell.saved_queries_selected = 0;
+            shell
+                .saved_queries_scroll_handle
+                .scroll_to_item(0, ScrollStrategy::Top);
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(
+            &saved_queries_filter_input,
+            window,
+            |shell, _, event: &TextInputEvent, window, cx| {
+                if *event == TextInputEvent::Submitted {
+                    shell.open_selected_saved_query_from_panel(window, cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &saved_query_name_input,
+            window,
+            |shell, _, event: &TextInputEvent, window, cx| {
+                if *event == TextInputEvent::Submitted {
+                    shell.submit_saved_query_panel_edit(window, cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &saved_query_panel_tags_input,
+            window,
+            |shell, _, event: &TextInputEvent, window, cx| {
+                if *event == TextInputEvent::Submitted {
+                    shell.submit_saved_query_panel_edit(window, cx);
+                }
+            },
+        )
+        .detach();
         cx.observe(&schema_search_input, |shell, _, cx| {
             shell.schema_search_selected = 0;
             shell
@@ -6131,6 +6203,11 @@ impl WorkspaceShell {
             connections_find_input,
             connections_find_open: false,
             connections_find_query: String::new(),
+            saved_queries_focus_handle: cx.focus_handle(),
+            saved_queries_filter_input,
+            saved_queries_filter_open: false,
+            saved_queries_selected: 0,
+            saved_queries_scroll_handle: UniformListScrollHandle::new(),
             inspector_focus_handle: cx.focus_handle(),
             connections_scroll_handle: UniformListScrollHandle::new(),
             query_input,
@@ -6263,10 +6340,11 @@ impl WorkspaceShell {
             saved_queries_tenant: None,
             saved_queries_loading: false,
             saved_queries_error: None,
-            saved_query_editing: None,
+            saved_query_panel_edit: None,
+            saved_query_panel_tags_input,
             pending_saved_query_renames: HashMap::new(),
             saved_query_tag_editing: None,
-            pending_saved_query_tag_update: None,
+            pending_saved_query_metadata_update: None,
             saved_query_delete_confirmation: None,
             pending_saved_query_deletion: None,
             query_history_rows: Vec::new(),
@@ -8305,9 +8383,22 @@ impl WorkspaceShell {
                     return;
                 }
                 self.saved_queries_loading = false;
+                let selected_id = self
+                    .selected_saved_query_panel_entry(cx)
+                    .map(|query| query.id);
                 match result {
                     Ok(queries) => {
                         self.saved_queries = queries;
+                        self.saved_queries_selected = selected_id
+                            .and_then(|id| {
+                                self.filtered_saved_query_panel(cx)
+                                    .iter()
+                                    .position(|query| query.id == id)
+                            })
+                            .unwrap_or_else(|| {
+                                self.saved_queries_selected
+                                    .min(self.saved_queries.len().saturating_sub(1))
+                            });
                         self.saved_queries_error = None;
                     }
                     Err(message) => self.saved_queries_error = Some(message),
@@ -8332,16 +8423,20 @@ impl WorkspaceShell {
             }
             ExecutorEvent::SavedQuerySaved { item_id, result } => {
                 self.saved_queries_loading = false;
-                let tag_update = self
-                    .pending_saved_query_tag_update
+                let selected_panel_id = self
+                    .selected_saved_query_panel_entry(cx)
+                    .map(|query| query.id);
+                let metadata_update = self
+                    .pending_saved_query_metadata_update
                     .as_ref()
-                    .filter(|(_, _, pending_item_id)| *pending_item_id == item_id)
+                    .filter(|pending| pending.item_id == item_id)
                     .cloned();
-                if tag_update.is_some() {
-                    self.pending_saved_query_tag_update = None;
+                if metadata_update.is_some() {
+                    self.pending_saved_query_metadata_update = None;
                 }
-                if tag_update.as_ref().is_some_and(|(instance_id, _, _)| {
-                    self.selected_instance_id.as_deref().unwrap_or("local") != instance_id.as_str()
+                if metadata_update.as_ref().is_some_and(|pending| {
+                    self.selected_instance_id.as_deref().unwrap_or("local")
+                        != pending.instance_id.as_str()
                 }) {
                     cx.notify();
                     return;
@@ -8353,8 +8448,11 @@ impl WorkspaceShell {
                 });
                 match result {
                     Ok(saved) => {
+                        if let Some(pending) = metadata_update.as_ref() {
+                            debug_assert_eq!(pending.id, saved.id);
+                        }
                         if let Some(item_id) = item_id {
-                            if renamed_from.is_some() || tag_update.is_some() {
+                            if renamed_from.is_some() || metadata_update.is_some() {
                                 self.apply_saved_query_metadata_to_item(item_id, &saved, cx);
                             } else {
                                 self.apply_saved_query_to_item(item_id, &saved, false, cx);
@@ -8370,14 +8468,43 @@ impl WorkspaceShell {
                             self.saved_queries.push(saved);
                         }
                         self.saved_queries.sort_by(|a, b| a.name.cmp(&b.name));
-                        self.saved_query_editing = None;
+                        let selected_id = metadata_update
+                            .as_ref()
+                            .map(|pending| pending.id)
+                            .or(selected_panel_id);
+                        self.saved_queries_selected = selected_id
+                            .and_then(|id| {
+                                self.filtered_saved_query_panel(cx)
+                                    .iter()
+                                    .position(|query| query.id == id)
+                            })
+                            .unwrap_or_else(|| {
+                                self.saved_queries_selected
+                                    .min(self.saved_queries.len().saturating_sub(1))
+                            });
                         self.saved_queries_error = None;
-                        if tag_update.is_some() {
-                            self.saved_query_tag_editing = None;
+                        if let Some(pending) = metadata_update {
+                            match pending.origin {
+                                SavedQueryMetadataOrigin::SwitcherTags => {
+                                    self.saved_query_tag_editing = None;
+                                }
+                                SavedQueryMetadataOrigin::PanelRename
+                                | SavedQueryMetadataOrigin::PanelTags => {
+                                    self.saved_query_panel_edit = None;
+                                }
+                            }
                             if item_id.is_some() {
                                 self.persist(cx);
                             }
-                            self.show_toast("Updated query tags".into(), cx);
+                            self.show_toast(
+                                match pending.origin {
+                                    SavedQueryMetadataOrigin::PanelRename => "Renamed query",
+                                    SavedQueryMetadataOrigin::SwitcherTags
+                                    | SavedQueryMetadataOrigin::PanelTags => "Updated query tags",
+                                }
+                                .into(),
+                                cx,
+                            );
                         } else if renamed_from.is_some() {
                             self.persist(cx);
                             self.show_toast("Renamed query".into(), cx);
@@ -8387,8 +8514,13 @@ impl WorkspaceShell {
                     }
                     Err(message) => {
                         self.saved_queries_error = Some(message.clone());
-                        if tag_update.is_some() {
-                            self.record_runtime_error(item_id, "Update query tags", message, cx);
+                        if let Some(pending) = metadata_update {
+                            let operation = match pending.origin {
+                                SavedQueryMetadataOrigin::PanelRename => "Rename query",
+                                SavedQueryMetadataOrigin::SwitcherTags
+                                | SavedQueryMetadataOrigin::PanelTags => "Update query tags",
+                            };
+                            self.record_runtime_error(item_id, operation, message, cx);
                         } else if let Some(item_id) = item_id {
                             if let Some((_, old_title)) = renamed_from {
                                 self.set_item_title(item_id, old_title, cx);
@@ -8424,7 +8556,10 @@ impl WorkspaceShell {
                 match result {
                     Ok(()) => {
                         self.saved_queries.retain(|query| query.id != id);
-                        self.saved_query_editing = None;
+                        self.saved_query_panel_edit = None;
+                        self.saved_queries_selected = self
+                            .saved_queries_selected
+                            .min(self.saved_queries.len().saturating_sub(1));
                         self.saved_queries_error = None;
                         let detached = self.detach_deleted_saved_query_tabs(id, cx);
                         self.persist(cx);
@@ -12780,7 +12915,7 @@ impl WorkspaceShell {
             .find(|workspace| workspace.id == selected)
     }
 
-    fn select_left_panel(&mut self, panel: LeftPanel, cx: &mut Context<Self>) {
+    fn select_left_panel(&mut self, panel: LeftPanel, window: &mut Window, cx: &mut Context<Self>) {
         if self.left_dock.presentation.open && self.active_left_panel == panel {
             self.left_dock.presentation.open = false;
         } else {
@@ -12789,6 +12924,8 @@ impl WorkspaceShell {
         }
         if panel == LeftPanel::SavedQueries && self.left_dock.presentation.open {
             self.request_saved_queries(cx);
+            self.focused_surface = WorkspaceSurface::SavedQueries;
+            self.saved_queries_focus_handle.focus(window, cx);
         }
         if panel == LeftPanel::Collaboration && self.left_dock.presentation.open {
             self.request_room_members(cx);
@@ -13121,9 +13258,9 @@ impl WorkspaceShell {
             return;
         }
         if self
-            .pending_saved_query_tag_update
+            .pending_saved_query_metadata_update
             .as_ref()
-            .is_some_and(|(_, _, item_id)| *item_id == Some(snapshot.item_id))
+            .is_some_and(|pending| pending.item_id == Some(snapshot.item_id))
         {
             self.show_toast("Wait for the tag update to finish".into(), cx);
             return;
@@ -13273,77 +13410,283 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn update_saved_query_from_active(
-        &mut self,
-        id: sift_api_types::SavedQueryId,
-        revision: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(snapshot) = self.active_query_snapshot(cx) else {
-            self.show_toast("Focus the query version to save".into(), cx);
-            return;
-        };
-        let Some(sender) = &self.executor_sender else {
-            return;
-        };
-        self.saved_queries_loading = sender
-            .send(ExecutorCommand::UpdateSavedQuery {
-                item_id: None,
-                id,
-                request: sift_api_types::UpdateSavedQueryRequest {
-                    expected_revision: revision,
-                    sql_text: Some(snapshot.sql_text),
-                    connection_profile_id: Some(snapshot.connection_profile_id),
-                    ..Default::default()
-                },
-            })
-            .is_ok();
-        cx.notify();
-    }
-
-    fn begin_rename_saved_query(
-        &mut self,
-        id: sift_api_types::SavedQueryId,
-        name: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.saved_query_editing = Some(id);
-        self.saved_query_name_input
-            .update(cx, |input, cx| input.set_text(name, cx));
-        cx.notify();
-    }
-
-    fn finish_rename_saved_query(
-        &mut self,
-        id: sift_api_types::SavedQueryId,
-        revision: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let name = self
-            .saved_query_name_input
+    fn filtered_saved_query_panel(&self, cx: &App) -> Vec<sift_api_types::SavedQuery> {
+        let query = self
+            .saved_queries_filter_input
             .read(cx)
             .text()
             .trim()
-            .to_owned();
-        if name.is_empty() {
-            self.saved_queries_error = Some("Saved query name cannot be empty".into());
-            cx.notify();
+            .to_lowercase();
+        self.saved_queries
+            .iter()
+            .filter(|saved| {
+                query.is_empty()
+                    || saved.name.to_lowercase().contains(&query)
+                    || saved.sql_text.to_lowercase().contains(&query)
+                    || saved
+                        .tags
+                        .iter()
+                        .any(|tag| tag.to_lowercase().contains(&query))
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn selected_saved_query_panel_entry(&self, cx: &App) -> Option<sift_api_types::SavedQuery> {
+        self.filtered_saved_query_panel(cx)
+            .get(self.saved_queries_selected)
+            .cloned()
+    }
+
+    fn move_saved_query_panel_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.filtered_saved_query_panel(cx).len();
+        if count == 0 {
+            self.saved_queries_selected = 0;
             return;
         }
-        let Some(sender) = &self.executor_sender else {
+        self.saved_queries_selected = self
+            .saved_queries_selected
+            .saturating_add_signed(delta)
+            .min(count - 1);
+        self.saved_queries_scroll_handle
+            .scroll_to_item(self.saved_queries_selected, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    fn open_selected_saved_query_from_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(query) = self.selected_saved_query_panel_entry(cx) {
+            self.open_saved_query(query, window, cx);
+        }
+    }
+
+    fn open_saved_queries_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.saved_queries_filter_open = true;
+        self.saved_queries_selected = 0;
+        self.saved_queries_filter_input
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_saved_queries_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.saved_queries_filter_open = false;
+        self.saved_queries_filter_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.saved_queries_focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn begin_saved_query_panel_edit(
+        &mut self,
+        edit_tags: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.saved_queries_loading || self.pending_saved_query_metadata_update.is_some() {
+            return;
+        }
+        let Some(query) = self.selected_saved_query_panel_entry(cx) else {
             return;
         };
-        self.saved_queries_loading = sender
+        self.saved_query_delete_confirmation = None;
+        self.saved_queries_error = None;
+        if edit_tags {
+            self.saved_query_panel_edit = Some(SavedQueryPanelEdit::Tags(query.id));
+            self.saved_query_panel_tags_input
+                .update(cx, |input, cx| input.set_text(query.tags.join(", "), cx));
+            self.saved_query_panel_tags_input
+                .focus_handle(cx)
+                .focus(window, cx);
+        } else {
+            self.saved_query_panel_edit = Some(SavedQueryPanelEdit::Rename(query.id));
+            self.saved_query_name_input
+                .update(cx, |input, cx| input.set_text(query.name, cx));
+            self.saved_query_name_input
+                .focus_handle(cx)
+                .focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn cancel_saved_query_panel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.saved_query_panel_edit = None;
+        self.saved_queries_error = None;
+        self.saved_queries_focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn submit_saved_query_panel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_saved_query_metadata_update.is_some() {
+            return;
+        }
+        let Some(edit) = self.saved_query_panel_edit else {
+            return;
+        };
+        let id = match edit {
+            SavedQueryPanelEdit::Rename(id) | SavedQueryPanelEdit::Tags(id) => id,
+        };
+        let Some(query) = self.saved_queries.iter().find(|query| query.id == id) else {
+            self.saved_query_panel_edit = None;
+            return;
+        };
+        let (request, origin, unchanged) = match edit {
+            SavedQueryPanelEdit::Rename(_) => {
+                let name = self
+                    .saved_query_name_input
+                    .read(cx)
+                    .text()
+                    .trim()
+                    .to_owned();
+                if name.is_empty() {
+                    self.saved_queries_error = Some("Saved query name cannot be empty".into());
+                    cx.notify();
+                    return;
+                }
+                (
+                    sift_api_types::UpdateSavedQueryRequest {
+                        expected_revision: query.revision,
+                        name: Some(name.clone()),
+                        ..Default::default()
+                    },
+                    SavedQueryMetadataOrigin::PanelRename,
+                    name == query.name,
+                )
+            }
+            SavedQueryPanelEdit::Tags(_) => {
+                let tags =
+                    normalize_saved_query_tags(self.saved_query_panel_tags_input.read(cx).text());
+                (
+                    sift_api_types::UpdateSavedQueryRequest {
+                        expected_revision: query.revision,
+                        tags: Some(tags.clone()),
+                        ..Default::default()
+                    },
+                    SavedQueryMetadataOrigin::PanelTags,
+                    tags == query.tags,
+                )
+            }
+        };
+        if unchanged {
+            self.cancel_saved_query_panel_edit(window, cx);
+            return;
+        }
+        let item_id = self.saved_query_item_id(id, cx);
+        let Some(sender) = &self.executor_sender else {
+            let message = "Saved-query executor is unavailable".to_owned();
+            self.saved_queries_error = Some(message.clone());
+            self.record_runtime_error(item_id, "Update saved query metadata", message, cx);
+            return;
+        };
+        if sender
             .send(ExecutorCommand::UpdateSavedQuery {
-                item_id: None,
+                item_id,
                 id,
-                request: sift_api_types::UpdateSavedQueryRequest {
-                    expected_revision: revision,
-                    name: Some(name),
-                    ..Default::default()
-                },
+                request,
             })
-            .is_ok();
+            .is_err()
+        {
+            let message = "Saved-query executor stopped".to_owned();
+            self.saved_queries_error = Some(message.clone());
+            self.record_runtime_error(item_id, "Update saved query metadata", message, cx);
+            return;
+        }
+        self.pending_saved_query_metadata_update = Some(PendingSavedQueryMetadataUpdate {
+            instance_id: self
+                .selected_instance_id
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            id,
+            item_id,
+            origin,
+        });
+        self.saved_queries_loading = true;
+        self.saved_queries_error = None;
+        cx.notify();
+    }
+
+    fn begin_saved_query_panel_delete(&mut self, cx: &mut Context<Self>) {
+        if self.saved_queries_loading || self.pending_saved_query_deletion.is_some() {
+            return;
+        }
+        if let Some(query) = self.selected_saved_query_panel_entry(cx) {
+            self.saved_query_panel_edit = None;
+            self.saved_query_delete_confirmation = Some(query.id);
+            self.saved_queries_error = None;
+            cx.notify();
+        }
+    }
+
+    fn cancel_saved_query_panel_delete(&mut self, cx: &mut Context<Self>) {
+        self.saved_query_delete_confirmation = None;
+        cx.notify();
+    }
+
+    fn update_selected_saved_query_from_active(&mut self, cx: &mut Context<Self>) {
+        let Some(selected) = self.selected_saved_query_panel_entry(cx) else {
+            return;
+        };
+        let active_matches = self.active_query_snapshot(cx).is_some_and(|snapshot| {
+            snapshot
+                .saved_source
+                .is_some_and(|source| source.saved_query_id == selected.id.0)
+        });
+        if !active_matches {
+            let message =
+                "Select the saved query that is open in the active tab before updating it"
+                    .to_owned();
+            self.saved_queries_error = Some(message.clone());
+            self.record_runtime_error(None, "Update saved query", message, cx);
+            return;
+        }
+        self.save_active_query(cx);
+    }
+
+    fn handle_saved_queries_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.saved_queries_filter_open {
+            return;
+        }
+        if self.saved_query_panel_edit.is_some() {
+            if event.keystroke.key == "escape" {
+                self.cancel_saved_query_panel_edit(window, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if self.saved_query_delete_confirmation.is_some() {
+            match event.keystroke.key.as_str() {
+                "y" => self.confirm_saved_query_delete(cx),
+                "n" | "escape" => self.cancel_saved_query_panel_delete(cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+            return;
+        }
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "j" | "down" => self.move_saved_query_panel_selection(1, cx),
+            "k" | "up" => self.move_saved_query_panel_selection(-1, cx),
+            "enter" => self.open_selected_saved_query_from_panel(window, cx),
+            "/" => self.open_saved_queries_filter(window, cx),
+            "r" => self.begin_saved_query_panel_edit(false, window, cx),
+            "t" => self.begin_saved_query_panel_edit(true, window, cx),
+            "d" => self.begin_saved_query_panel_delete(cx),
+            "u" => self.update_selected_saved_query_from_active(cx),
+            "R" => self.request_saved_queries(cx),
+            "escape" => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
         cx.notify();
     }
 
@@ -13403,7 +13746,7 @@ impl WorkspaceShell {
     }
 
     fn begin_selected_saved_query_tag_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saved_queries_loading || self.pending_saved_query_tag_update.is_some() {
+        if self.saved_queries_loading || self.pending_saved_query_metadata_update.is_some() {
             return;
         }
         let selected = self
@@ -13434,7 +13777,7 @@ impl WorkspaceShell {
     }
 
     fn confirm_saved_query_tag_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_saved_query_tag_update.is_some() {
+        if self.pending_saved_query_metadata_update.is_some() {
             return;
         }
         let Some(id) = self.saved_query_tag_editing else {
@@ -13469,13 +13812,15 @@ impl WorkspaceShell {
             })
             .is_ok();
         if sent {
-            self.pending_saved_query_tag_update = Some((
-                self.selected_instance_id
+            self.pending_saved_query_metadata_update = Some(PendingSavedQueryMetadataUpdate {
+                instance_id: self
+                    .selected_instance_id
                     .clone()
                     .unwrap_or_else(|| "local".into()),
                 id,
                 item_id,
-            ));
+                origin: SavedQueryMetadataOrigin::SwitcherTags,
+            });
             self.saved_queries_loading = true;
             self.saved_queries_error = None;
         } else {
@@ -21167,6 +21512,7 @@ impl WorkspaceShell {
         let keyboard_focused = matches!(
             (dock.id, self.focused_surface),
             (DockId::Left, WorkspaceSurface::Connections)
+                | (DockId::Left, WorkspaceSurface::SavedQueries)
                 | (DockId::Inspector, WorkspaceSurface::Inspector)
         );
         div()
@@ -21178,6 +21524,14 @@ impl WorkspaceShell {
                 |dock| {
                     dock.key_context("SiftConnections")
                         .track_focus(&self.connections_focus_handle)
+                },
+            )
+            .when(
+                dock.id == DockId::Left && self.active_left_panel == LeftPanel::SavedQueries,
+                |dock| {
+                    dock.key_context("SiftSavedQueries")
+                        .track_focus(&self.saved_queries_focus_handle)
+                        .on_key_down(cx.listener(WorkspaceShell::handle_saved_queries_key))
                 },
             )
             .when(dock.id == DockId::Inspector, |dock| {
@@ -21675,130 +22029,98 @@ impl WorkspaceShell {
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::SavedQueries,
                 |dock_view| {
-                    let rows = self.saved_queries.iter().cloned().map(|query| {
-                        let id = query.id;
-                        let revision = query.revision;
-                        let editing = self.saved_query_editing == Some(id);
-                        if editing {
-                            return div()
-                                .id(("saved-query-edit", id.0 as usize))
-                                .mx_2()
-                                .py_1()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(self.saved_query_name_input.clone()),
-                                )
-                                .child(
-                                    Button::new(("save-saved-query-name", id.0 as usize), "Save")
-                                        .tone(ButtonTone::Accent)
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.finish_rename_saved_query(id, revision, cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new(("cancel-saved-query-name", id.0 as usize), "Cancel")
-                                        .tone(ButtonTone::Ghost)
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.saved_query_editing = None;
-                                            cx.notify();
-                                        })),
-                                )
-                                .into_any_element();
-                        }
-                        let open_query = query.clone();
-                        let rename_name = query.name.clone();
-                        div()
-                            .id(("saved-query", id.0 as usize))
-                            .mx_2()
-                            .py_1()
-                            .px_2()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .rounded_sm()
-                            .border_b_1()
-                            .border_color(colors.subtle_border)
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(query.name),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .font_family("monospace")
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child(query.sql_text.replace(['\n', '\r'], " ")),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        Button::new(("open-saved-query", id.0 as usize), "Open")
-                                            .tone(ButtonTone::Ghost)
-                                            .on_click(cx.listener(move |shell, _, window, cx| {
-                                                shell.open_saved_query(open_query.clone(), window, cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new(("update-saved-query", id.0 as usize), "Update")
-                                            .tone(ButtonTone::Ghost)
-                                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                                shell.update_saved_query_from_active(id, revision, cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new(("rename-saved-query", id.0 as usize), "Rename")
-                                            .tone(ButtonTone::Ghost)
-                                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                                shell.begin_rename_saved_query(id, rename_name.clone(), cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new(("delete-saved-query", id.0 as usize), "Delete")
-                                            .tone(ButtonTone::DangerGhost)
-                                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                                shell.delete_saved_query(id, revision, cx);
-                                            })),
-                                    ),
-                            )
-                            .into_any_element()
-                    });
+                    let queries = self.filtered_saved_query_panel(cx);
+                    let query_count = queries.len();
                     dock_view
                         .child(
                             div()
                                 .px_2()
-                                .pb_2()
+                                .h(px(32.))
                                 .flex()
                                 .items_center()
-                                .gap_1()
+                                .justify_between()
                                 .child(
-                                    Button::new("save-active-query", "Save current")
-                                        .tone(ButtonTone::Accent)
-                                        .disabled(self.active_query_snapshot(cx).is_none())
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.save_active_query(cx)
-                                        })),
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(SectionLabel::new("SAVED QUERIES"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.disabled_text)
+                                                .child(query_count.to_string()),
+                                        ),
                                 )
                                 .child(
-                                    Button::new("refresh-saved-queries", "Refresh")
-                                        .tone(ButtonTone::Ghost)
-                                        .disabled(self.saved_queries_loading)
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.request_saved_queries(cx)
-                                        })),
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            IconButton::new(
+                                                "filter-saved-queries",
+                                                IconName::Search,
+                                                "Filter saved queries · /",
+                                            )
+                                            .square(px(24.))
+                                            .icon_size(12.)
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_saved_queries_filter(window, cx)
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "refresh-saved-queries",
+                                                IconName::Refresh,
+                                                "Refresh saved queries · Shift+R",
+                                            )
+                                            .square(px(24.))
+                                            .icon_size(12.)
+                                            .disabled(self.saved_queries_loading)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.request_saved_queries(cx)
+                                            })),
+                                        ),
                                 ),
                         )
+                        .when(self.saved_queries_filter_open, |panel| {
+                            panel.child(
+                                div()
+                                    .debug_selector(|| "saved-queries-filter-bar".into())
+                                    .mx_2()
+                                    .h(px(34.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .border_t_1()
+                                    .border_b_1()
+                                    .border_color(colors.subtle_border)
+                                    .on_key_down(cx.listener(
+                                        |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                            if event.keystroke.key == "escape" {
+                                                shell.close_saved_queries_filter(window, cx);
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    ))
+                                    .child(icon(IconName::Search, colors.muted_text, 13.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .child(self.saved_queries_filter_input.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child(format!("{query_count} match(es)")),
+                                    ),
+                            )
+                        })
                         .children(self.saved_queries_error.as_ref().map(|message| {
                             div()
                                 .mx_2()
@@ -21821,14 +22143,252 @@ impl WorkspaceShell {
                                     .child("No saved queries yet."),
                             )
                         })
+                        .when(
+                            !self.saved_queries.is_empty() && query_count == 0,
+                            |panel| {
+                                panel.child(
+                                    div()
+                                        .p_3()
+                                        .text_color(colors.muted_text)
+                                        .child("No matching saved queries."),
+                                )
+                            },
+                        )
                         .child(
-                            div()
-                                .id("saved-queries-scroll")
-                                .debug_selector(|| "saved-queries-scroll".into())
+                            uniform_list(
+                                "saved-queries-scroll",
+                                query_count,
+                                cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                    let queries = shell.filtered_saved_query_panel(cx);
+                                    range
+                                        .filter_map(|index| {
+                                            queries
+                                                .get(index)
+                                                .cloned()
+                                                .map(|query| (index, query))
+                                        })
+                                        .map(|(index, query)| {
+                                            let selected = index == shell.saved_queries_selected;
+                                            let pending = shell
+                                                .pending_saved_query_metadata_update
+                                                .as_ref()
+                                                .is_some_and(|pending| pending.id == query.id);
+                                            if shell.saved_query_panel_edit
+                                                == Some(SavedQueryPanelEdit::Rename(query.id))
+                                            {
+                                                return div()
+                                                    .id(("saved-query-panel-rename", index))
+                                                    .debug_selector(move || {
+                                                        format!("saved-query-panel-rename-{index}")
+                                                    })
+                                                    .h(px(58.))
+                                                    .mx_2()
+                                                    .px_2()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .bg(colors.active_surface)
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .overflow_hidden()
+                                                            .child(
+                                                                shell.saved_query_name_input.clone(),
+                                                            ),
+                                                    )
+                                                    .child(KeyBinding::new("Enter"))
+                                                    .child(KeyBinding::new("Esc"))
+                                                    .when(pending, |row| {
+                                                        row.child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(colors.muted_text)
+                                                                .child("Saving…"),
+                                                        )
+                                                    })
+                                                    .into_any_element();
+                                            }
+                                            if shell.saved_query_panel_edit
+                                                == Some(SavedQueryPanelEdit::Tags(query.id))
+                                            {
+                                                return div()
+                                                    .id(("saved-query-panel-tags", index))
+                                                    .debug_selector(move || {
+                                                        format!("saved-query-panel-tags-{index}")
+                                                    })
+                                                    .h(px(58.))
+                                                    .mx_2()
+                                                    .px_2()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .bg(colors.active_surface)
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .overflow_hidden()
+                                                            .child(
+                                                                shell
+                                                                    .saved_query_panel_tags_input
+                                                                    .clone(),
+                                                            ),
+                                                    )
+                                                    .child(KeyBinding::new("Enter"))
+                                                    .child(KeyBinding::new("Esc"))
+                                                    .when(pending, |row| {
+                                                        row.child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(colors.muted_text)
+                                                                .child("Saving…"),
+                                                        )
+                                                    })
+                                                    .into_any_element();
+                                            }
+                                            if shell.saved_query_delete_confirmation
+                                                == Some(query.id)
+                                            {
+                                                return div()
+                                                    .id(("saved-query-panel-delete", index))
+                                                    .debug_selector(move || {
+                                                        format!("saved-query-panel-delete-{index}")
+                                                    })
+                                                    .h(px(58.))
+                                                    .mx_2()
+                                                    .px_2()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .bg(colors.warning_muted)
+                                                    .text_color(colors.warning)
+                                                    .child(icon(
+                                                        IconName::Warning,
+                                                        colors.warning,
+                                                        13.,
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .child(format!(
+                                                                "Delete {}?",
+                                                                query.name
+                                                            )),
+                                                    )
+                                                    .child(KeyBinding::new("y"))
+                                                    .child(KeyBinding::new("n"))
+                                                    .into_any_element();
+                                            }
+                                            let scope = if query.owner_principal_id.is_some() {
+                                                "Personal"
+                                            } else {
+                                                "Shared"
+                                            };
+                                            let detail = if query.tags.is_empty() {
+                                                scope.to_owned()
+                                            } else {
+                                                format!(
+                                                    "{scope} · {}",
+                                                    query.tags.join(" · ")
+                                                )
+                                            };
+                                            div()
+                                                .id(("saved-query-panel-row", index))
+                                                .debug_selector(move || {
+                                                    format!("saved-query-panel-row-{index}")
+                                                })
+                                                .h(px(58.))
+                                                .mx_2()
+                                                .px_2()
+                                                .py_1()
+                                                .flex()
+                                                .flex_col()
+                                                .justify_center()
+                                                .gap_1()
+                                                .rounded_sm()
+                                                .border_b_1()
+                                                .border_color(colors.subtle_border)
+                                                .when(selected, |row| {
+                                                    row.bg(colors.active_surface)
+                                                })
+                                                .hover(|row| row.bg(colors.hovered_surface))
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(
+                                                        move |shell,
+                                                              event: &gpui::MouseDownEvent,
+                                                              window,
+                                                              cx| {
+                                                            shell.saved_queries_selected = index;
+                                                            shell.focused_surface =
+                                                                WorkspaceSurface::SavedQueries;
+                                                            shell
+                                                                .saved_queries_focus_handle
+                                                                .focus(window, cx);
+                                                            if event.click_count >= 2 {
+                                                                shell
+                                                                    .open_selected_saved_query_from_panel(
+                                                                        window, cx,
+                                                                    );
+                                                            }
+                                                            cx.notify();
+                                                        },
+                                                    ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                        .child(query.name),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .font_family("monospace")
+                                                        .text_xs()
+                                                        .text_color(colors.muted_text)
+                                                        .child(query.sql_text.replace(
+                                                            ['\n', '\r'],
+                                                            " ",
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .text_color(colors.disabled_text)
+                                                        .child(detail),
+                                                )
+                                                .into_any_element()
+                                        })
+                                        .collect()
+                                }),
+                            )
                                 .flex_1()
                                 .min_h_0()
-                                .overflow_y_scroll()
-                                .children(rows),
+                                .w_full()
+                                .track_scroll(&self.saved_queries_scroll_handle),
+                        )
+                        .child(
+                            div()
+                                .h(px(40.))
+                                .px_2()
+                                .flex_none()
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .items_center()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child("j/k · Enter open · / filter · R refresh")
+                                .child("r rename · t tags · d delete · u update"),
                         )
                 },
             )
@@ -22160,9 +22720,11 @@ impl WorkspaceShell {
                                             .map(|(index, query)| {
                                                 if shell.saved_query_tag_editing == Some(query.id) {
                                                     let saving = shell
-                                                        .pending_saved_query_tag_update
+                                                        .pending_saved_query_metadata_update
                                                         .as_ref()
-                                                        .is_some_and(|(_, id, _)| *id == query.id);
+                                                        .is_some_and(|pending| {
+                                                            pending.id == query.id
+                                                        });
                                                     return div()
                                                         .id(("saved-query-tags-editor", index))
                                                         .debug_selector(move || {
@@ -32833,15 +33395,15 @@ mod tests {
         assert!(cx.debug_bounds("footer-project-search").is_none());
 
         workspace.update_in(&mut cx, |shell, window, cx| {
-            shell.select_left_panel(LeftPanel::Collaboration, cx);
+            shell.select_left_panel(LeftPanel::Collaboration, window, cx);
             assert!(shell.left_dock.presentation.open);
             assert_eq!(shell.active_left_panel, LeftPanel::Collaboration);
 
-            shell.select_left_panel(LeftPanel::QueryOutline, cx);
+            shell.select_left_panel(LeftPanel::QueryOutline, window, cx);
             assert!(shell.left_dock.presentation.open);
             assert_eq!(shell.active_left_panel, LeftPanel::QueryOutline);
 
-            shell.select_left_panel(LeftPanel::QueryOutline, cx);
+            shell.select_left_panel(LeftPanel::QueryOutline, window, cx);
             assert!(!shell.left_dock.presentation.open);
 
             shell.select_bottom_tool(BottomTool::Monitor, cx);
@@ -34161,7 +34723,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn saved_queries_panel_routes_crud_and_reopens_sql(cx: &mut TestAppContext) {
+    fn saved_queries_panel_is_keyboard_first_and_guards_updates(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -34178,8 +34740,15 @@ mod tests {
             updated_at: "2026-08-24T10:00:00Z".parse().unwrap(),
             revision: 3,
         };
+        let other = sift_api_types::SavedQuery {
+            id: sift_api_types::SavedQueryId(8),
+            name: "Other query".into(),
+            sql_text: "select 8".into(),
+            revision: 2,
+            ..saved.clone()
+        };
 
-        workspace.update(&mut cx, |shell, cx| {
+        workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.lifecycle.tenants = vec![crate::TenantNavEntry {
                 id: sift_api_types::TenantId(1),
@@ -34187,7 +34756,7 @@ mod tests {
                 rooms: Vec::new(),
                 connections: Vec::new(),
             }];
-            shell.select_left_panel(LeftPanel::SavedQueries, cx);
+            shell.select_left_panel(LeftPanel::SavedQueries, window, cx);
         });
         assert!(matches!(
             receiver.try_recv(),
@@ -34197,17 +34766,18 @@ mod tests {
             shell.on_executor_event(
                 ExecutorEvent::SavedQueriesLoaded {
                     tenant_id: 1,
-                    result: Ok(vec![saved.clone()]),
+                    result: Ok(vec![saved.clone(), other.clone()]),
                 },
                 cx,
             )
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("saved-queries-scroll").is_some());
+        assert!(cx.debug_bounds("saved-query-panel-row-0").is_some());
+        assert!(cx.debug_bounds("saved-query-panel-row-1").is_some());
 
-        workspace.update_in(&mut cx, |shell, window, cx| {
-            shell.open_saved_query(saved.clone(), window, cx)
-        });
+        cx.simulate_keystrokes("j");
+        workspace.read_with(&cx, |shell, _| assert_eq!(shell.saved_queries_selected, 1));
+        cx.simulate_keystrokes("k enter");
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().unwrap();
@@ -34223,49 +34793,166 @@ mod tests {
             );
         });
 
-        workspace.update(&mut cx, |shell, cx| shell.save_active_query(cx));
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(ExecutorCommand::UpdateSavedQuery {
-                item_id: Some(_),
-                id,
-                request,
-            }) if id == saved.id && request.sql_text.as_deref() == Some(saved.sql_text.as_str())
-        ));
-        workspace.update(&mut cx, |shell, cx| {
-            shell.update_saved_query_from_active(saved.id, saved.revision, cx)
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.saved_queries_selected = 1;
+            shell.saved_queries_focus_handle.focus(window, cx);
         });
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(ExecutorCommand::UpdateSavedQuery {
-                item_id: None,
+        cx.simulate_keystrokes("u");
+        assert!(receiver.try_recv().is_err());
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.global_problems.last().is_some_and(|problem| {
+                problem.title == "Update saved query" && problem.message.contains("active tab")
+            }));
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.saved_queries_selected = 0;
+            shell.saved_queries_error = None;
+            cx.notify();
+        });
+        cx.simulate_keystrokes("u");
+        let item_id = match receiver.try_recv().unwrap() {
+            ExecutorCommand::UpdateSavedQuery {
+                item_id: Some(item_id),
                 id,
                 request,
-            })
-                if id == saved.id && request.sql_text.as_deref() == Some(saved.sql_text.as_str())
-        ));
+            } if id == saved.id && request.sql_text.as_deref() == Some(saved.sql_text.as_str()) => {
+                item_id
+            }
+            _ => panic!("unexpected command"),
+        };
+        let mut updated = saved.clone();
+        updated.revision = 4;
         workspace.update(&mut cx, |shell, cx| {
-            shell.begin_rename_saved_query(saved.id, saved.name.clone(), cx);
+            shell.on_executor_event(
+                ExecutorEvent::SavedQuerySaved {
+                    item_id: Some(item_id),
+                    result: Ok(updated.clone()),
+                },
+                cx,
+            );
+            assert_eq!(shell.saved_queries_selected, 1);
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.saved_queries_focus_handle.focus(window, cx);
+        });
+        cx.simulate_keystrokes("r");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("saved-query-panel-rename-1").is_some());
+        workspace.update(&mut cx, |shell, cx| {
             shell
                 .saved_query_name_input
                 .update(cx, |input, cx| input.set_text("Audit trail", cx));
-            shell.finish_rename_saved_query(saved.id, saved.revision, cx);
         });
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(ExecutorCommand::UpdateSavedQuery {
-                item_id: None,
-                id,
-                request,
-            })
-                if id == saved.id && request.name.as_deref() == Some("Audit trail")
-        ));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.pending_saved_query_metadata_update.is_some());
+        });
+        let rename =
+            std::iter::from_fn(|| receiver.try_recv().ok()).find_map(|command| match command {
+                ExecutorCommand::UpdateSavedQuery {
+                    item_id,
+                    id,
+                    request,
+                } => Some((item_id, id, request)),
+                _ => None,
+            });
+        let (command_item_id, id, request) = rename.expect("rename command");
+        assert_eq!(command_item_id, Some(item_id));
+        assert_eq!(id, saved.id);
+        assert_eq!(request.expected_revision, 4);
+        assert_eq!(request.name.as_deref(), Some("Audit trail"));
         workspace.update(&mut cx, |shell, cx| {
-            shell.delete_saved_query(saved.id, saved.revision, cx)
+            shell.on_executor_event(
+                ExecutorEvent::SavedQuerySaved {
+                    item_id: Some(item_id),
+                    result: Err("revision conflict".into()),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell.saved_query_panel_edit,
+                Some(SavedQueryPanelEdit::Rename(saved.id))
+            );
+            assert!(shell.global_problems.last().is_some_and(|problem| {
+                problem.title.starts_with("Rename query") && problem.message == "revision conflict"
+            }));
         });
+        cx.simulate_keystrokes("enter");
+        assert!(receiver.try_recv().is_ok());
+        let mut renamed = updated;
+        renamed.name = "Audit trail".into();
+        renamed.revision = 5;
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQuerySaved {
+                    item_id: Some(item_id),
+                    result: Ok(renamed.clone()),
+                },
+                cx,
+            );
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.title, "Audit trail.sql");
+            assert!(matches!(
+                item.source.as_ref(),
+                Some(ItemSource::SavedQuery(source)) if source.revision == 5
+            ));
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.saved_queries_focus_handle.focus(window, cx)
+        });
+        cx.simulate_keystrokes("t");
+        workspace.update(&mut cx, |shell, cx| {
+            shell.saved_query_panel_tags_input.update(cx, |input, cx| {
+                input.set_text("finance, audit, finance", cx)
+            });
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::DeleteSavedQuery { id, expected_revision: 3 })
+            Ok(ExecutorCommand::UpdateSavedQuery { request, .. })
+                if request.expected_revision == 5
+                    && request.tags == Some(vec!["finance".into(), "audit".into()])
+        ));
+        let mut tagged = renamed;
+        tagged.tags = vec!["finance".into(), "audit".into()];
+        tagged.revision = 6;
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQuerySaved {
+                    item_id: Some(item_id),
+                    result: Ok(tagged),
+                },
+                cx,
+            );
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.saved_queries_focus_handle.focus(window, cx)
+        });
+        cx.simulate_keystrokes("/");
+        workspace.update(&mut cx, |shell, cx| {
+            assert!(shell.saved_queries_filter_open);
+            shell
+                .saved_queries_filter_input
+                .update(cx, |input, cx| input.set_text("finance", cx));
+            assert_eq!(shell.filtered_saved_query_panel(cx).len(), 1);
+        });
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(!shell.saved_queries_filter_open);
+            assert!(shell.saved_queries_filter_input.read(cx).text().is_empty());
+        });
+
+        cx.simulate_keystrokes("d n d y");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::DeleteSavedQuery { id, expected_revision: 6 })
                 if id == saved.id
         ));
     }

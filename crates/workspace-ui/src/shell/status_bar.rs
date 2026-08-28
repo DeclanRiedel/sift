@@ -149,8 +149,8 @@ pub(super) fn render_status_bar(
                         None,
                         false,
                     )
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.select_left_panel(LeftPanel::Connections, cx)
+                    .on_click(cx.listener(|shell, _, window, cx| {
+                        shell.select_left_panel(LeftPanel::Connections, window, cx)
                     })),
                 )
                 .child(
@@ -163,9 +163,9 @@ pub(super) fn render_status_bar(
                         None,
                         false,
                     )
-                    .on_click(
-                        cx.listener(|shell, _, _, cx| shell.select_left_panel(LeftPanel::Git, cx)),
-                    ),
+                    .on_click(cx.listener(|shell, _, window, cx| {
+                        shell.select_left_panel(LeftPanel::Git, window, cx)
+                    })),
                 )
                 .child(
                     button(
@@ -180,8 +180,8 @@ pub(super) fn render_status_bar(
                         Some(shell.presence.participants.len()),
                         false,
                     )
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.select_left_panel(LeftPanel::Collaboration, cx)
+                    .on_click(cx.listener(|shell, _, window, cx| {
+                        shell.select_left_panel(LeftPanel::Collaboration, window, cx)
                     })),
                 )
                 .child(
@@ -198,8 +198,8 @@ pub(super) fn render_status_bar(
                                 false,
                             )
                             .on_click(cx.listener(
-                                |shell, _, _, cx| {
-                                    shell.select_left_panel(LeftPanel::QueryOutline, cx)
+                                |shell, _, window, cx| {
+                                    shell.select_left_panel(LeftPanel::QueryOutline, window, cx)
                                 },
                             )),
                         ),
@@ -218,8 +218,8 @@ pub(super) fn render_status_bar(
                                 false,
                             )
                             .on_click(cx.listener(
-                                |shell, _, _, cx| {
-                                    shell.select_left_panel(LeftPanel::SavedQueries, cx)
+                                |shell, _, window, cx| {
+                                    shell.select_left_panel(LeftPanel::SavedQueries, window, cx)
                                 },
                             )),
                         ),
