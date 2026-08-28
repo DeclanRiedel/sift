@@ -589,6 +589,22 @@ async fn run_query_executor(
             return;
         };
         match command {
+            ExecutorCommand::LoadChangeLedger { filter } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .change_ledger(&filter)
+                        .await
+                        .map_err(|error| format!("loading database change ledger failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ChangeLedgerLoaded { filter, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::Connect {
                 tenant_id,
                 profile_id,
@@ -815,6 +831,7 @@ async fn run_query_executor(
                 sql,
                 params,
                 transform,
+                source,
             } => {
                 let Some(opened) = context.as_ref() else {
                     if events
@@ -853,6 +870,7 @@ async fn run_query_executor(
                             sql,
                             params,
                             transform,
+                            source,
                         },
                         control_receiver,
                         events,
@@ -2757,13 +2775,27 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::LoadAutomations { workspace_id } => {
+            ExecutorCommand::LoadAutomations {
+                workspace_id,
+                git_commit,
+            } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
-                    Ok(client) => client
-                        .run_configurations(sift_protocol::WorkspaceId(workspace_id))
-                        .await
-                        .map_err(|error| format!("loading automations failed: {error}")),
+                    Ok(client) => async {
+                        let workspace = sift_protocol::WorkspaceId(workspace_id);
+                        let configurations = client.run_configurations(workspace).await?;
+                        let last_success = match git_commit {
+                            Some(commit) => {
+                                client
+                                    .latest_successful_run_for_commit(workspace, &commit)
+                                    .await?
+                            }
+                            None => None,
+                        };
+                        Ok::<_, sift_client_sdk::Error>((configurations, last_success))
+                    }
+                    .await
+                    .map_err(|error| format!("loading automations failed: {error}")),
                     Err(error) => Err(error),
                 };
                 if events
@@ -3091,6 +3123,79 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::PrepareWorkspaceDdlMigration { workspace_id } => {
+                let result = match context.as_ref() {
+                    Some(opened) => async {
+                        let live = opened
+                            .client
+                            .catalog_graph(
+                                opened.session,
+                                opened.metadata_connection,
+                                sift_protocol::CatalogGraphRequest::default(),
+                            )
+                            .await?;
+                        let source = opened
+                            .client
+                            .ddl_sources(sift_protocol::WorkspaceId(workspace_id))
+                            .await?
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| sift_client_sdk::Error::Protocol(
+                                "Create a workspace DDL source before comparing it to live schema".into(),
+                            ))?;
+                        let model = opened
+                            .client
+                            .refresh_ddl_source(
+                                source.id,
+                                sift_api_types::ExpectedDdlSourceRevisionRequest {
+                                    expected_revision: source.revision,
+                                },
+                            )
+                            .await?;
+                        if model.diagnostics.iter().any(|diagnostic| diagnostic.error) {
+                            return Err(sift_client_sdk::Error::Protocol(
+                                "Workspace DDL source has parser errors".into(),
+                            ));
+                        }
+                        let diff_request = sift_protocol::SchemaDiffRequest {
+                            from: sift_protocol::CatalogSourceRef::Live {
+                                expected_revision: live.revision,
+                                options: Default::default(),
+                            },
+                            to: sift_protocol::CatalogSourceRef::DdlSource {
+                                source_id: model.source.id,
+                                expected_model_revision: model.source.model_revision,
+                            },
+                            accepted_renames: Vec::new(),
+                            max_changes: Some(2_000),
+                        };
+                        let diff = opened.client.compare_catalog_schemas(
+                            opened.session,
+                            opened.metadata_connection,
+                            diff_request.clone(),
+                        ).await?;
+                        let plan = opened.client.preview_migration(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::PreviewMigrationRequest {
+                                diff: diff_request,
+                                expected_diff_digest: diff.digest.clone(),
+                                selected_changes: diff.changes.iter().map(|change| change.id.clone()).collect(),
+                                expected_live_revision: live.revision,
+                                options: Default::default(),
+                            },
+                        ).await?;
+                        Ok::<_, sift_client_sdk::Error>((Box::new(diff), Box::new(plan)))
+                    }.await.map_err(|error| format!("comparing workspace DDL to live schema failed: {error}")),
+                    None => Err("Connect before comparing workspace DDL".into()),
+                };
+                if events
+                    .send(ExecutorEvent::CatalogMigrationPrepared(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::ApplyCatalogMigration { request } => {
                 let result = match context.as_ref() {
                     Some(opened) => opened
@@ -3103,6 +3208,46 @@ async fn run_query_executor(
                 };
                 if events
                     .send(ExecutorEvent::CatalogMigrationApplied(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ValidateCatalogMigration { request } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .validate_migration(opened.session, opened.metadata_connection, request)
+                        .await
+                        .map(Box::new)
+                        .map_err(|error| format!("validating schema migration failed: {error}")),
+                    None => Err("Connect to the selected test database first".into()),
+                };
+                if events
+                    .send(ExecutorEvent::CatalogMigrationValidated(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::GenerateMigrationArtifacts {
+                workspace_id,
+                request,
+                migration_path,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .mutate_workspace_batch(sift_protocol::WorkspaceId(workspace_id), request)
+                        .await
+                        .map_err(|error| format!("generating migration artifacts failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::MigrationArtifactsGenerated {
+                        migration_path,
+                        result,
+                    })
                     .is_err()
                 {
                     return;
@@ -3365,9 +3510,10 @@ async fn run_query_executor(
                 item_id,
                 sql,
                 params,
+                source,
             } => {
                 let result = match context.as_ref() {
-                    Some(opened) => capture_plan(opened, sql, params).await,
+                    Some(opened) => capture_plan(opened, sql, params, source).await,
                     None => Err("Connect before saving a plan capture".into()),
                 };
                 if events
@@ -3688,6 +3834,7 @@ async fn capture_plan(
     context: &QueryContext,
     sql: String,
     params: Vec<sift_protocol::Value>,
+    source: Option<sift_protocol::VersionedExecutionContext>,
 ) -> Result<sift_protocol::PlanCapture, String> {
     let state = context
         .client
@@ -3742,6 +3889,7 @@ async fn capture_plan(
                     analyze: false,
                     params,
                     include_raw_response: false,
+                    source,
                 },
             )
             .await
@@ -3913,6 +4061,7 @@ struct QueryRun {
     sql: String,
     params: Vec<sift_protocol::Value>,
     transform: Option<sift_protocol::ResultTransform>,
+    source: Option<sift_protocol::VersionedExecutionContext>,
 }
 
 async fn run_streamed_query(
@@ -3954,9 +4103,10 @@ async fn run_streamed_query_inner(
         sql,
         params,
         transform,
+        source,
     } = run;
     let started = tokio::select! {
-        stream = client.start_query_stream_transformed(
+        stream = client.start_query_stream_versioned(
             session,
             connection,
             sql,
@@ -3967,6 +4117,7 @@ async fn run_streamed_query_inner(
                 mode: transaction.mode,
             }),
             transform,
+            source,
         ) => stream,
         control = controls.recv() => {
             if matches!(control, Some(QueryControl::Cancel)) {

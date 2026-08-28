@@ -1871,6 +1871,7 @@ fn parse_status(
         entries,
         truncated: false,
         observed_at: chrono::Utc::now(),
+        validation: None,
     })
 }
 
@@ -1907,6 +1908,8 @@ fn status_entry(
         stage,
         conflict,
         pending: None,
+        affected_objects: Vec::new(),
+        validation_errors: 0,
     })
 }
 
@@ -2405,6 +2408,8 @@ fn parse_commit_detail(metadata: &[u8], stats: &[u8], truncated: bool) -> Result
         message: fields[7].trim_end_matches('\n').to_owned(),
         files_truncated: truncated || stats.lines().count() > MAX_COMMIT_FILES,
         files,
+        checkpoint_id: None,
+        workspace_revision: None,
     })
 }
 

@@ -243,6 +243,7 @@ fn exec(
         room_id: None,
         connection_profile_id: None,
         transform: None,
+        source: None,
     }
 }
 
@@ -651,6 +652,7 @@ mod tests {
             complete: true,
             revision: 0,
             raw_response: None,
+            source: None,
         }
     }
 

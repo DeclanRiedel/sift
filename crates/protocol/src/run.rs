@@ -127,6 +127,8 @@ pub struct RunManifestScript {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RunManifest {
     pub workspace_revision: WorkspaceRevision,
+    #[serde(default)]
+    pub git_commit: Option<String>,
     pub scripts: Vec<RunManifestScript>,
     pub connection_profile_id: i64,
     pub target_schema: Option<String>,

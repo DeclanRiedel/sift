@@ -18,6 +18,10 @@ pub enum CatalogSourceRef {
     Snapshot {
         snapshot_id: CatalogSnapshotId,
     },
+    DdlSource {
+        source_id: crate::DdlSourceId,
+        expected_model_revision: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

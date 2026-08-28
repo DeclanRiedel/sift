@@ -14,6 +14,7 @@ pub mod auth;
 pub mod automation;
 pub mod capability;
 pub mod catalog;
+pub mod change_ledger;
 pub mod column;
 pub mod comparison;
 pub mod completion;
@@ -63,6 +64,7 @@ pub use auth::{
 pub use automation::*;
 pub use capability::{OperationCapability, OperationCapabilityContext, OperationKind};
 pub use catalog::*;
+pub use change_ledger::*;
 pub use column::{
     EngineColumnFacets, MssqlColumnFacets, Nullability, PgColumnFacets, PrimitiveType,
     TypeCategory, TypeRef,

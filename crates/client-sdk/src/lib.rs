@@ -240,7 +240,10 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "disableRunSchedule",
     "enableRunSchedule",
     "executeTransferRecipe",
+    "exportChangeLedger",
     "getRun",
+    "getChangeLedgerPolicy",
+    "getLatestSuccessfulRunForCommit",
     "getRunConfiguration",
     "getRunLogs",
     "getRunSteps",
@@ -248,17 +251,21 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "getTransferRecipe",
     "getWorkspaceArtifact",
     "listRunConfigurations",
+    "listChangeLedger",
     "listRunSchedules",
     "listScheduleOccurrences",
     "listTransferRecipes",
     "rerun",
     "resumeScheduleOccurrence",
+    "importExternalChangeLedger",
     "startRun",
     "updateRunConfiguration",
+    "updateChangeLedgerPolicy",
     "updateRunSchedule",
     "updateTransferRecipe",
     "validateRunConfiguration",
     "validateTransferRecipe",
+    "validateMigration",
     "abortRepositoryOperation",
     "beginRepositoryConflictResolution",
     "continueRepositoryOperation",
@@ -1436,6 +1443,19 @@ impl Client {
         .await
     }
 
+    pub async fn validate_migration(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::ValidateMigrationRequest,
+    ) -> Result<sift_protocol::MigrationValidation> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/catalog/migrations/validate"),
+            &request,
+        )
+        .await
+    }
+
     pub async fn migration_run(
         &self,
         session: SessionId,
@@ -2028,6 +2048,7 @@ impl Client {
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             },
         )
         .await
@@ -2050,6 +2071,7 @@ impl Client {
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             },
         )
         .await
@@ -2075,6 +2097,7 @@ impl Client {
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             },
         )
         .await
@@ -3157,6 +3180,19 @@ impl Client {
         .await
     }
 
+    pub async fn latest_successful_run_for_commit(
+        &self,
+        workspace: WorkspaceId,
+        git_commit: &str,
+    ) -> Result<Option<Run>> {
+        self.get(&format!(
+            "/v1/metadata/workspaces/{}/runs/latest-success?git_commit={}",
+            workspace.0,
+            urlencoding_replace(git_commit)
+        ))
+        .await
+    }
+
     pub async fn create_run_configuration(
         &self,
         workspace: WorkspaceId,
@@ -3963,6 +3999,56 @@ impl Client {
             .await
     }
 
+    pub async fn change_ledger(
+        &self,
+        filter: &sift_protocol::ChangeLedgerFilter,
+    ) -> Result<sift_protocol::ChangeLedgerPage> {
+        let mut query = Vec::new();
+        if let Some(value) = filter.tenant_id {
+            query.push(format!("tenant_id={value}"));
+        }
+        if let Some(value) = filter.connection_profile_id {
+            query.push(format!("connection_profile_id={value}"));
+        }
+        if let Some(value) = &filter.database_target {
+            query.push(format!("database_target={}", urlencoding_replace(value)));
+        }
+        if let Some(value) = &filter.affected_object {
+            query.push(format!("affected_object={}", urlencoding_replace(value)));
+        }
+        if let Some(value) = filter.executed_by {
+            query.push(format!("executed_by={value}"));
+        }
+        if let Some(value) = filter.operation {
+            let value = serde_json::to_value(value)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            query.push(format!("operation={value}"));
+        }
+        if let Some(value) = filter.from {
+            query.push(format!("from={}", urlencoding_replace(&value.to_rfc3339())));
+        }
+        if let Some(value) = filter.to {
+            query.push(format!("to={}", urlencoding_replace(&value.to_rfc3339())));
+        }
+        if let Some(value) = &filter.git_commit {
+            query.push(format!("git_commit={}", urlencoding_replace(value)));
+        }
+        if let Some(value) = filter.before_id {
+            query.push(format!("before_id={value}"));
+        }
+        if let Some(value) = filter.limit {
+            query.push(format!("limit={value}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/change-ledger{suffix}")).await
+    }
+
     pub async fn stream_query(
         &self,
         session: SessionId,
@@ -4015,6 +4101,21 @@ impl Client {
         tx: Option<TxHandleRef>,
         transform: Option<sift_protocol::ResultTransform>,
     ) -> Result<QueryStream> {
+        self.start_query_stream_versioned(session, connection, sql, params, tx, transform, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_query_stream_versioned(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        sql: impl Into<String>,
+        params: Vec<Value>,
+        tx: Option<TxHandleRef>,
+        transform: Option<sift_protocol::ResultTransform>,
+        source: Option<sift_protocol::VersionedExecutionContext>,
+    ) -> Result<QueryStream> {
         let mut socket = self.connect_session_websocket(session).await?;
         let request_id = "sdk-stream-query".to_string();
         socket
@@ -4025,6 +4126,7 @@ impl Client {
                 params,
                 tx,
                 transform,
+                source: source.map(Box::new),
             })
             .await?;
 

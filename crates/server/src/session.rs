@@ -2088,6 +2088,150 @@ impl SessionStore {
         Ok(plan)
     }
 
+    pub async fn validate_migration(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        principal: PrincipalId,
+        request: sift_protocol::ValidateMigrationRequest,
+    ) -> ApiResult<sift_protocol::MigrationValidation> {
+        use sift_protocol::{MigrationStatementOutcome, MigrationStatementStatus};
+
+        if !request.confirm_test_database {
+            return Err(ApiError::BadRequest(
+                "explicitly confirm the selected connection is a test database".into(),
+            ));
+        }
+        let (current_principal, tenant, profile, policy_revision) = self.managed_catalog_scope(
+            session,
+            connection,
+            sift_protocol::OperationKind::PreviewMigration,
+        )?;
+        if current_principal != principal {
+            return Err(ApiError::Forbidden(
+                "migration caller must own the managed session".into(),
+            ));
+        }
+        let stored = self
+            .inner
+            .migration_plans
+            .get(&request.plan_id)
+            .map(|entry| entry.clone())
+            .ok_or_else(|| ApiError::BadRequest("migration plan not found or expired".into()))?;
+        if stored.session != session
+            || stored.connection != connection
+            || stored.principal != principal
+            || stored.tenant != tenant
+            || stored.profile != profile
+            || stored.policy_revision != policy_revision
+            || stored.plan.digest != request.plan_digest
+            || stored.plan.expires_at <= chrono::Utc::now()
+        {
+            return Err(ApiError::BadRequest(
+                "migration plan is expired, tampered, or bound to another scope".into(),
+            ));
+        }
+        if stored.plan.groups.iter().any(|group| !group.transactional) {
+            return Err(ApiError::BadRequest(
+                "this plan contains non-transactional DDL and cannot be safely test-rolled-back"
+                    .into(),
+            ));
+        }
+        let lock = self
+            .inner
+            .migration_locks
+            .entry((session, connection))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+        self.catalog_graph_at_revision(
+            session,
+            connection,
+            stored.plan.expected_live_revision,
+            stored.live_options.clone(),
+            sift_protocol::OperationKind::PreviewMigration,
+        )
+        .await?;
+        let transaction = self
+            .begin_transaction_as(
+                session,
+                sift_protocol::BeginTransactionRequest {
+                    connection,
+                    mode: sift_protocol::TxMode::default(),
+                },
+                sift_protocol::OperationKind::PreviewMigration,
+            )
+            .await?;
+        let tx = sift_protocol::TxHandleRef {
+            tx_id: transaction.tx_id,
+            connection: transaction.connection,
+            mode: transaction.mode,
+        };
+        let mut outcomes = Vec::new();
+        let mut valid = true;
+        'groups: for group in &stored.plan.groups {
+            for statement in &group.statements {
+                match self
+                    .execute_http_as(
+                        session,
+                        ExecuteRequestHttp {
+                            connection,
+                            sql: statement.sql.clone(),
+                            params: Vec::new(),
+                            tx: Some(tx.clone()),
+                            room_id: None,
+                            connection_profile_id: Some(profile.0),
+                            transform: None,
+                            source: None,
+                        },
+                        sift_protocol::OperationKind::PreviewMigration,
+                    )
+                    .await
+                {
+                    Ok(response) => outcomes.push(MigrationStatementOutcome {
+                        group_ordinal: group.ordinal,
+                        statement_ordinal: statement.ordinal,
+                        fingerprint: statement.fingerprint.clone(),
+                        status: MigrationStatementStatus::Applied,
+                        affected_rows: response.affected_rows,
+                        result_code: None,
+                    }),
+                    Err(error) => {
+                        valid = false;
+                        outcomes.push(MigrationStatementOutcome {
+                            group_ordinal: group.ordinal,
+                            statement_ordinal: statement.ordinal,
+                            fingerprint: statement.fingerprint.clone(),
+                            status: MigrationStatementStatus::Failed,
+                            affected_rows: None,
+                            result_code: migration_result_code(&error),
+                        });
+                        break 'groups;
+                    }
+                }
+            }
+        }
+        let rolled_back = self
+            .rollback_migration_tx(session, connection, tx.tx_id)
+            .await;
+        if !rolled_back {
+            return Err(ApiError::Internal(
+                "test migration validation rollback failed; database outcome is unknown".into(),
+            ));
+        }
+        for outcome in &mut outcomes {
+            if outcome.status == MigrationStatementStatus::Applied {
+                outcome.status = MigrationStatementStatus::RolledBack;
+            }
+        }
+        Ok(sift_protocol::MigrationValidation {
+            plan_id: stored.plan.id,
+            valid,
+            rolled_back,
+            outcomes,
+        })
+    }
+
     pub async fn apply_migration(
         &self,
         session: SessionId,
@@ -2279,6 +2423,7 @@ impl SessionStore {
                             room_id: None,
                             connection_profile_id: Some(profile.0),
                             transform: None,
+                            source: None,
                         },
                         sift_protocol::OperationKind::ApplyMigration,
                     )
@@ -3950,6 +4095,7 @@ impl SessionStore {
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             };
             match self
                 .execute_http_as(session_id, exec, sift_protocol::OperationKind::ApplyEdits)
@@ -4064,6 +4210,7 @@ impl SessionStore {
                     room_id: None,
                     connection_profile_id: None,
                     transform: None,
+                    source: None,
                 },
                 sift_protocol::OperationKind::SearchSchema,
             )
@@ -4147,6 +4294,7 @@ impl SessionStore {
                         room_id: None,
                         connection_profile_id: None,
                         transform: None,
+                        source: None,
                     },
                     sift_protocol::OperationKind::SearchData,
                 )
@@ -4893,6 +5041,7 @@ impl SessionStore {
                             room_id: None,
                             connection_profile_id: None,
                             transform: None,
+                            source: None,
                         },
                         sift_protocol::OperationKind::StartComparison,
                     )
@@ -5112,6 +5261,7 @@ impl SessionStore {
             complete: true,
             revision: 0,
             raw_response: None,
+            source: request.source,
         };
         let metadata = self
             .inner

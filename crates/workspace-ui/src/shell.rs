@@ -1076,6 +1076,7 @@ pub enum Modal {
     ConfirmWorkspaceDelete,
     WorkspaceCheckpoint,
     WorkspaceHistory,
+    ChangeLedger,
     ConfirmWorkspaceRestore(sift_protocol::WorkspaceCheckpointId),
     WorkspaceReconcile,
 }
@@ -1677,6 +1678,7 @@ pub enum ExecutorCommand {
         sql: String,
         params: Vec<sift_protocol::Value>,
         transform: Option<sift_protocol::ResultTransform>,
+        source: Option<sift_protocol::VersionedExecutionContext>,
     },
     Explain {
         item_id: u64,
@@ -1724,6 +1726,9 @@ pub enum ExecutorCommand {
     LoadRepositoryStatus {
         workspace_id: i64,
         request_id: u64,
+    },
+    LoadChangeLedger {
+        filter: sift_protocol::ChangeLedgerFilter,
     },
     BindWorkspaceRepository {
         workspace_id: i64,
@@ -2008,6 +2013,7 @@ pub enum ExecutorCommand {
     },
     LoadAutomations {
         workspace_id: i64,
+        git_commit: Option<String>,
     },
     StartAutomation {
         configuration_id: i64,
@@ -2040,8 +2046,19 @@ pub enum ExecutorCommand {
     PrepareCatalogMigration {
         baseline: Option<sift_protocol::CatalogSnapshotId>,
     },
+    PrepareWorkspaceDdlMigration {
+        workspace_id: i64,
+    },
     ApplyCatalogMigration {
         request: sift_protocol::ApplyMigrationRequest,
+    },
+    ValidateCatalogMigration {
+        request: sift_protocol::ValidateMigrationRequest,
+    },
+    GenerateMigrationArtifacts {
+        workspace_id: i64,
+        request: sift_api_types::WorkspaceBatchMutationRequest,
+        migration_path: sift_protocol::WorkspacePath,
     },
     RefreshCatalogMigrationRun {
         run: sift_protocol::MigrationRunId,
@@ -2100,6 +2117,7 @@ pub enum ExecutorCommand {
         item_id: u64,
         sql: String,
         params: Vec<sift_protocol::Value>,
+        source: Option<sift_protocol::VersionedExecutionContext>,
     },
     LoadPlanCaptures {
         item_id: u64,
@@ -2210,6 +2228,10 @@ pub enum ExecutorEvent {
         request_id: u64,
         binding: Option<sift_protocol::RepositoryBinding>,
         result: Result<Option<sift_protocol::VcsStatus>, String>,
+    },
+    ChangeLedgerLoaded {
+        filter: sift_protocol::ChangeLedgerFilter,
+        result: Result<sift_protocol::ChangeLedgerPage, String>,
     },
     RepositorySetupFinished {
         workspace_id: i64,
@@ -2348,7 +2370,13 @@ pub enum ExecutorEvent {
     },
     AutomationsLoaded {
         workspace_id: i64,
-        result: Result<Vec<sift_protocol::RunConfiguration>, String>,
+        result: Result<
+            (
+                Vec<sift_protocol::RunConfiguration>,
+                Option<sift_protocol::Run>,
+            ),
+            String,
+        >,
     },
     AutomationRunUpdated(Result<sift_protocol::Run, String>),
     CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
@@ -2393,6 +2421,11 @@ pub enum ExecutorEvent {
         >,
     ),
     CatalogMigrationApplied(Result<Box<sift_protocol::MigrationRun>, String>),
+    CatalogMigrationValidated(Result<Box<sift_protocol::MigrationValidation>, String>),
+    MigrationArtifactsGenerated {
+        migration_path: sift_protocol::WorkspacePath,
+        result: Result<sift_api_types::WorkspaceTreeResponse, String>,
+    },
     CatalogMigrationRunLoaded(Result<Box<sift_protocol::MigrationRun>, String>),
     CatalogMigrationCanceled(Result<sift_protocol::MigrationRunId, String>),
     HistoryLoaded {
@@ -4966,6 +4999,7 @@ fn vcs_action_label(action: sift_protocol::VcsAction) -> &'static str {
         VcsAction::Bind => "repository bind",
         VcsAction::Unbind => "repository unbind",
         VcsAction::Status => "status refresh",
+        VcsAction::Validate => "SQL validation",
         VcsAction::Diff => "diff load",
         VcsAction::Branches => "branch load",
         VcsAction::History => "history load",
@@ -5135,9 +5169,16 @@ pub struct WorkspaceShell {
     workspace_files_scroll_handle: UniformListScrollHandle,
     repository_scroll_handle: UniformListScrollHandle,
     repository_diff_items: HashMap<u64, RepositoryDiffItemState>,
+    change_ledger_filter: sift_protocol::ChangeLedgerFilter,
+    change_ledger_entries: Vec<sift_protocol::ChangeLedgerEntry>,
+    change_ledger_next_before_id: Option<i64>,
+    change_ledger_chain_verified: bool,
+    change_ledger_loading: bool,
+    change_ledger_error: Option<String>,
     _repository_refresh_task: Option<Task<()>>,
     automation_configurations: Vec<sift_protocol::RunConfiguration>,
     automation_runs: HashMap<sift_protocol::RunConfigurationId, sift_protocol::Run>,
+    automation_last_success_for_commit: Option<sift_protocol::Run>,
     automations_loading: bool,
     automations_error: Option<String>,
     _lifecycle_task: Option<Task<()>>,
@@ -5204,6 +5245,8 @@ pub struct WorkspaceShell {
     catalog_migration_pending: bool,
     catalog_migration_error: Option<String>,
     catalog_migration_run: Option<Box<sift_protocol::MigrationRun>>,
+    catalog_migration_validation: Option<Box<sift_protocol::MigrationValidation>>,
+    catalog_migration_workspace_path: Option<sift_protocol::WorkspacePath>,
     last_catalog_drift_digest: Option<String>,
     catalog_snapshots: Vec<sift_protocol::CatalogSnapshotSummary>,
     selected_catalog_snapshot: Option<sift_protocol::CatalogSnapshotId>,
@@ -5700,9 +5743,16 @@ impl WorkspaceShell {
             workspace_files_scroll_handle: UniformListScrollHandle::new(),
             repository_scroll_handle: UniformListScrollHandle::new(),
             repository_diff_items: HashMap::new(),
+            change_ledger_filter: sift_protocol::ChangeLedgerFilter::default(),
+            change_ledger_entries: Vec::new(),
+            change_ledger_next_before_id: None,
+            change_ledger_chain_verified: false,
+            change_ledger_loading: false,
+            change_ledger_error: None,
             _repository_refresh_task: None,
             automation_configurations: Vec::new(),
             automation_runs: HashMap::new(),
+            automation_last_success_for_commit: None,
             automations_loading: false,
             automations_error: None,
             _lifecycle_task: None,
@@ -5763,6 +5813,8 @@ impl WorkspaceShell {
             catalog_migration_pending: false,
             catalog_migration_error: None,
             catalog_migration_run: None,
+            catalog_migration_validation: None,
+            catalog_migration_workspace_path: None,
             last_catalog_drift_digest: None,
             catalog_snapshots: Vec::new(),
             selected_catalog_snapshot: None,
@@ -7447,6 +7499,43 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            ExecutorEvent::CatalogMigrationValidated(result) => {
+                self.catalog_migration_pending = false;
+                match result {
+                    Ok(validation) => {
+                        if validation.valid {
+                            self.show_success_toast(
+                                "Migration validated and rolled back on the selected test database"
+                                    .into(),
+                                cx,
+                            );
+                        }
+                        self.catalog_migration_validation = Some(validation);
+                        self.catalog_migration_error = None;
+                    }
+                    Err(message) => self.catalog_migration_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::MigrationArtifactsGenerated {
+                migration_path,
+                result,
+            } => {
+                self.catalog_migration_pending = false;
+                match result {
+                    Ok(_) => {
+                        self.catalog_migration_workspace_path = Some(migration_path);
+                        self.show_success_toast(
+                            "Generated paired migration and rollback workspace artifacts".into(),
+                            cx,
+                        );
+                        self.request_workspace_files(cx);
+                        self.request_repository_status(cx);
+                    }
+                    Err(error) => self.catalog_migration_error = Some(error),
+                }
+                cx.notify();
+            }
             ExecutorEvent::CatalogMigrationRunLoaded(result) => {
                 self.catalog_migration_pending = false;
                 match result {
@@ -7699,6 +7788,7 @@ impl WorkspaceShell {
                     .repository
                     .apply_status_result(workspace_id, request_id, result)
                 {
+                    self.request_automations(cx);
                     if self.repository.take_queued_refresh() {
                         self.request_repository_status(cx);
                     }
@@ -7813,6 +7903,24 @@ impl WorkspaceShell {
                     self.repository.apply_history(result, append);
                     cx.notify();
                 }
+            }
+            ExecutorEvent::ChangeLedgerLoaded { filter, result } => {
+                let append = filter.before_id.is_some();
+                self.change_ledger_loading = false;
+                match result {
+                    Ok(page) => {
+                        if append {
+                            self.change_ledger_entries.extend(page.entries);
+                        } else {
+                            self.change_ledger_entries = page.entries;
+                        }
+                        self.change_ledger_next_before_id = page.next_before_id;
+                        self.change_ledger_chain_verified = page.chain_verified;
+                        self.change_ledger_error = None;
+                    }
+                    Err(error) => self.change_ledger_error = Some(error),
+                }
+                cx.notify();
             }
             ExecutorEvent::RepositoryCommitLoaded {
                 workspace_id,
@@ -8104,8 +8212,9 @@ impl WorkspaceShell {
                 }
                 self.automations_loading = false;
                 match result {
-                    Ok(configurations) => {
+                    Ok((configurations, last_success)) => {
                         self.automation_configurations = configurations;
+                        self.automation_last_success_for_commit = last_success;
                         self.automations_error = None;
                     }
                     Err(message) => self.automations_error = Some(message),
@@ -8754,6 +8863,7 @@ impl WorkspaceShell {
         };
         let execution_id = self.next_execution_id;
         self.next_execution_id = self.next_execution_id.saturating_add(1);
+        let source = self.versioned_execution_context(item_id, cx);
         if sender
             .send(ExecutorCommand::Execute {
                 item_id,
@@ -8761,6 +8871,7 @@ impl WorkspaceShell {
                 sql,
                 params,
                 transform,
+                source,
             })
             .is_ok()
         {
@@ -8778,6 +8889,35 @@ impl WorkspaceShell {
             }
             cx.notify();
         }
+    }
+
+    fn versioned_execution_context(
+        &self,
+        item_id: u64,
+        cx: &App,
+    ) -> Option<sift_protocol::VersionedExecutionContext> {
+        let document_id = self
+            .panes
+            .iter()
+            .find_map(|pane| pane.read(cx).room_document_source(item_id))?
+            .document_id;
+        let snapshot = self.workspace_files.snapshot()?;
+        let node = snapshot
+            .tree
+            .nodes
+            .iter()
+            .find(|node| node.document_id == Some(document_id))?;
+        Some(sift_protocol::VersionedExecutionContext {
+            workspace_id: snapshot.tree.workspace.id,
+            workspace_revision: snapshot.tree.workspace.revision,
+            checkpoint_id: None,
+            path: Some(node.path.clone()),
+            git_commit: self
+                .repository
+                .status()
+                .and_then(|status| status.head_oid.clone()),
+            source_workflow: Some("workspace_editor".into()),
+        })
     }
 
     fn apply_server_result_transform(
@@ -10855,6 +10995,7 @@ impl WorkspaceShell {
             plan_id: plan.id,
             plan_digest: plan.digest.clone(),
             acknowledgements: plan.required_acknowledgements.clone(),
+            source: None,
         };
         let sent = self.executor_sender.as_ref().is_some_and(|sender| {
             sender
@@ -12741,6 +12882,55 @@ impl WorkspaceShell {
         self.query_input.read(cx).focus_handle(cx).focus(window, cx);
     }
 
+    fn request_change_ledger(&mut self, append: bool, cx: &mut Context<Self>) {
+        if self.change_ledger_loading {
+            return;
+        }
+        let mut filter = self.change_ledger_filter.clone();
+        filter.before_id = append
+            .then_some(self.change_ledger_next_before_id)
+            .flatten();
+        filter.limit = Some(100);
+        let Some(sender) = &self.executor_sender else {
+            self.change_ledger_error = Some("Change ledger service is unavailable".into());
+            return;
+        };
+        self.change_ledger_loading = true;
+        self.change_ledger_error = None;
+        if sender
+            .send(ExecutorCommand::LoadChangeLedger { filter })
+            .is_err()
+        {
+            self.change_ledger_loading = false;
+            self.change_ledger_error = Some("Change ledger service is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn open_change_ledger(&mut self, git_commit: Option<String>, cx: &mut Context<Self>) {
+        let profile_id = match self.connection_status {
+            ConnectionStatus::Connected { profile_id, .. }
+            | ConnectionStatus::Connecting { profile_id } => Some(profile_id),
+            ConnectionStatus::Disconnected | ConnectionStatus::Failed { .. } => None,
+        };
+        let affected_object = self
+            .focused_database_item(cx)
+            .map(|(_, source)| format!("{}.{}", source.schema, source.object));
+        self.change_ledger_filter = sift_protocol::ChangeLedgerFilter {
+            tenant_id: self.selected_database_tenant,
+            connection_profile_id: profile_id,
+            affected_object,
+            git_commit,
+            limit: Some(100),
+            ..Default::default()
+        };
+        self.change_ledger_entries.clear();
+        self.change_ledger_next_before_id = None;
+        self.change_ledger_chain_verified = false;
+        self.modal = Some(Modal::ChangeLedger);
+        self.request_change_ledger(false, cx);
+    }
+
     fn request_workspace_files(&mut self, cx: &mut Context<Self>) {
         self.workspace_files
             .select_workspace(self.selected_workspace_id);
@@ -14315,7 +14505,13 @@ impl WorkspaceShell {
             return;
         };
         self.automations_loading = sender
-            .send(ExecutorCommand::LoadAutomations { workspace_id })
+            .send(ExecutorCommand::LoadAutomations {
+                workspace_id,
+                git_commit: self
+                    .repository
+                    .status()
+                    .and_then(|status| status.head_oid.clone()),
+            })
             .is_ok();
         if self.automations_loading {
             self.automations_error = None;
@@ -15419,10 +15615,12 @@ impl WorkspaceShell {
                     }
                 };
                 if let Some(sender) = &self.executor_sender {
+                    let source = self.versioned_execution_context(*item_id, cx);
                     let _ = sender.send(ExecutorCommand::CapturePlan {
                         item_id: *item_id,
                         sql: sql.clone(),
                         params,
+                        source,
                     });
                     self.show_toast("Saving estimated plan capture…".into(), cx);
                 }
@@ -16617,6 +16815,29 @@ impl WorkspaceShell {
         }
     }
 
+    fn prepare_workspace_ddl_migration(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.selected_workspace_id else {
+            self.show_error_toast("Select a Git-enabled workspace first".into(), cx);
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::PrepareWorkspaceDdlMigration { workspace_id })
+            .is_ok()
+        {
+            self.catalog_diff = None;
+            self.catalog_migration_plan = None;
+            self.catalog_migration_validation = None;
+            self.catalog_migration_error = None;
+            self.catalog_migration_pending = true;
+            self.catalog_migration_run = None;
+            self.modal = Some(Modal::CatalogMigration);
+            cx.notify();
+        }
+    }
+
     fn catalog_diagram_mermaid(&self) -> Option<String> {
         let diagram = self.catalog_diagram.as_ref()?;
         let node_ids = diagram
@@ -16689,6 +16910,90 @@ impl WorkspaceShell {
         Some(output)
     }
 
+    fn catalog_migration_sql(&self) -> Option<String> {
+        let plan = self.catalog_migration_plan.as_ref()?;
+        let mut output = format!(
+            "-- Sift migration plan {}\n-- Digest: {}\n-- Review and validate against a test database before applying.\n\n",
+            plan.id, plan.digest
+        );
+        for statement in plan.groups.iter().flat_map(|group| &group.statements) {
+            output.push_str(&statement.sql);
+            if !statement.sql.trim_end().ends_with(';') {
+                output.push(';');
+            }
+            output.push_str("\n\n");
+        }
+        Some(output)
+    }
+
+    fn generate_catalog_migration_artifacts(&mut self, cx: &mut Context<Self>) {
+        let Some(plan) = self.catalog_migration_plan.as_ref() else {
+            return;
+        };
+        let Some(snapshot) = self.workspace_files.snapshot() else {
+            self.show_error_toast(
+                "Select a workspace before generating migration files".into(),
+                cx,
+            );
+            return;
+        };
+        let Some(up) = self.catalog_migration_sql() else {
+            return;
+        };
+        let Some(down) = self.catalog_rollback_sql() else {
+            self.show_error_toast(
+                "This plan has no safely generated rollback script".into(),
+                cx,
+            );
+            return;
+        };
+        let stem = plan
+            .digest
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .take(12)
+            .collect::<String>();
+        let stem = if stem.is_empty() {
+            plan.id.to_string().chars().take(12).collect()
+        } else {
+            stem
+        };
+        let migration_path = sift_protocol::WorkspacePath(format!("{stem}.migration.sql"));
+        let rollback_path = sift_protocol::WorkspacePath(format!("{stem}.rollback.sql"));
+        let request = sift_api_types::WorkspaceBatchMutationRequest {
+            expected_workspace_revision: snapshot.tree.workspace.revision,
+            mutations: vec![
+                sift_api_types::WorkspaceBatchMutationItem::Create {
+                    parent_id: None,
+                    path: migration_path.clone(),
+                    kind: sift_protocol::WorkspaceNodeKind::SqlDocument,
+                    initial_text: Some(up),
+                },
+                sift_api_types::WorkspaceBatchMutationItem::Create {
+                    parent_id: None,
+                    path: rollback_path,
+                    kind: sift_protocol::WorkspaceNodeKind::SqlDocument,
+                    initial_text: Some(down),
+                },
+            ],
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::GenerateMigrationArtifacts {
+                workspace_id: snapshot.tree.workspace.id.0,
+                request,
+                migration_path,
+            })
+            .is_ok()
+        {
+            self.catalog_migration_pending = true;
+            self.catalog_migration_error = None;
+            cx.notify();
+        }
+    }
+
     fn copy_catalog_rollback_sql(&mut self, cx: &mut Context<Self>) {
         if let Some(sql) = self.catalog_rollback_sql() {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(sql));
@@ -16714,12 +17019,52 @@ impl WorkspaceShell {
             plan_id: plan.id,
             plan_digest: plan.digest.clone(),
             acknowledgements: plan.required_acknowledgements.clone(),
+            source: self
+                .catalog_migration_workspace_path
+                .as_ref()
+                .and_then(|path| {
+                    let snapshot = self.workspace_files.snapshot()?;
+                    Some(sift_protocol::VersionedExecutionContext {
+                        workspace_id: snapshot.tree.workspace.id,
+                        workspace_revision: snapshot.tree.workspace.revision,
+                        checkpoint_id: None,
+                        path: Some(path.clone()),
+                        git_commit: self
+                            .repository
+                            .status()
+                            .and_then(|status| status.head_oid.clone()),
+                        source_workflow: Some("catalog_migration".into()),
+                    })
+                }),
         };
         if sender
             .send(ExecutorCommand::ApplyCatalogMigration { request })
             .is_ok()
         {
             self.catalog_migration_pending = true;
+            cx.notify();
+        }
+    }
+
+    fn validate_catalog_migration(&mut self, cx: &mut Context<Self>) {
+        let Some(plan) = self.catalog_migration_plan.as_ref() else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        let request = sift_protocol::ValidateMigrationRequest {
+            plan_id: plan.id,
+            plan_digest: plan.digest.clone(),
+            confirm_test_database: true,
+        };
+        if sender
+            .send(ExecutorCommand::ValidateCatalogMigration { request })
+            .is_ok()
+        {
+            self.catalog_migration_pending = true;
+            self.catalog_migration_validation = None;
+            self.catalog_migration_error = None;
             cx.notify();
         }
     }
@@ -18537,6 +18882,8 @@ impl WorkspaceShell {
                 self.modal = Some(Modal::WorkspaceHistory);
                 cx.notify();
             }
+            CommandId::OpenChangeLedger => self.open_change_ledger(None, cx),
+            CommandId::CompareWorkspaceDdl => self.prepare_workspace_ddl_migration(cx),
             CommandId::ReconcileWorkspaceProjection => self.open_workspace_reconcile(cx),
             CommandId::ToggleRepositoryGrouping => self.toggle_repository_grouping(cx),
             CommandId::ToggleRepositorySort => self.toggle_repository_sort(cx),
@@ -20014,6 +20361,14 @@ impl WorkspaceShell {
                                 }
                             }))
                             .child("Row JSON"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("result-change-ledger", "Ledger")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(
+                                cx.listener(|shell, _, _, cx| shell.open_change_ledger(None, cx)),
+                            ),
                     ),
             )
             .child(match selected {
@@ -20459,6 +20814,12 @@ impl WorkspaceShell {
                 });
                 let mut left_actions = Vec::new();
                 let mut right_actions = Vec::new();
+                right_actions.push(
+                    Button::new("table-change-ledger", "Change ledger")
+                        .tone(ButtonTone::Ghost)
+                        .on_click(cx.listener(|shell, _, _, cx| shell.open_change_ledger(None, cx)))
+                        .into_any_element(),
+                );
                 if editing {
                     let ddl_pending = designer.is_some_and(|designer| designer.pending);
                     left_actions.push(
@@ -21385,6 +21746,20 @@ impl WorkspaceShell {
                         11.,
                     )))
                     .child(div().flex_1().min_w_0().truncate().child(entry.path.0))
+                    .children((!entry.affected_objects.is_empty()).then(|| {
+                        div()
+                            .max_w(px(180.))
+                            .truncate()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(entry.affected_objects.join(", "))
+                    }))
+                    .children((entry.validation_errors > 0).then(|| {
+                        div()
+                            .text_xs()
+                            .text_color(colors.warning)
+                            .child(format!("{} validation error(s)", entry.validation_errors))
+                    }))
                     .child(
                         div()
                             .text_xs()
@@ -21883,7 +22258,15 @@ impl WorkspaceShell {
                         let remote = status.upstream.as_ref().map_or_else(String::new, |upstream| {
                             format!(" · ↑{} ↓{}", upstream.ahead, upstream.behind)
                         });
-                        format!("{branch}{remote} · {} change(s)", status.entries.len())
+                        let run = self
+                            .automation_last_success_for_commit
+                            .as_ref()
+                            .map(|run| format!(" · run {} ✓", run.id.0))
+                            .unwrap_or_default();
+                        format!(
+                            "{branch}{remote} · {} change(s){run}",
+                            status.entries.len()
+                        )
                     });
                     let stageable = self.repository.stageable_paths();
                     let unstageable = self.repository.unstageable_paths();
@@ -23015,6 +23398,7 @@ impl WorkspaceShell {
             let csv_import = matches!(modal, Modal::CsvImport);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let repository_conflict = matches!(modal, Modal::RepositoryConflict);
+            let change_ledger = matches!(modal, Modal::ChangeLedger);
             let card_width = if data_results {
                 0.0
             } else if settings
@@ -23025,6 +23409,7 @@ impl WorkspaceShell {
                 || result_cell_edit
                 || plan_captures
                 || catalog_snapshots
+                || change_ledger
             {
                 720.0
             } else if catalog_diagram {
@@ -26663,6 +27048,17 @@ impl WorkspaceShell {
                                 statement_count
                             ))
                     });
+                    let validation_summary = self
+                        .catalog_migration_validation
+                        .as_ref()
+                        .map(|validation| {
+                            div().p_2().rounded_sm().bg(colors.active_surface).child(format!(
+                                "Test validation: {} · {} statement(s) · rollback {}",
+                                if validation.valid { "passed" } else { "failed" },
+                                validation.outcomes.len(),
+                                if validation.rolled_back { "confirmed" } else { "failed" }
+                            ))
+                        });
                     let outcomes = self
                         .catalog_migration_run
                         .iter()
@@ -26700,10 +27096,13 @@ impl WorkspaceShell {
                         .child(div().text_sm().text_color(colors.muted_text).child(format!("{change_count} change(s) · {statement_count} statement(s)")))
                         .children(self.catalog_migration_error.clone().map(ErrorBanner::new))
                         .children(run_summary)
+                        .children(validation_summary)
                         .children((!outcomes.is_empty()).then(|| div().id("catalog-migration-outcomes").max_h(px(160.)).overflow_y_scroll().children(outcomes)))
                         .child(div().id("catalog-migration-statements").flex_1().min_h_0().overflow_y_scroll().children(statements))
                         .children((statement_count > 20).then(|| div().text_xs().text_color(colors.muted_text).child(format!("{} more statement(s) not shown", statement_count - 20))))
                         .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("generate-catalog-migration-artifacts", "Generate SQL + rollback").debug_selector("generate-catalog-migration-artifacts").tone(ButtonTone::Accent).disabled(self.catalog_migration_pending || self.catalog_migration_plan.is_none() || self.catalog_rollback_sql().is_none()).on_click(cx.listener(|shell, _, _, cx| shell.generate_catalog_migration_artifacts(cx))))
+                            .child(Button::new("validate-catalog-migration", "Validate on test DB").debug_selector("validate-catalog-migration").tone(ButtonTone::Ghost).disabled(self.catalog_migration_pending || self.catalog_migration_plan.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.validate_catalog_migration(cx))))
                             .child(Button::new("copy-catalog-rollback", "Copy rollback SQL").debug_selector("copy-catalog-rollback").tone(ButtonTone::Ghost).disabled(self.catalog_rollback_sql().is_none()).on_click(cx.listener(|shell, _, _, cx| shell.copy_catalog_rollback_sql(cx))))
                             .child(Button::new("refresh-catalog-migration-run", "Refresh run").debug_selector("refresh-catalog-migration-run").tone(ButtonTone::Ghost).disabled(self.catalog_migration_run.is_none() || self.catalog_migration_pending).on_click(cx.listener(|shell, _, _, cx| shell.refresh_catalog_migration_run(cx))))
                             .child(Button::new("cancel-catalog-migration-run", "Stop run").debug_selector("cancel-catalog-migration-run").tone(ButtonTone::DangerGhost).disabled(!run_running || self.catalog_migration_pending).on_click(cx.listener(|shell, _, _, cx| shell.cancel_catalog_migration_run(cx))))
@@ -27228,6 +27627,47 @@ impl WorkspaceShell {
                                 .on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx)))))
                         .into_any_element()
                 }
+                Modal::ChangeLedger => {
+                    let rows = self.change_ledger_entries.iter().enumerate().map(|(index, entry)| {
+                        let object = entry.affected_object.as_deref().unwrap_or("database");
+                        let commit = entry.git_commit.as_deref().map(|oid| oid.chars().take(8).collect::<String>());
+                        div().id(("change-ledger-row", index)).px_2().py_2().flex().items_center().gap_3()
+                            .border_b_1().border_color(colors.subtle_border)
+                            .child(div().w(px(150.)).text_xs().text_color(colors.muted_text).child(entry.at.to_rfc3339()))
+                            .child(div().w(px(92.)).font_family("monospace").text_xs().child(format!("user:{}", entry.executed_by)))
+                            .child(div().w(px(118.)).child(format!("{:?}", entry.operation)))
+                            .child(div().flex_1().min_w_0().truncate().child(object.to_owned()))
+                            .child(div().w(px(70.)).text_xs().text_color(colors.muted_text).child(entry.row_count.map(|count| format!("{count} rows")).unwrap_or_default()))
+                            .child(div().w(px(74.)).font_family("monospace").text_xs().text_color(colors.muted_text).child(commit.unwrap_or_default()))
+                            .child(div().w(px(90.)).text_xs().child(format!("{:?}", entry.outcome)))
+                    });
+                    let filter_summary = [
+                        self.change_ledger_filter.tenant_id.map(|id| format!("tenant {id}")),
+                        self.change_ledger_filter.connection_profile_id.map(|id| format!("connection {id}")),
+                        self.change_ledger_filter.affected_object.clone(),
+                        self.change_ledger_filter.git_commit.as_deref().map(|oid| format!("commit {}", oid.chars().take(8).collect::<String>())),
+                    ].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                    div().debug_selector(|| "change-ledger-modal".into()).w(px(980.)).h(px(620.)).flex().flex_col().gap_3()
+                        .child(div().flex().items_center().justify_between()
+                            .child(div().flex().flex_col()
+                                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Database change ledger"))
+                                .child(div().text_xs().text_color(colors.muted_text).child(if filter_summary.is_empty() { "All permitted database changes".into() } else { filter_summary })))
+                            .child(div().text_xs().text_color(if self.change_ledger_chain_verified { colors.success } else { colors.muted_text }).child(if self.change_ledger_chain_verified { "Hash chain verified" } else { "Verification pending" })))
+                        .children(self.change_ledger_error.clone().map(|error| ErrorBanner::new(error).into_any_element()))
+                        .child(div().px_2().h(px(28.)).flex().items_center().gap_3().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(colors.muted_text)
+                            .child(div().w(px(150.)).child("TIME")).child(div().w(px(92.)).child("EXECUTOR")).child(div().w(px(118.)).child("OPERATION"))
+                            .child(div().flex_1().child("OBJECT")).child(div().w(px(70.)).child("ROWS")).child(div().w(px(74.)).child("COMMIT")).child(div().w(px(90.)).child("OUTCOME")))
+                        .child(div().id("change-ledger-list").flex_1().min_h_0().overflow_y_scroll().border_1().border_color(colors.subtle_border)
+                            .when(self.change_ledger_entries.is_empty() && !self.change_ledger_loading, |view| view.child(div().p_4().text_color(colors.muted_text).child("No matching database changes")))
+                            .children(rows))
+                        .child(div().flex().justify_between()
+                            .child(Button::new("more-change-ledger", if self.change_ledger_loading { "Loading…" } else { "Load older" }).tone(ButtonTone::Ghost)
+                                .disabled(self.change_ledger_loading || self.change_ledger_next_before_id.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.request_change_ledger(true, cx))))
+                            .child(div().flex().gap_2()
+                                .child(Button::new("refresh-change-ledger", "Refresh").tone(ButtonTone::Ghost).disabled(self.change_ledger_loading).on_click(cx.listener(|shell, _, _, cx| shell.request_change_ledger(false, cx))))
+                                .child(Button::new("close-change-ledger", "Close").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))))
+                        .into_any_element()
+                }
                 Modal::RepositoryCommitDetail => {
                     let detail = self
                         .repository
@@ -27291,6 +27731,7 @@ impl WorkspaceShell {
                     let revert_hash = hash.clone();
                     let revert_status = status.clone();
                     let copy_hash = hash.clone();
+                    let executions_hash = hash.clone();
                     let compare_hash = hash.clone();
                     let compare_status = status.clone();
                     div()
@@ -27316,6 +27757,13 @@ impl WorkspaceShell {
                                     detail.commit.authored_at
                                 )),
                         )
+                        .children(detail.checkpoint_id.map(|checkpoint| {
+                            div().text_xs().text_color(colors.muted_text).child(format!(
+                                "Sift checkpoint {} · workspace revision {}",
+                                checkpoint.0,
+                                detail.workspace_revision.map(|revision| revision.0).unwrap_or_default()
+                            ))
+                        }))
                         .child(
                             div()
                                 .p_2()
@@ -27416,6 +27864,13 @@ impl WorkspaceShell {
                                                 oid: revert_hash.clone(),
                                             });
                                             cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("repository-commit-executions", "Database executions")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.open_change_ledger(Some(executions_hash.clone()), cx)
                                         })),
                                 )
                                 .child(
@@ -31109,7 +31564,7 @@ mod tests {
         });
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::CapturePlan { item_id: capture_item, sql, params })
+            Ok(ExecutorCommand::CapturePlan { item_id: capture_item, sql, params, .. })
                 if capture_item == item_id && sql == preview_sql && params.is_empty()
         ));
         workspace.update_in(&mut cx, |shell, window, cx| {
@@ -34932,7 +35387,10 @@ mod tests {
         });
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::LoadAutomations { workspace_id: 42 })
+            Ok(ExecutorCommand::LoadAutomations {
+                workspace_id: 42,
+                ..
+            })
         ));
     }
 

@@ -55,6 +55,7 @@ pub mod sql_policy;
 pub mod state_backup;
 pub mod transfer;
 pub mod updater;
+pub mod vcs_validation;
 pub mod workspace_adapter;
 pub mod workspace_projection;
 

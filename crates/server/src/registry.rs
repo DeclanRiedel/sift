@@ -1895,6 +1895,7 @@ mod tests {
             .execute_http(
                 session.id,
                 sift_protocol::ExecuteRequestHttp {
+                    source: None,
                     connection: connection.id,
                     sql: "select 42".into(),
                     params: vec![],

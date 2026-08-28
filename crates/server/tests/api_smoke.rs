@@ -1147,6 +1147,7 @@ async fn websocket_mid_stream_cancel_stops_paging() {
             params: Vec::new(),
             tx: None,
             transform: None,
+            source: None,
         })
         .unwrap()
         .into(),
@@ -1245,6 +1246,7 @@ async fn websocket_execute_requires_active_tx_ref() {
             params: Vec::new(),
             tx: None,
             transform: None,
+            source: None,
         })
         .unwrap()
         .into(),
@@ -2654,6 +2656,7 @@ async fn http_execute_records_room_scoped_query_history() {
                         room_id: Some(room.id.0),
                         connection_profile_id: None,
                         transform: None,
+                        source: None,
                     })
                     .unwrap(),
                 ))
@@ -2733,6 +2736,7 @@ async fn room_scoped_execute_requires_a_bound_connection() {
                         room_id: Some(room.id.0),
                         connection_profile_id: None,
                         transform: None,
+                        source: None,
                     })
                     .unwrap(),
                 ))
@@ -2852,6 +2856,7 @@ async fn room_scoped_execute_gates_on_submitter_role() {
                             room_id: Some(room.id.0),
                             connection_profile_id: None,
                             transform: None,
+                            source: None,
                         })
                         .unwrap(),
                     ))
@@ -3890,6 +3895,7 @@ async fn execute_returns_drained_rows_and_affected_count() {
         room_id: None,
         connection_profile_id: None,
         transform: None,
+        source: None,
     };
     let res = app
         .oneshot(post_json(format!("/v1/sessions/{sid}/queries"), exec_req))
@@ -3975,6 +3981,7 @@ async fn http_execute_rejects_results_over_row_cap() {
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             },
         ))
         .await
@@ -4056,6 +4063,7 @@ async fn http_execute_rejects_multi_result_batches() {
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             },
         ))
         .await
@@ -4124,6 +4132,7 @@ async fn transaction_flow_requires_explicit_tx_ref() {
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             },
         ))
         .await
@@ -4146,6 +4155,7 @@ async fn transaction_flow_requires_explicit_tx_ref() {
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             },
         ))
         .await
@@ -4386,6 +4396,7 @@ async fn execute_stream_error_maps_to_http_error() {
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             },
         ))
         .await

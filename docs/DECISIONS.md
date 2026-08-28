@@ -1802,3 +1802,63 @@ desktop intentions fail safely, and collaborators can see who currently owns
 the operation without granting that client durable authority. Optimistic local
 state is presentation only and always yields to terminal status. Separate
 per-user credentials do not imply separate branches or indexes.
+
+---
+
+## ADR-050 — Database Change Ledger And Versioned Execution Provenance
+
+**Context.** Git can prove which reviewed SQL/DDL artifact a person authored,
+but it cannot prove who executed a change against a database, whether that
+change committed, or what happened through grid editing, CSV import, or direct
+DML. Putting live rows or credentials into Git would turn source control into a
+data-exfiltration path. Conversely, treating a Git author as the database actor
+would collapse authored, approved, and executed identities into a false claim.
+
+**Decision.** Sift maintains an append-only, hash-chained Database Change
+Ledger in metadata. It records authenticated executor, optional author and
+approver, tenant/room/profile/database scope, affected object, bounded row
+count, SQL and row-identity fingerprints, transaction/correlation identifiers,
+terminal outcome, and validated workspace revision/checkpoint/path/commit
+provenance. It never records raw SQL, parameters, cell values, before/after
+rows, results, or credentials. Database-native audit/CDC imports retain their
+database actor separately and must declare a non-Sift identity source and
+confidence; they never impersonate an authenticated Sift principal.
+
+Git remains authoritative only for immutable reviewed artifacts. A Sift commit
+links to its workspace checkpoint and tree revision. Query, explain-plan,
+migration, and automation execution may link to that artifact after the server
+validates workspace membership, revision, path, checkpoint, and commit. The
+ledger is authoritative for “who executed what and with what outcome.” SQLite
+triggers reject update/delete and every entry hashes the complete redacted
+record plus the preceding hash. Retention is tenant-admin controlled. The
+optional `pull:csv` external sink is deliberately pull-based: a tenant admin's
+collector retrieves the permission- and retention-scoped export endpoint, so
+Sift stores no webhook URL, bearer token, or SIEM credential.
+
+Database effects and SQLite metadata cannot share one atomic transaction.
+After the database reaches a terminal result, Sift makes a bounded best-effort
+ledger append and emits an operator-visible error if metadata is unavailable;
+native database auditing is the required independent control where losing that
+final append is unacceptable. The hash chain detects metadata tampering but is
+not a substitute for an external immutable archive.
+
+Optional before/after capture is a separate future compliance mode, disabled by
+default. It requires per-tenant envelope encryption, a distinct access role,
+field allowlists, explicit purpose, short retention, deletion/legal-hold rules,
+key rotation and revocation, access auditing, export controls, and a database
+engine capability review. It must never reuse Git, ordinary operation audit,
+query history, logs, or the default ledger columns.
+
+Generated migrations create paired `.migration.sql` and `.rollback.sql`
+workspace documents atomically. Pre-commit validation parses staged SQL,
+reports formatter drift and affected objects, requires generated pairs to be
+staged together, and rejects secret-shaped material. Transactional migrations
+can be executed and rolled back only after the user explicitly confirms the
+selected connection is a test database; non-transactional plans fail closed.
+
+**Consequences.** Review history, execution history, and native database
+identity remain distinct but navigable. Auditors can filter/export a redacted
+tamper-evident trail, developers can move from commit or table to executions,
+and normal Git workflows cannot accidentally capture result data or secrets.
+Installations needing stronger delivery guarantees configure native auditing
+and an external collector rather than assuming cross-system atomicity.

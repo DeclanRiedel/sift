@@ -114,9 +114,9 @@ impl MetadataStore {
               provider_json, server_version, engine, source_digest,
               document_revision, statement_id, statement_fingerprint,
               catalog_revision, analyzed, captured_at, duration_ms, root_json,
-              warnings_json, complete, revision)
+              warnings_json, complete, revision, source_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                     ?12, ?13, ?14, ?15, ?16, ?17, ?18, 0)",
+                     ?12, ?13, ?14, ?15, ?16, ?17, ?18, 0, ?19)",
             params![
                 capture.id.to_string(),
                 capture.tenant_id,
@@ -144,6 +144,11 @@ impl MetadataStore {
                 root,
                 warnings,
                 capture.complete,
+                capture
+                    .source
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
             ],
         )?;
         tx.commit()?;
@@ -157,7 +162,7 @@ impl MetadataStore {
                     provider_json, server_version, engine, source_digest,
                     document_revision, statement_id, statement_fingerprint,
                     catalog_revision, analyzed, captured_at, duration_ms,
-                    root_json, warnings_json, complete, revision
+                    root_json, warnings_json, complete, revision, source_json
              FROM plan_capture WHERE id = ?1 AND tenant_id = ?2",
             params![id.to_string(), tenant.0],
             |row| {
@@ -180,6 +185,7 @@ impl MetadataStore {
                     row.get::<_, String>(15)?,
                     row.get::<_, bool>(16)?,
                     row.get::<_, i64>(17)?,
+                    row.get::<_, Option<String>>(18)?,
                 ))
             },
         )
@@ -210,6 +216,10 @@ impl MetadataStore {
                 complete: row.16,
                 revision: u64::try_from(row.17).map_err(|_| invalid("revision", row.17))?,
                 raw_response: None,
+                source: row
+                    .18
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()?,
             })
         })
     }
@@ -250,7 +260,7 @@ impl MetadataStore {
                     provider_json, server_version, engine, source_digest,
                     document_revision, statement_id, statement_fingerprint,
                     catalog_revision, analyzed, captured_at, duration_ms,
-                    json_extract(root_json, '$.op'), complete, revision
+                    json_extract(root_json, '$.op'), complete, revision, source_json
              FROM plan_capture
              WHERE tenant_id = ?1
                AND (?2 IS NULL OR source_digest = ?2)
@@ -287,6 +297,7 @@ impl MetadataStore {
                         row.get::<_, String>(15)?,
                         row.get::<_, bool>(16)?,
                         row.get::<_, i64>(17)?,
+                        row.get::<_, Option<String>>(18)?,
                     ))
                 },
             )?
@@ -321,6 +332,10 @@ impl MetadataStore {
                     root_operator: row.15,
                     complete: row.16,
                     revision: u64::try_from(row.17).map_err(|_| invalid("revision", row.17))?,
+                    source: row
+                        .18
+                        .map(|value| serde_json::from_str(&value))
+                        .transpose()?,
                 })
             })
             .collect()
@@ -425,6 +440,7 @@ mod tests {
             complete: true,
             revision: 0,
             raw_response: None,
+            source: None,
         }
     }
 

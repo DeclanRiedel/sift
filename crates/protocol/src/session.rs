@@ -93,6 +93,9 @@ pub struct ExecuteRequestHttp {
     /// Complete-result filter/sort applied before cursor paging.
     #[serde(default)]
     pub transform: Option<crate::ResultTransform>,
+    /// Optional server-validated workspace artifact that originated this run.
+    #[serde(default)]
+    pub source: Option<crate::VersionedExecutionContext>,
 }
 
 /// Server-side export format for
@@ -317,6 +320,8 @@ pub enum WsClientMessage {
         tx: Option<TxHandleRef>,
         #[serde(default)]
         transform: Option<crate::ResultTransform>,
+        #[serde(default)]
+        source: Option<Box<crate::VersionedExecutionContext>>,
     },
     Listen {
         request_id: String,

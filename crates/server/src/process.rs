@@ -30,6 +30,7 @@ pub async fn list(
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             },
             sift_protocol::OperationKind::ListProcesses,
         )
@@ -74,6 +75,7 @@ pub async fn kill(
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             },
             sift_protocol::OperationKind::KillProcess,
         )

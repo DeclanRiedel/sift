@@ -191,6 +191,23 @@ pub fn app(state: AppState) -> Router {
             get_with(list_operation_audit_pages, doc("pageOperationAudit", "Keyset-page durable operation audit rows")),
         )
         .api_route(
+            "/v1/change-ledger",
+            get_with(list_change_ledger, doc("listChangeLedger", "Filter the append-only database change ledger")),
+        )
+        .api_route(
+            "/v1/change-ledger/export",
+            get_with(export_change_ledger, doc("exportChangeLedger", "Export a permission-scoped database change ledger report")),
+        )
+        .api_route(
+            "/v1/change-ledger/external",
+            post_with(import_external_change_ledger_event, doc("importExternalChangeLedger", "Append a labeled database-native audit or CDC event")),
+        )
+        .api_route(
+            "/v1/change-ledger/policy/:tenant",
+            get_with(get_change_ledger_policy, doc("getChangeLedgerPolicy", "Read database change ledger retention and sink policy"))
+                .put_with(update_change_ledger_policy, doc("updateChangeLedgerPolicy", "Configure database change ledger retention and external sink label")),
+        )
+        .api_route(
             "/v1/providers",
             get_with(list_providers, doc("listProviders", "List provider-neutral database capabilities")),
         )
@@ -651,6 +668,10 @@ pub fn app(state: AppState) -> Router {
             get_with(list_run_configurations, doc("listRunConfigurations", "List workspace run configurations")).post_with(create_run_configuration, doc("createRunConfiguration", "Create a revisioned foreground run configuration")),
         )
         .api_route(
+            "/v1/metadata/workspaces/:id/runs/latest-success",
+            get_with(latest_successful_run_for_commit, doc("getLatestSuccessfulRunForCommit", "Get the latest successful immutable run for a Git commit")),
+        )
+        .api_route(
             "/v1/metadata/run-configurations/:id",
             get_with(get_run_configuration, doc("getRunConfiguration", "Get a run configuration")).put_with(update_run_configuration, doc("updateRunConfiguration", "Update a run configuration by revision")).delete_with(delete_run_configuration, doc("deleteRunConfiguration", "Delete an unused run configuration by revision")),
         )
@@ -865,6 +886,10 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/catalog/migrations/apply",
             post_with(apply_migration, doc("applyMigration", "Apply a one-use migration plan with revision and risk checks")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/catalog/migrations/validate",
+            post_with(validate_migration, doc("validateMigration", "Execute a migration on an explicitly confirmed test database and roll it back")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/catalog/migrations/runs/:run",
@@ -1677,6 +1702,9 @@ struct ExecuteMetadataContext {
     principal_id: PrincipalId,
     room_id: Option<RoomId>,
     connection_profile_id: Option<ConnectionProfileId>,
+    tenant_id: Option<TenantId>,
+    database_target: Option<String>,
+    versioned_source: Option<sift_metadata::ValidatedVersionedExecution>,
     /// Present when the query targets a bound room: route it through the
     /// room's server-owned connection instead of the caller's (ADR-037).
     room_routing: Option<RoomRouting>,
@@ -3808,73 +3836,118 @@ async fn execute_metadata_context(
     let metadata_for_check = metadata.clone();
     let auth_for_check = auth.clone();
     let sql = req.sql.clone();
-    let (effective_profile, room_routing) = metadata_blocking(move || {
-        let mut effective = profile;
-        let mut routing: Option<RoomRouting> = None;
-        if let Some(room) = room {
-            ensure_room_permission(
-                &metadata_for_check,
-                &auth_for_check,
-                room,
-                RoomPermission::Write,
-            )?;
-            let room_row = metadata_for_check.get_room(room)?;
-            // A bound room runs every query through its server-owned
-            // connection (ADR-037); an unbound room cannot execute.
-            let profile_id = room_row.bound_connection_profile_id.ok_or_else(|| {
-                ApiError::BadRequest(
-                    "room has no bound connection; bind one before running queries".into(),
-                )
-            })?;
-            let binder = room_row.bound_connection_by.ok_or_else(|| {
-                ApiError::Internal("bound room connection is missing its binder".into())
-            })?;
-            let bound_profile =
-                metadata_for_check.get_connection_profile(room_row.tenant_id, profile_id)?;
-            // Submitter-scoped intersection: the submitting member's room role
-            // x the bound profile's policy, enforced BEFORE routing to the
-            // shared connection (which itself authorizes only as the binder).
-            let scope = room_submitter_scope(
-                &metadata_for_check,
-                auth_for_check.principal_id,
-                room,
-                room_row.tenant_id,
-                &bound_profile,
-            )?;
-            crate::authorization::authorize(&scope, sift_protocol::OperationKind::ExecuteQuery)
-                .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
-            crate::sql_policy::enforce(
-                &bound_profile.policy,
-                bound_profile.semantic_engine,
-                sift_protocol::OperationKind::ExecuteQuery,
-                Some(&sql),
-                &[],
-            )?;
-            effective = Some(profile_id);
-            routing = Some(RoomRouting {
-                room_id: room.0,
-                binder,
-                tenant: room_row.tenant_id,
-                profile_id,
-                provider_id: bound_profile.provider_id,
-                engine: bound_profile.semantic_engine,
-                policy_revision: bound_profile.policy.revision,
-            });
-        } else if let Some(profile) = effective {
-            metadata_for_check
-                .get_connection_profile_for_principal(profile, auth_for_check.principal_id)?;
-        }
-        Ok((effective, routing))
-    })
-    .await?;
+    let requested_source = req.source.clone();
+    let (effective_profile, room_routing, tenant_id, database_target, versioned_source) =
+        metadata_blocking(move || {
+            let mut effective = profile;
+            let mut routing: Option<RoomRouting> = None;
+            let mut tenant_id = None;
+            let mut database_target = None;
+            if let Some(room) = room {
+                ensure_room_permission(
+                    &metadata_for_check,
+                    &auth_for_check,
+                    room,
+                    RoomPermission::Write,
+                )?;
+                let room_row = metadata_for_check.get_room(room)?;
+                // A bound room runs every query through its server-owned
+                // connection (ADR-037); an unbound room cannot execute.
+                let profile_id = room_row.bound_connection_profile_id.ok_or_else(|| {
+                    ApiError::BadRequest(
+                        "room has no bound connection; bind one before running queries".into(),
+                    )
+                })?;
+                let binder = room_row.bound_connection_by.ok_or_else(|| {
+                    ApiError::Internal("bound room connection is missing its binder".into())
+                })?;
+                let bound_profile =
+                    metadata_for_check.get_connection_profile(room_row.tenant_id, profile_id)?;
+                tenant_id = Some(room_row.tenant_id);
+                database_target = connection_database_target(&bound_profile);
+                // Submitter-scoped intersection: the submitting member's room role
+                // x the bound profile's policy, enforced BEFORE routing to the
+                // shared connection (which itself authorizes only as the binder).
+                let scope = room_submitter_scope(
+                    &metadata_for_check,
+                    auth_for_check.principal_id,
+                    room,
+                    room_row.tenant_id,
+                    &bound_profile,
+                )?;
+                crate::authorization::authorize(&scope, sift_protocol::OperationKind::ExecuteQuery)
+                    .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
+                crate::sql_policy::enforce(
+                    &bound_profile.policy,
+                    bound_profile.semantic_engine,
+                    sift_protocol::OperationKind::ExecuteQuery,
+                    Some(&sql),
+                    &[],
+                )?;
+                effective = Some(profile_id);
+                routing = Some(RoomRouting {
+                    room_id: room.0,
+                    binder,
+                    tenant: room_row.tenant_id,
+                    profile_id,
+                    provider_id: bound_profile.provider_id,
+                    engine: bound_profile.semantic_engine,
+                    policy_revision: bound_profile.policy.revision,
+                });
+            } else if let Some(profile) = effective {
+                let profile = metadata_for_check
+                    .get_connection_profile_for_principal(profile, auth_for_check.principal_id)?;
+                tenant_id = Some(profile.tenant_id);
+                database_target = connection_database_target(&profile);
+            }
+            let versioned_source = requested_source
+                .as_ref()
+                .map(|source| {
+                    metadata_for_check
+                        .validate_versioned_execution(auth_for_check.principal_id, source)
+                })
+                .transpose()?;
+            if let (Some(source), Some(tenant)) = (&versioned_source, tenant_id) {
+                let workspace_room = metadata_for_check.get_room(RoomId(source.room_id))?;
+                if workspace_room.tenant_id != tenant {
+                    return Err(ApiError::BadRequest(
+                        "versioned execution source belongs to another tenant".into(),
+                    ));
+                }
+            }
+            Ok((
+                effective,
+                routing,
+                tenant_id,
+                database_target,
+                versioned_source,
+            ))
+        })
+        .await?;
 
     Ok(Some(ExecuteMetadataContext {
         metadata,
         principal_id: auth.principal_id,
         room_id: room,
         connection_profile_id: effective_profile,
+        tenant_id,
+        database_target,
+        versioned_source,
         room_routing,
     }))
+}
+
+fn connection_database_target(profile: &sift_metadata::ConnectionProfile) -> Option<String> {
+    ["database", "dbname", "catalog", "initial_catalog"]
+        .into_iter()
+        .find_map(|key| {
+            profile
+                .configuration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 256)
+                .map(str::to_owned)
+        })
 }
 
 /// Build the submitting member's authorization scope for a room-scoped
@@ -3956,6 +4029,236 @@ async fn record_execute_history(
     .await
     {
         tracing::warn!(%error, "failed to record query history");
+    }
+}
+
+#[derive(Debug)]
+struct DatabaseChangeRecord {
+    tenant_id: Option<TenantId>,
+    room_id: Option<RoomId>,
+    connection_profile_id: Option<ConnectionProfileId>,
+    database_target: Option<String>,
+    operation: sift_protocol::ChangeLedgerOperation,
+    affected_object: Option<String>,
+    row_count: Option<i64>,
+    sql_fingerprint: Option<String>,
+    row_identity_fingerprint: Option<String>,
+    transaction_id: Option<String>,
+    source_workflow: &'static str,
+    approved_by: Option<i64>,
+    outcome: sift_protocol::ChangeLedgerOutcome,
+    result_code: Option<String>,
+    versioned_source: Option<sift_metadata::ValidatedVersionedExecution>,
+}
+
+#[derive(Debug, Clone)]
+struct DatabaseActorScope {
+    actor: PrincipalId,
+    tenant_id: Option<TenantId>,
+    connection_profile_id: Option<ConnectionProfileId>,
+    database_target: Option<String>,
+}
+
+async fn database_actor_scope(
+    state: &AppState,
+    headers: HeaderMap,
+    session: sift_protocol::SessionId,
+    connection: sift_protocol::ConnectionId,
+    operation: sift_protocol::OperationKind,
+) -> ApiResult<Option<DatabaseActorScope>> {
+    let auth = optional_auth_context_blocking(state.clone(), headers).await?;
+    match state
+        .sessions
+        .managed_catalog_scope(session, connection, operation)
+    {
+        Ok((actor, tenant, profile, _)) => {
+            if auth.as_ref().is_some_and(|auth| auth.principal_id != actor) {
+                return Err(ApiError::Forbidden(
+                    "database mutation caller must own the managed session".into(),
+                ));
+            }
+            let metadata = metadata_store_cloned(state)?;
+            let profile_record = metadata_blocking(move || {
+                metadata
+                    .get_connection_profile(tenant, profile)
+                    .map_err(Into::into)
+            })
+            .await?;
+            Ok(Some(DatabaseActorScope {
+                actor,
+                tenant_id: Some(tenant),
+                connection_profile_id: Some(profile),
+                database_target: connection_database_target(&profile_record),
+            }))
+        }
+        Err(_) => Ok(auth.map(|auth| DatabaseActorScope {
+            actor: auth.principal_id,
+            tenant_id: None,
+            connection_profile_id: None,
+            database_target: None,
+        })),
+    }
+}
+
+async fn database_actor_scope_for_ws(
+    state: &AppState,
+    auth: Option<&AuthContext>,
+    session: sift_protocol::SessionId,
+    connection: sift_protocol::ConnectionId,
+) -> ApiResult<Option<DatabaseActorScope>> {
+    match state.sessions.managed_catalog_scope(
+        session,
+        connection,
+        sift_protocol::OperationKind::ExecuteQuery,
+    ) {
+        Ok((actor, tenant, profile, _)) => {
+            if auth.is_some_and(|auth| auth.principal_id != actor) {
+                return Err(ApiError::Forbidden(
+                    "query caller must own the managed session".into(),
+                ));
+            }
+            let metadata = metadata_store_cloned(state)?;
+            let profile_record = metadata_blocking(move || {
+                metadata
+                    .get_connection_profile(tenant, profile)
+                    .map_err(Into::into)
+            })
+            .await?;
+            Ok(Some(DatabaseActorScope {
+                actor,
+                tenant_id: Some(tenant),
+                connection_profile_id: Some(profile),
+                database_target: connection_database_target(&profile_record),
+            }))
+        }
+        Err(_) => Ok(auth.map(|auth| DatabaseActorScope {
+            actor: auth.principal_id,
+            tenant_id: None,
+            connection_profile_id: None,
+            database_target: None,
+        })),
+    }
+}
+
+async fn record_database_change(
+    state: &AppState,
+    actor: PrincipalId,
+    record: DatabaseChangeRecord,
+) -> ApiResult<sift_protocol::ChangeLedgerEntry> {
+    let metadata = metadata_store_cloned(state)?;
+    let source_workflow = record
+        .versioned_source
+        .as_ref()
+        .map(|source| source.source_workflow.clone())
+        .unwrap_or_else(|| record.source_workflow.into());
+    let input = sift_metadata::NewChangeLedgerEntry {
+        tenant_id: record.tenant_id.map(|value| value.0),
+        room_id: record.room_id.map(|value| value.0).or_else(|| {
+            record
+                .versioned_source
+                .as_ref()
+                .map(|source| source.room_id)
+        }),
+        connection_profile_id: record.connection_profile_id.map(|value| value.0),
+        database_target: record.database_target,
+        operation: record.operation,
+        affected_object: record.affected_object,
+        row_count: record.row_count,
+        sql_fingerprint: record.sql_fingerprint,
+        row_identity_fingerprint: record.row_identity_fingerprint,
+        transaction_id: record.transaction_id,
+        correlation_id: crate::correlation::current(),
+        workspace_id: record
+            .versioned_source
+            .as_ref()
+            .map(|source| source.workspace_id),
+        workspace_revision: record
+            .versioned_source
+            .as_ref()
+            .map(|source| source.workspace_revision),
+        checkpoint_id: record
+            .versioned_source
+            .as_ref()
+            .and_then(|source| source.checkpoint_id),
+        workspace_path: record
+            .versioned_source
+            .as_ref()
+            .and_then(|source| source.workspace_path.clone()),
+        git_commit: record
+            .versioned_source
+            .as_ref()
+            .and_then(|source| source.git_commit.clone()),
+        source_workflow,
+        authored_by: record
+            .versioned_source
+            .as_ref()
+            .and_then(|source| source.authored_by),
+        approved_by: record.approved_by,
+        executed_by: actor.0,
+        database_actor: None,
+        outcome: record.outcome,
+        result_code: record.result_code,
+        identity_source: sift_protocol::ChangeIdentitySource::Sift,
+        identity_confidence: sift_protocol::ChangeIdentityConfidence::Authenticated,
+    };
+    metadata_blocking(move || metadata.append_change_ledger(input).map_err(Into::into)).await
+}
+
+fn sql_change_kind(sql: &str) -> Option<sift_protocol::ChangeLedgerOperation> {
+    let keyword = sql
+        .trim_start()
+        .chars()
+        .take_while(|character| character.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    match keyword.as_str() {
+        "INSERT" | "UPDATE" | "DELETE" | "MERGE" => {
+            Some(sift_protocol::ChangeLedgerOperation::DirectDml)
+        }
+        "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "GRANT" | "REVOKE" => {
+            Some(sift_protocol::ChangeLedgerOperation::DdlApply)
+        }
+        _ => None,
+    }
+}
+
+fn object_path_label(path: &ObjectPath) -> String {
+    [
+        path.catalog.as_deref(),
+        path.schema.as_deref(),
+        Some(&path.name),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(".")
+}
+
+fn redacted_fingerprint<T: serde::Serialize>(value: &T) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn database_terminal<T>(
+    result: &ApiResult<T>,
+    rows: impl FnOnce(&T) -> Option<i64>,
+) -> (
+    Option<i64>,
+    sift_protocol::ChangeLedgerOutcome,
+    Option<String>,
+) {
+    match result {
+        Ok(value) => (
+            rows(value),
+            sift_protocol::ChangeLedgerOutcome::Committed,
+            None,
+        ),
+        Err(ApiError::Driver(error)) => (
+            None,
+            sift_protocol::ChangeLedgerOutcome::Failed,
+            Some(error.code.to_string()),
+        ),
+        Err(_) => (None, sift_protocol::ChangeLedgerOutcome::Failed, None),
     }
 }
 
@@ -4319,6 +4622,320 @@ async fn list_operation_audit_pages(
             .to_string()
     });
     Ok(Json(CursorPage { items, next_cursor }))
+}
+
+async fn list_change_ledger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(mut filter): Query<sift_protocol::ChangeLedgerFilter>,
+) -> ApiResult<Json<sift_protocol::ChangeLedgerPage>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = change_ledger_tenant(&auth, filter.tenant_id)?;
+    filter.tenant_id = Some(tenant.0);
+    apply_change_ledger_retention(&metadata, tenant, &mut filter).await?;
+    let result =
+        metadata_blocking(move || metadata.change_ledger(&filter).map_err(Into::into)).await;
+    let page = finish_operation_as(
+        &state.sessions,
+        Operation::Metadata {
+            action: "read".into(),
+            target: "database_change_ledger".into(),
+            id: Some(tenant.0),
+        },
+        result,
+        Some(auth.principal_id.0),
+        |page| i64::try_from(page.entries.len()).ok(),
+    )?;
+    Ok(Json(page))
+}
+
+async fn export_change_ledger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(mut filter): Query<sift_protocol::ChangeLedgerFilter>,
+) -> ApiResult<Response> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = change_ledger_tenant(&auth, filter.tenant_id)?;
+    require_tenant_admin(&auth, tenant)?;
+    filter.tenant_id = Some(tenant.0);
+    let export_limit = filter.limit.unwrap_or(10_000).min(10_000) as usize;
+    filter.limit = Some(500);
+    apply_change_ledger_retention(&metadata, tenant, &mut filter).await?;
+    let entries = metadata_blocking(move || {
+        let mut entries = Vec::new();
+        loop {
+            let page = metadata.change_ledger(&filter)?;
+            entries.extend(page.entries.into_iter().take(export_limit - entries.len()));
+            if entries.len() >= export_limit || page.next_before_id.is_none() {
+                break;
+            }
+            filter.before_id = page.next_before_id;
+        }
+        Ok::<_, ApiError>(entries)
+    })
+    .await?;
+    let mut csv = String::from(
+        "id,at,executed_by,authored_by,approved_by,database_actor,identity_source,identity_confidence,database,object,operation,row_count,outcome,correlation_id,workspace_revision,checkpoint_id,workspace_path,git_commit,source_workflow,entry_hash\n",
+    );
+    for entry in &entries {
+        let fields = [
+            entry.id.to_string(),
+            entry.at.to_rfc3339(),
+            entry.executed_by.to_string(),
+            entry
+                .authored_by
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            entry
+                .approved_by
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            entry.database_actor.clone().unwrap_or_default(),
+            serde_json::to_value(entry.identity_source)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            serde_json::to_value(entry.identity_confidence)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            entry.database_target.clone().unwrap_or_default(),
+            entry.affected_object.clone().unwrap_or_default(),
+            serde_json::to_value(entry.operation)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            entry
+                .row_count
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            serde_json::to_value(entry.outcome)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            entry.correlation_id.clone().unwrap_or_default(),
+            entry
+                .workspace_revision
+                .map(|value| value.0.to_string())
+                .unwrap_or_default(),
+            entry
+                .checkpoint_id
+                .map(|value| value.0.to_string())
+                .unwrap_or_default(),
+            entry
+                .workspace_path
+                .as_ref()
+                .map(|value| value.0.clone())
+                .unwrap_or_default(),
+            entry.git_commit.clone().unwrap_or_default(),
+            entry.source_workflow.clone(),
+            entry.entry_hash.clone(),
+        ];
+        csv.push_str(&fields.map(|field| csv_field(&field)).join(","));
+        csv.push('\n');
+    }
+    state.sessions.push_operation_full(
+        Operation::Metadata {
+            action: "export".into(),
+            target: "database_change_ledger".into(),
+            id: Some(tenant.0),
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        i64::try_from(entries.len()).ok(),
+        None,
+    );
+    Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            "attachment; filename=database-change-ledger.csv",
+        )
+        .body(Body::from(csv))
+        .map_err(|error| ApiError::Internal(error.to_string()))
+}
+
+async fn import_external_change_ledger_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(event): Json<sift_protocol::ExternalChangeLedgerEvent>,
+) -> ApiResult<Json<sift_protocol::ChangeLedgerEntry>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = TenantId(event.tenant_id);
+    require_tenant_admin(&auth, tenant)?;
+    if event.identity_source == sift_protocol::ChangeIdentitySource::Sift
+        || event.identity_confidence == sift_protocol::ChangeIdentityConfidence::Authenticated
+    {
+        return Err(ApiError::BadRequest(
+            "external events must preserve a database-native or explicitly uncertain identity"
+                .into(),
+        ));
+    }
+    if let Some(profile) = event.connection_profile_id {
+        let store = metadata.clone();
+        metadata_blocking(move || {
+            store
+                .get_connection_profile(tenant, ConnectionProfileId(profile))
+                .map(|_| ())
+                .map_err(Into::into)
+        })
+        .await?;
+    }
+    let actor = auth.principal_id;
+    let input = sift_metadata::NewChangeLedgerEntry {
+        tenant_id: Some(tenant.0),
+        room_id: None,
+        connection_profile_id: event.connection_profile_id,
+        database_target: event.database_target,
+        operation: event.operation,
+        affected_object: event.affected_object,
+        row_count: event.row_count,
+        sql_fingerprint: event.sql_fingerprint,
+        row_identity_fingerprint: event.row_identity_fingerprint,
+        transaction_id: event.transaction_id,
+        correlation_id: event.correlation_id.or_else(crate::correlation::current),
+        workspace_id: None,
+        workspace_revision: None,
+        checkpoint_id: None,
+        workspace_path: None,
+        git_commit: None,
+        source_workflow: "external_audit_ingest".into(),
+        authored_by: None,
+        approved_by: Some(actor.0),
+        executed_by: actor.0,
+        database_actor: Some(event.database_actor),
+        outcome: event.outcome,
+        result_code: event.result_code,
+        identity_source: event.identity_source,
+        identity_confidence: event.identity_confidence,
+    };
+    let entry =
+        metadata_blocking(move || metadata.append_change_ledger(input).map_err(Into::into)).await?;
+    state.sessions.push_operation_full(
+        Operation::Metadata {
+            action: "import_external".into(),
+            target: "database_change_ledger".into(),
+            id: Some(entry.id),
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        Some(1),
+        None,
+    );
+    Ok(Json(entry))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ChangeLedgerPolicyRequest {
+    retention_days: u32,
+    #[serde(default)]
+    external_sink: Option<String>,
+}
+
+async fn get_change_ledger_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant): Path<i64>,
+) -> ApiResult<Json<sift_metadata::ChangeLedgerPolicy>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = TenantId(tenant);
+    change_ledger_tenant(&auth, Some(tenant.0))?;
+    metadata_blocking(move || metadata.change_ledger_policy(tenant.0).map_err(Into::into))
+        .await
+        .map(Json)
+}
+
+async fn update_change_ledger_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant): Path<i64>,
+    Json(request): Json<ChangeLedgerPolicyRequest>,
+) -> ApiResult<Json<sift_metadata::ChangeLedgerPolicy>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = TenantId(tenant);
+    require_tenant_admin(&auth, tenant)?;
+    let actor = auth.principal_id;
+    let policy = metadata_blocking(move || {
+        metadata
+            .set_change_ledger_policy(
+                tenant.0,
+                request.retention_days,
+                request.external_sink.as_deref(),
+                actor.0,
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    state.sessions.push_operation_full(
+        Operation::Metadata {
+            action: "configure".into(),
+            target: "database_change_ledger_policy".into(),
+            id: Some(tenant.0),
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(policy))
+}
+
+fn change_ledger_tenant(auth: &AuthContext, requested: Option<i64>) -> ApiResult<TenantId> {
+    let tenant = requested
+        .map(TenantId)
+        .or_else(|| (auth.tenants.len() == 1).then(|| auth.tenants[0].tenant.id))
+        .ok_or_else(|| ApiError::BadRequest("select a tenant for the change ledger".into()))?;
+    ensure_tenant(auth, tenant)?;
+    Ok(tenant)
+}
+
+fn require_tenant_admin(auth: &AuthContext, tenant: TenantId) -> ApiResult<()> {
+    let membership = auth
+        .tenants
+        .iter()
+        .find(|membership| membership.tenant.id == tenant)
+        .ok_or_else(|| ApiError::Forbidden("tenant membership required".into()))?;
+    if !matches!(
+        membership.role,
+        sift_metadata::MembershipRole::Owner | sift_metadata::MembershipRole::Admin
+    ) {
+        return Err(ApiError::Forbidden(
+            "tenant administrator context required".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn apply_change_ledger_retention(
+    metadata: &MetadataStore,
+    tenant: TenantId,
+    filter: &mut sift_protocol::ChangeLedgerFilter,
+) -> ApiResult<()> {
+    let store = metadata.clone();
+    let policy =
+        metadata_blocking(move || store.change_ledger_policy(tenant.0).map_err(Into::into)).await?;
+    let retained_from =
+        chrono::Utc::now() - chrono::Duration::days(i64::from(policy.retention_days));
+    if filter.from.map_or(true, |from| from < retained_from) {
+        filter.from = Some(retained_from);
+    }
+    Ok(())
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\r', '\n']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
 }
 
 async fn list_providers(
@@ -7121,7 +7738,8 @@ async fn get_repository_status(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let binding_id = repository_binding_id(id)?;
     let actor = auth.principal_id;
-    let context = load_repository_context(&state, metadata, actor, binding_id, false).await?;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, false).await?;
     authorize_vcs_operation(
         &state,
         &auth,
@@ -7143,10 +7761,44 @@ async fn get_repository_status(
     for entry in &mut status.entries {
         entry.pending = pending.get(&entry.path.0).copied();
     }
+    let filesystem = state.rooms.workspace_adapter().ok_or_else(|| {
+        ApiError::BadRequest("workspace filesystem projections are disabled".into())
+    })?;
+    let inputs = metadata_blocking({
+        let metadata = metadata.clone();
+        let rooms = state.rooms.clone();
+        let filesystem = filesystem.clone();
+        let projection_id = context.record.binding.projection_id;
+        move || load_projection_inputs(&metadata, &rooms, &filesystem, projection_id, actor, false)
+    })
+    .await?;
+    let validation = crate::vcs_validation::validate(&status, &inputs.files);
+    for entry in &mut status.entries {
+        if let Some(artifact) = validation
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == entry.path)
+        {
+            entry.affected_objects = artifact.affected_objects.clone();
+        }
+        entry.validation_errors = validation
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.error && diagnostic.path == entry.path)
+            .count() as u32;
+    }
+    status.validation = Some(validation);
     push_vcs_operation(
         &state,
         actor,
         VcsAction::Status,
+        context.record.binding.workspace_id,
+        binding_id,
+    );
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::Validate,
         context.record.binding.workspace_id,
         binding_id,
     );
@@ -7308,7 +7960,8 @@ async fn get_repository_commit(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let binding_id = repository_binding_id(id)?;
     let actor = auth.principal_id;
-    let context = load_repository_context(&state, metadata, actor, binding_id, false).await?;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, false).await?;
     authorize_vcs_operation(
         &state,
         &auth,
@@ -7316,11 +7969,25 @@ async fn get_repository_commit(
         binding_id,
         VcsAction::History,
     )?;
-    let detail = context
+    let mut detail = context
         .adapter
         .commit_detail(&context.worktree, &oid)
         .await
         .map_err(git_adapter_error)?;
+    let provenance = metadata_blocking({
+        let metadata = metadata.clone();
+        let oid = oid.clone();
+        move || {
+            metadata
+                .repository_commit_provenance(binding_id, actor, &oid)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    if let Some((checkpoint_id, workspace_revision)) = provenance {
+        detail.checkpoint_id = Some(checkpoint_id);
+        detail.workspace_revision = Some(workspace_revision);
+    }
     push_vcs_operation(
         &state,
         actor,
@@ -9130,6 +9797,22 @@ async fn mutate_repository_commit(
             "Git index has no staged SQL changes to commit".into(),
         ));
     }
+    let validation = crate::vcs_validation::validate(&status, &inputs.files);
+    if !validation.valid {
+        let summary = validation
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.error)
+            .take(5)
+            .map(|diagnostic| format!("{}: {}", diagnostic.path.0, diagnostic.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        push_vcs_operation(&state, actor, VcsAction::Validate, workspace_id, binding_id);
+        return Err(ApiError::BadRequest(format!(
+            "pre-commit SQL validation failed: {summary}"
+        )));
+    }
+    push_vcs_operation(&state, actor, VcsAction::Validate, workspace_id, binding_id);
     filesystem
         .materialize(
             &inputs.binding.root_handle,
@@ -10871,6 +11554,52 @@ fn new_run_configuration(request: CreateRunConfigurationRequest) -> NewRunConfig
     }
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct LatestSuccessfulRunQuery {
+    git_commit: String,
+}
+
+async fn latest_successful_run_for_commit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<LatestSuccessfulRunQuery>,
+) -> ApiResult<Json<Option<sift_protocol::Run>>> {
+    if !matches!(query.git_commit.len(), 40 | 64)
+        || !query
+            .git_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ApiError::BadRequest("invalid Git commit id".into()));
+    }
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_run_configuration_operation(
+        &state,
+        &auth,
+        workspace_id,
+        None,
+        RunConfigurationAction::Read,
+    )?;
+    let actor = auth.principal_id;
+    let run = metadata_blocking(move || {
+        metadata
+            .latest_successful_run_for_commit(workspace_id, actor, &query.git_commit)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_run_configuration_operation(
+        &state,
+        actor,
+        workspace_id,
+        None,
+        RunConfigurationAction::Read,
+    );
+    Ok(Json(run))
+}
+
 async fn list_run_configurations(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -11127,6 +11856,9 @@ pub(crate) fn capture_run_payload(
     }
     let manifest = RunManifest {
         workspace_revision: workspace.revision,
+        git_commit: metadata
+            .repository_binding_for_workspace(configuration.workspace_id, actor)?
+            .and_then(|record| record.binding.head),
         scripts: manifest_scripts,
         connection_profile_id: configuration.connection_profile_id,
         target_schema: configuration.target_schema.clone(),
@@ -13854,28 +14586,77 @@ async fn ping_connection(
 
 async fn bulk_insert(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(req): Json<BulkInsertRequest>,
 ) -> ApiResult<Json<sift_protocol::BulkInsertResponse>> {
+    let ledger_scope = database_actor_scope(
+        &state,
+        headers,
+        id,
+        conn_id,
+        sift_protocol::OperationKind::BulkInsert,
+    )
+    .await?;
+    let table = req.table.clone();
     let operation = Operation::BulkInsert {
         session: id,
         connection: conn_id,
         request: req.clone(),
     };
-    let response = finish_operation(
-        &state.sessions,
-        operation,
-        state.sessions.bulk_insert(id, conn_id, req).await,
-        |response| Some(response.rows_inserted as i64),
-    )?;
+    let execute_result = state.sessions.bulk_insert(id, conn_id, req).await;
+    if let Some(scope) = ledger_scope {
+        let (row_count, outcome, result_code) = database_terminal(&execute_result, |response| {
+            i64::try_from(response.rows_inserted).ok()
+        });
+        if let Err(error) = record_database_change(
+            &state,
+            scope.actor,
+            DatabaseChangeRecord {
+                tenant_id: scope.tenant_id,
+                room_id: None,
+                connection_profile_id: scope.connection_profile_id,
+                database_target: scope.database_target,
+                operation: sift_protocol::ChangeLedgerOperation::BulkMutation,
+                affected_object: Some(table),
+                row_count,
+                sql_fingerprint: None,
+                row_identity_fingerprint: None,
+                transaction_id: None,
+                source_workflow: "bulk_insert",
+                approved_by: Some(scope.actor.0),
+                outcome,
+                result_code,
+                versioned_source: None,
+            },
+        )
+        .await
+        {
+            tracing::error!(%error, "failed to append bulk change ledger entry");
+        }
+    }
+    let response = finish_operation(&state.sessions, operation, execute_result, |response| {
+        Some(response.rows_inserted as i64)
+    })?;
     Ok(Json(response))
 }
 
 async fn import_csv(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(req): Json<CsvImportRequest>,
 ) -> ApiResult<Json<sift_protocol::CsvImportResponse>> {
+    let ledger_scope = database_actor_scope(
+        &state,
+        headers,
+        session,
+        connection,
+        sift_protocol::OperationKind::ImportCsv,
+    )
+    .await?;
+    let table = req.table.clone();
+    let create_table = req.create_table;
     let operation = Operation::ImportCsv {
         session,
         connection,
@@ -13883,12 +14664,44 @@ async fn import_csv(
         create_table: req.create_table,
         conflict_policy: req.conflict_policy,
     };
-    let response = finish_operation(
-        &state.sessions,
-        operation,
-        crate::csv_import::import(&state.sessions, session, connection, req).await,
-        |response| Some(response.rows_inserted as i64),
-    )?;
+    let import_result = crate::csv_import::import(&state.sessions, session, connection, req).await;
+    if let Some(scope) = ledger_scope {
+        let (row_count, outcome, result_code) = database_terminal(&import_result, |response| {
+            i64::try_from(response.rows_inserted).ok()
+        });
+        for ledger_operation in std::iter::once(sift_protocol::ChangeLedgerOperation::CsvImport)
+            .chain(create_table.then_some(sift_protocol::ChangeLedgerOperation::DdlApply))
+        {
+            if let Err(error) = record_database_change(
+                &state,
+                scope.actor,
+                DatabaseChangeRecord {
+                    tenant_id: scope.tenant_id,
+                    room_id: None,
+                    connection_profile_id: scope.connection_profile_id,
+                    database_target: scope.database_target.clone(),
+                    operation: ledger_operation,
+                    affected_object: Some(table.clone()),
+                    row_count,
+                    sql_fingerprint: None,
+                    row_identity_fingerprint: None,
+                    transaction_id: None,
+                    source_workflow: "csv_import",
+                    approved_by: Some(scope.actor.0),
+                    outcome,
+                    result_code: result_code.clone(),
+                    versioned_source: None,
+                },
+            )
+            .await
+            {
+                tracing::error!(%error, "failed to append CSV change ledger entry");
+            }
+        }
+    }
+    let response = finish_operation(&state.sessions, operation, import_result, |response| {
+        Some(response.rows_inserted as i64)
+    })?;
     Ok(Json(response))
 }
 
@@ -14431,9 +15244,20 @@ async fn post_edits_preview(
 
 async fn post_edits_apply(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((id, conn_id)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
     Json(mut req): Json<sift_protocol::ApplyEditsRequest>,
 ) -> ApiResult<Json<sift_protocol::ApplyEditsResult>> {
+    let ledger_scope = database_actor_scope(
+        &state,
+        headers,
+        id,
+        conn_id,
+        sift_protocol::OperationKind::ApplyEdits,
+    )
+    .await?;
+    let edit_set = req.edit_set.clone();
+    let transaction_id = req.tx.as_ref().map(|tx| tx.tx_id.0.to_string());
     let apply_result = async {
         if req.connection != conn_id {
             return Err(ApiError::BadRequest(
@@ -14444,6 +15268,95 @@ async fn post_edits_apply(
         state.sessions.apply_edits(id, req).await
     }
     .await;
+    if let Some(scope) = ledger_scope {
+        for (kind, operation) in [
+            (
+                sift_protocol::EditStatementKind::Insert,
+                sift_protocol::ChangeLedgerOperation::GridInsert,
+            ),
+            (
+                sift_protocol::EditStatementKind::Update,
+                sift_protocol::ChangeLedgerOperation::GridUpdate,
+            ),
+            (
+                sift_protocol::EditStatementKind::Delete,
+                sift_protocol::ChangeLedgerOperation::GridDelete,
+            ),
+        ] {
+            let requested = edit_set.edits.iter().any(|edit| {
+                matches!(
+                    (kind, edit),
+                    (
+                        sift_protocol::EditStatementKind::Insert,
+                        sift_protocol::RowEdit::Insert { .. }
+                    ) | (
+                        sift_protocol::EditStatementKind::Update,
+                        sift_protocol::RowEdit::Update { .. }
+                    ) | (
+                        sift_protocol::EditStatementKind::Delete,
+                        sift_protocol::RowEdit::Delete { .. }
+                    )
+                )
+            });
+            if !requested {
+                continue;
+            }
+            let (row_count, outcome, result_code) = match &apply_result {
+                Ok(result) => (
+                    i64::try_from(
+                        result
+                            .applied
+                            .iter()
+                            .filter(|entry| entry.kind == kind)
+                            .map(|entry| entry.affected_rows)
+                            .sum::<u64>(),
+                    )
+                    .ok(),
+                    if result.committed {
+                        sift_protocol::ChangeLedgerOutcome::Committed
+                    } else {
+                        sift_protocol::ChangeLedgerOutcome::Partial
+                    },
+                    None,
+                ),
+                Err(ApiError::Driver(error)) => (
+                    None,
+                    if error.code == sift_protocol::Code::EditConflict {
+                        sift_protocol::ChangeLedgerOutcome::Conflicted
+                    } else {
+                        sift_protocol::ChangeLedgerOutcome::Failed
+                    },
+                    Some(error.code.to_string()),
+                ),
+                Err(_) => (None, sift_protocol::ChangeLedgerOutcome::Failed, None),
+            };
+            if let Err(error) = record_database_change(
+                &state,
+                scope.actor,
+                DatabaseChangeRecord {
+                    tenant_id: scope.tenant_id,
+                    room_id: None,
+                    connection_profile_id: scope.connection_profile_id,
+                    database_target: scope.database_target.clone(),
+                    operation,
+                    affected_object: Some(object_path_label(&edit_set.table)),
+                    row_count,
+                    sql_fingerprint: None,
+                    row_identity_fingerprint: Some(redacted_fingerprint(&edit_set.edits)),
+                    transaction_id: transaction_id.clone(),
+                    source_workflow: "data_grid",
+                    approved_by: Some(scope.actor.0),
+                    outcome,
+                    result_code,
+                    versioned_source: None,
+                },
+            )
+            .await
+            {
+                tracing::error!(%error, "failed to append grid change ledger entry");
+            }
+        }
+    }
     let result = finish_operation(
         &state.sessions,
         Operation::ApplyEdits {
@@ -14769,12 +15682,20 @@ async fn compare_catalog_schemas(
             ));
         }
         ensure_tenant(&auth, tenant)?;
-        let from =
-            resolve_catalog_source(&state, session, connection, tenant, &request.from).await?;
+        let from = resolve_catalog_source(
+            &state,
+            session,
+            connection,
+            tenant,
+            principal,
+            &request.from,
+        )
+        .await?;
         let to = if request.from == request.to {
             from.clone()
         } else {
-            resolve_catalog_source(&state, session, connection, tenant, &request.to).await?
+            resolve_catalog_source(&state, session, connection, tenant, principal, &request.to)
+                .await?
         };
         sift_core::schema_diff::diff_catalogs(
             request.from.clone(),
@@ -14801,6 +15722,7 @@ async fn resolve_catalog_source(
     session: sift_protocol::SessionId,
     connection: sift_protocol::ConnectionId,
     tenant: TenantId,
+    principal: PrincipalId,
     source: &sift_protocol::CatalogSourceRef,
 ) -> ApiResult<sift_protocol::CatalogGraph> {
     match source {
@@ -14826,6 +15748,35 @@ async fn resolve_catalog_source(
                     .get_catalog_snapshot(tenant, snapshot_id)
                     .map(|snapshot| snapshot.graph)
                     .map_err(Into::into)
+            })
+            .await
+        }
+        sift_protocol::CatalogSourceRef::DdlSource {
+            source_id,
+            expected_model_revision,
+        } => {
+            let metadata = metadata_store_cloned(state)?;
+            let source_id = *source_id;
+            let expected_model_revision = *expected_model_revision;
+            metadata_blocking(move || {
+                let record = metadata.ddl_source_for_principal(source_id, principal, false)?;
+                if record.source.model_revision != expected_model_revision {
+                    return Err(sift_metadata::MetadataError::DdlSourceRevisionConflict {
+                        expected: expected_model_revision,
+                        current: record.source.model_revision,
+                    }
+                    .into());
+                }
+                record
+                    .model_json
+                    .as_deref()
+                    .ok_or_else(|| {
+                        ApiError::BadRequest("refresh the DDL source before comparing it".into())
+                    })
+                    .and_then(|json| {
+                        serde_json::from_str(json)
+                            .map_err(|_| ApiError::Internal("stored DDL model is invalid".into()))
+                    })
             })
             .await
         }
@@ -14879,6 +15830,7 @@ async fn preview_migration(
             session,
             connection,
             tenant,
+            principal,
             &request.diff.from,
         )
         .await?;
@@ -14890,6 +15842,7 @@ async fn preview_migration(
                 session,
                 connection,
                 tenant,
+                principal,
                 &request.diff.to,
             )
             .await?
@@ -14966,16 +15919,155 @@ async fn apply_migration(
         connection,
         plan_id: request.plan_id,
     };
+    let (principal, tenant, profile, _) = state.sessions.managed_catalog_scope(
+        session,
+        connection,
+        sift_protocol::OperationKind::ApplyMigration,
+    )?;
+    if principal != auth.principal_id {
+        return Err(ApiError::Forbidden(
+            "migration caller must own the managed session".into(),
+        ));
+    }
+    let metadata = metadata_store_cloned(&state)?;
+    let source = request.source.clone();
+    let validated_source = if let Some(source) = source {
+        let store = metadata.clone();
+        Some(
+            metadata_blocking(move || {
+                store
+                    .validate_versioned_execution(principal, &source)
+                    .map_err(Into::into)
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
+    let profile_record = metadata_blocking(move || {
+        metadata
+            .get_connection_profile(tenant, profile)
+            .map_err(Into::into)
+    })
+    .await?;
+    let database_target = connection_database_target(&profile_record);
+    let plan_digest = request.plan_digest.clone();
     let result = state
         .sessions
         .apply_migration(session, connection, auth.principal_id, request)
         .await;
+    let (row_count, outcome, result_code) = match &result {
+        Ok(run) => {
+            let outcome = match run.state {
+                sift_protocol::MigrationRunState::Applied => {
+                    sift_protocol::ChangeLedgerOutcome::Committed
+                }
+                sift_protocol::MigrationRunState::RolledBack => {
+                    sift_protocol::ChangeLedgerOutcome::RolledBack
+                }
+                sift_protocol::MigrationRunState::Partial
+                | sift_protocol::MigrationRunState::Canceled => {
+                    sift_protocol::ChangeLedgerOutcome::Partial
+                }
+                sift_protocol::MigrationRunState::Failed => {
+                    sift_protocol::ChangeLedgerOutcome::Failed
+                }
+                sift_protocol::MigrationRunState::Running => {
+                    sift_protocol::ChangeLedgerOutcome::Partial
+                }
+            };
+            (
+                i64::try_from(
+                    run.outcomes
+                        .iter()
+                        .filter_map(|entry| entry.affected_rows)
+                        .sum::<u64>(),
+                )
+                .ok(),
+                outcome,
+                run.outcomes
+                    .iter()
+                    .find_map(|entry| entry.result_code.clone()),
+            )
+        }
+        Err(ApiError::Driver(error)) => (
+            None,
+            sift_protocol::ChangeLedgerOutcome::Failed,
+            Some(error.code.to_string()),
+        ),
+        Err(_) => (None, sift_protocol::ChangeLedgerOutcome::Failed, None),
+    };
+    let rolled_back = result.as_ref().is_ok_and(|run| {
+        run.outcomes
+            .iter()
+            .any(|entry| entry.status == sift_protocol::MigrationStatementStatus::RolledBack)
+    });
+    for ledger_operation in std::iter::once(sift_protocol::ChangeLedgerOperation::MigrationApply)
+        .chain(rolled_back.then_some(sift_protocol::ChangeLedgerOperation::MigrationRollback))
+    {
+        if let Err(error) = record_database_change(
+            &state,
+            principal,
+            DatabaseChangeRecord {
+                tenant_id: Some(tenant),
+                room_id: None,
+                connection_profile_id: Some(profile),
+                database_target: database_target.clone(),
+                operation: ledger_operation,
+                affected_object: None,
+                row_count,
+                sql_fingerprint: Some(plan_digest.clone()),
+                row_identity_fingerprint: None,
+                transaction_id: result.as_ref().ok().map(|run| run.id.0.to_string()),
+                source_workflow: "schema_migration",
+                approved_by: Some(principal.0),
+                outcome: if ledger_operation
+                    == sift_protocol::ChangeLedgerOperation::MigrationRollback
+                {
+                    sift_protocol::ChangeLedgerOutcome::RolledBack
+                } else {
+                    outcome
+                },
+                result_code: result_code.clone(),
+                versioned_source: validated_source.clone(),
+            },
+        )
+        .await
+        {
+            tracing::error!(%error, "failed to append migration change ledger entry");
+        }
+    }
     Ok(Json(finish_operation_as(
         &state.sessions,
         operation,
         result,
         Some(auth.principal_id.0),
         |run| i64::try_from(run.outcomes.len()).ok(),
+    )?))
+}
+
+async fn validate_migration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::ValidateMigrationRequest>,
+) -> ApiResult<Json<sift_protocol::MigrationValidation>> {
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let operation = Operation::ValidateMigration {
+        session,
+        connection,
+        plan_id: request.plan_id,
+    };
+    let result = state
+        .sessions
+        .validate_migration(session, connection, auth.principal_id, request)
+        .await;
+    Ok(Json(finish_operation_as(
+        &state.sessions,
+        operation,
+        result,
+        Some(auth.principal_id.0),
+        |validation| i64::try_from(validation.outcomes.len()).ok(),
     )?))
 }
 
@@ -15195,9 +16287,21 @@ async fn capture_semantic_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
-    Json(request): Json<sift_protocol::CaptureSemanticPlanRequest>,
+    Json(mut request): Json<sift_protocol::CaptureSemanticPlanRequest>,
 ) -> ApiResult<Json<sift_protocol::PlanCapture>> {
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    if let Some(source) = request.source.as_ref() {
+        let metadata = metadata_store_cloned(&state)?;
+        let source = source.clone();
+        let actor = auth.principal_id;
+        let validated = metadata_blocking(move || {
+            metadata
+                .validate_versioned_execution(actor, &source)
+                .map_err(Into::into)
+        })
+        .await?;
+        request.source = Some(validated.context());
+    }
     let operation = Operation::CaptureSemanticPlan {
         session,
         connection,
@@ -15261,7 +16365,10 @@ async fn execute_query(
     Json(req): Json<ExecuteRequestHttp>,
 ) -> ApiResult<Response> {
     let metadata_context = execute_metadata_context(&state, headers, &req).await?;
+    let ledger_context = metadata_context.clone();
     let sql_text = req.sql.clone();
+    let change_kind = sql_change_kind(&sql_text);
+    let transaction_id = req.tx.as_ref().map(|tx| tx.tx_id.0.to_string());
     let operation = Operation::ExecuteQuery {
         session: id,
         request: req.clone(),
@@ -15303,6 +16410,53 @@ async fn execute_query(
         None => (state.sessions.execute_http(id, req).await, None, Vec::new()),
     };
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    if let (Some(context), Some(change_kind)) = (ledger_context, change_kind) {
+        let (row_count, outcome, result_code) = match &result {
+            Ok(response) => (
+                response
+                    .affected_rows
+                    .and_then(|rows| i64::try_from(rows).ok())
+                    .or_else(|| i64::try_from(response.rows.len()).ok()),
+                if transaction_id.is_some() {
+                    sift_protocol::ChangeLedgerOutcome::Partial
+                } else {
+                    sift_protocol::ChangeLedgerOutcome::Committed
+                },
+                None,
+            ),
+            Err(ApiError::Driver(error)) => (
+                None,
+                sift_protocol::ChangeLedgerOutcome::Failed,
+                Some(error.code.to_string()),
+            ),
+            Err(_) => (None, sift_protocol::ChangeLedgerOutcome::Failed, None),
+        };
+        if let Err(error) = record_database_change(
+            &state,
+            context.principal_id,
+            DatabaseChangeRecord {
+                tenant_id: context.tenant_id,
+                room_id: context.room_id,
+                connection_profile_id: context.connection_profile_id,
+                database_target: context.database_target,
+                operation: change_kind,
+                affected_object: None,
+                row_count,
+                sql_fingerprint: Some(crate::fingerprint::sql(&sql_text)),
+                row_identity_fingerprint: None,
+                transaction_id,
+                source_workflow: "direct_sql",
+                approved_by: None,
+                outcome,
+                result_code,
+                versioned_source: context.versioned_source,
+            },
+        )
+        .await
+        {
+            tracing::error!(%error, "failed to append database change ledger entry");
+        }
+    }
     if let Some(context) = metadata_context {
         if let Some(room_id) = context.room_id {
             let row_count = shared_pages.as_ref().map(|pages| {
@@ -16526,6 +17680,7 @@ async fn handle_ws(
                         params,
                         tx,
                         transform,
+                        source,
                     } => {
                         if let Err(retry_after_secs) = ws_rate_admit(
                             &state,
@@ -16540,6 +17695,51 @@ async fn handle_ws(
                         // Track the streaming query against the drain gate for
                         // its whole lifetime (execute + paging).
                         let _query_guard = state.shutdown.track_query();
+                        let change_kind = sql_change_kind(&sql);
+                        let sql_fingerprint = change_kind.map(|_| crate::fingerprint::sql(&sql));
+                        let ledger_scope = if change_kind.is_some() || source.is_some() {
+                            database_actor_scope_for_ws(
+                                &state,
+                                auth.as_ref(),
+                                session_id,
+                                connection,
+                            )
+                            .await?
+                        } else {
+                            None
+                        };
+                        let validated_source = match (source, ledger_scope.as_ref()) {
+                            (Some(source), Some(scope)) => {
+                                let metadata = metadata_store_cloned(&state)?;
+                                let actor = scope.actor;
+                                let validated = metadata_blocking(move || {
+                                    metadata
+                                        .validate_versioned_execution(actor, &source)
+                                        .map_err(Into::into)
+                                })
+                                .await?;
+                                if let Some(tenant) = scope.tenant_id {
+                                    let metadata = metadata_store_cloned(&state)?;
+                                    let room_id = validated.room_id;
+                                    let room = metadata_blocking(move || {
+                                        metadata.get_room(RoomId(room_id)).map_err(Into::into)
+                                    })
+                                    .await?;
+                                    if room.tenant_id != tenant {
+                                        return Err(ApiError::BadRequest(
+                                            "versioned execution source belongs to another tenant"
+                                                .into(),
+                                        ));
+                                    }
+                                }
+                                Some(validated)
+                            }
+                            (Some(_), None) => {
+                                return Err(ApiError::Unauthorized);
+                            }
+                            (None, _) => None,
+                        };
+                        let transaction_id = tx.as_ref().map(|tx| tx.tx_id.0.to_string());
                         let stream = match state
                             .sessions
                             .execute_stream(
@@ -16556,6 +17756,39 @@ async fn handle_ws(
                         {
                             Ok(stream) => stream,
                             Err(error) => {
+                                if let (Some(scope), Some(operation)) =
+                                    (ledger_scope.as_ref(), change_kind)
+                                {
+                                    let result_code = match &error {
+                                        ApiError::Driver(error) => Some(error.code.to_string()),
+                                        _ => None,
+                                    };
+                                    if let Err(ledger_error) = record_database_change(
+                                        &state,
+                                        scope.actor,
+                                        DatabaseChangeRecord {
+                                            tenant_id: scope.tenant_id,
+                                            room_id: None,
+                                            connection_profile_id: scope.connection_profile_id,
+                                            database_target: scope.database_target.clone(),
+                                            operation,
+                                            affected_object: None,
+                                            row_count: None,
+                                            sql_fingerprint: sql_fingerprint.clone(),
+                                            row_identity_fingerprint: None,
+                                            transaction_id: transaction_id.clone(),
+                                            source_workflow: "direct_sql",
+                                            approved_by: None,
+                                            outcome: sift_protocol::ChangeLedgerOutcome::Failed,
+                                            result_code,
+                                            versioned_source: validated_source.clone(),
+                                        },
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(%ledger_error, "failed to append streamed change ledger entry");
+                                    }
+                                }
                                 if let Some(tx) = &tx {
                                     state.sessions.mark_transaction_failed(session_id, tx.tx_id);
                                 }
@@ -16580,7 +17813,7 @@ async fn handle_ws(
                             },
                         )
                         .await?;
-                        stream_pages_with_ack(
+                        let terminal = stream_pages_with_ack(
                             &mut sender,
                             &mut receiver,
                             stream.rows,
@@ -16596,6 +17829,42 @@ async fn handle_ws(
                             },
                         )
                         .await?;
+                        if let (Some(scope), Some(operation)) = (ledger_scope, change_kind) {
+                            let outcome = if terminal.failed {
+                                sift_protocol::ChangeLedgerOutcome::Failed
+                            } else if terminal.cancelled || transaction_id.is_some() {
+                                sift_protocol::ChangeLedgerOutcome::Partial
+                            } else {
+                                sift_protocol::ChangeLedgerOutcome::Committed
+                            };
+                            if let Err(error) = record_database_change(
+                                &state,
+                                scope.actor,
+                                DatabaseChangeRecord {
+                                    tenant_id: scope.tenant_id,
+                                    room_id: None,
+                                    connection_profile_id: scope.connection_profile_id,
+                                    database_target: scope.database_target,
+                                    operation,
+                                    affected_object: None,
+                                    row_count: terminal
+                                        .affected_rows
+                                        .and_then(|rows| i64::try_from(rows).ok()),
+                                    sql_fingerprint,
+                                    row_identity_fingerprint: None,
+                                    transaction_id,
+                                    source_workflow: "direct_sql",
+                                    approved_by: None,
+                                    outcome,
+                                    result_code: terminal.result_code,
+                                    versioned_source: validated_source,
+                                },
+                            )
+                            .await
+                            {
+                                tracing::error!(%error, "failed to append streamed change ledger entry");
+                            }
+                        }
                     }
                     WsClientMessage::Listen {
                         request_id,
@@ -16765,12 +18034,20 @@ enum AckOutcome {
     Cancelled,
 }
 
+#[derive(Debug, Default)]
+struct StreamTerminal {
+    affected_rows: Option<u64>,
+    result_code: Option<String>,
+    failed: bool,
+    cancelled: bool,
+}
+
 async fn stream_pages_with_ack(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     mut rows: tokio::sync::mpsc::Receiver<sift_protocol::Page>,
     context: WsPageContext<'_>,
-) -> ApiResult<()> {
+) -> ApiResult<StreamTerminal> {
     let WsPageContext {
         sessions,
         session_id,
@@ -16782,6 +18059,7 @@ async fn stream_pages_with_ack(
         tx_id,
     } = context;
     let mut seq = 0_u64;
+    let mut outcome = StreamTerminal::default();
     while let Some(page) = rows.recv().await {
         sessions.cursor_page_received(cursor_id);
         let page_bytes = serde_json::to_vec(&page)
@@ -16804,6 +18082,7 @@ async fn stream_pages_with_ack(
             let Some(paced) = paced else {
                 let _ = sessions.cancel(session_id, connection, cursor_id).await;
                 sessions.cursor_remove(cursor_id);
+                outcome.cancelled = true;
                 break;
             };
             if let Err(retry_after_secs) = paced {
@@ -16822,6 +18101,7 @@ async fn stream_pages_with_ack(
                 send_rate_limited(sender, None, retry_after_secs).await?;
                 let _ = sessions.cancel(session_id, connection, cursor_id).await;
                 sessions.cursor_remove(cursor_id);
+                outcome.cancelled = true;
                 break;
             }
         }
@@ -16829,6 +18109,16 @@ async fn stream_pages_with_ack(
             if let Some(tx_id) = tx_id {
                 sessions.mark_transaction_failed(session_id, tx_id);
             }
+        }
+        match &page {
+            sift_protocol::Page::Done { affected_rows, .. } => {
+                outcome.affected_rows = *affected_rows;
+            }
+            sift_protocol::Page::Error { error } => {
+                outcome.failed = true;
+                outcome.result_code = Some(error.code.to_string());
+            }
+            _ => {}
         }
         let terminal = matches!(
             &page,
@@ -16867,12 +18157,13 @@ async fn stream_pages_with_ack(
             }
             AckOutcome::Cancelled => {
                 sessions.cursor_remove(cursor_id);
+                outcome.cancelled = true;
                 break;
             }
         }
         seq += 1;
     }
-    Ok(())
+    Ok(outcome)
 }
 
 struct WsPageContext<'a> {

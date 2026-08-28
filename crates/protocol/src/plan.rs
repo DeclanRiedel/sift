@@ -112,6 +112,8 @@ pub struct CaptureSemanticPlanRequest {
     pub params: Vec<Value>,
     #[serde(default)]
     pub include_raw_response: bool,
+    #[serde(default)]
+    pub source: Option<crate::VersionedExecutionContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -139,6 +141,8 @@ pub struct PlanCapture {
     pub revision: u64,
     #[serde(default)]
     pub raw_response: Option<String>,
+    #[serde(default)]
+    pub source: Option<crate::VersionedExecutionContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -162,6 +166,8 @@ pub struct PlanCaptureSummary {
     pub root_operator: String,
     pub complete: bool,
     pub revision: u64,
+    #[serde(default)]
+    pub source: Option<crate::VersionedExecutionContext>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]

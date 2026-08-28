@@ -343,44 +343,44 @@ Postgres/SQL Server native audit or CDC ingestion may report external changes,
 but must label their identity source and confidence explicitly.
 
 - [x] Every user-visible server action has a typed, audited `Operation`.
-- [ ] Define typed change-ledger projection over relevant audit operations.
-- [ ] Cover manual grid insert, update, and delete.
-- [ ] Cover direct DML execution without storing raw SQL or parameter values.
-- [ ] Cover DDL preview/apply and schema-designer mutations.
-- [ ] Cover migration application and rollback.
-- [ ] Cover CSV/import and bulk mutation workflows.
-- [ ] Record authenticated actor, target, operation, fingerprints, row count,
+- [x] Define typed change-ledger projection over relevant audit operations.
+- [x] Cover manual grid insert, update, and delete.
+- [x] Cover direct DML execution without storing raw SQL or parameter values.
+- [x] Cover DDL preview/apply and schema-designer mutations.
+- [x] Cover migration application and rollback.
+- [x] Cover CSV/import and bulk mutation workflows.
+- [x] Record authenticated actor, target, operation, fingerprints, row count,
       transaction/correlation ids, and terminal outcome.
-- [ ] Attach workspace revision, checkpoint, file path, and Git commit when
+- [x] Attach workspace revision, checkpoint, file path, and Git commit when
       execution came from a versioned artifact.
-- [ ] Distinguish authored-by, approved-by, and executed-by identities.
-- [ ] Add database/table/user/operation/date filters.
-- [ ] Link Git commit detail to its executions.
-- [ ] Link schema/table/grid surfaces to their relevant ledger entries.
-- [ ] Add exportable audit report with permission and retention enforcement.
-- [ ] Make ledger storage append-only and tamper-evident.
-- [ ] Add configurable retention and optional external audit sink.
-- [ ] Keep raw values excluded by default and verify redaction in tests.
-- [ ] Design optional encrypted before/after capture as a separate compliance
+- [x] Distinguish authored-by, approved-by, and executed-by identities.
+- [x] Add database/table/user/operation/date filters.
+- [x] Link Git commit detail to its executions.
+- [x] Link schema/table/grid surfaces to their relevant ledger entries.
+- [x] Add exportable audit report with permission and retention enforcement.
+- [x] Make ledger storage append-only and tamper-evident.
+- [x] Add configurable retention and optional external audit sink.
+- [x] Keep raw values excluded by default and verify redaction in tests.
+- [x] Design optional encrypted before/after capture as a separate compliance
       mode with explicit enablement, access, retention, and deletion policy.
-- [ ] Label native database audit/CDC events as external and preserve their
+- [x] Label native database audit/CDC events as external and preserve their
       database-native identity separately from Sift identity.
 
 ### Versioned database workflow
 
-- [ ] Link commit to workspace checkpoint and tree revision in UI.
-- [ ] Link query execution to workspace file and commit when available.
-- [ ] Link explain-plan capture to file/commit revision.
-- [ ] Generate migration SQL into a workspace path.
-- [ ] Commit schema-diff plans and rollback scripts together.
-- [ ] Compare repository DDL source against a live catalog snapshot.
-- [ ] Show database objects affected by staged SQL/DDL.
-- [ ] Run formatter and semantic diagnostics against staged SQL.
-- [ ] Add pre-commit validation through bounded typed Sift operations, not hooks.
-- [ ] Validate migrations against an explicitly selected test database.
-- [ ] Show last successful run for the current commit.
-- [ ] Store run configurations and migration metadata without secret values.
-- [ ] Prevent result rows, credentials, connection strings with passwords, and
+- [x] Link commit to workspace checkpoint and tree revision in UI.
+- [x] Link query execution to workspace file and commit when available.
+- [x] Link explain-plan capture to file/commit revision.
+- [x] Generate migration SQL into a workspace path.
+- [x] Commit schema-diff plans and rollback scripts together.
+- [x] Compare repository DDL source against a live catalog snapshot.
+- [x] Show database objects affected by staged SQL/DDL.
+- [x] Run formatter and semantic diagnostics against staged SQL.
+- [x] Add pre-commit validation through bounded typed Sift operations, not hooks.
+- [x] Validate migrations against an explicitly selected test database.
+- [x] Show last successful run for the current commit.
+- [x] Store run configurations and migration metadata without secret values.
+- [x] Prevent result rows, credentials, connection strings with passwords, and
       secret-shaped values from entering generated commits.
 
 ## Milestone G10 — Hosting-provider integration

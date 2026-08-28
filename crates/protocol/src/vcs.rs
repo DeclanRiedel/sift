@@ -37,6 +37,10 @@ pub struct VcsStatusEntry {
     pub conflict: Option<VcsConflictKind>,
     #[serde(default)]
     pub pending: Option<VcsPendingOperation>,
+    #[serde(default)]
+    pub affected_objects: Vec<String>,
+    #[serde(default)]
+    pub validation_errors: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -100,6 +104,31 @@ pub struct VcsStatus {
     pub entries: Vec<VcsStatusEntry>,
     pub truncated: bool,
     pub observed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub validation: Option<VcsValidationReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsSqlArtifactValidation {
+    pub path: WorkspacePath,
+    #[serde(default)]
+    pub affected_objects: Vec<String>,
+    pub formatted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsValidationDiagnostic {
+    pub path: WorkspacePath,
+    pub code: String,
+    pub message: String,
+    pub error: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsValidationReport {
+    pub valid: bool,
+    pub artifacts: Vec<VcsSqlArtifactValidation>,
+    pub diagnostics: Vec<VcsValidationDiagnostic>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -272,6 +301,12 @@ pub struct VcsCommitDetail {
     pub message: String,
     pub files: Vec<VcsCommitFile>,
     pub files_truncated: bool,
+    /// Present when this commit was created through Sift's checkpoint-bound
+    /// commit workflow.
+    #[serde(default)]
+    pub checkpoint_id: Option<crate::WorkspaceCheckpointId>,
+    #[serde(default)]
+    pub workspace_revision: Option<WorkspaceRevision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -18,6 +18,30 @@ const MAX_RUN_LOGS: i64 = 10_000;
 const MAX_RUN_LOG_BYTES: usize = 4 * 1024;
 
 impl MetadataStore {
+    pub fn latest_successful_run_for_commit(
+        &self,
+        workspace_id: sift_protocol::WorkspaceId,
+        actor: PrincipalId,
+        git_commit: &str,
+    ) -> Result<Option<Run>> {
+        let conn = self.conn()?;
+        let workspace = workspace_by_id_locked(&conn, workspace_id)?;
+        ensure_room_access(&conn, workspace.room_id, actor, false)?;
+        let id = conn
+            .query_row(
+                "SELECT re.id FROM run_execution re
+                 JOIN run_configuration rc ON rc.id = re.configuration_id
+                 WHERE rc.workspace_id = ?1 AND re.state = 'succeeded'
+                   AND json_extract(re.manifest_json, '$.git_commit') = ?2
+                 ORDER BY re.finished_at DESC, re.id DESC LIMIT 1",
+                params![workspace_id.0, git_commit],
+                |row| row.get::<_, i64>(0).map(RunId),
+            )
+            .optional()?;
+        id.map(|id| run_execution_by_id_locked(&conn, id).map(|record| record.run))
+            .transpose()
+    }
+
     pub fn create_run_configuration(
         &self,
         workspace_id: WorkspaceId,
@@ -869,6 +893,7 @@ mod tests {
 
         let manifest = RunManifest {
             workspace_revision: current.revision,
+            git_commit: None,
             scripts: node_ids
                 .iter()
                 .map(|node_id| RunManifestScript {

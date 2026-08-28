@@ -147,6 +147,7 @@ async fn retained_query_comparison_is_revision_bound_paged_and_audited() {
                 room_id: None,
                 connection_profile_id: None,
                 transform: None,
+                source: None,
             },
         )
     };
@@ -378,6 +379,7 @@ async fn live_table_comparison_prepares_parameterized_optimistic_patch() {
                     room_id: None,
                     connection_profile_id: None,
                     transform: None,
+                    source: None,
                 },
             ))
             .await

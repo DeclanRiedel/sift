@@ -11,6 +11,37 @@ use crate::{
 const VCS_CREDENTIAL_NAMESPACE: &str = "vcs-credential";
 
 impl MetadataStore {
+    pub fn repository_commit_provenance(
+        &self,
+        id: RepositoryBindingId,
+        actor: PrincipalId,
+        oid: &str,
+    ) -> Result<
+        Option<(
+            sift_protocol::WorkspaceCheckpointId,
+            sift_protocol::WorkspaceRevision,
+        )>,
+    > {
+        validate_oid(Some(oid))?;
+        let conn = self.conn()?;
+        let binding = repository_binding_by_id_locked(&conn, id)?;
+        let workspace = workspace_by_id_locked(&conn, binding.binding.workspace_id)?;
+        ensure_room_access(&conn, workspace.room_id, actor, false)?;
+        conn.query_row(
+            "SELECT checkpoint_id, workspace_revision FROM repository_commit
+             WHERE binding_id = ?1 AND commit_oid = ?2",
+            params![id.0, oid],
+            |row| {
+                Ok((
+                    sift_protocol::WorkspaceCheckpointId(row.get(0)?),
+                    sift_protocol::WorkspaceRevision(row.get(1)?),
+                ))
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn repository_commit_for_checkpoint(
         &self,
         id: RepositoryBindingId,

@@ -107,6 +107,29 @@ pub struct ApplyMigrationRequest {
     pub plan_digest: String,
     #[serde(default)]
     pub acknowledgements: Vec<SchemaChangeRisk>,
+    /// Optional server-validated workspace artifact that contains this plan.
+    #[serde(default)]
+    pub source: Option<crate::VersionedExecutionContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateMigrationRequest {
+    pub plan_id: MigrationPlanId,
+    pub plan_digest: String,
+    /// Deliberate acknowledgement that the selected connection is a test
+    /// target. Validation never falls back to a production connection.
+    pub confirm_test_database: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationValidation {
+    pub plan_id: MigrationPlanId,
+    pub valid: bool,
+    pub rolled_back: bool,
+    #[serde(default)]
+    pub outcomes: Vec<MigrationStatementOutcome>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

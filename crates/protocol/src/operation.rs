@@ -85,6 +85,7 @@ pub enum VcsAction {
     Bind,
     Unbind,
     Status,
+    Validate,
     Diff,
     Branches,
     History,
@@ -313,6 +314,11 @@ pub enum Operation {
         connection: ConnectionId,
         selected_change_count: u32,
         expected_live_revision: crate::CatalogRevision,
+    },
+    ValidateMigration {
+        session: SessionId,
+        connection: ConnectionId,
+        plan_id: crate::MigrationPlanId,
     },
     ApplyMigration {
         session: SessionId,
@@ -669,6 +675,7 @@ impl Operation {
             Self::DeleteCatalogSnapshot { .. } => OperationKind::DeleteCatalogSnapshot,
             Self::CompareCatalogSchemas { .. } => OperationKind::CompareCatalogSchemas,
             Self::PreviewMigration { .. } => OperationKind::PreviewMigration,
+            Self::ValidateMigration { .. } => OperationKind::PreviewMigration,
             Self::ApplyMigration { .. } => OperationKind::ApplyMigration,
             Self::CancelMigration { .. } => OperationKind::CancelMigration,
             Self::GetMigrationRun { .. } => OperationKind::GetMigrationRun,
@@ -739,6 +746,7 @@ impl Operation {
             },
             Self::Vcs { action, .. } => match action {
                 VcsAction::Status
+                | VcsAction::Validate
                 | VcsAction::Diff
                 | VcsAction::Branches
                 | VcsAction::History
@@ -952,6 +960,9 @@ impl Operation {
             }
             Operation::PreviewMigration { connection, .. } => {
                 summary("preview", "migration", Some(connection.0 as i64))
+            }
+            Operation::ValidateMigration { connection, .. } => {
+                summary("validate", "migration", Some(connection.0 as i64))
             }
             Operation::ApplyMigration { connection, .. } => {
                 summary("apply", "migration", Some(connection.0 as i64))
@@ -1218,6 +1229,7 @@ single_word_audit_names!(VcsAction {
     Bind => "bind",
     Unbind => "unbind",
     Status => "status",
+    Validate => "validate",
     Diff => "diff",
     Branches => "branches",
     History => "history",
