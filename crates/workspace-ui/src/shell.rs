@@ -25739,7 +25739,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn schema_search_filters_requests_and_column_hits_by_object_family(cx: &mut TestAppContext) {
+    fn tables_only_schema_search_excludes_every_other_object_family(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -25754,7 +25754,8 @@ mod tests {
         while receiver.try_recv().is_ok() {}
 
         workspace.update(&mut cx, |shell, cx| {
-            shell.toggle_schema_search_filter(ObjectGroupKind::Tables, cx);
+            shell.schema_search_filters = HashSet::from([ObjectGroupKind::Tables]);
+            shell.request_schema_search(cx);
         });
         let request = loop {
             let command = receiver.try_recv().expect("filtered schema search command");
@@ -25763,9 +25764,11 @@ mod tests {
             }
         };
         let kinds = request.kinds.expect("selected object kinds");
-        assert!(!kinds.contains(&sift_protocol::ObjectKind::Table));
-        assert!(kinds.contains(&sift_protocol::ObjectKind::View));
-        assert!(kinds.contains(&sift_protocol::ObjectKind::ScalarFunction));
+        assert!(kinds.contains(&sift_protocol::ObjectKind::Table));
+        assert!(kinds.contains(&sift_protocol::ObjectKind::ForeignTable));
+        assert!(kinds.contains(&sift_protocol::ObjectKind::PartitionedTable));
+        assert!(!kinds.contains(&sift_protocol::ObjectKind::View));
+        assert!(!kinds.contains(&sift_protocol::ObjectKind::ScalarFunction));
 
         workspace.update(&mut cx, |shell, _| {
             shell.schema_search_state = SchemaSearchState::Ready {
@@ -25810,7 +25813,7 @@ mod tests {
             };
             let hits = shell.schema_palette_hits();
             assert_eq!(hits.len(), 1);
-            assert_eq!(hits[0].display, "public.people_view");
+            assert_eq!(hits[0].display, "public.people.name");
         });
     }
 
