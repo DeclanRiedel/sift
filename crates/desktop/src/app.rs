@@ -556,6 +556,8 @@ async fn run_query_executor(
         HashMap::new();
     let mut active_exports: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
     let mut notification_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut repository_history_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut repository_diff_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
@@ -574,6 +576,12 @@ async fn run_query_executor(
                 cancel_active_queries(&mut active_queries);
                 active_exports.clear();
                 if let Some(task) = notification_task.take() {
+                    task.abort();
+                }
+                if let Some(task) = repository_history_task.take() {
+                    task.abort();
+                }
+                if let Some(task) = repository_diff_task.take() {
                     task.abort();
                 }
                 if let Some(previous) = context.take() {
@@ -1767,35 +1775,38 @@ async fn run_query_executor(
             ExecutorCommand::LoadRepositoryHistory {
                 workspace_id,
                 binding_id,
+                request_id,
                 cursor,
                 query,
                 append,
             } => {
                 let server = targets.borrow().clone();
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .repository_history(
-                            sift_protocol::RepositoryBindingId(binding_id),
-                            sift_api_types::VcsHistoryQuery {
-                                cursor,
-                                limit: 80,
-                                query,
-                            },
-                        )
-                        .await
-                        .map_err(|error| format!("loading repository history failed: {error}")),
-                    Err(error) => Err(error),
-                };
-                if events
-                    .send(ExecutorEvent::RepositoryHistoryLoaded {
+                if let Some(task) = repository_history_task.take() {
+                    task.abort();
+                }
+                let events = events.clone();
+                repository_history_task = Some(tokio::spawn(async move {
+                    let result = match server.client().await {
+                        Ok(client) => client
+                            .repository_history(
+                                sift_protocol::RepositoryBindingId(binding_id),
+                                sift_api_types::VcsHistoryQuery {
+                                    cursor,
+                                    limit: 80,
+                                    query,
+                                },
+                            )
+                            .await
+                            .map_err(|error| format!("loading repository history failed: {error}")),
+                        Err(error) => Err(error),
+                    };
+                    let _ = events.send(ExecutorEvent::RepositoryHistoryLoaded {
                         workspace_id,
+                        request_id,
                         append,
                         result,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
+                    });
+                }));
             }
             ExecutorCommand::LoadRepositoryCommit {
                 workspace_id,
@@ -2723,31 +2734,32 @@ async fn run_query_executor(
                 path,
             } => {
                 let server = targets.borrow().clone();
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .repository_diff(
-                            sift_protocol::RepositoryBindingId(binding_id),
-                            VcsDiffQuery {
-                                side,
-                                path: path.clone(),
-                            },
-                        )
-                        .await
-                        .map_err(|error| format!("loading repository diff failed: {error}")),
-                    Err(error) => Err(error),
-                };
-                if events
-                    .send(ExecutorEvent::RepositoryDiffLoaded {
+                if let Some(task) = repository_diff_task.take() {
+                    task.abort();
+                }
+                let events = events.clone();
+                repository_diff_task = Some(tokio::spawn(async move {
+                    let result = match server.client().await {
+                        Ok(client) => client
+                            .repository_diff(
+                                sift_protocol::RepositoryBindingId(binding_id),
+                                VcsDiffQuery {
+                                    side,
+                                    path: path.clone(),
+                                },
+                            )
+                            .await
+                            .map_err(|error| format!("loading repository diff failed: {error}")),
+                        Err(error) => Err(error),
+                    };
+                    let _ = events.send(ExecutorEvent::RepositoryDiffLoaded {
                         workspace_id,
                         request_id,
                         side,
                         path,
                         result,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
+                    });
+                }));
             }
             ExecutorCommand::SetRepositoryHunkStaged {
                 workspace_id,

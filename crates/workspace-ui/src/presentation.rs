@@ -5,6 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::settings::{
+    RepositoryGrouping, RepositoryPrimaryAction, RepositorySort, RepositoryView,
+};
+
 const PRESENTATION_VERSION: u32 = 1;
 const MIN_WINDOW_WIDTH: f32 = 720.0;
 const MIN_WINDOW_HEIGHT: f32 = 480.0;
@@ -227,6 +231,40 @@ pub struct WorkspacePresentation {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepositoryWorkspacePresentation {
+    pub panel_size: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_diff_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_diff_side: Option<sift_protocol::VcsDiffSide>,
+    #[serde(default)]
+    pub grouping: RepositoryGrouping,
+    #[serde(default)]
+    pub sort: RepositorySort,
+    #[serde(default)]
+    pub view: RepositoryView,
+    #[serde(default)]
+    pub primary_action: RepositoryPrimaryAction,
+}
+
+impl Default for RepositoryWorkspacePresentation {
+    fn default() -> Self {
+        Self {
+            panel_size: 232.0,
+            selected_path: None,
+            selected_diff_path: None,
+            selected_diff_side: None,
+            grouping: RepositoryGrouping::default(),
+            sort: RepositorySort::default(),
+            view: RepositoryView::default(),
+            primary_action: RepositoryPrimaryAction::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PresentationState {
     pub version: u32,
     pub dark_theme: bool,
@@ -244,6 +282,10 @@ pub struct PresentationState {
     /// workspace projection or repository file.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub repository_commit_drafts: HashMap<i64, String>,
+    /// Per-workspace source-control UI state. Contains paths and preferences,
+    /// never repository contents or credentials.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub repository_workspaces: HashMap<i64, RepositoryWorkspacePresentation>,
 }
 
 impl Default for PresentationState {
@@ -296,6 +338,7 @@ impl Default for PresentationState {
             },
             instance_workspaces: HashMap::new(),
             repository_commit_drafts: HashMap::new(),
+            repository_workspaces: HashMap::new(),
         }
     }
 }
@@ -591,5 +634,26 @@ mod tests {
         store.save(&state).unwrap();
         assert_eq!(store.load(), state);
         assert!(!store.path().with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn repository_workspace_state_round_trips_without_content_or_credentials() {
+        let mut state = PresentationState::default();
+        state.repository_workspaces.insert(
+            7,
+            RepositoryWorkspacePresentation {
+                panel_size: 318.0,
+                selected_path: Some("queries/report.sql".into()),
+                selected_diff_path: Some("queries/report.sql".into()),
+                selected_diff_side: Some(sift_protocol::VcsDiffSide::IndexToWorktree),
+                grouping: RepositoryGrouping::FileState,
+                sort: RepositorySort::FileName,
+                view: RepositoryView::Tree,
+                primary_action: RepositoryPrimaryAction::OpenDiff,
+            },
+        );
+        let encoded = state.encode().unwrap();
+        assert!(!String::from_utf8_lossy(&encoded).contains("credential"));
+        assert_eq!(PresentationState::decode(&encoded), state);
     }
 }

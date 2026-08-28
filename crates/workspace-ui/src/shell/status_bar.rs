@@ -169,6 +169,23 @@ pub(super) fn render_status_bar(
                         cx.listener(|shell, _, _, cx| shell.select_left_panel(LeftPanel::Git, cx)),
                     ),
                 )
+                .children(shell.repository.status().map(|status| {
+                    let branch = status.branch.as_deref().unwrap_or("detached");
+                    let changed = status.entries.len();
+                    div()
+                        .id("footer-git-branch")
+                        .debug_selector(|| "footer-git-branch".into())
+                        .aria_label(format!("Git branch {branch}, {changed} changed path(s)"))
+                        .max_w(px(180.))
+                        .truncate()
+                        .font_family("monospace")
+                        .text_color(if changed == 0 {
+                            colors.muted_text
+                        } else {
+                            colors.accent
+                        })
+                        .child(format!("{branch} · {changed}"))
+                }))
                 .child(
                     button(
                         "footer-collaboration",

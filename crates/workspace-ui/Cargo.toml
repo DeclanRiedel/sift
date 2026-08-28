@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+benchmark = []
+
 [dependencies]
 csv = { workspace = true }
 gpui = { workspace = true }
@@ -32,3 +35,4 @@ tempfile = { workspace = true }
 [[bench]]
 name = "frame_budget"
 harness = false
+required-features = ["benchmark"]

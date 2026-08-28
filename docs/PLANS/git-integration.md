@@ -399,22 +399,22 @@ but must label their identity source and confidence explicitly.
 
 ## Milestone G11 — Performance and polish
 
-- [ ] Measure status latency for 1k, 10k, and 100k-path repositories.
-- [ ] Measure first Git-panel frame and steady-state refresh cost.
-- [ ] Keep status/history panel rows virtualized.
-- [ ] Avoid repository scans during editor typing and cursor blink.
-- [ ] Coalesce filesystem events and repository refreshes.
-- [ ] Cancel stale diff/history requests.
-- [ ] Cache unchanged diff metadata by HEAD/index/worktree identity.
-- [ ] Keep binary and huge-file work bounded.
-- [ ] Preserve focus and selection through refresh.
-- [ ] Add app-bar/status-bar branch indicator and changed-count badge.
-- [ ] Add notifications for commit/fetch/push/conflict outcomes.
-- [ ] Add command-palette entries for every Git action.
-- [ ] Add Vim navigation for panel rows, files, hunks, history, and pickers.
-- [ ] Add context menus without making them the only action path.
-- [ ] Persist panel size, selected row, selected diff, and view mode per workspace.
-- [ ] Add accessible names, disabled reasons, and keyboard focus coverage.
+- [x] Measure status latency for 1k, 10k, and 100k-path repositories.
+- [x] Measure first Git-panel frame and steady-state refresh cost.
+- [x] Keep status/history panel rows virtualized.
+- [x] Avoid repository scans during editor typing and cursor blink.
+- [x] Coalesce filesystem events and repository refreshes.
+- [x] Cancel stale diff/history requests.
+- [x] Cache unchanged diff metadata by HEAD/index/worktree identity.
+- [x] Keep binary and huge-file work bounded.
+- [x] Preserve focus and selection through refresh.
+- [x] Add app-bar/status-bar branch indicator and changed-count badge.
+- [x] Add notifications for commit/fetch/push/conflict outcomes.
+- [x] Add command-palette entries for every Git action.
+- [x] Add Vim navigation for panel rows, files, hunks, history, and pickers.
+- [x] Add context menus without making them the only action path.
+- [x] Persist panel size, selected row, selected diff, and view mode per workspace.
+- [x] Add accessible names, disabled reasons, and keyboard focus coverage.
 
 ## Milestone G12 — Operations, compatibility, and graduation
 

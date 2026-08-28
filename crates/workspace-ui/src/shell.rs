@@ -38,7 +38,8 @@ use crate::workspace::{
 use crate::presentation::{
     BottomTool, DatabaseObjectSource, ItemKind, ItemPresentation, ItemSource, LeftPanel, PaneAxis,
     PaneLayoutPresentation, PanePresentation, PresentationState, PresentationStore,
-    ResultReference, RoomDocumentSource, WindowPresentation, WorkspacePresentation,
+    RepositoryWorkspacePresentation, ResultReference, RoomDocumentSource, WindowPresentation,
+    WorkspacePresentation,
 };
 use crate::{
     ConnectionNavEntry, DocumentNavEntry, LifecycleEvent, LifecycleProjection, PresenceEvent,
@@ -465,6 +466,7 @@ enum ObjectGroupKind {
 enum WorkspaceSurface {
     Editor,
     Connections,
+    Git,
     Inspector,
     Results,
     Problems,
@@ -1833,6 +1835,7 @@ pub enum ExecutorCommand {
     LoadRepositoryHistory {
         workspace_id: i64,
         binding_id: i64,
+        request_id: u64,
         cursor: Option<String>,
         query: Option<String>,
         append: bool,
@@ -2303,6 +2306,7 @@ pub enum ExecutorEvent {
     },
     RepositoryHistoryLoaded {
         workspace_id: i64,
+        request_id: u64,
         append: bool,
         result: Result<sift_protocol::VcsHistoryPage, String>,
     },
@@ -5105,6 +5109,7 @@ fn project_diff_text(side: sift_protocol::VcsDiffSide, diff: &sift_protocol::Vcs
 pub struct WorkspaceShell {
     focus_handle: FocusHandle,
     connections_focus_handle: FocusHandle,
+    repository_focus_handle: FocusHandle,
     inspector_focus_handle: FocusHandle,
     connections_scroll_handle: UniformListScrollHandle,
     query_input: Entity<TextInput>,
@@ -5123,6 +5128,7 @@ pub struct WorkspaceShell {
     repository_remote_selected: Option<String>,
     workspace_path_input: Entity<TextInput>,
     repository_commit_drafts: HashMap<i64, String>,
+    repository_workspaces: HashMap<i64, RepositoryWorkspacePresentation>,
     recent_repository_commit: Option<sift_protocol::VcsCommitResult>,
     repository_recovery_notice: Option<String>,
     /// Legacy modal slot retained while result-edit review shares the modal
@@ -5191,6 +5197,9 @@ pub struct WorkspaceShell {
     inspector_g_pending: bool,
     connection_nav_selected: usize,
     connection_nav_g_pending: bool,
+    repository_nav_g_pending: bool,
+    repository_modal_selected: usize,
+    repository_modal_g_pending: bool,
     connection_row_menu: Option<i64>,
     repository_row_menu: Option<sift_protocol::WorkspacePath>,
     manual_conflict_path: Option<sift_protocol::WorkspacePath>,
@@ -5217,6 +5226,7 @@ pub struct WorkspaceShell {
     workspace_files_scroll_handle: UniformListScrollHandle,
     repository_scroll_handle: UniformListScrollHandle,
     repository_diff_items: HashMap<u64, RepositoryDiffItemState>,
+    pending_repository_diff: Option<(sift_protocol::WorkspacePath, sift_protocol::VcsDiffSide)>,
     change_ledger_filter: sift_protocol::ChangeLedgerFilter,
     change_ledger_entries: Vec<sift_protocol::ChangeLedgerEntry>,
     change_ledger_next_before_id: Option<i64>,
@@ -5407,7 +5417,7 @@ impl WorkspaceSession {
 impl WorkspaceShell {
     pub fn new(
         state: PresentationState,
-        settings: UserSettings,
+        mut settings: UserSettings,
         store: Option<Arc<PresentationStore>>,
         settings_store: Option<Arc<SettingsStore>>,
         window: &mut Window,
@@ -5415,6 +5425,7 @@ impl WorkspaceShell {
     ) -> Self {
         let window_presentation = state.window.clone();
         let repository_commit_drafts = state.repository_commit_drafts.clone();
+        let repository_workspaces = state.repository_workspaces.clone();
         let vim_mode_default = settings.editor.default_mode == EditorMode::Vim;
         // Install the process-wide theme first so every child entity reads the
         // same palette through `ActiveTheme` during construction and render.
@@ -5597,6 +5608,7 @@ impl WorkspaceShell {
         // Re-render the palette as the search text changes so its list filters.
         cx.observe(&query_input, |shell, _, cx| {
             shell.palette_selected = 0;
+            shell.repository_modal_selected = 0;
             shell
                 .palette_scroll_handle
                 .scroll_to_item(0, ScrollStrategy::Top);
@@ -5692,14 +5704,34 @@ impl WorkspaceShell {
         });
         let mut repository = RepositoryProjection::new(selected_workspace_id);
         let workspace_files = WorkspaceFilesProjection::new(selected_workspace_id);
+        let repository_presentation =
+            selected_workspace_id.and_then(|workspace_id| repository_workspaces.get(&workspace_id));
+        if let Some(state) = repository_presentation {
+            settings.repository.grouping = state.grouping;
+            settings.repository.sort = state.sort;
+            settings.repository.view = state.view;
+            settings.repository.primary_action = state.primary_action;
+        }
         repository.set_view_preferences(
-            settings.repository.grouping,
-            settings.repository.sort,
-            settings.repository.view,
+            repository_presentation.map_or(settings.repository.grouping, |state| state.grouping),
+            repository_presentation.map_or(settings.repository.sort, |state| state.sort),
+            repository_presentation.map_or(settings.repository.view, |state| state.view),
         );
+        repository.restore_selected_path(
+            repository_presentation
+                .and_then(|state| state.selected_path.as_deref())
+                .and_then(|path| sift_protocol::WorkspacePath::new(path).ok()),
+        );
+        let pending_repository_diff = repository_presentation.and_then(|state| {
+            Some((
+                sift_protocol::WorkspacePath::new(state.selected_diff_path.as_deref()?).ok()?,
+                state.selected_diff_side?,
+            ))
+        });
         Self {
             focus_handle: cx.focus_handle(),
             connections_focus_handle: cx.focus_handle(),
+            repository_focus_handle: cx.focus_handle(),
             inspector_focus_handle: cx.focus_handle(),
             connections_scroll_handle: UniformListScrollHandle::new(),
             query_input,
@@ -5718,6 +5750,7 @@ impl WorkspaceShell {
             repository_remote_selected: None,
             workspace_path_input,
             repository_commit_drafts,
+            repository_workspaces,
             recent_repository_commit: None,
             repository_recovery_notice: None,
             result_json_edit_editor: None,
@@ -5785,6 +5818,9 @@ impl WorkspaceShell {
             inspector_g_pending: false,
             connection_nav_selected: 0,
             connection_nav_g_pending: false,
+            repository_nav_g_pending: false,
+            repository_modal_selected: 0,
+            repository_modal_g_pending: false,
             connection_row_menu: None,
             repository_row_menu: None,
             manual_conflict_path: None,
@@ -5809,6 +5845,7 @@ impl WorkspaceShell {
             workspace_files_scroll_handle: UniformListScrollHandle::new(),
             repository_scroll_handle: UniformListScrollHandle::new(),
             repository_diff_items: HashMap::new(),
+            pending_repository_diff,
             change_ledger_filter: sift_protocol::ChangeLedgerFilter::default(),
             change_ledger_entries: Vec::new(),
             change_ledger_next_before_id: None,
@@ -6078,6 +6115,13 @@ impl WorkspaceShell {
             transaction_active: self.transaction.is_some(),
             transaction_pending: self.transaction_pending,
             transaction_aborted: self.transaction_aborted || self.transaction_error.is_some(),
+            git_workspace_loaded: self.repository.status().is_some(),
+            git_path_selected: self.repository.selected_entry().is_some(),
+            git_operation_active: self
+                .repository
+                .status()
+                .and_then(|status| status.operation.as_ref())
+                .is_some(),
         }
     }
 
@@ -7858,6 +7902,12 @@ impl WorkspaceShell {
                     .repository
                     .apply_status_result(workspace_id, request_id, result)
                 {
+                    if let Some((path, side)) = self.pending_repository_diff.take() {
+                        self.repository.select_path(path.clone());
+                        if self.repository.selected_path() == Some(&path) {
+                            self.request_repository_diff(path, side, cx);
+                        }
+                    }
                     self.request_automations(cx);
                     if self.repository.take_queued_refresh() {
                         self.request_repository_status(cx);
@@ -7987,6 +8037,7 @@ impl WorkspaceShell {
             } => {
                 if self.selected_workspace_id == Some(workspace_id) {
                     let succeeded = result.is_ok();
+                    let failure = result.as_ref().err().cloned();
                     self.repository.finish_network_operation(result.map(Some));
                     if succeeded {
                         self.show_success_toast(action.into(), cx);
@@ -7999,6 +8050,8 @@ impl WorkspaceShell {
                                 });
                             }
                         }
+                    } else if let Some(message) = failure {
+                        self.show_toast(format!("{action} failed: {message}"), cx);
                     }
                     cx.notify();
                 }
@@ -8014,11 +8067,14 @@ impl WorkspaceShell {
             }
             ExecutorEvent::RepositoryHistoryLoaded {
                 workspace_id,
+                request_id,
                 append,
                 result,
             } => {
-                if self.selected_workspace_id == Some(workspace_id) {
-                    self.repository.apply_history(result, append);
+                if self
+                    .repository
+                    .apply_history(workspace_id, request_id, result, append)
+                {
                     cx.notify();
                 }
             }
@@ -8114,7 +8170,10 @@ impl WorkspaceShell {
                             self.request_workspace_files(cx);
                             self.request_repository_status(cx);
                         }
-                        Err(message) => self.repository.set_error(message),
+                        Err(message) => {
+                            self.repository.set_error(message.clone());
+                            self.show_toast(format!("{action} failed: {message}"), cx);
+                        }
                     }
                     cx.notify();
                 }
@@ -8162,7 +8221,10 @@ impl WorkspaceShell {
             } => {
                 let (status_result, committed) = match result {
                     Ok((commit, status)) => (Ok(status), Some(commit)),
-                    Err(message) => (Err(message), None),
+                    Err(message) => {
+                        self.show_toast(format!("Commit failed: {message}"), cx);
+                        (Err(message), None)
+                    }
                 };
                 if self
                     .repository
@@ -13059,8 +13121,10 @@ impl WorkspaceShell {
             workspace_id,
             binding_id,
         });
+        self.repository_modal_selected = 0;
+        self.repository_modal_g_pending = false;
         self.modal = Some(Modal::RepositoryBranches);
-        self.query_input.read(cx).focus_handle(cx).focus(window, cx);
+        self.focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -13072,20 +13136,25 @@ impl WorkspaceShell {
             return;
         };
         let query = self.query_input.read(cx).text().trim().to_owned();
-        if !self.repository.begin_history_load(query.clone(), append) {
+        let Some(request_id) = self.repository.begin_history_load(query.clone(), append) else {
             return;
-        }
+        };
         let cursor = append
             .then(|| self.repository.history_cursor().map(str::to_owned))
             .flatten();
         let Some(sender) = &self.executor_sender else {
-            self.repository
-                .apply_history(Err("Repository history is unavailable".into()), append);
+            self.repository.apply_history(
+                workspace_id,
+                request_id,
+                Err("Repository history is unavailable".into()),
+                append,
+            );
             return;
         };
         let _ = sender.send(ExecutorCommand::LoadRepositoryHistory {
             workspace_id,
             binding_id,
+            request_id,
             cursor,
             query: (!query.is_empty()).then_some(query),
             append,
@@ -13097,8 +13166,134 @@ impl WorkspaceShell {
         self.query_input
             .update(cx, |input, cx| input.set_text("", cx));
         self.modal = Some(Modal::RepositoryHistory);
+        self.repository_modal_selected = 0;
+        self.repository_modal_g_pending = false;
         self.request_repository_history(false, cx);
-        self.query_input.read(cx).focus_handle(cx).focus(window, cx);
+        self.focus_handle.focus(window, cx);
+    }
+
+    fn mutate_active_repository_operation(&mut self, abort: bool, cx: &mut Context<Self>) {
+        let Some(status) = self.repository.status() else {
+            return;
+        };
+        let Some(operation) = status.operation.as_ref() else {
+            self.repository.set_error("No Git operation is in progress");
+            return;
+        };
+        if !abort
+            && (self.repository.conflict_count() > 0
+                || operation.kind == sift_protocol::VcsRepositoryOperationKind::Rebase)
+        {
+            self.repository.set_error(
+                "Resolve conflicts before continuing; rebase continuation is unsupported",
+            );
+            return;
+        }
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.repository.set_error("Source control is unavailable");
+            return;
+        };
+        let _ = sender.send(ExecutorCommand::MutateRepositoryOperation {
+            workspace_id,
+            binding_id: status.binding_id.0,
+            expected_revision: status.binding_revision,
+            kind: operation.kind,
+            abort,
+        });
+        cx.notify();
+    }
+
+    fn repair_repository_binding(&mut self, cx: &mut Context<Self>) {
+        let Some((binding_id, expected_revision)) = self.repository.repair_target() else {
+            self.repository
+                .set_error("No repository binding is available to repair");
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.repository.set_error("Source control is unavailable");
+            return;
+        };
+        let _ = sender.send(ExecutorCommand::RepairRepositoryBinding {
+            workspace_id,
+            binding_id,
+            expected_revision,
+        });
+        cx.notify();
+    }
+
+    fn repository_modal_row_count(&self, cx: &App) -> usize {
+        let query = self.query_input.read(cx).text().trim().to_lowercase();
+        match self.modal {
+            Some(Modal::RepositoryBranches) => self
+                .repository
+                .branches()
+                .iter()
+                .filter(|branch| query.is_empty() || branch.name.to_lowercase().contains(&query))
+                .count(),
+            Some(Modal::RepositoryHistory) => self.repository.history().len(),
+            _ => 0,
+        }
+    }
+
+    fn activate_repository_modal_row(&mut self, cx: &mut Context<Self>) {
+        let Some(status) = self.repository.status().cloned() else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        match self.modal {
+            Some(Modal::RepositoryBranches) => {
+                let query = self.query_input.read(cx).text().trim().to_lowercase();
+                let branch = self
+                    .repository
+                    .branches()
+                    .iter()
+                    .filter(|branch| {
+                        query.is_empty() || branch.name.to_lowercase().contains(&query)
+                    })
+                    .nth(self.repository_modal_selected)
+                    .cloned();
+                let Some(branch) = branch else { return };
+                if branch.current || branch.remote {
+                    return;
+                }
+                let checkpoint_changes = !status.entries.is_empty();
+                let _ = sender.send(ExecutorCommand::SwitchRepositoryBranch {
+                    workspace_id,
+                    binding_id: status.binding_id.0,
+                    expected_revision: status.binding_revision,
+                    target: branch.name,
+                    detached: false,
+                    checkpoint_changes,
+                });
+            }
+            Some(Modal::RepositoryHistory) => {
+                let Some(commit) = self
+                    .repository
+                    .history()
+                    .get(self.repository_modal_selected)
+                else {
+                    return;
+                };
+                let _ = sender.send(ExecutorCommand::LoadRepositoryCommit {
+                    workspace_id,
+                    binding_id: status.binding_id.0,
+                    oid: commit.oid.clone(),
+                });
+            }
+            _ => return,
+        }
+        cx.notify();
     }
 
     fn request_change_ledger(&mut self, append: bool, cx: &mut Context<Self>) {
@@ -13509,12 +13704,14 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn focus_source_control(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_source_control(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_left_panel = LeftPanel::Git;
+        self.focused_surface = WorkspaceSurface::Git;
         self.left_dock.presentation.open = true;
         self.request_repository_status(cx);
         self.request_workspace_files(cx);
         self.start_repository_fallback_refresh(cx);
+        self.repository_focus_handle.focus(window, cx);
         self.persist(cx);
         cx.notify();
     }
@@ -13643,8 +13840,21 @@ impl WorkspaceShell {
                 sift_protocol::VcsDiffSide::IndexToWorktree
             }
         };
+        self.request_repository_diff(entry.path, side, cx);
+    }
+
+    fn request_repository_diff(
+        &mut self,
+        requested_path: sift_protocol::WorkspacePath,
+        side: sift_protocol::VcsDiffSide,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(diff) = self.repository.cached_diff(side, Some(&requested_path)) {
+            self.open_repository_diff_tab(&requested_path, side, diff, cx);
+            return;
+        }
         let Some((workspace_id, binding_id, request_id, side, path)) =
-            self.repository.begin_diff(side, Some(entry.path))
+            self.repository.begin_diff(side, Some(requested_path))
         else {
             return;
         };
@@ -13682,6 +13892,10 @@ impl WorkspaceShell {
 
     fn request_project_diff(&mut self, cx: &mut Context<Self>) {
         let side = sift_protocol::VcsDiffSide::HeadToWorktree;
+        if let Some(diff) = self.repository.cached_diff(side, None) {
+            self.open_project_diff_tab(side, &diff, cx);
+            return;
+        }
         let Some((workspace_id, binding_id, request_id, side, path)) =
             self.repository.begin_diff(side, None)
         else {
@@ -15097,7 +15311,25 @@ impl WorkspaceShell {
     }
 
     pub fn open_workspace(&mut self, workspace: &WorkspaceNavEntry, cx: &mut Context<Self>) {
+        if let Some(current) = self.selected_workspace_id {
+            let presentation = self.current_repository_presentation(cx);
+            self.repository_workspaces.insert(current, presentation);
+        }
         self.selected_workspace_id = Some(workspace.id);
+        if let Some(state) = self.repository_workspaces.get(&workspace.id).cloned() {
+            self.left_dock.presentation.size = state.panel_size;
+            self.settings.repository.grouping = state.grouping;
+            self.settings.repository.sort = state.sort;
+            self.settings.repository.view = state.view;
+            self.settings.repository.primary_action = state.primary_action;
+            self.pending_repository_diff = state
+                .selected_diff_path
+                .as_deref()
+                .and_then(|path| sift_protocol::WorkspacePath::new(path).ok())
+                .zip(state.selected_diff_side);
+        } else {
+            self.pending_repository_diff = None;
+        }
         let draft = self
             .repository_commit_drafts
             .get(&workspace.id)
@@ -15108,6 +15340,17 @@ impl WorkspaceShell {
         self.recent_repository_commit = None;
         self.repository_recovery_notice = None;
         self.repository.select_workspace(Some(workspace.id));
+        self.repository.set_view_preferences(
+            self.settings.repository.grouping,
+            self.settings.repository.sort,
+            self.settings.repository.view,
+        );
+        self.repository.restore_selected_path(
+            self.repository_workspaces
+                .get(&workspace.id)
+                .and_then(|state| state.selected_path.as_deref())
+                .and_then(|path| sift_protocol::WorkspacePath::new(path).ok()),
+        );
         self.workspace_files.select_workspace(Some(workspace.id));
         self.presence.join(RoomId(workspace.room_id));
         if self.left_dock.presentation.open && self.active_left_panel == LeftPanel::Git {
@@ -15180,6 +15423,51 @@ impl WorkspaceShell {
         }
     }
 
+    /// Headless renderer benchmark hook. Product code receives the same state
+    /// through `ExecutorEvent::RepositoryStatusLoaded`.
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
+    pub fn apply_repository_status_benchmark(
+        &mut self,
+        status: sift_protocol::VcsStatus,
+        cold: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if cold {
+            self.repository.select_workspace(None);
+        }
+        self.selected_workspace_id = Some(1);
+        self.repository.select_workspace(Some(1));
+        let (_, request_id) = self
+            .repository
+            .begin_refresh()
+            .expect("benchmark workspace must be selected");
+        let _ = self
+            .repository
+            .apply_status_result(1, request_id, Ok(Some(status)));
+        self.left_dock.presentation.open = true;
+        self.active_left_panel = LeftPanel::Git;
+        cx.notify();
+    }
+
+    fn current_repository_presentation(&self, cx: &App) -> RepositoryWorkspacePresentation {
+        let selected_diff = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            let item_id = pane.active_item()?.id;
+            self.repository_diff_items.get(&item_id)
+        });
+        RepositoryWorkspacePresentation {
+            panel_size: self.left_dock.presentation.size,
+            selected_path: self.repository.selected_path().map(|path| path.0.clone()),
+            selected_diff_path: selected_diff.map(|state| state.path.0.clone()),
+            selected_diff_side: selected_diff.map(|state| state.side),
+            grouping: self.settings.repository.grouping,
+            sort: self.settings.repository.sort,
+            view: self.settings.repository.view,
+            primary_action: self.settings.repository.primary_action,
+        }
+    }
+
     pub fn snapshot(&self, cx: &App) -> PresentationState {
         let mut instance_workspaces = self.workspace_presentations.clone();
         instance_workspaces.extend(
@@ -15192,6 +15480,10 @@ impl WorkspaceShell {
                     )
                 }),
         );
+        let mut repository_workspaces = self.repository_workspaces.clone();
+        if let Some(workspace_id) = self.selected_workspace_id {
+            repository_workspaces.insert(workspace_id, self.current_repository_presentation(cx));
+        }
         PresentationState {
             dark_theme: self.dark_theme,
             window: self.window_presentation.clone(),
@@ -15214,6 +15506,7 @@ impl WorkspaceShell {
             },
             instance_workspaces,
             repository_commit_drafts: self.repository_commit_drafts.clone(),
+            repository_workspaces,
             ..PresentationState::default()
         }
     }
@@ -16605,6 +16898,71 @@ impl WorkspaceShell {
             cx.stop_propagation();
             return;
         }
+        let repository_modal = matches!(
+            self.modal,
+            Some(Modal::RepositoryBranches | Modal::RepositoryHistory)
+        );
+        if repository_modal && !event.keystroke.modifiers.modified() {
+            let text_input_focused = event
+                .context_stack
+                .iter()
+                .any(|context| context.contains("SiftTextInput"));
+            if text_input_focused && key == "escape" {
+                self.focus_handle.focus(window, cx);
+                cx.stop_propagation();
+                return;
+            }
+            if !text_input_focused {
+                let row_count = self.repository_modal_row_count(cx);
+                let handled = match key.as_str() {
+                    "j" if row_count > 0 => {
+                        self.repository_modal_selected =
+                            (self.repository_modal_selected + 1).min(row_count - 1);
+                        true
+                    }
+                    "k" if row_count > 0 => {
+                        self.repository_modal_selected =
+                            self.repository_modal_selected.saturating_sub(1);
+                        true
+                    }
+                    "g" if self.repository_modal_g_pending => {
+                        self.repository_modal_g_pending = false;
+                        self.repository_modal_selected = 0;
+                        true
+                    }
+                    "g" => {
+                        self.repository_modal_g_pending = true;
+                        true
+                    }
+                    "shift-g" if row_count > 0 => {
+                        self.repository_modal_g_pending = false;
+                        self.repository_modal_selected = row_count - 1;
+                        true
+                    }
+                    "enter" if row_count > 0 => {
+                        self.activate_repository_modal_row(cx);
+                        true
+                    }
+                    "/" => {
+                        self.query_input.read(cx).focus_handle(cx).focus(window, cx);
+                        true
+                    }
+                    "escape" => {
+                        self.dismiss_modal(&DismissModal, window, cx);
+                        true
+                    }
+                    _ => {
+                        self.repository_modal_g_pending = false;
+                        false
+                    }
+                };
+                if handled {
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+            }
+        }
         if self.ide_input.is_none() {
             if !self.keyboard_profile().vim_enabled() {
                 return;
@@ -16793,6 +17151,92 @@ impl WorkspaceShell {
                     }
                     _ => {
                         self.connection_nav_g_pending = false;
+                        false
+                    }
+                };
+                if handled {
+                    cx.stop_propagation();
+                    return;
+                }
+            }
+            if workspace && !modal && !text_input && has_context("SiftGit") {
+                let handled = match key.as_str() {
+                    "j" => {
+                        self.navigate_repository_file(1, cx);
+                        true
+                    }
+                    "k" => {
+                        self.navigate_repository_file(-1, cx);
+                        true
+                    }
+                    "g" if self.repository_nav_g_pending => {
+                        self.repository_nav_g_pending = false;
+                        self.repository.select_edge(false);
+                        self.repository_scroll_handle
+                            .scroll_to_item(0, ScrollStrategy::Top);
+                        cx.notify();
+                        true
+                    }
+                    "g" => {
+                        self.repository_nav_g_pending = true;
+                        cx.notify();
+                        true
+                    }
+                    "shift-g" => {
+                        self.repository_nav_g_pending = false;
+                        self.repository.select_edge(true);
+                        if let Some(index) = self.repository.selected_row_index() {
+                            self.repository_scroll_handle
+                                .scroll_to_item(index, ScrollStrategy::Bottom);
+                        }
+                        cx.notify();
+                        true
+                    }
+                    "enter" => {
+                        self.repository_nav_g_pending = false;
+                        if let Some(path) = self.repository.selected_path().cloned() {
+                            self.activate_repository_path(path, window, cx);
+                        }
+                        true
+                    }
+                    "o" => {
+                        self.open_selected_repository_file(window, cx);
+                        true
+                    }
+                    "v" => {
+                        self.request_selected_repository_diff(cx);
+                        true
+                    }
+                    "s" => {
+                        self.set_selected_repository_path_staged(true, cx);
+                        true
+                    }
+                    "u" => {
+                        self.set_selected_repository_path_staged(false, cx);
+                        true
+                    }
+                    "d" => {
+                        if let Some(path) = self.repository.selected_path().cloned() {
+                            self.modal = Some(Modal::ConfirmRepositoryDiscard(path));
+                            cx.notify();
+                        }
+                        true
+                    }
+                    "r" => {
+                        self.request_repository_status(cx);
+                        true
+                    }
+                    "/" => {
+                        self.open_command_palette(&OpenCommandPalette, window, cx);
+                        true
+                    }
+                    "escape" => {
+                        self.repository_nav_g_pending = false;
+                        self.focus_active_pane(window, cx);
+                        true
+                    }
+                    _ => {
+                        self.repository_nav_g_pending = false;
                         false
                     }
                 };
@@ -19032,7 +19476,28 @@ impl WorkspaceShell {
             CommandId::StageDiffLines => self.set_active_repository_lines_staged(true, cx),
             CommandId::UnstageDiffLines => self.set_active_repository_lines_staged(false, cx),
             CommandId::RefreshRepository => self.request_repository_status(cx),
+            CommandId::OpenRepositorySetup => self.open_repository_setup(window, cx),
+            CommandId::OpenRepositoryBranches => self.open_repository_branches(window, cx),
+            CommandId::OpenRepositoryHistory => self.open_repository_history(window, cx),
+            CommandId::OpenRepositoryRemotes => self.open_repository_remotes(window, cx),
             CommandId::OpenRepositoryHosting => self.open_repository_hosting(window, cx),
+            CommandId::FetchRepository => self.run_repository_remote(false, cx),
+            CommandId::PushRepository => self.run_repository_remote(true, cx),
+            CommandId::ResolveRepositoryConflict => self.request_selected_repository_conflict(cx),
+            CommandId::DiscardRepositoryPath => {
+                if let Some(path) = self.repository.selected_path().cloned() {
+                    self.modal = Some(Modal::ConfirmRepositoryDiscard(path));
+                    cx.notify();
+                }
+            }
+            CommandId::CommitRepository => self.commit_repository(false, cx),
+            CommandId::ContinueRepositoryOperation => {
+                self.mutate_active_repository_operation(false, cx)
+            }
+            CommandId::AbortRepositoryOperation => {
+                self.mutate_active_repository_operation(true, cx)
+            }
+            CommandId::RepairRepositoryBinding => self.repair_repository_binding(cx),
             CommandId::StageRepositoryPath => self.set_selected_repository_path_staged(true, cx),
             CommandId::UnstageRepositoryPath => self.set_selected_repository_path_staged(false, cx),
             CommandId::StageAllTrackedRepositoryPaths => self.set_repository_paths_staged(
@@ -21935,6 +22400,11 @@ impl WorkspaceShell {
                     };
                 div()
                     .id(("repository-path", index))
+                    .role(Role::ListItem)
+                    .aria_label(format!(
+                        "{}: {:?}, {:?}",
+                        entry.path.0, entry.state, entry.stage
+                    ))
                     .mx_2()
                     .h(cx.theme().metrics.row_height)
                     .px_2()
@@ -22235,6 +22705,7 @@ impl WorkspaceShell {
         let keyboard_focused = matches!(
             (dock.id, self.focused_surface),
             (DockId::Left, WorkspaceSurface::Connections)
+                | (DockId::Left, WorkspaceSurface::Git)
                 | (DockId::Inspector, WorkspaceSurface::Inspector)
         );
         div()
@@ -22246,6 +22717,13 @@ impl WorkspaceShell {
                 |dock| {
                     dock.key_context("SiftConnections")
                         .track_focus(&self.connections_focus_handle)
+                },
+            )
+            .when(
+                dock.id == DockId::Left && self.active_left_panel == LeftPanel::Git,
+                |dock| {
+                    dock.key_context("SiftGit")
+                        .track_focus(&self.repository_focus_handle)
                 },
             )
             .when(dock.id == DockId::Inspector, |dock| {
@@ -22488,8 +22966,8 @@ impl WorkspaceShell {
                             status.entries.len()
                         )
                     });
-                    let stageable = self.repository.stageable_paths();
-                    let unstageable = self.repository.unstageable_paths();
+                    let has_stageable = self.repository.has_stageable_changes();
+                    let has_unstageable = self.repository.has_staged_changes();
                     let commit_message = self.repository_commit_input.read(cx).text().to_owned();
                     let subject_length = commit_message.lines().next().unwrap_or("").chars().count();
                     let subject_limit = self.settings.repository.commit_subject_limit.max(1);
@@ -23248,13 +23726,10 @@ impl WorkspaceShell {
                                             "Stage all (incl. untracked)",
                                         )
                                         .tone(ButtonTone::Ghost)
-                                        .disabled(self.repository.loading() || stageable.is_empty())
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.set_repository_paths_staged(
-                                                stageable.clone(),
-                                                true,
-                                                cx,
-                                            )
+                                        .disabled(self.repository.loading() || !has_stageable)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            let paths = shell.repository.stageable_paths();
+                                            shell.set_repository_paths_staged(paths, true, cx)
                                         })),
                                     )
                                     .child(
@@ -23264,14 +23739,11 @@ impl WorkspaceShell {
                                         )
                                         .tone(ButtonTone::Ghost)
                                         .disabled(
-                                            self.repository.loading() || unstageable.is_empty(),
+                                            self.repository.loading() || !has_unstageable,
                                         )
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.set_repository_paths_staged(
-                                                unstageable.clone(),
-                                                false,
-                                                cx,
-                                            )
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            let paths = shell.repository.unstageable_paths();
+                                            shell.set_repository_paths_staged(paths, false, cx)
                                         })),
                                     ),
                             )
@@ -27640,6 +28112,7 @@ impl WorkspaceShell {
                         .cloned()
                         .collect::<Vec<_>>();
                     let status = self.repository.status().cloned();
+                    let selected_index = self.repository_modal_selected;
                     let rows = filtered.into_iter().enumerate().map(|(index, branch)| {
                         let target = branch.name.clone();
                         let rename_name = branch.name.clone();
@@ -27654,8 +28127,11 @@ impl WorkspaceShell {
                             .is_some_and(|status| !status.entries.is_empty());
                         div()
                             .id(("repository-branch-row", index))
+                            .role(Role::ListItem)
+                            .aria_label(format!("Git branch {}", branch.name))
                             .px_2().py_2().flex().items_center().gap_2()
                             .border_b_1().border_color(colors.subtle_border)
+                            .when(index == selected_index, |row| row.bg(colors.active_surface))
                             .child(div().w(px(14.)).text_color(colors.accent).child(if current { "●" } else { "" }))
                             .child(div().flex_1().min_w_0().flex().flex_col()
                                 .child(div().truncate().child(branch.name))
@@ -27867,6 +28343,7 @@ impl WorkspaceShell {
                     let binding_id = self.repository.status().map(|status| status.binding_id.0);
                     let has_more = self.repository.history_cursor().is_some();
                     let loading = self.repository.history_loading();
+                    let selected_index = self.repository_modal_selected;
                     div().debug_selector(|| "repository-history-modal".into())
                         .w(px(780.)).h(px(620.)).flex().flex_col().gap_3()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Repository history"))
@@ -27881,7 +28358,8 @@ impl WorkspaceShell {
                                 let compare_selected = shell.repository.comparison_base() == Some(compare_oid.as_str());
                                 let short = commit.oid.chars().take(8).collect::<String>();
                                 let refs = commit.refs.join(", ");
-                                div().id(("repository-history-row", index)).h(px(50.)).px_2().flex().items_center().gap_2()
+                                div().id(("repository-history-row", index)).role(Role::ListItem).aria_label(format!("Commit {}: {}", commit.oid, commit.subject)).h(px(50.)).px_2().flex().items_center().gap_2()
+                                    .when(index == selected_index, |row| row.bg(colors.active_surface))
                                     .border_b_1().border_color(cx.theme().colors.subtle_border)
                                     .child(div().w(px(18.)).text_color(cx.theme().colors.accent).child("●"))
                                     .child(div().flex_1().min_w_0().flex().flex_col()
@@ -37293,6 +37771,55 @@ mod tests {
         );
         assert!(
             matches!(commands.try_recv(), Ok(ExecutorCommand::CreateHostingPullRequest { workspace_id: 7, binding_id: 9, expected_revision: 4, title, head_branch, base_branch }) if title == "Audit ledger" && head_branch == "feature/audit" && base_branch == "main")
+        );
+    }
+
+    #[gpui::test]
+    fn git_panel_vim_navigation_and_status_indicator_are_keyboard_accessible(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.repository.select_workspace(Some(7));
+            shell.selected_workspace_id = Some(7);
+            let (_, request_id) = shell.repository.begin_refresh().unwrap();
+            let status = serde_json::from_value(serde_json::json!({
+                "binding_id": 9,
+                "workspace_revision": 3,
+                "binding_revision": 4,
+                "head_oid": "0123456789abcdef0123456789abcdef01234567",
+                "branch": "feature/performance",
+                "upstream": null,
+                "entries": [
+                    {"path":"a.sql","previous_path":null,"state":"modified","stage":"unstaged","conflict":null,"pending":null},
+                    {"path":"b.sql","previous_path":null,"state":"modified","stage":"unstaged","conflict":null,"pending":null}
+                ],
+                "truncated": false,
+                "observed_at": "2026-08-28T00:00:00Z"
+            }))
+            .unwrap();
+            shell
+                .repository
+                .apply_status_result(7, request_id, Ok(Some(status)));
+            shell.focus_source_control(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("footer-git-branch").is_some());
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.repository.selected_path().cloned()),
+            Some(sift_protocol::WorkspacePath::new("a.sql").unwrap())
+        );
+        cx.simulate_keystrokes("j");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.repository.selected_path().cloned()),
+            Some(sift_protocol::WorkspacePath::new("b.sql").unwrap())
+        );
+        cx.simulate_keystrokes("g g");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.repository.selected_path().cloned()),
+            Some(sift_protocol::WorkspacePath::new("a.sql").unwrap())
         );
     }
 

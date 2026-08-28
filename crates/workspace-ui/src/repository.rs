@@ -140,6 +140,7 @@ pub(crate) struct RepositoryProjection {
     history_cursor: Option<String>,
     history_loading: bool,
     history_query: String,
+    current_history_request_id: Option<u64>,
     commit_detail: Option<VcsCommitDetail>,
     historical_file: Option<VcsHistoricalFile>,
     comparison_base: Option<String>,
@@ -182,6 +183,7 @@ impl RepositoryProjection {
         self.history_cursor = None;
         self.history_loading = false;
         self.history_query.clear();
+        self.current_history_request_id = None;
         self.commit_detail = None;
         self.historical_file = None;
         self.comparison_base = None;
@@ -307,9 +309,9 @@ impl RepositoryProjection {
         }
     }
 
-    pub(crate) fn begin_history_load(&mut self, query: String, append: bool) -> bool {
-        if self.history_loading {
-            return false;
+    pub(crate) fn begin_history_load(&mut self, query: String, append: bool) -> Option<u64> {
+        if append && self.history_loading {
+            return None;
         }
         if !append {
             self.history.clear();
@@ -317,7 +319,9 @@ impl RepositoryProjection {
         }
         self.history_query = query;
         self.history_loading = true;
-        true
+        let request_id = self.next_request();
+        self.current_history_request_id = Some(request_id);
+        Some(request_id)
     }
 
     pub(crate) fn apply_branches(&mut self, result: Result<Vec<VcsBranch>, String>) {
@@ -327,8 +331,20 @@ impl RepositoryProjection {
         }
     }
 
-    pub(crate) fn apply_history(&mut self, result: Result<VcsHistoryPage, String>, append: bool) {
+    pub(crate) fn apply_history(
+        &mut self,
+        workspace_id: i64,
+        request_id: u64,
+        result: Result<VcsHistoryPage, String>,
+        append: bool,
+    ) -> bool {
+        if self.workspace_id != Some(workspace_id)
+            || self.current_history_request_id != Some(request_id)
+        {
+            return false;
+        }
         self.history_loading = false;
+        self.current_history_request_id = None;
         match result {
             Ok(page) => {
                 if !append {
@@ -339,6 +355,7 @@ impl RepositoryProjection {
             }
             Err(message) => self.set_error(message),
         }
+        true
     }
 
     pub(crate) fn set_commit_detail(&mut self, result: Result<VcsCommitDetail, String>) {
@@ -463,9 +480,6 @@ impl RepositoryProjection {
         side: VcsDiffSide,
         path: Option<WorkspacePath>,
     ) -> Option<(i64, i64, u64, VcsDiffSide, Option<WorkspacePath>)> {
-        if self.diff_loading {
-            return None;
-        }
         let workspace_id = self.workspace_id?;
         let binding_id = self.status.as_ref()?.binding_id.0;
         let request_id = self.next_request();
@@ -594,6 +608,14 @@ impl RepositoryProjection {
         })
     }
 
+    pub(crate) fn cached_diff(
+        &self,
+        side: VcsDiffSide,
+        path: Option<&WorkspacePath>,
+    ) -> Option<Arc<VcsDiff>> {
+        self.diffs.get(&(side, path.cloned())).cloned()
+    }
+
     pub(crate) fn apply_status_result(
         &mut self,
         workspace_id: i64,
@@ -610,6 +632,7 @@ impl RepositoryProjection {
         self.current_request_id = None;
         match result {
             Ok(status) => {
+                let mut rebuild_rows = false;
                 let stale = status.as_ref().is_some_and(|next| {
                     self.status.as_ref().is_some_and(|current| {
                         current.binding_id == next.binding_id
@@ -617,10 +640,27 @@ impl RepositoryProjection {
                     })
                 });
                 if !stale {
+                    let diff_identity_unchanged = self
+                        .status
+                        .as_ref()
+                        .zip(status.as_ref())
+                        .is_some_and(|(current, next)| {
+                            current.binding_id == next.binding_id
+                                && current.binding_revision == next.binding_revision
+                                && current.workspace_revision == next.workspace_revision
+                                && current.head_oid == next.head_oid
+                                && current.entries == next.entries
+                        });
+                    if !diff_identity_unchanged {
+                        self.diffs.clear();
+                    }
                     self.status = status;
+                    rebuild_rows = !diff_identity_unchanged;
                 }
                 self.error = None;
-                self.rebuild_visible_rows();
+                if rebuild_rows {
+                    self.rebuild_visible_rows();
+                }
             }
             Err(error) => {
                 self.error = Some(classify_failure(error));
@@ -700,6 +740,10 @@ impl RepositoryProjection {
         }
     }
 
+    pub(crate) fn restore_selected_path(&mut self, path: Option<WorkspacePath>) {
+        self.selected_path = path;
+    }
+
     pub(crate) fn move_selection(&mut self, delta: isize) -> Option<WorkspacePath> {
         let paths = self
             .visible_rows
@@ -720,6 +764,22 @@ impl RepositoryProjection {
         let index = (current as isize + delta).rem_euclid(paths.len() as isize) as usize;
         self.selected_path = Some(paths[index].clone());
         self.selected_path.clone()
+    }
+
+    pub(crate) fn select_edge(&mut self, last: bool) -> Option<WorkspacePath> {
+        let path = if last {
+            self.visible_rows.iter().rev().find_map(|row| match row {
+                RepositoryRow::Entry { entry, .. } => Some(entry.path.clone()),
+                RepositoryRow::Section { .. } | RepositoryRow::Folder { .. } => None,
+            })
+        } else {
+            self.visible_rows.iter().find_map(|row| match row {
+                RepositoryRow::Entry { entry, .. } => Some(entry.path.clone()),
+                RepositoryRow::Section { .. } | RepositoryRow::Folder { .. } => None,
+            })
+        }?;
+        self.selected_path = Some(path.clone());
+        Some(path)
     }
 
     pub(crate) fn move_conflict_selection(&mut self, delta: isize) -> Option<WorkspacePath> {
@@ -827,6 +887,13 @@ impl RepositoryProjection {
                     VcsStageState::Staged | VcsStageState::PartiallyStaged
                 )
             })
+    }
+
+    pub(crate) fn has_stageable_changes(&self) -> bool {
+        self.status
+            .iter()
+            .flat_map(|status| &status.entries)
+            .any(|entry| !matches!(entry.stage, VcsStageState::Staged | VcsStageState::Conflict))
     }
 
     fn next_request(&mut self) -> u64 {
@@ -1205,6 +1272,47 @@ mod tests {
             .unwrap()
             .is_ok());
         assert!(!projection.diff_loading());
+        assert!(projection
+            .cached_diff(VcsDiffSide::IndexToWorktree, Some(&path))
+            .is_some());
+
+        let (_, refresh_request) = projection.begin_refresh().unwrap();
+        let unchanged = status(serde_json::json!([entry(
+            "query.sql",
+            "modified",
+            "unstaged"
+        )]));
+        projection.apply_status_result(7, refresh_request, Ok(Some(unchanged)));
+        assert!(projection
+            .cached_diff(VcsDiffSide::IndexToWorktree, Some(&path))
+            .is_some());
+
+        let (_, refresh_request) = projection.begin_refresh().unwrap();
+        let mut changed = status(serde_json::json!([entry(
+            "query.sql",
+            "modified",
+            "unstaged"
+        )]));
+        changed.head_oid = Some("new-head".into());
+        projection.apply_status_result(7, refresh_request, Ok(Some(changed)));
+        assert!(projection
+            .cached_diff(VcsDiffSide::IndexToWorktree, Some(&path))
+            .is_none());
+    }
+
+    #[test]
+    fn a_new_history_search_supersedes_and_rejects_the_stale_page() {
+        let mut projection = RepositoryProjection::new(Some(7));
+        let stale = projection.begin_history_load("old".into(), false).unwrap();
+        let current = projection.begin_history_load("new".into(), false).unwrap();
+        let page = VcsHistoryPage {
+            commits: Vec::new(),
+            next_cursor: None,
+        };
+        assert!(!projection.apply_history(7, stale, Ok(page.clone()), false));
+        assert!(projection.history_loading());
+        assert!(projection.apply_history(7, current, Ok(page), false));
+        assert!(!projection.history_loading());
     }
 
     #[test]

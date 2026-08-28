@@ -64,7 +64,19 @@ pub enum CommandId {
     StageDiffLines,
     UnstageDiffLines,
     RefreshRepository,
+    OpenRepositorySetup,
+    OpenRepositoryBranches,
+    OpenRepositoryHistory,
+    OpenRepositoryRemotes,
     OpenRepositoryHosting,
+    FetchRepository,
+    PushRepository,
+    ResolveRepositoryConflict,
+    DiscardRepositoryPath,
+    CommitRepository,
+    ContinueRepositoryOperation,
+    AbortRepositoryOperation,
+    RepairRepositoryBinding,
     StageRepositoryPath,
     UnstageRepositoryPath,
     StageAllTrackedRepositoryPaths,
@@ -171,7 +183,19 @@ impl CommandId {
             Self::StageDiffLines => "repository.stage-lines",
             Self::UnstageDiffLines => "repository.unstage-lines",
             Self::RefreshRepository => "repository.refresh",
+            Self::OpenRepositorySetup => "repository.open-setup",
+            Self::OpenRepositoryBranches => "repository.open-branches",
+            Self::OpenRepositoryHistory => "repository.open-history",
+            Self::OpenRepositoryRemotes => "repository.open-remotes",
             Self::OpenRepositoryHosting => "repository.open-hosting",
+            Self::FetchRepository => "repository.fetch",
+            Self::PushRepository => "repository.push",
+            Self::ResolveRepositoryConflict => "repository.resolve-conflict",
+            Self::DiscardRepositoryPath => "repository.discard-path",
+            Self::CommitRepository => "repository.commit",
+            Self::ContinueRepositoryOperation => "repository.continue-operation",
+            Self::AbortRepositoryOperation => "repository.abort-operation",
+            Self::RepairRepositoryBinding => "repository.repair-binding",
             Self::StageRepositoryPath => "repository.stage-path",
             Self::UnstageRepositoryPath => "repository.unstage-path",
             Self::StageAllTrackedRepositoryPaths => "repository.stage-all-tracked",
@@ -232,6 +256,9 @@ enum AvailabilityRule {
     NoActiveTransaction,
     ActiveTransaction,
     CommittableTransaction,
+    GitWorkspace,
+    GitSelection,
+    GitOperation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,7 +273,7 @@ pub struct CommandDefinition {
     availability: AvailabilityRule,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CommandContext {
     pub has_active_item: bool,
     pub pane_count: usize,
@@ -259,6 +286,9 @@ pub struct CommandContext {
     pub transaction_active: bool,
     pub transaction_pending: bool,
     pub transaction_aborted: bool,
+    pub git_workspace_loaded: bool,
+    pub git_path_selected: bool,
+    pub git_operation_active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +378,18 @@ impl CommandRegistry {
                 AvailabilityRule::CommittableTransaction if context.transaction_aborted => {
                     Some("The transaction is aborted; roll it back".into())
                 }
+                AvailabilityRule::GitWorkspace if !context.git_workspace_loaded => {
+                    Some("No Git-enabled workspace selected".into())
+                }
+                AvailabilityRule::GitSelection if !context.git_workspace_loaded => {
+                    Some("No Git-enabled workspace selected".into())
+                }
+                AvailabilityRule::GitSelection if !context.git_path_selected => {
+                    Some("No changed path selected".into())
+                }
+                AvailabilityRule::GitOperation if !context.git_operation_active => {
+                    Some("No Git operation is in progress".into())
+                }
                 AvailabilityRule::ActiveItem
                 | AvailabilityRule::MultiplePanes
                 | AvailabilityRule::EditableInstance
@@ -356,7 +398,10 @@ impl CommandRegistry {
                 | AvailabilityRule::ActiveResult
                 | AvailabilityRule::NoActiveTransaction
                 | AvailabilityRule::ActiveTransaction
-                | AvailabilityRule::CommittableTransaction => None,
+                | AvailabilityRule::CommittableTransaction
+                | AvailabilityRule::GitWorkspace
+                | AvailabilityRule::GitSelection
+                | AvailabilityRule::GitOperation => None,
             },
         }
     }
@@ -890,12 +935,108 @@ const DEFINITIONS: &[CommandDefinition] = &[
         AvailabilityRule::Always,
     ),
     command(
+        CommandId::OpenRepositorySetup,
+        "Source Control: Configure Repository…",
+        "",
+        "",
+        true,
+        AvailabilityRule::Always,
+    ),
+    command(
+        CommandId::OpenRepositoryBranches,
+        "Source Control: Branches…",
+        "",
+        "",
+        true,
+        AvailabilityRule::GitWorkspace,
+    ),
+    command(
+        CommandId::OpenRepositoryHistory,
+        "Source Control: History…",
+        "",
+        "",
+        true,
+        AvailabilityRule::GitWorkspace,
+    ),
+    command(
+        CommandId::OpenRepositoryRemotes,
+        "Source Control: Remotes and Credentials…",
+        "",
+        "",
+        true,
+        AvailabilityRule::GitWorkspace,
+    ),
+    command(
         CommandId::OpenRepositoryHosting,
         "Source Control: Open Hosting, Pull Requests and Checks",
         "",
         "<leader> v g",
         true,
-        AvailabilityRule::Always,
+        AvailabilityRule::GitWorkspace,
+    ),
+    command(
+        CommandId::FetchRepository,
+        "Source Control: Fetch",
+        "",
+        "",
+        true,
+        AvailabilityRule::GitWorkspace,
+    ),
+    command(
+        CommandId::PushRepository,
+        "Source Control: Push Current Branch",
+        "",
+        "",
+        true,
+        AvailabilityRule::GitWorkspace,
+    ),
+    command(
+        CommandId::ResolveRepositoryConflict,
+        "Source Control: Resolve Selected Conflict…",
+        "",
+        "",
+        true,
+        AvailabilityRule::GitSelection,
+    ),
+    command(
+        CommandId::DiscardRepositoryPath,
+        "Source Control: Discard Selected Worktree Change…",
+        "",
+        "",
+        true,
+        AvailabilityRule::GitSelection,
+    ),
+    command(
+        CommandId::CommitRepository,
+        "Source Control: Commit Staged Changes",
+        "",
+        "",
+        true,
+        AvailabilityRule::GitWorkspace,
+    ),
+    command(
+        CommandId::ContinueRepositoryOperation,
+        "Source Control: Continue Operation",
+        "",
+        "",
+        true,
+        AvailabilityRule::GitOperation,
+    ),
+    command(
+        CommandId::AbortRepositoryOperation,
+        "Source Control: Abort Operation",
+        "",
+        "",
+        true,
+        AvailabilityRule::GitOperation,
+    ),
+    command(
+        CommandId::RepairRepositoryBinding,
+        "Source Control: Repair Repository Binding",
+        "",
+        "",
+        true,
+        AvailabilityRule::GitWorkspace,
     ),
     command(
         CommandId::StageRepositoryPath,
@@ -1332,6 +1473,9 @@ mod tests {
             transaction_active: false,
             transaction_pending: false,
             transaction_aborted: false,
+            git_workspace_loaded: false,
+            git_path_selected: false,
+            git_operation_active: false,
         };
         assert_eq!(
             CommandRegistry::spec(CommandId::ExecuteStatement, empty)
@@ -1446,6 +1590,52 @@ mod tests {
             .disabled_reason
             .as_deref(),
             Some("Result export already in progress")
+        );
+    }
+
+    #[test]
+    fn every_source_control_surface_action_is_palette_visible_and_contextual() {
+        let git_actions = [
+            CommandId::OpenRepositorySetup,
+            CommandId::OpenRepositoryBranches,
+            CommandId::OpenRepositoryHistory,
+            CommandId::OpenRepositoryRemotes,
+            CommandId::OpenRepositoryHosting,
+            CommandId::FetchRepository,
+            CommandId::PushRepository,
+            CommandId::ResolveRepositoryConflict,
+            CommandId::DiscardRepositoryPath,
+            CommandId::StageRepositoryPath,
+            CommandId::UnstageRepositoryPath,
+            CommandId::StageAllTrackedRepositoryPaths,
+            CommandId::StageAllRepositoryPaths,
+            CommandId::UnstageAllRepositoryPaths,
+            CommandId::CommitRepository,
+            CommandId::AmendRepository,
+            CommandId::UncommitRepository,
+            CommandId::ContinueRepositoryOperation,
+            CommandId::AbortRepositoryOperation,
+            CommandId::RepairRepositoryBinding,
+        ];
+        for id in git_actions {
+            assert!(
+                CommandRegistry::definition(id).palette_visible,
+                "{} must be reachable without a context menu",
+                id.as_str()
+            );
+        }
+
+        let unavailable = CommandContext {
+            git_workspace_loaded: false,
+            git_path_selected: false,
+            git_operation_active: false,
+            ..CommandContext::default()
+        };
+        assert_eq!(
+            CommandRegistry::spec(CommandId::FetchRepository, unavailable)
+                .disabled_reason
+                .as_deref(),
+            Some("No Git-enabled workspace selected")
         );
     }
 

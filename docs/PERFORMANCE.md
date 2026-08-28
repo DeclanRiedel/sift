@@ -9,13 +9,13 @@ submission. The 16.7 ms budget remains the hard fallback for 60 Hz systems.
 Run the headless renderer benchmarks from the reproducible development shell:
 
 ```sh
-nix develop -c cargo bench -p sift-workspace-ui --bench frame_budget
+nix develop -c cargo bench -p sift-workspace-ui --features benchmark --bench frame_budget
 ```
 
 For a quick local comparison while iterating:
 
 ```sh
-nix develop -c cargo bench -p sift-workspace-ui --bench frame_budget -- --quick
+nix develop -c cargo bench -p sift-workspace-ui --features benchmark --bench frame_budget -- --quick
 ```
 
 The suite uses GPUI's own benchmark context and headless Blade renderer. Frame
@@ -27,6 +27,8 @@ renderer submission rather than timing isolated model functions.
 | `vim_typing_large_document` | 8,000-line SQL document, Vim insert/backspace cycle | p95 draw ≤ 8.3 ms; no p99 draw above 16.7 ms |
 | `first_result_page` | 500 rows × 20 typed display cells | p95 draw ≤ 16.7 ms; update-to-frame ≤ 50 ms |
 | `retained_grid_navigation` | 10,000 retained rows × 20 columns | p95 draw ≤ 8.3 ms; offscreen cells remain unshaped |
+| `git_panel_first_frame` | 20,000 changed paths (adapter response cap) | record first materialization separately from steady refresh |
+| `git_panel_steady_refresh` | unchanged 20,000-path status | unchanged identities reuse flattened rows and diff metadata |
 
 Benchmarks are comparison gates, not portable absolute scores. Record CPU, GPU,
 display server, compositor, build revision, and benchmark output when publishing
@@ -65,6 +67,35 @@ entering GPUI, matching the production executor boundary. Formatting time is
 therefore excluded from the UI-thread measurement. M3 performance is not yet
 graduated: typing meets its draw budget, while grid construction and navigation
 still require a custom paint/layout path or equivalent measured reduction.
+
+### Git integration G11 baseline
+
+Measured 2026-08-28 immediately before the G11 commit, on Linux 6.17.0 x86_64,
+Git 2.51.0, and 16 logical CPUs. The status fixture used the adapter's exact
+hardened command shape (`--porcelain=v2 --branch -z --untracked-files=all`)
+with hooks, credential helpers, fsmonitor, external diff, and pager disabled.
+Each repository contained clean tracked SQL files; steady values are the mean
+of 20 runs after one warm-up.
+
+| Tracked paths | First observed status | Steady mean |
+| ---: | ---: | ---: |
+| 1,000 | <10 ms (timer resolution) | 3.324 ms |
+| 10,000 | <10 ms (timer resolution) | 8.934 ms |
+| 100,000 | 50 ms | 57.139 ms |
+
+The renderer fixture is reproducible with:
+
+```sh
+nix develop -c cargo bench -p sift-workspace-ui --features benchmark \
+  --bench frame_budget -- --quick git_panel
+```
+
+It uses the server's 20,000-entry response ceiling. The initial measurement was
+149.815 ms p95 draw for first materialization and 173.933 ms p95 for an
+unchanged refresh. Identity-aware row/diff reuse and removal of per-frame path
+vector allocations reduced the latter to 61.669 ms p95 (64.5% lower). This is
+a measured baseline, not a 120 Hz graduation: first loading and rendering a
+maximal status still needs background row preparation or a custom layout path.
 
 ## Interactive large-schema fixture
 
