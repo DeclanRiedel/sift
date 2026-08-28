@@ -29,6 +29,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "bindWorkspaceRepository",
     "bindWorkspaceProjection",
     "bulkInsert",
+    "cloneWorkspaceRepository",
     "cancelComparison",
     "cancelQuery",
     "cancelMigration",
@@ -235,6 +236,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "deleteRunConfiguration",
     "deleteRunSchedule",
     "deleteTransferRecipe",
+    "deleteRepositoryCredential",
     "disableRunSchedule",
     "enableRunSchedule",
     "executeTransferRecipe",
@@ -261,9 +263,15 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "beginRepositoryConflictResolution",
     "continueRepositoryOperation",
     "getRepositoryConflict",
+    "listRepositoryRemotes",
     "markRepositoryConflictResolved",
     "repairRepositoryBinding",
+    "addRepositoryRemote",
+    "removeRepositoryRemote",
+    "renameRepositoryRemote",
     "resolveRepositoryConflict",
+    "testRepositoryCredential",
+    "updateRepositoryRemote",
     "whoAmI",
 ];
 
@@ -271,11 +279,11 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
 // consumers need no server-internal storage crate.
 pub use sift_api_types::{
     AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRepositoryRequest,
-    BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CreateDdlSourceRequest,
-    CreateDocumentRequest, CreateRoomRequest, CreateRunConfigurationRequest,
-    CreateRunScheduleRequest, CreateSavedQueryRequest, CreateTransferRecipeRequest,
-    CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest, CreateWorkspaceRequest,
-    ExecuteTransferRecipeRequest, ExpectedDdlSourceRevisionRequest,
+    BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CloneWorkspaceRepositoryRequest,
+    CreateDdlSourceRequest, CreateDocumentRequest, CreateRoomRequest,
+    CreateRunConfigurationRequest, CreateRunScheduleRequest, CreateSavedQueryRequest,
+    CreateTransferRecipeRequest, CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest,
+    CreateWorkspaceRequest, ExecuteTransferRecipeRequest, ExpectedDdlSourceRevisionRequest,
     ExpectedProjectionRevisionRequest, ExpectedRepositoryRevisionRequest,
     ExpectedRunConfigurationRevisionRequest, ExpectedTransferRecipeRevisionRequest,
     ExpectedWorkspaceRevisionRequest, InstanceConfigurationDocument, IssueTokenRequest,
@@ -286,8 +294,9 @@ pub use sift_api_types::{
     UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
     UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
     VcsBeginConflictResolutionRequest, VcsCommitRequest, VcsCompareQuery, VcsConflictQuery,
-    VcsCreateBranchRequest, VcsDeleteBranchRequest, VcsDiffQuery, VcsDiscardRequest,
-    VcsHistoryQuery, VcsHunkRequest, VcsMarkConflictResolvedRequest, VcsPathsRequest,
+    VcsCreateBranchRequest, VcsCredentialTestRequest, VcsDeleteBranchRequest, VcsDiffQuery,
+    VcsDiscardRequest, VcsHistoryQuery, VcsHunkRequest, VcsMarkConflictResolvedRequest,
+    VcsPathsRequest, VcsRemoteDeleteRequest, VcsRemoteMutationRequest, VcsRemoteRenameRequest,
     VcsRemoteRequest, VcsRenameBranchRequest, VcsRepositoryOperationRequest,
     VcsResolveConflictRequest, VcsRestoreHistoricalFileRequest, VcsRevertCommitRequest,
     VcsRevertHunkRequest, VcsSetUpstreamRequest, VcsSwitchBranchRequest, VcsUncommitRequest,
@@ -330,10 +339,10 @@ use sift_protocol::{
     TransactionState, TransferExecutionResult, TransferRecipe, TransferRecipeId, TxHandleRef, TxId,
     TxMode, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, ValidatedExtensionPackage,
     Value, VcsBranch, VcsCommitDetail, VcsCommitResult, VcsConflictFile, VcsDiff, VcsDiffSide,
-    VcsHeadMutationResult, VcsHistoricalFile, VcsHistoryPage, VcsRemoteResult, VcsStatus,
-    VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceArtifactId,
-    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspacePath,
-    WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
+    VcsHeadMutationResult, VcsHistoricalFile, VcsHistoryPage, VcsRemote, VcsRemoteResult,
+    VcsStatus, VcsWorktreeMutationResult, WebAuthResponse, WhoAmIResponse, Workspace,
+    WorkspaceArtifactId, WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId,
+    WorkspacePath, WsClientMessage, WsServerMessage, PROTOCOL_VERSION_NUMBER,
 };
 
 #[derive(Clone)]
@@ -2620,6 +2629,18 @@ impl Client {
         .await
     }
 
+    pub async fn clone_workspace_repository(
+        &self,
+        workspace: WorkspaceId,
+        request: CloneWorkspaceRepositoryRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/workspaces/{}/repository/clone", workspace.0),
+            &request,
+        )
+        .await
+    }
+
     pub async fn delete_workspace_repository(
         &self,
         binding: RepositoryBindingId,
@@ -3015,6 +3036,87 @@ impl Client {
     ) -> Result<RepositoryBinding> {
         self.post(
             &format!("/v1/metadata/repositories/{}/credential", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn delete_repository_credential(
+        &self,
+        binding: RepositoryBindingId,
+        request: ExpectedRepositoryRevisionRequest,
+    ) -> Result<RepositoryBinding> {
+        self.send(
+            self.http
+                .delete(self.url(&format!(
+                    "/v1/metadata/repositories/{}/credential",
+                    binding.0
+                )))
+                .json(&request),
+        )
+        .await
+    }
+
+    pub async fn test_repository_credential(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsCredentialTestRequest,
+    ) -> Result<()> {
+        self.post_empty_body(
+            &format!("/v1/metadata/repositories/{}/credential/test", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn repository_remotes(&self, binding: RepositoryBindingId) -> Result<Vec<VcsRemote>> {
+        self.get(&format!("/v1/metadata/repositories/{}/remotes", binding.0))
+            .await
+    }
+
+    pub async fn add_repository_remote(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRemoteMutationRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/remotes", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn update_repository_remote(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRemoteMutationRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/remotes/update", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn rename_repository_remote(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRemoteRenameRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/remotes/rename", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn remove_repository_remote(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsRemoteDeleteRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/remotes/remove", binding.0),
             &request,
         )
         .await

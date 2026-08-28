@@ -207,6 +207,26 @@ pub struct BindRepositoryRequest {
     pub initialize: bool,
 }
 
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CloneWorkspaceRepositoryRequest {
+    pub root_handle: String,
+    pub url: String,
+    pub username: RedactedString,
+    pub password: RedactedString,
+}
+
+impl std::fmt::Debug for CloneWorkspaceRepositoryRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CloneWorkspaceRepositoryRequest")
+            .field("root_handle", &self.root_handle)
+            .field("url", &"[REDACTED]")
+            .field("username", &"[REDACTED]")
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExpectedRepositoryRevisionRequest {
     pub expected_revision: u64,
@@ -411,6 +431,33 @@ pub struct VcsRemoteRequest {
     pub remote: String,
     #[serde(default)]
     pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRemoteMutationRequest {
+    pub expected_revision: u64,
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRemoteRenameRequest {
+    pub expected_revision: u64,
+    pub old_name: String,
+    pub new_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRemoteDeleteRequest {
+    pub expected_revision: u64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsCredentialTestRequest {
+    pub expected_revision: u64,
+    #[serde(default = "default_git_remote")]
+    pub remote: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

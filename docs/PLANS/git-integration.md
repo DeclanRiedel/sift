@@ -283,24 +283,26 @@ ways:
 
 ## Milestone G7 — Remotes and credentials
 
-- [ ] Add repository binding/initialization UI.
-- [ ] Add clone-to-configured-projection workflow.
-- [ ] List/add/edit/remove remotes through typed APIs.
-- [ ] Add credential creation, replacement, test, and removal UI.
-- [ ] Support PAT/basic credentials through `SecretStore` first.
-- [ ] Design SSH-key support without ambient agent leakage.
-- [ ] Support per-principal credentials where deployment policy requires them.
-- [ ] Fetch selected remote.
-- [ ] Show fetched ref changes and actionable remote output.
-- [ ] Push current branch.
-- [ ] Set upstream on first push.
-- [ ] Explain authentication, non-fast-forward, protected-branch, and network
+- [x] Add repository binding/initialization UI.
+- [x] Add clone-to-configured-projection workflow.
+- [x] List/add/edit/remove remotes through typed APIs.
+- [x] Add credential creation, replacement, test, and removal UI.
+- [x] Support PAT/basic credentials through `SecretStore` first.
+- [x] Design SSH-key support without ambient agent leakage.
+- [x] Support per-principal credentials where deployment policy requires them.
+- [x] Fetch selected remote.
+- [x] Show fetched ref changes and actionable remote output.
+- [x] Push current branch.
+- [x] Set upstream on first push.
+- [x] Explain authentication, non-fast-forward, protected-branch, and network
       policy failures distinctly.
-- [ ] Add explicit pull strategy only after fetch + branch integration is solid.
-- [ ] Preview merge/rebase effects before pull mutates shared worktree.
-- [ ] Keep force push disabled.
-- [ ] Keep background network operations opt-in and visible.
-- [ ] Add provider-neutral repository/commit/file permalinks.
+- [x] Keep pull unavailable until an explicit strategy is designed after the
+      fetch + branch integration has graduated.
+- [x] Require a merge/rebase preview before any future pull may mutate the
+      shared worktree (ADR-048); no pull endpoint exists today.
+- [x] Keep force push disabled.
+- [x] Keep background network operations opt-in and visible.
+- [x] Add provider-neutral repository/commit/file permalinks.
 
 ## Milestone G8 — Collaboration semantics
 

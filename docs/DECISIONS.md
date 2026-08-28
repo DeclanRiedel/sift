@@ -1711,3 +1711,49 @@ whole-file while the adapter exposes one stage-derived region; finer semantic
 regions may be added later without changing the trust boundary. Shared
 operation serialization and actor/in-flight collaboration presentation remain
 Milestone G8 work.
+
+---
+
+## ADR-048 — Explicit HTTPS Remotes And Principal-Scoped Credentials
+
+**Context.** Git executes beside Sift's server-owned projection, so a desktop
+credential helper, SSH agent, filesystem key, or URL-embedded password would
+lend ambient server authority to an attached client. A credential shared by a
+room would also make a remote action appear under the wrong hosting identity.
+Network operations can be slow and mutate shared remote-tracking refs, so they
+must not hide behind status refresh.
+
+**Decision.** Repository setup accepts only an operator-configured logical root
+handle. A workspace owner may bind an existing repository, initialize that
+projection, or clone an HTTPS URL into an empty configured projection. Remotes
+are listed and mutated through typed, validated APIs. Embedded URL credentials,
+non-HTTPS transport, force push, arbitrary refspecs, hooks, interactive prompts,
+global configuration, credential helpers, and inherited environment remain
+disabled.
+
+PAT/basic credentials are stored by `SecretStore`; SQLite contains a distinct
+opaque handle for each `(repository binding, principal)`. A secret is exposed
+only to one explicit fetch, push, clone, or credential-test process through the
+bounded askpass channel and is never placed in a URL, argument, audit record, or
+log. Public HTTPS fetch/push may run without a stored credential. Managed SSH
+support is deferred until Sift owns a typed key record, host-key policy, and
+one-process `GIT_SSH_COMMAND` wrapper that never consults `SSH_AUTH_SOCK`, a
+home-directory key, or user SSH configuration.
+
+Fetch and push are manual, visible, revision-guarded operations. Their result
+reports typed before/after ref changes; common authentication,
+non-fast-forward, protected-branch, missing-remote, and network failures are
+classified without returning transport stderr. First push of a branch without
+an upstream uses `--set-upstream`; later pushes preserve it. Pull remains
+unavailable: users fetch first, inspect branch state, and use the existing
+explicit branch/conflict workflow. A future pull must preview merge versus
+rebase effects and require a selected strategy before it can mutate the shared
+worktree. Sift permalinks identify repository, commit, and historical file
+without assuming a hosting provider.
+
+**Consequences.** Collaborators cannot silently borrow one another's remote
+identity, remote traffic never occurs as a background refresh, and UI output is
+actionable without leaking provider text or secrets. SSH and pull have explicit
+security and review prerequisites instead of incomplete fallbacks. A remote
+rename followed by URL replacement is two individually revisioned and audited
+mutations, so partial completion remains visible and recoverable by refresh.

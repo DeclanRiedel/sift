@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use sift_protocol::{
     RepositoryBinding, VcsBranch, VcsCommitDetail, VcsCommitSummary, VcsConflictFile, VcsDiff,
-    VcsDiffSide, VcsFileState, VcsHistoricalFile, VcsHistoryPage, VcsStageState, VcsStatus,
-    VcsStatusEntry, WorkspacePath,
+    VcsDiffSide, VcsFileState, VcsHistoricalFile, VcsHistoryPage, VcsRemote, VcsRemoteResult,
+    VcsStageState, VcsStatus, VcsStatusEntry, WorkspacePath,
 };
 
 use crate::settings::{RepositoryGrouping, RepositorySort, RepositoryView};
@@ -63,6 +63,7 @@ pub(crate) enum RepositoryOperation {
     Uncommit,
     Discard,
     Revert,
+    Network,
 }
 
 impl RepositoryOperation {
@@ -75,6 +76,7 @@ impl RepositoryOperation {
             Self::Uncommit => "Creating checkpoint and uncommitting HEAD…",
             Self::Discard => "Creating checkpoint and discarding worktree change…",
             Self::Revert => "Creating checkpoint and reverting diff hunk…",
+            Self::Network => "Running visible remote operation…",
         }
     }
 }
@@ -137,6 +139,8 @@ pub(crate) struct RepositoryProjection {
     comparison_base: Option<String>,
     comparison: Option<VcsDiff>,
     conflict: Option<VcsConflictFile>,
+    remotes: Arc<[VcsRemote]>,
+    remote_result: Option<VcsRemoteResult>,
 }
 
 impl RepositoryProjection {
@@ -176,6 +180,8 @@ impl RepositoryProjection {
         self.comparison_base = None;
         self.comparison = None;
         self.conflict = None;
+        self.remotes = Arc::default();
+        self.remote_result = None;
     }
 
     pub(crate) fn branches(&self) -> Arc<[VcsBranch]> {
@@ -216,6 +222,50 @@ impl RepositoryProjection {
 
     pub(crate) fn conflict(&self) -> Option<&VcsConflictFile> {
         self.conflict.as_ref()
+    }
+
+    pub(crate) fn remotes(&self) -> Arc<[VcsRemote]> {
+        self.remotes.clone()
+    }
+
+    pub(crate) fn remote_result(&self) -> Option<&VcsRemoteResult> {
+        self.remote_result.as_ref()
+    }
+
+    pub(crate) fn apply_remotes(&mut self, result: Result<Vec<VcsRemote>, String>) {
+        match result {
+            Ok(remotes) => self.remotes = remotes.into(),
+            Err(message) => self.set_error(message),
+        }
+    }
+
+    pub(crate) fn begin_network_operation(&mut self) -> bool {
+        if self.loading {
+            return false;
+        }
+        self.loading = true;
+        self.operation = Some(RepositoryOperation::Network);
+        self.error = None;
+        true
+    }
+
+    pub(crate) fn finish_network_operation(
+        &mut self,
+        result: Result<Option<VcsRemoteResult>, String>,
+    ) -> bool {
+        self.loading = false;
+        self.operation = None;
+        match result {
+            Ok(result) => {
+                self.remote_result = result;
+                self.error = None;
+                true
+            }
+            Err(message) => {
+                self.set_error(message);
+                false
+            }
+        }
     }
 
     pub(crate) fn set_conflict(&mut self, result: Result<VcsConflictFile, String>) {
@@ -574,6 +624,10 @@ impl RepositoryProjection {
         if binding.is_some() {
             self.observed_binding = binding;
         }
+    }
+
+    pub(crate) fn observed_binding(&self) -> Option<&RepositoryBinding> {
+        self.observed_binding.as_ref()
     }
 
     pub(crate) fn repair_target(&self) -> Option<(i64, u64)> {

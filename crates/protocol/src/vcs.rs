@@ -226,6 +226,20 @@ pub struct VcsBranch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRemote {
+    pub name: String,
+    pub fetch_url: String,
+    pub push_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VcsRefChange {
+    pub name: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct VcsCommitSummary {
     pub oid: String,
     pub parents: Vec<String>,
@@ -301,4 +315,6 @@ pub struct VcsRemoteResult {
     pub operation: String,
     pub head: Option<String>,
     pub updated_refs: Vec<String>,
+    #[serde(default)]
+    pub ref_changes: Vec<VcsRefChange>,
 }

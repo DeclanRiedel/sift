@@ -57,10 +57,10 @@ use sift_protocol::{
     TransferRecipeAction, TransferRecipeId, UpdateConnectionPolicyRequest,
     UpdateTenantLimitsRequest, VcsAction, VcsBranch, VcsCommitDetail, VcsCommitResult,
     VcsConflictFile, VcsDiff, VcsHeadMutationResult, VcsHistoricalFile, VcsHistoryPage,
-    VcsPendingOperation, VcsRemoteResult, VcsStatus, VcsWorktreeMutationResult, WebAuthResponse,
-    WhoAmIResponse, Workspace, WorkspaceAction, WorkspaceCheckpoint, WorkspaceCheckpointId,
-    WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    VcsPendingOperation, VcsRemote, VcsRemoteResult, VcsStatus, VcsWorktreeMutationResult,
+    WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceAction, WorkspaceCheckpoint,
+    WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind, WsClientMessage,
+    WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -479,6 +479,10 @@ pub fn app(state: AppState) -> Router {
             get_with(get_workspace_repository, doc("getWorkspaceRepository", "Get the optional repository binding")).post_with(bind_workspace_repository, doc("bindWorkspaceRepository", "Bind or initialize Git for a filesystem projection")),
         )
         .api_route(
+            "/v1/metadata/workspaces/:id/repository/clone",
+            post_with(clone_workspace_repository, doc("cloneWorkspaceRepository", "Clone an HTTPS repository into an empty configured projection")),
+        )
+        .api_route(
             "/v1/metadata/repositories/:id",
             delete_with(delete_workspace_repository, doc("deleteWorkspaceRepository", "Remove a repository binding")),
         )
@@ -600,7 +604,27 @@ pub fn app(state: AppState) -> Router {
         )
         .api_route(
             "/v1/metadata/repositories/:id/credential",
-            post_with(set_repository_credential, doc("setRepositoryCredential", "Set an opaque one-operation repository credential")),
+            post_with(set_repository_credential, doc("setRepositoryCredential", "Set an opaque repository credential")).delete_with(delete_repository_credential, doc("deleteRepositoryCredential", "Remove the repository credential")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/credential/test",
+            post_with(test_repository_credential, doc("testRepositoryCredential", "Test the stored credential without mutating refs")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/remotes",
+            get_with(list_repository_remotes, doc("listRepositoryRemotes", "List typed repository remotes")).post_with(add_repository_remote, doc("addRepositoryRemote", "Add a validated repository remote")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/remotes/rename",
+            post_with(rename_repository_remote, doc("renameRepositoryRemote", "Rename a repository remote")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/remotes/update",
+            post_with(update_repository_remote, doc("updateRepositoryRemote", "Replace a repository remote URL")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/remotes/remove",
+            post_with(remove_repository_remote, doc("removeRepositoryRemote", "Remove a repository remote")),
         )
         .api_route(
             "/v1/metadata/repositories/:id/fetch",
@@ -1719,11 +1743,11 @@ struct CursorListQuery {
 
 use sift_metadata::http::{
     AddRoomMemberRequest, ApplyWorkspaceProjectionRequest, BindRepositoryRequest,
-    BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CreateDdlSourceRequest,
-    CreateDocumentRequest, CreateRoomRequest, CreateRunConfigurationRequest,
-    CreateRunScheduleRequest, CreateSavedQueryRequest, CreateTransferRecipeRequest,
-    CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest, CreateWorkspaceRequest,
-    ExecuteTransferRecipeRequest, ExpectedDdlSourceRevisionRequest,
+    BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CloneWorkspaceRepositoryRequest,
+    CreateDdlSourceRequest, CreateDocumentRequest, CreateRoomRequest,
+    CreateRunConfigurationRequest, CreateRunScheduleRequest, CreateSavedQueryRequest,
+    CreateTransferRecipeRequest, CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest,
+    CreateWorkspaceRequest, ExecuteTransferRecipeRequest, ExpectedDdlSourceRevisionRequest,
     ExpectedProjectionRevisionRequest, ExpectedRepositoryRevisionRequest,
     ExpectedRunConfigurationRevisionRequest, ExpectedTransferRecipeRevisionRequest,
     ExpectedWorkspaceRevisionRequest, IssueTokenRequest, IssueTokenResponse,
@@ -1733,13 +1757,14 @@ use sift_metadata::http::{
     UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
     UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
     VcsBeginConflictResolutionRequest, VcsCommitRequest, VcsCompareQuery, VcsConflictQuery,
-    VcsCreateBranchRequest, VcsDeleteBranchRequest, VcsDiffQuery, VcsDiscardRequest,
-    VcsHistoricalFileQuery, VcsHistoryQuery, VcsHunkRequest, VcsMarkConflictResolvedRequest,
-    VcsPathsRequest, VcsRemoteRequest, VcsRenameBranchRequest, VcsRepositoryOperationRequest,
-    VcsResolveConflictRequest, VcsRestoreHistoricalFileRequest, VcsRevertCommitRequest,
-    VcsRevertHunkRequest, VcsSetUpstreamRequest, VcsSwitchBranchRequest, VcsUncommitRequest,
-    WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest, WorkspaceCheckpointPageQuery,
-    WorkspaceTreeResponse,
+    VcsCreateBranchRequest, VcsCredentialTestRequest, VcsDeleteBranchRequest, VcsDiffQuery,
+    VcsDiscardRequest, VcsHistoricalFileQuery, VcsHistoryQuery, VcsHunkRequest,
+    VcsMarkConflictResolvedRequest, VcsPathsRequest, VcsRemoteDeleteRequest,
+    VcsRemoteMutationRequest, VcsRemoteRenameRequest, VcsRemoteRequest, VcsRenameBranchRequest,
+    VcsRepositoryOperationRequest, VcsResolveConflictRequest, VcsRestoreHistoricalFileRequest,
+    VcsRevertCommitRequest, VcsRevertHunkRequest, VcsSetUpstreamRequest, VcsSwitchBranchRequest,
+    VcsUncommitRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
+    WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
 };
 
 fn metadata_room_kind(kind: sift_api_types::RoomKind) -> sift_metadata::RoomKind {
@@ -6356,6 +6381,11 @@ fn git_adapter_error(error: crate::git_adapter::GitAdapterError) -> ApiError {
         | GitAdapterError::CorruptState(_)
         | GitAdapterError::OutputLimit
         | GitAdapterError::NetworkDisabled
+        | GitAdapterError::AuthenticationFailed
+        | GitAdapterError::NonFastForward
+        | GitAdapterError::ProtectedBranch
+        | GitAdapterError::NetworkFailure
+        | GitAdapterError::RemoteNotFound
         | GitAdapterError::CredentialHelperUnavailable => ApiError::BadRequest(error.to_string()),
         GitAdapterError::TimedOut => ApiError::BadRequest(error.to_string()),
         GitAdapterError::CommandFailed(_) => ApiError::BadRequest(error.to_string()),
@@ -6770,6 +6800,132 @@ async fn bind_workspace_repository(
             .map_err(Into::into)
     })
     .await?;
+    push_vcs_operation(&state, actor, VcsAction::Bind, workspace_id, binding.id);
+    Ok(Json(binding))
+}
+
+async fn clone_workspace_repository(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<CloneWorkspaceRepositoryRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_workspace_operation(
+        &state,
+        &auth,
+        None,
+        Some(workspace_id),
+        WorkspaceAction::BindProjection,
+    )?;
+    let actor = auth.principal_id;
+    let existing = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            Ok::<_, ApiError>((
+                metadata.projection_binding_for_workspace(workspace_id, actor)?,
+                metadata.repository_binding_for_workspace(workspace_id, actor)?,
+            ))
+        }
+    })
+    .await?;
+    if existing.0.is_some() || existing.1.is_some() {
+        return Err(ApiError::Conflict(
+            "workspace already has a projection or repository binding".into(),
+        ));
+    }
+    let filesystem = state.rooms.workspace_adapter().ok_or_else(|| {
+        ApiError::BadRequest("workspace filesystem projections are disabled".into())
+    })?;
+    filesystem
+        .validate_binding(&req.root_handle, true)
+        .map_err(workspace_adapter_error)?;
+    let worktree = filesystem
+        .canonical_root_path(&req.root_handle)
+        .map_err(workspace_adapter_error)?;
+    let adapter = state
+        .rooms
+        .git_adapter()
+        .ok_or_else(|| ApiError::BadRequest("Git integration is disabled".into()))?;
+    let username = req.username.0;
+    let password = req.password.0;
+    let credential_present = !username.is_empty() || !password.is_empty();
+    let observation = adapter
+        .clone_repository_into(
+            &worktree,
+            &req.url,
+            crate::git_adapter::GitCredential {
+                username: username.clone(),
+                password: password.clone(),
+            },
+        )
+        .await
+        .map_err(git_adapter_error)?;
+    let generation = crate::workspace_adapter::WorkspaceAdapter::generation(filesystem.as_ref());
+    let root_handle = req.root_handle;
+    let projection = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .create_projection_binding(
+                    workspace_id,
+                    actor,
+                    NewProjectionBinding {
+                        root_handle,
+                        mode: ProjectionMode::ReadWrite,
+                        adapter_generation: generation.into(),
+                        health: ProjectionHealth::Ready,
+                    },
+                )
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    let input = NewRepositoryBinding {
+        projection_id: projection.binding.id,
+        repository_identity: observation.identity,
+        adapter_generation: adapter.generation().into(),
+        executable_version: adapter.executable_version().into(),
+        network_enabled: adapter.network_enabled(),
+        branch: observation.branch,
+        head: observation.head,
+    };
+    let binding = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .create_repository_binding(workspace_id, actor, input)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    let result = if credential_present {
+        let mut stored_secret = serde_json::to_vec(&StoredGitCredential { username, password })
+            .map_err(|_| ApiError::BadRequest("invalid repository credential".into()))?;
+        let result = metadata
+            .set_repository_credential(
+                binding.binding.id,
+                actor,
+                binding.binding.revision,
+                &stored_secret,
+            )
+            .await;
+        stored_secret.fill(0);
+        result
+    } else {
+        Ok(binding)
+    };
+    let binding = result?.binding;
+    push_workspace_operation(
+        &state,
+        actor,
+        WorkspaceAction::BindProjection,
+        Some(workspace_id),
+        None,
+    );
     push_vcs_operation(&state, actor, VcsAction::Bind, workspace_id, binding.id);
     Ok(Json(binding))
 }
@@ -8976,6 +9132,295 @@ async fn set_repository_credential(
     Ok(Json(updated))
 }
 
+async fn delete_repository_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<ExpectedRepositoryRevisionRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let binding = metadata_blocking({
+        let metadata = metadata.clone();
+        move || {
+            metadata
+                .repository_binding_for_principal(binding_id, actor, true)
+                .map(|record| record.binding)
+                .map_err(Into::into)
+        }
+    })
+    .await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        binding.workspace_id,
+        binding_id,
+        VcsAction::RemoveCredential,
+    )?;
+    let updated = metadata
+        .delete_repository_credential(binding_id, actor, req.expected_revision)
+        .await?
+        .binding;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::RemoveCredential,
+        updated.workspace_id,
+        binding_id,
+    );
+    Ok(Json(updated))
+}
+
+async fn test_repository_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsCredentialTestRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::TestCredential,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    let credential = load_git_credential(&metadata, binding_id, actor).await?;
+    context
+        .adapter
+        .test_remote_credential(&context.worktree, &req.remote, credential)
+        .await
+        .map_err(git_adapter_error)?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::TestCredential,
+        context.workspace.id,
+        binding_id,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn list_repository_remotes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<VcsRemote>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context = load_repository_context(&state, metadata, actor, binding_id, false).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.workspace.id,
+        binding_id,
+        VcsAction::Remotes,
+    )?;
+    let remotes = context
+        .adapter
+        .remotes(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    push_vcs_operation(
+        &state,
+        actor,
+        VcsAction::Remotes,
+        context.workspace.id,
+        binding_id,
+    );
+    Ok(Json(remotes))
+}
+
+enum RepositoryRemoteMutation {
+    Add { name: String, url: String },
+    Update { name: String, url: String },
+    Rename { old: String, new: String },
+    Remove { name: String },
+}
+
+async fn mutate_repository_remote(
+    state: AppState,
+    headers: HeaderMap,
+    id: i64,
+    expected_revision: u64,
+    mutation: RepositoryRemoteMutation,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    let action = match &mutation {
+        RepositoryRemoteMutation::Add { .. } => VcsAction::AddRemote,
+        RepositoryRemoteMutation::Update { .. } => VcsAction::EditRemote,
+        RepositoryRemoteMutation::Rename { .. } => VcsAction::EditRemote,
+        RepositoryRemoteMutation::Remove { .. } => VcsAction::RemoveRemote,
+    };
+    authorize_vcs_operation(&state, &auth, context.workspace.id, binding_id, action)?;
+    if context.record.binding.revision != expected_revision {
+        return Err(ApiError::Conflict(
+            "repository binding changed; refresh and retry".into(),
+        ));
+    }
+    match mutation {
+        RepositoryRemoteMutation::Add { name, url } => {
+            context
+                .adapter
+                .add_remote(&context.worktree, &name, &url)
+                .await
+        }
+        RepositoryRemoteMutation::Update { name, url } => {
+            context
+                .adapter
+                .set_remote_url(&context.worktree, &name, &url)
+                .await
+        }
+        RepositoryRemoteMutation::Rename { old, new } => {
+            context
+                .adapter
+                .rename_remote(&context.worktree, &old, &new)
+                .await
+        }
+        RepositoryRemoteMutation::Remove { name } => {
+            context
+                .adapter
+                .remove_remote(&context.worktree, &name)
+                .await
+        }
+    }
+    .map_err(git_adapter_error)?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = observe_repository_after_mutation(
+        metadata,
+        binding_id,
+        actor,
+        expected_revision,
+        observation,
+    )
+    .await?;
+    push_vcs_operation(&state, actor, action, context.workspace.id, binding_id);
+    publish_repository_changed(
+        &state,
+        &context.workspace,
+        binding_id,
+        updated.binding.revision,
+    );
+    Ok(Json(updated.binding))
+}
+
+async fn add_repository_remote(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRemoteMutationRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    mutate_repository_remote(
+        state,
+        headers,
+        id,
+        req.expected_revision,
+        RepositoryRemoteMutation::Add {
+            name: req.name,
+            url: req.url,
+        },
+    )
+    .await
+}
+
+async fn update_repository_remote(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRemoteMutationRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    mutate_repository_remote(
+        state,
+        headers,
+        id,
+        req.expected_revision,
+        RepositoryRemoteMutation::Update {
+            name: req.name,
+            url: req.url,
+        },
+    )
+    .await
+}
+
+async fn rename_repository_remote(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRemoteRenameRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    mutate_repository_remote(
+        state,
+        headers,
+        id,
+        req.expected_revision,
+        RepositoryRemoteMutation::Rename {
+            old: req.old_name,
+            new: req.new_name,
+        },
+    )
+    .await
+}
+
+async fn remove_repository_remote(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsRemoteDeleteRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    mutate_repository_remote(
+        state,
+        headers,
+        id,
+        req.expected_revision,
+        RepositoryRemoteMutation::Remove { name: req.name },
+    )
+    .await
+}
+
+async fn load_git_credential(
+    metadata: &MetadataStore,
+    binding_id: RepositoryBindingId,
+    actor: PrincipalId,
+) -> ApiResult<crate::git_adapter::GitCredential> {
+    let Some(mut secret) = metadata.repository_credential(binding_id, actor).await? else {
+        return Ok(crate::git_adapter::GitCredential {
+            username: String::new(),
+            password: String::new(),
+        });
+    };
+    let stored: StoredGitCredential = serde_json::from_slice(&secret)
+        .map_err(|_| ApiError::Internal("stored repository credential is invalid".into()))?;
+    secret.fill(0);
+    Ok(crate::git_adapter::GitCredential {
+        username: stored.username,
+        password: stored.password,
+    })
+}
+
 async fn fetch_repository(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9027,17 +9472,12 @@ async fn remote_repository_operation(
         }
         .into());
     }
-    let mut secret = metadata
-        .repository_credential(binding_id, actor)
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("repository credential is not configured".into()))?;
-    let stored: StoredGitCredential = serde_json::from_slice(&secret)
-        .map_err(|_| ApiError::Internal("stored repository credential is invalid".into()))?;
-    secret.fill(0);
-    let credential = crate::git_adapter::GitCredential {
-        username: stored.username,
-        password: stored.password,
-    };
+    let before_refs = context
+        .adapter
+        .branches(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let credential = load_git_credential(&metadata, binding_id, actor).await?;
     let observation = if push {
         context
             .adapter
@@ -9056,6 +9496,40 @@ async fn remote_repository_operation(
     }
     .map_err(git_adapter_error)?;
     let head = observation.head.clone();
+    let after_refs = context
+        .adapter
+        .branches(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let before_heads = before_refs
+        .into_iter()
+        .filter_map(|branch| branch.head.map(|head| (branch.name, head)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let after_heads = after_refs
+        .into_iter()
+        .filter_map(|branch| branch.head.map(|head| (branch.name, head)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let ref_names = before_heads
+        .keys()
+        .chain(after_heads.keys())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let ref_changes = ref_names
+        .into_iter()
+        .filter_map(|name| {
+            let before = before_heads.get(&name).cloned();
+            let after = after_heads.get(&name).cloned();
+            (before != after).then_some(sift_protocol::VcsRefChange {
+                name,
+                before,
+                after,
+            })
+        })
+        .collect::<Vec<_>>();
+    let updated_refs = ref_changes
+        .iter()
+        .map(|change| change.name.clone())
+        .collect();
     metadata_blocking(move || {
         metadata
             .observe_repository(
@@ -9081,7 +9555,8 @@ async fn remote_repository_operation(
         binding_id,
         operation: if push { "push" } else { "fetch" }.into(),
         head,
-        updated_refs: Vec::new(),
+        updated_refs,
+        ref_changes,
     }))
 }
 

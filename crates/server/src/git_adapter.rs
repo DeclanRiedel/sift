@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use sift_protocol::{
     VcsBranch, VcsCommitDetail, VcsCommitFile, VcsCommitSummary, VcsConflictFile, VcsConflictKind,
     VcsConflictRegion, VcsConflictResolution, VcsDiff, VcsDiffFile, VcsDiffHunk, VcsDiffLine,
-    VcsDiffLineKind, VcsDiffSide, VcsFileState, VcsHistoricalFile, VcsHistoryPage,
+    VcsDiffLineKind, VcsDiffSide, VcsFileState, VcsHistoricalFile, VcsHistoryPage, VcsRemote,
     VcsRepositoryOperationKind, VcsRepositoryOperationState, VcsStageState, VcsStatus,
     VcsStatusEntry, VcsUpstreamStatus, WorkspacePath, WorkspaceRevision,
 };
@@ -56,6 +56,16 @@ pub enum GitAdapterError {
     CommandFailed(Option<i32>),
     #[error("Git network operations are disabled")]
     NetworkDisabled,
+    #[error("repository authentication failed")]
+    AuthenticationFailed,
+    #[error("remote rejected a non-fast-forward update")]
+    NonFastForward,
+    #[error("remote rejected an update to a protected branch")]
+    ProtectedBranch,
+    #[error("repository network request failed")]
+    NetworkFailure,
+    #[error("remote repository was not found")]
+    RemoteNotFound,
     #[error("Git credential helper is unavailable")]
     CredentialHelperUnavailable,
     #[error("Git process I/O failed")]
@@ -547,6 +557,9 @@ impl GitAdapter {
             return Err(GitAdapterError::OutputLimit);
         }
         if !result.0.success() {
+            if network {
+                return Err(classify_network_error(&result.2 .0));
+            }
             return Err(GitAdapterError::CommandFailed(result.0.code()));
         }
         Ok(GitOutput {
@@ -605,6 +618,108 @@ impl GitAdapter {
             let _ = (worktree, args, credential);
             Err(GitAdapterError::CredentialHelperUnavailable)
         }
+    }
+
+    pub async fn remotes(&self, worktree: &Path) -> Result<Vec<VcsRemote>> {
+        let output = self.run(worktree, ["remote"], false, &[]).await?;
+        let text = String::from_utf8(output.stdout).map_err(|_| GitAdapterError::InvalidData)?;
+        let mut remotes = Vec::new();
+        for name in text.lines().filter(|name| !name.is_empty()) {
+            validate_remote(name)?;
+            let fetch_url = self.remote_url(worktree, name, false).await?;
+            let push_url = self.remote_url(worktree, name, true).await?;
+            remotes.push(VcsRemote {
+                name: name.to_owned(),
+                fetch_url,
+                push_url,
+            });
+        }
+        remotes.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(remotes)
+    }
+
+    async fn remote_url(&self, worktree: &Path, name: &str, push: bool) -> Result<String> {
+        validate_remote(name)?;
+        let output = if push {
+            self.run(worktree, ["remote", "get-url", "--push", name], false, &[])
+                .await?
+        } else {
+            self.run(worktree, ["remote", "get-url", name], false, &[])
+                .await?
+        };
+        String::from_utf8(output.stdout)
+            .map_err(|_| GitAdapterError::InvalidData)
+            .map(|value| value.trim().to_owned())
+    }
+
+    pub async fn add_remote(&self, worktree: &Path, name: &str, url: &str) -> Result<()> {
+        validate_remote(name)?;
+        validate_remote_url(url)?;
+        self.run(worktree, ["remote", "add", "--", name, url], false, &[])
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_remote_url(&self, worktree: &Path, name: &str, url: &str) -> Result<()> {
+        validate_remote(name)?;
+        validate_remote_url(url)?;
+        self.run(worktree, ["remote", "set-url", "--", name, url], false, &[])
+            .await?;
+        Ok(())
+    }
+
+    pub async fn rename_remote(&self, worktree: &Path, old: &str, new: &str) -> Result<()> {
+        validate_remote(old)?;
+        validate_remote(new)?;
+        self.run(worktree, ["remote", "rename", old, new], false, &[])
+            .await?;
+        Ok(())
+    }
+
+    pub async fn remove_remote(&self, worktree: &Path, name: &str) -> Result<()> {
+        validate_remote(name)?;
+        self.run(worktree, ["remote", "remove", name], false, &[])
+            .await?;
+        Ok(())
+    }
+
+    pub async fn test_remote_credential(
+        &self,
+        worktree: &Path,
+        remote: &str,
+        credential: GitCredential,
+    ) -> Result<()> {
+        let url = self.remote_url(worktree, remote, false).await?;
+        validate_remote_network_url(&url)?;
+        self.run_network(
+            worktree,
+            ["ls-remote", "--exit-code", remote, "HEAD"],
+            credential,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn clone_repository_into(
+        &self,
+        worktree: &Path,
+        url: &str,
+        credential: GitCredential,
+    ) -> Result<GitRepositoryObservation> {
+        validate_remote_network_url(url)?;
+        let mut entries = std::fs::read_dir(worktree)?;
+        if entries.next().transpose()?.is_some() {
+            return Err(GitAdapterError::UnsupportedOperation(
+                "clone target must be an empty configured projection",
+            ));
+        }
+        self.run_network(
+            worktree,
+            ["clone", "--origin", "origin", "--", url, "."],
+            credential,
+        )
+        .await?;
+        self.observation(worktree).await
     }
 }
 
@@ -1600,6 +1715,8 @@ impl VcsRepository for GitAdapter {
         credential: GitCredential,
     ) -> Result<GitRepositoryObservation> {
         validate_remote(remote)?;
+        let url = self.remote_url(worktree, remote, false).await?;
+        validate_remote_network_url(&url)?;
         self.run_network(worktree, ["fetch", "--prune", remote], credential)
             .await?;
         self.observation(worktree).await
@@ -1613,16 +1730,40 @@ impl VcsRepository for GitAdapter {
         credential: GitCredential,
     ) -> Result<GitRepositoryObservation> {
         validate_remote(remote)?;
+        let url = self.remote_url(worktree, remote, true).await?;
+        validate_remote_network_url(&url)?;
         if branch.is_some_and(|branch| !valid_ref_component(branch)) {
             return Err(GitAdapterError::InvalidData);
         }
-        let mut args = vec![OsString::from("push"), OsString::from(remote)];
-        if let Some(branch) = branch {
-            args.push(OsString::from(branch));
-        }
+        let set_upstream = if let Some(branch) = branch {
+            let key = format!("branch.{branch}.remote");
+            match self
+                .run(worktree, ["config", "--get", key.as_str()], false, &[])
+                .await
+            {
+                Ok(output) => output.stdout.iter().all(u8::is_ascii_whitespace),
+                Err(GitAdapterError::CommandFailed(_)) => true,
+                Err(error) => return Err(error),
+            }
+        } else {
+            false
+        };
+        let args = push_arguments(remote, branch, set_upstream);
         self.run_network(worktree, args, credential).await?;
         self.observation(worktree).await
     }
+}
+
+fn push_arguments(remote: &str, branch: Option<&str>, set_upstream: bool) -> Vec<OsString> {
+    let mut args = vec![OsString::from("push")];
+    if set_upstream {
+        args.push(OsString::from("--set-upstream"));
+    }
+    args.push(OsString::from(remote));
+    if let Some(branch) = branch {
+        args.push(OsString::from(branch));
+    }
+    args
 }
 
 async fn read_bounded<R: AsyncRead + Unpin>(
@@ -2327,6 +2468,64 @@ fn validate_remote(remote: &str) -> Result<()> {
     }
 }
 
+fn validate_remote_url(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 4096
+        || value.starts_with('-')
+        || value.contains(['\0', '\n', '\r'])
+    {
+        return Err(GitAdapterError::InvalidData);
+    }
+    if let Ok(url) = url::Url::parse(value) {
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(GitAdapterError::UnsupportedOperation(
+                "credentials must be stored separately from the remote URL",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_remote_network_url(value: &str) -> Result<()> {
+    validate_remote_url(value)?;
+    let url = url::Url::parse(value).map_err(|_| {
+        GitAdapterError::UnsupportedOperation(
+            "only HTTPS remotes are supported; managed SSH keys are not implemented",
+        )
+    })?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return Err(GitAdapterError::UnsupportedOperation(
+            "only HTTPS remotes are supported; managed SSH keys are not implemented",
+        ));
+    }
+    Ok(())
+}
+
+fn classify_network_error(stderr: &[u8]) -> GitAdapterError {
+    let diagnostic = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    if diagnostic.contains("non-fast-forward")
+        || diagnostic.contains("fetch first")
+        || diagnostic.contains("failed to push some refs")
+    {
+        GitAdapterError::NonFastForward
+    } else if diagnostic.contains("protected branch")
+        || diagnostic.contains("pre-receive hook declined")
+    {
+        GitAdapterError::ProtectedBranch
+    } else if diagnostic.contains("authentication failed")
+        || diagnostic.contains("could not read username")
+        || diagnostic.contains("terminal prompts disabled")
+        || diagnostic.contains("http 401")
+        || diagnostic.contains("http 403")
+    {
+        GitAdapterError::AuthenticationFailed
+    } else if diagnostic.contains("repository not found") || diagnostic.contains("not found") {
+        GitAdapterError::RemoteNotFound
+    } else {
+        GitAdapterError::NetworkFailure
+    }
+}
+
 fn validate_ref(value: &str) -> Result<()> {
     if valid_ref_component(value)
         && !value.contains("..")
@@ -2800,6 +2999,86 @@ mod tests {
             std::fs::read_to_string(repository.path().join(&path.0)).unwrap(),
             "side\n"
         );
+    }
+
+    #[tokio::test]
+    async fn remotes_are_typed_mutable_and_urls_never_embed_credentials() {
+        let adapter = GitAdapter::for_tests().await.unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        adapter.initialize(repository.path()).await.unwrap();
+
+        adapter
+            .add_remote(
+                repository.path(),
+                "origin",
+                "https://example.invalid/one.git",
+            )
+            .await
+            .unwrap();
+        let remotes = adapter.remotes(repository.path()).await.unwrap();
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].name, "origin");
+        assert_eq!(remotes[0].fetch_url, "https://example.invalid/one.git");
+
+        adapter
+            .set_remote_url(
+                repository.path(),
+                "origin",
+                "https://example.invalid/two.git",
+            )
+            .await
+            .unwrap();
+        adapter
+            .rename_remote(repository.path(), "origin", "upstream")
+            .await
+            .unwrap();
+        let remotes = adapter.remotes(repository.path()).await.unwrap();
+        assert_eq!(remotes[0].name, "upstream");
+        assert_eq!(remotes[0].push_url, "https://example.invalid/two.git");
+        adapter
+            .remove_remote(repository.path(), "upstream")
+            .await
+            .unwrap();
+        assert!(adapter.remotes(repository.path()).await.unwrap().is_empty());
+
+        assert!(matches!(
+            validate_remote_url("https://user:secret@example.invalid/repository.git"),
+            Err(GitAdapterError::UnsupportedOperation(_))
+        ));
+        assert!(matches!(
+            validate_remote_network_url("git@example.invalid:repository.git"),
+            Err(GitAdapterError::UnsupportedOperation(_))
+        ));
+    }
+
+    #[test]
+    fn remote_failures_are_actionable_without_echoing_stderr() {
+        assert!(matches!(
+            classify_network_error(b"fatal: Authentication failed for secret URL"),
+            GitAdapterError::AuthenticationFailed
+        ));
+        assert!(matches!(
+            classify_network_error(b"rejected (non-fast-forward)"),
+            GitAdapterError::NonFastForward
+        ));
+        assert!(matches!(
+            classify_network_error(b"protected branch hook declined"),
+            GitAdapterError::ProtectedBranch
+        ));
+    }
+
+    #[test]
+    fn first_push_sets_upstream_without_enabling_force() {
+        assert_eq!(
+            push_arguments("origin", Some("feature/a"), true),
+            ["push", "--set-upstream", "origin", "feature/a"]
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
+        let ordinary = push_arguments("origin", Some("feature/a"), false);
+        assert_eq!(ordinary, ["push", "origin", "feature/a"]);
+        assert!(!ordinary.iter().any(|arg| arg == "--force"));
     }
 
     #[tokio::test]

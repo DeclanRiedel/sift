@@ -87,9 +87,10 @@ impl MetadataStore {
         writable: bool,
     ) -> Result<RepositoryBindingRecord> {
         let conn = self.conn()?;
-        let binding = repository_binding_by_id_locked(&conn, id)?;
+        let mut binding = repository_binding_by_id_locked(&conn, id)?;
         let workspace = workspace_by_id_locked(&conn, binding.binding.workspace_id)?;
         ensure_room_access(&conn, workspace.room_id, principal, writable)?;
+        attach_principal_credential(&conn, &mut binding, principal)?;
         Ok(binding)
     }
 
@@ -108,8 +109,12 @@ impl MetadataStore {
                 |row| row.get::<_, i64>(0).map(RepositoryBindingId),
             )
             .optional()?;
-        id.map(|id| repository_binding_by_id_locked(&conn, id))
-            .transpose()
+        id.map(|id| {
+            let mut binding = repository_binding_by_id_locked(&conn, id)?;
+            attach_principal_credential(&conn, &mut binding, principal)?;
+            Ok(binding)
+        })
+        .transpose()
     }
 
     pub fn observe_repository(
@@ -132,7 +137,8 @@ impl MetadataStore {
                  revision = revision + 1, updated_at = ?3 WHERE id = ?4",
             params![observation.branch, observation.head, now, id.0],
         )?;
-        let updated = repository_binding_by_id_locked(&tx, id)?;
+        let mut updated = repository_binding_by_id_locked(&tx, id)?;
+        attach_principal_credential(&tx, &mut updated, actor)?;
         tx.commit()?;
         Ok(updated)
     }
@@ -172,7 +178,8 @@ impl MetadataStore {
                 id.0,
             ],
         )?;
-        let updated = repository_binding_by_id_locked(&tx, id)?;
+        let mut updated = repository_binding_by_id_locked(&tx, id)?;
+        attach_principal_credential(&tx, &mut updated, actor)?;
         tx.commit()?;
         Ok(updated)
     }
@@ -223,7 +230,8 @@ impl MetadataStore {
                  revision = revision + 1, updated_at = ?3 WHERE id = ?4",
             params![observation.branch, observation.head, now, id.0],
         )?;
-        let updated = repository_binding_by_id_locked(&tx, id)?;
+        let mut updated = repository_binding_by_id_locked(&tx, id)?;
+        attach_principal_credential(&tx, &mut updated, actor)?;
         tx.commit()?;
         Ok(updated)
     }
@@ -249,16 +257,26 @@ impl MetadataStore {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let current = repository_binding_by_id_locked(&tx, id)?;
             let workspace = workspace_by_id_locked(&tx, current.binding.workspace_id)?;
-            ensure_room_owner(&tx, workspace.room_id, actor)?;
+            ensure_room_access(&tx, workspace.room_id, actor, true)?;
             ensure_revision(&current.binding, expected_revision)?;
+            let previous = principal_credential_handle_locked(&tx, id, actor)?;
             tx.execute(
-                "UPDATE repository_binding SET credential_handle = ?1,
-                     revision = revision + 1, updated_at = ?2 WHERE id = ?3",
-                params![db_handle, now_text(), id.0],
+                "INSERT INTO repository_principal_credential (
+                     binding_id, principal_id, credential_handle, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?4)
+                 ON CONFLICT(binding_id, principal_id) DO UPDATE SET
+                     credential_handle = excluded.credential_handle,
+                     updated_at = excluded.updated_at",
+                params![id.0, actor.0, db_handle, now_text()],
             )?;
-            let updated = repository_binding_by_id_locked(&tx, id)?;
+            tx.execute(
+                "UPDATE repository_binding SET revision = revision + 1, updated_at = ?1 WHERE id = ?2",
+                params![now_text(), id.0],
+            )?;
+            let mut updated = repository_binding_by_id_locked(&tx, id)?;
+            attach_principal_credential(&tx, &mut updated, actor)?;
             tx.commit()?;
-            Ok((updated, current.credential_handle))
+            Ok((updated, previous))
         })
         .await;
         match result {
@@ -282,11 +300,55 @@ impl MetadataStore {
         id: RepositoryBindingId,
         principal: PrincipalId,
     ) -> Result<Option<Vec<u8>>> {
-        let binding = self.repository_binding_for_principal(id, principal, true)?;
-        let Some(handle) = binding.credential_handle else {
+        let handle = {
+            let conn = self.conn()?;
+            let binding = repository_binding_by_id_locked(&conn, id)?;
+            let workspace = workspace_by_id_locked(&conn, binding.binding.workspace_id)?;
+            ensure_room_access(&conn, workspace.room_id, principal, true)?;
+            principal_credential_handle_locked(&conn, id, principal)?
+        };
+        let Some(handle) = handle else {
             return Ok(None);
         };
         self.secrets.get(VCS_CREDENTIAL_NAMESPACE, &handle).await
+    }
+
+    pub async fn delete_repository_credential(
+        &self,
+        id: RepositoryBindingId,
+        actor: PrincipalId,
+        expected_revision: u64,
+    ) -> Result<RepositoryBindingRecord> {
+        let backend = self.backend.clone();
+        let (updated, previous) = sqlite_blocking_repository(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current = repository_binding_by_id_locked(&tx, id)?;
+            let workspace = workspace_by_id_locked(&tx, current.binding.workspace_id)?;
+            ensure_room_access(&tx, workspace.room_id, actor, true)?;
+            ensure_revision(&current.binding, expected_revision)?;
+            let previous = principal_credential_handle_locked(&tx, id, actor)?;
+            tx.execute(
+                "DELETE FROM repository_principal_credential
+                 WHERE binding_id = ?1 AND principal_id = ?2",
+                params![id.0, actor.0],
+            )?;
+            tx.execute(
+                "UPDATE repository_binding SET revision = revision + 1, updated_at = ?1 WHERE id = ?2",
+                params![now_text(), id.0],
+            )?;
+            let mut updated = repository_binding_by_id_locked(&tx, id)?;
+            attach_principal_credential(&tx, &mut updated, actor)?;
+            tx.commit()?;
+            Ok((updated, previous))
+        })
+        .await?;
+        if let Some(previous) = previous {
+            self.secrets
+                .delete(VCS_CREDENTIAL_NAMESPACE, &previous)
+                .await?;
+        }
+        Ok(updated)
     }
 
     pub async fn delete_repository_binding(
@@ -296,28 +358,61 @@ impl MetadataStore {
         expected_revision: u64,
     ) -> Result<()> {
         let backend = self.backend.clone();
-        let credential = sqlite_blocking_repository(move || {
+        let credentials = sqlite_blocking_repository(move || {
             let mut conn = backend.conn()?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let current = repository_binding_by_id_locked(&tx, id)?;
             let workspace = workspace_by_id_locked(&tx, current.binding.workspace_id)?;
             ensure_room_owner(&tx, workspace.room_id, actor)?;
             ensure_revision(&current.binding, expected_revision)?;
+            let mut statement = tx.prepare(
+                "SELECT credential_handle FROM repository_principal_credential WHERE binding_id = ?1",
+            )?;
+            let credentials = statement
+                .query_map(params![id.0], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(statement);
             tx.execute(
                 "DELETE FROM repository_binding WHERE id = ?1",
                 params![id.0],
             )?;
             tx.commit()?;
-            Ok(current.credential_handle)
+            Ok(credentials)
         })
         .await?;
-        if let Some(handle) = credential {
+        for handle in credentials {
             self.secrets
                 .delete(VCS_CREDENTIAL_NAMESPACE, &handle)
                 .await?;
         }
         Ok(())
     }
+}
+
+fn principal_credential_handle_locked(
+    conn: &Connection,
+    id: RepositoryBindingId,
+    principal: PrincipalId,
+) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT credential_handle FROM repository_principal_credential
+         WHERE binding_id = ?1 AND principal_id = ?2",
+        params![id.0, principal.0],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn attach_principal_credential(
+    conn: &Connection,
+    record: &mut RepositoryBindingRecord,
+    principal: PrincipalId,
+) -> Result<()> {
+    record.credential_handle =
+        principal_credential_handle_locked(conn, record.binding.id, principal)?;
+    record.binding.credential_handle_present = record.credential_handle.is_some();
+    Ok(())
 }
 
 async fn sqlite_blocking_repository<T>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>
@@ -438,7 +533,10 @@ mod tests {
     use sift_protocol::{ProjectionHealth, ProjectionMode};
 
     use super::*;
-    use crate::{MemorySecretStore, NewProjectionBinding, NewRoom, RoomKind, TenantId};
+    use crate::{
+        MembershipRole, MemorySecretStore, NewOperationAudit, NewProjectionBinding, NewRoom,
+        RoomKind, RoomRole, TenantId,
+    };
 
     #[test]
     fn repository_credential_request_debug_is_redacted() {
@@ -586,11 +684,60 @@ mod tests {
                 .unwrap(),
             secret
         );
+        let peer = store
+            .create_principal("repository-peer", "Repository peer", None)
+            .unwrap();
+        store
+            .upsert_tenant_membership(TenantId(1), peer.id, MembershipRole::Member)
+            .unwrap();
+        store
+            .add_room_member_authorized(
+                room.id,
+                actor,
+                peer.id,
+                RoomRole::Editor,
+                NewOperationAudit {
+                    actor_principal_id: Some(actor),
+                    action: "add_member".into(),
+                    target: "room".into(),
+                    target_id: Some(room.id.0),
+                    status: "succeeded".into(),
+                    result_code: None,
+                    row_count: None,
+                    error_message: None,
+                    correlation_id: None,
+                },
+            )
+            .unwrap();
+        let peer_secret = br#"{"username":"bob","password":"peer-only"}"#;
+        let peer_binding = store
+            .set_repository_credential(binding.binding.id, peer.id, 2, peer_secret)
+            .await
+            .unwrap();
+        assert_eq!(peer_binding.binding.revision, 3);
+        assert_eq!(
+            store
+                .repository_credential(binding.binding.id, peer.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(peer_secret.as_slice())
+        );
+        assert_eq!(
+            store
+                .repository_credential(binding.binding.id, actor)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(secret.as_slice()),
+            "each principal keeps a distinct SecretStore handle"
+        );
         let conn = store.conn().unwrap();
         let stored: String = conn
             .query_row(
-                "SELECT credential_handle FROM repository_binding WHERE id = ?1",
-                params![binding.binding.id.0],
+                "SELECT credential_handle FROM repository_principal_credential
+                 WHERE binding_id = ?1 AND principal_id = ?2",
+                params![binding.binding.id.0, actor.0],
                 |row| row.get(0),
             )
             .unwrap();
@@ -598,7 +745,7 @@ mod tests {
         assert!(!stored.contains("not-in-sqlite"));
         drop(conn);
         store
-            .delete_repository_binding(binding.binding.id, actor, 2)
+            .delete_repository_binding(binding.binding.id, actor, 3)
             .await
             .unwrap();
         assert!(secrets.is_empty());

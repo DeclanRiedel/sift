@@ -152,7 +152,9 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 - [ ] `workspace_repository`, `bind_workspace_repository`, `delete_workspace_repository` — repo binding (M5)
 - [ ] `repository_status`, `repository_diff`, `repository_branches` — status/diff/branches (M5)
 - [ ] `stage_repository_paths`, `unstage_repository_paths`, `commit_repository` — stage/commit (M5)
-- [ ] `set_repository_credential`, `fetch_repository`, `push_repository` — fetch/push + creds (M5)
+- [x] `set_repository_credential`, `delete_repository_credential`,
+      `test_repository_credential`, remote list/add/edit/remove,
+      `fetch_repository`, `push_repository` — explicit remotes + credentials (G7)
 
 ---
 

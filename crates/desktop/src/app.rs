@@ -1188,6 +1188,397 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::BindWorkspaceRepository {
+                workspace_id,
+                root_handle,
+                initialize,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let workspace = sift_protocol::WorkspaceId(workspace_id);
+                        let projection = match client.workspace_projection(workspace).await {
+                            Ok(Some(projection)) => Ok(projection),
+                            Ok(None) => {
+                                client
+                                    .bind_workspace_projection(
+                                        workspace,
+                                        sift_api_types::BindWorkspaceProjectionRequest {
+                                            root_handle,
+                                            mode: sift_protocol::ProjectionMode::ReadWrite,
+                                        },
+                                    )
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        };
+                        match projection {
+                            Ok(projection) => client
+                                .bind_workspace_repository(
+                                    workspace,
+                                    sift_api_types::BindRepositoryRequest {
+                                        projection_id: projection.id,
+                                        initialize,
+                                    },
+                                )
+                                .await
+                                .map_err(|error| format!("binding repository failed: {error}")),
+                            Err(error) => Err(format!("binding projection failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositorySetupFinished {
+                        workspace_id,
+                        action: if initialize {
+                            "Repository initialized"
+                        } else {
+                            "Repository bound"
+                        },
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CloneWorkspaceRepository {
+                workspace_id,
+                root_handle,
+                url,
+                username,
+                password,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .clone_workspace_repository(
+                            sift_protocol::WorkspaceId(workspace_id),
+                            sift_api_types::CloneWorkspaceRepositoryRequest {
+                                root_handle,
+                                url,
+                                username: sift_protocol::RedactedString(username),
+                                password: sift_protocol::RedactedString(password),
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("cloning repository failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositorySetupFinished {
+                        workspace_id,
+                        action: "Repository cloned",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadRepositoryRemotes {
+                workspace_id,
+                binding_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .repository_remotes(sift_protocol::RepositoryBindingId(binding_id))
+                        .await
+                        .map_err(|error| format!("loading remotes failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryRemotesLoaded {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::AddRepositoryRemote {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                name,
+                url,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let request = sift_api_types::VcsRemoteMutationRequest {
+                            expected_revision,
+                            name,
+                            url,
+                        };
+                        client
+                            .add_repository_remote(
+                                sift_protocol::RepositoryBindingId(binding_id),
+                                request,
+                            )
+                            .await
+                            .map_err(|error| format!("saving remote failed: {error}"))
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryConfigurationFinished {
+                        workspace_id,
+                        action: "Remote added",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::UpdateRepositoryRemote {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                old_name,
+                name,
+                url,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let binding = sift_protocol::RepositoryBindingId(binding_id);
+                        let revision = if let Some(old_name) = old_name.filter(|old| old != &name) {
+                            match client
+                                .rename_repository_remote(
+                                    binding,
+                                    sift_api_types::VcsRemoteRenameRequest {
+                                        expected_revision,
+                                        old_name,
+                                        new_name: name.clone(),
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(updated) => Ok(updated.revision),
+                                Err(error) => Err(format!("renaming remote failed: {error}")),
+                            }
+                        } else {
+                            Ok(expected_revision)
+                        };
+                        match revision {
+                            Ok(expected_revision) => client
+                                .update_repository_remote(
+                                    binding,
+                                    sift_api_types::VcsRemoteMutationRequest {
+                                        expected_revision,
+                                        name,
+                                        url,
+                                    },
+                                )
+                                .await
+                                .map_err(|error| format!("saving remote failed: {error}")),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryConfigurationFinished {
+                        workspace_id,
+                        action: "Remote updated",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RemoveRepositoryRemote {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                name,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .remove_repository_remote(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsRemoteDeleteRequest {
+                                expected_revision,
+                                name,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("removing remote failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryConfigurationFinished {
+                        workspace_id,
+                        action: "Remote removed",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SetRepositoryCredential {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                username,
+                password,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .set_repository_credential(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::SetVcsCredentialRequest {
+                                expected_revision,
+                                username: sift_protocol::RedactedString(username),
+                                password: sift_protocol::RedactedString(password),
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("saving credential failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryConfigurationFinished {
+                        workspace_id,
+                        action: "Credential saved",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::TestRepositoryCredential {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                remote,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .test_repository_credential(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsCredentialTestRequest {
+                                expected_revision,
+                                remote,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("testing credential failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryCredentialTested {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RemoveRepositoryCredential {
+                workspace_id,
+                binding_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_repository_credential(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::ExpectedRepositoryRevisionRequest { expected_revision },
+                        )
+                        .await
+                        .map_err(|error| format!("removing credential failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryConfigurationFinished {
+                        workspace_id,
+                        action: "Credential removed",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::FetchRepository {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                remote,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .fetch_repository(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsRemoteRequest {
+                                expected_revision,
+                                remote,
+                                branch: None,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("fetch failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryRemoteFinished {
+                        workspace_id,
+                        action: "Fetch completed",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::PushRepository {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                remote,
+                branch,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .push_repository(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            sift_api_types::VcsRemoteRequest {
+                                expected_revision,
+                                remote,
+                                branch,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("push failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryRemoteFinished {
+                        workspace_id,
+                        action: "Push completed",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadRepositoryBranches {
                 workspace_id,
                 binding_id,

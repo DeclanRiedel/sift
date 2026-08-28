@@ -1068,6 +1068,8 @@ pub enum Modal {
         force: bool,
     },
     RepositoryConflict,
+    RepositorySetup,
+    RepositoryRemotes,
     WorkspaceCreateFile,
     WorkspaceCreateFolder,
     WorkspaceMove,
@@ -1723,6 +1725,74 @@ pub enum ExecutorCommand {
         workspace_id: i64,
         request_id: u64,
     },
+    BindWorkspaceRepository {
+        workspace_id: i64,
+        root_handle: String,
+        initialize: bool,
+    },
+    CloneWorkspaceRepository {
+        workspace_id: i64,
+        root_handle: String,
+        url: String,
+        username: String,
+        password: String,
+    },
+    LoadRepositoryRemotes {
+        workspace_id: i64,
+        binding_id: i64,
+    },
+    AddRepositoryRemote {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        name: String,
+        url: String,
+    },
+    UpdateRepositoryRemote {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        old_name: Option<String>,
+        name: String,
+        url: String,
+    },
+    RemoveRepositoryRemote {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        name: String,
+    },
+    SetRepositoryCredential {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        username: String,
+        password: String,
+    },
+    TestRepositoryCredential {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        remote: String,
+    },
+    RemoveRepositoryCredential {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+    },
+    FetchRepository {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        remote: String,
+    },
+    PushRepository {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        remote: String,
+        branch: Option<String>,
+    },
     LoadRepositoryBranches {
         workspace_id: i64,
         binding_id: i64,
@@ -2140,6 +2210,29 @@ pub enum ExecutorEvent {
         request_id: u64,
         binding: Option<sift_protocol::RepositoryBinding>,
         result: Result<Option<sift_protocol::VcsStatus>, String>,
+    },
+    RepositorySetupFinished {
+        workspace_id: i64,
+        action: &'static str,
+        result: Result<sift_protocol::RepositoryBinding, String>,
+    },
+    RepositoryRemotesLoaded {
+        workspace_id: i64,
+        result: Result<Vec<sift_protocol::VcsRemote>, String>,
+    },
+    RepositoryConfigurationFinished {
+        workspace_id: i64,
+        action: &'static str,
+        result: Result<sift_protocol::RepositoryBinding, String>,
+    },
+    RepositoryCredentialTested {
+        workspace_id: i64,
+        result: Result<(), String>,
+    },
+    RepositoryRemoteFinished {
+        workspace_id: i64,
+        action: &'static str,
+        result: Result<sift_protocol::VcsRemoteResult, String>,
     },
     RepositoryBranchesLoaded {
         workspace_id: i64,
@@ -4902,6 +4995,12 @@ pub struct WorkspaceShell {
     saved_query_name_input: Entity<TextInput>,
     result_cell_edit_input: Entity<TextInput>,
     repository_commit_input: Entity<TextInput>,
+    repository_root_input: Entity<TextInput>,
+    repository_remote_name_input: Entity<TextInput>,
+    repository_remote_url_input: Entity<TextInput>,
+    repository_username_input: Entity<TextInput>,
+    repository_password_input: Entity<TextInput>,
+    repository_remote_selected: Option<String>,
     workspace_path_input: Entity<TextInput>,
     repository_commit_drafts: HashMap<i64, String>,
     recent_repository_commit: Option<sift_protocol::VcsCommitResult>,
@@ -5272,6 +5371,23 @@ impl WorkspaceShell {
             TextInput::new(repository_commit_draft, "Commit message", cx)
                 .aria_label("Git commit message")
         });
+        let repository_root_input = cx.new(|cx| {
+            TextInput::new("", "Configured root handle", cx)
+                .aria_label("Repository projection root handle")
+        });
+        let repository_remote_name_input =
+            cx.new(|cx| TextInput::new("origin", "Remote name", cx).aria_label("Git remote name"));
+        let repository_remote_url_input = cx.new(|cx| {
+            TextInput::new("", "https://host/owner/repository.git", cx)
+                .aria_label("Git remote HTTPS URL")
+        });
+        let repository_username_input =
+            cx.new(|cx| TextInput::new("", "Username (optional)", cx).aria_label("Git username"));
+        let repository_password_input = cx.new(|cx| {
+            TextInput::new("", "Personal access token or password", cx)
+                .aria_label("Git personal access token or password")
+                .masked()
+        });
         let workspace_path_input =
             cx.new(|cx| TextInput::new("", "Workspace path", cx).aria_label("Workspace path"));
         let schema_search_input = cx.new(|cx| {
@@ -5447,6 +5563,12 @@ impl WorkspaceShell {
             saved_query_name_input,
             result_cell_edit_input,
             repository_commit_input,
+            repository_root_input,
+            repository_remote_name_input,
+            repository_remote_url_input,
+            repository_username_input,
+            repository_password_input,
+            repository_remote_selected: None,
             workspace_path_input,
             repository_commit_drafts,
             recent_repository_commit: None,
@@ -7482,6 +7604,96 @@ impl WorkspaceShell {
                 {
                     if self.repository.take_queued_refresh() {
                         self.request_repository_status(cx);
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositorySetupFinished {
+                workspace_id,
+                action,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    match result {
+                        Ok(binding) => {
+                            self.repository.set_observed_binding(Some(binding));
+                            self.show_success_toast(action.into(), cx);
+                            self.request_workspace_files(cx);
+                            self.request_repository_status(cx);
+                        }
+                        Err(message) => self.repository.set_error(message),
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryRemotesLoaded {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    self.repository.apply_remotes(result);
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryConfigurationFinished {
+                workspace_id,
+                action,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    match result {
+                        Ok(binding) => {
+                            self.repository.set_observed_binding(Some(binding));
+                            self.repository_remote_selected = None;
+                            self.show_success_toast(action.into(), cx);
+                        }
+                        Err(message) => self.repository.set_error(message),
+                    }
+                    if let Some(status) = self.repository.status() {
+                        if let Some(sender) = &self.executor_sender {
+                            let _ = sender.send(ExecutorCommand::LoadRepositoryRemotes {
+                                workspace_id,
+                                binding_id: status.binding_id.0,
+                            });
+                        }
+                    }
+                    self.request_repository_status(cx);
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryCredentialTested {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    match result {
+                        Ok(()) => {
+                            self.show_success_toast("Repository credential is valid".into(), cx)
+                        }
+                        Err(message) => self.repository.set_error(message),
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryRemoteFinished {
+                workspace_id,
+                action,
+                result,
+            } => {
+                if self.selected_workspace_id == Some(workspace_id) {
+                    let succeeded = result.is_ok();
+                    self.repository.finish_network_operation(result.map(Some));
+                    if succeeded {
+                        self.show_success_toast(action.into(), cx);
+                        self.request_repository_status(cx);
+                        if let Some(status) = self.repository.status() {
+                            if let Some(sender) = &self.executor_sender {
+                                let _ = sender.send(ExecutorCommand::LoadRepositoryRemotes {
+                                    workspace_id,
+                                    binding_id: status.binding_id.0,
+                                });
+                            }
+                        }
                     }
                     cx.notify();
                 }
@@ -12129,6 +12341,247 @@ impl WorkspaceShell {
         {
             self.repository
                 .fail_to_send(request_id, "Source control is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn open_repository_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.repository_root_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.repository_remote_url_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.repository_username_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.repository_password_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.modal = Some(Modal::RepositorySetup);
+        self.repository_root_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn submit_repository_setup(&mut self, initialize: bool, clone: bool, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let root_handle = self.repository_root_input.read(cx).text().trim().to_owned();
+        if root_handle.is_empty() {
+            self.repository
+                .set_error("A configured root handle is required");
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.repository.set_error("Source control is unavailable");
+            return;
+        };
+        let command = if clone {
+            let url = self
+                .repository_remote_url_input
+                .read(cx)
+                .text()
+                .trim()
+                .to_owned();
+            if url.is_empty() {
+                self.repository.set_error("An HTTPS clone URL is required");
+                return;
+            }
+            ExecutorCommand::CloneWorkspaceRepository {
+                workspace_id,
+                root_handle,
+                url,
+                username: self.repository_username_input.read(cx).text().to_owned(),
+                password: self.repository_password_input.read(cx).text().to_owned(),
+            }
+        } else {
+            ExecutorCommand::BindWorkspaceRepository {
+                workspace_id,
+                root_handle,
+                initialize,
+            }
+        };
+        if sender.send(command).is_ok() {
+            self.modal = None;
+        } else {
+            self.repository.set_error("Source control is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn open_repository_remotes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(status) = self.repository.status() else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        self.repository_remote_name_input
+            .update(cx, |input, cx| input.set_text("origin", cx));
+        self.repository_remote_url_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.repository_remote_selected = None;
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::LoadRepositoryRemotes {
+                workspace_id,
+                binding_id: status.binding_id.0,
+            });
+        }
+        self.modal = Some(Modal::RepositoryRemotes);
+        self.repository_remote_name_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn mutate_repository_remote(&mut self, remove: bool, cx: &mut Context<Self>) {
+        let Some(status) = self.repository.status() else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        let name = self
+            .repository_remote_name_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        if name.is_empty() {
+            self.repository.set_error("Remote name is required");
+            return;
+        }
+        let remotes = self.repository.remotes();
+        let selected = self.repository_remote_selected.clone();
+        let command = if remove {
+            ExecutorCommand::RemoveRepositoryRemote {
+                workspace_id,
+                binding_id: status.binding_id.0,
+                expected_revision: status.binding_revision,
+                name,
+            }
+        } else {
+            let url = self
+                .repository_remote_url_input
+                .read(cx)
+                .text()
+                .trim()
+                .to_owned();
+            if url.is_empty() {
+                self.repository.set_error("Remote HTTPS URL is required");
+                return;
+            }
+            if selected.is_some() || remotes.iter().any(|remote| remote.name == name) {
+                ExecutorCommand::UpdateRepositoryRemote {
+                    workspace_id,
+                    binding_id: status.binding_id.0,
+                    expected_revision: status.binding_revision,
+                    old_name: selected,
+                    name,
+                    url,
+                }
+            } else {
+                ExecutorCommand::AddRepositoryRemote {
+                    workspace_id,
+                    binding_id: status.binding_id.0,
+                    expected_revision: status.binding_revision,
+                    name,
+                    url,
+                }
+            }
+        };
+        let _ = sender.send(command);
+    }
+
+    fn repository_credential_action(&mut self, action: &str, cx: &mut Context<Self>) {
+        let Some(status) = self.repository.status() else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        let remote = self
+            .repository_remote_name_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let command = match action {
+            "save" => ExecutorCommand::SetRepositoryCredential {
+                workspace_id,
+                binding_id: status.binding_id.0,
+                expected_revision: status.binding_revision,
+                username: self.repository_username_input.read(cx).text().to_owned(),
+                password: self.repository_password_input.read(cx).text().to_owned(),
+            },
+            "test" => ExecutorCommand::TestRepositoryCredential {
+                workspace_id,
+                binding_id: status.binding_id.0,
+                expected_revision: status.binding_revision,
+                remote,
+            },
+            _ => ExecutorCommand::RemoveRepositoryCredential {
+                workspace_id,
+                binding_id: status.binding_id.0,
+                expected_revision: status.binding_revision,
+            },
+        };
+        let _ = sender.send(command);
+    }
+
+    fn run_repository_remote(&mut self, push: bool, cx: &mut Context<Self>) {
+        let Some((binding_id, expected_revision, branch)) =
+            self.repository.status().map(|status| {
+                (
+                    status.binding_id.0,
+                    status.binding_revision,
+                    status.branch.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        if !self.repository.begin_network_operation() {
+            return;
+        }
+        let remote = self
+            .repository_remote_name_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let command = if push {
+            ExecutorCommand::PushRepository {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                remote,
+                branch,
+            }
+        } else {
+            ExecutorCommand::FetchRepository {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                remote,
+            }
+        };
+        if sender.send(command).is_err() {
+            self.repository
+                .finish_network_operation(Err("Source control is unavailable".into()));
         }
         cx.notify();
     }
@@ -21395,6 +21848,20 @@ impl WorkspaceShell {
                                         .gap_1()
                                         .child(
                                             IconButton::new(
+                                                "repository-remotes",
+                                                IconName::Server,
+                                                "Remotes and credentials",
+                                            )
+                                            .square(px(24.))
+                                            .icon_size(12.)
+                                            .tooltip("Remotes, credentials, fetch and push")
+                                            .disabled(self.repository.status().is_none())
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_repository_remotes(window, cx)
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
                                                 "repository-branches",
                                                 IconName::VersionControl,
                                                 "Branches",
@@ -21884,9 +22351,19 @@ impl WorkspaceShell {
                                 panel.child(
                                     div()
                                         .p_3()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
                                         .whitespace_normal()
                                         .text_color(colors.muted_text)
-                                        .child("No repository is bound to this workspace."),
+                                        .child("No repository is bound to this workspace.")
+                                        .child(
+                                            Button::new("setup-workspace-repository", "Set up repository…")
+                                                .tone(ButtonTone::Accent)
+                                                .on_click(cx.listener(|shell, _, window, cx| {
+                                                    shell.open_repository_setup(window, cx)
+                                                })),
+                                        ),
                                 )
                             },
                         )
@@ -26249,6 +26726,98 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::RepositorySetup => {
+                    div()
+                        .debug_selector(|| "repository-setup".into())
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Set up Git repository"))
+                        .child(div().text_sm().text_color(colors.muted_text).child("The root handle must be configured by the server operator. Sift never accepts an arbitrary filesystem path."))
+                        .child(div().flex().flex_col().gap_1().child(SectionLabel::new("CONFIGURED ROOT HANDLE")).child(self.repository_root_input.clone()))
+                        .child(div().flex().flex_col().gap_1().child(SectionLabel::new("HTTPS CLONE URL")).child(self.repository_remote_url_input.clone()))
+                        .child(div().flex().gap_2()
+                            .child(div().flex_1().flex().flex_col().gap_1().child(SectionLabel::new("USERNAME")).child(self.repository_username_input.clone()))
+                            .child(div().flex_1().flex().flex_col().gap_1().child(SectionLabel::new("PAT / PASSWORD")).child(self.repository_password_input.clone())))
+                        .child(div().text_xs().text_color(colors.muted_text).child("Credentials are sent once and stored behind SecretStore. Clone currently supports HTTPS; managed SSH keys are deliberately unavailable until they can run without ambient agents."))
+                        .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("cancel-repository-setup", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
+                            .child(Button::new("bind-existing-repository", "Bind existing").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(false, false, cx))))
+                            .child(Button::new("initialize-repository", "Initialize").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(true, false, cx))))
+                            .child(Button::new("clone-repository", "Clone HTTPS").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(false, true, cx)))))
+                        .into_any_element()
+                }
+                Modal::RepositoryRemotes => {
+                    let remotes = self.repository.remotes();
+                    let repository_permalink = self.selected_workspace_id.zip(
+                        self.repository.status().map(|status| status.binding_id.0),
+                    ).map(|(workspace_id, binding_id)| {
+                        format!("sift://workspace/{workspace_id}/repository/{binding_id}")
+                    });
+                    let credential_present = self
+                        .repository
+                        .observed_binding()
+                        .is_some_and(|binding| binding.credential_handle_present);
+                    let remote_rows = remotes.iter().enumerate().map(|(index, remote)| {
+                        let name = remote.name.clone();
+                        let url = remote.fetch_url.clone();
+                        div().id(("repository-remote-row", index)).p_2().rounded_sm().border_1().border_color(colors.subtle_border)
+                            .flex().items_center().gap_2()
+                            .child(div().flex_1().min_w_0().flex().flex_col()
+                                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(name.clone()))
+                                .child(div().text_xs().truncate().text_color(colors.muted_text).child(url.clone())))
+                            .child(Button::new(("edit-repository-remote", index), "Edit").tone(ButtonTone::Ghost).on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.repository_remote_selected = Some(name.clone());
+                                shell.repository_remote_name_input.update(cx, |input, cx| input.set_text(name.clone(), cx));
+                                shell.repository_remote_url_input.update(cx, |input, cx| input.set_text(url.clone(), cx));
+                            })))
+                    });
+                    let result_rows = self.repository.remote_result().map(|result| {
+                        let changes = result.ref_changes.iter().map(|change| {
+                            let before = change.before.as_deref().map(|oid| oid.chars().take(8).collect::<String>()).unwrap_or_else(|| "new".into());
+                            let after = change.after.as_deref().map(|oid| oid.chars().take(8).collect::<String>()).unwrap_or_else(|| "deleted".into());
+                            div().text_xs().font_family("monospace").child(format!("{}  {before} → {after}", change.name))
+                        });
+                        div().p_2().rounded_sm().bg(colors.surface).flex().flex_col().gap_1()
+                            .child(format!("Last {} · {} ref change(s)", result.operation, result.ref_changes.len()))
+                            .children(changes)
+                    });
+                    div()
+                        .debug_selector(|| "repository-remotes".into())
+                        .flex().flex_col().gap_3()
+                        .child(div().flex().items_center().justify_between()
+                            .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Remotes and credentials"))
+                            .child(div().flex().gap_2()
+                                .children(repository_permalink.map(|permalink| Button::new("copy-repository-permalink", "Copy repository link").tone(ButtonTone::Ghost).on_click(cx.listener(move |shell, _, _, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(permalink.clone()));
+                                    shell.show_toast("Copied repository link".into(), cx);
+                                }))))
+                                .child(Button::new("close-repository-remotes", "Close").tone(ButtonTone::Ghost).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx)))))
+                        )
+                        .children(remote_rows)
+                        .when(remotes.is_empty(), |view| view.child(div().text_sm().text_color(colors.muted_text).child("No remotes configured.")))
+                        .child(div().flex().gap_2()
+                            .child(div().w(px(140.)).child(self.repository_remote_name_input.clone()))
+                            .child(div().flex_1().child(self.repository_remote_url_input.clone())))
+                        .child(div().flex().gap_2()
+                            .child(Button::new("save-repository-remote", "Add / update remote").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.mutate_repository_remote(false, cx))))
+                            .child(Button::new("remove-repository-remote", "Remove").tone(ButtonTone::DangerGhost).on_click(cx.listener(|shell, _, _, cx| shell.mutate_repository_remote(true, cx)))))
+                        .child(div().border_t_1().border_color(colors.subtle_border).pt_3().flex().flex_col().gap_2()
+                            .child(SectionLabel::new(if credential_present { "CREDENTIAL · CONFIGURED FOR YOU" } else { "CREDENTIAL · NOT CONFIGURED" }))
+                            .child(div().flex().gap_2().child(div().flex_1().child(self.repository_username_input.clone())).child(div().flex_1().child(self.repository_password_input.clone())))
+                            .child(div().flex().gap_2()
+                                .child(Button::new("save-repository-credential", "Save / replace").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.repository_credential_action("save", cx))))
+                                .child(Button::new("test-repository-credential", "Test").tone(ButtonTone::Neutral).disabled(!credential_present).on_click(cx.listener(|shell, _, _, cx| shell.repository_credential_action("test", cx))))
+                                .child(Button::new("remove-repository-credential", "Remove").tone(ButtonTone::DangerGhost).disabled(!credential_present).on_click(cx.listener(|shell, _, _, cx| shell.repository_credential_action("remove", cx)))))
+                            .child(div().text_xs().text_color(colors.muted_text).child("PAT/basic credentials are scoped to your principal and revealed only to one explicit network operation.")))
+                        .child(div().border_t_1().border_color(colors.subtle_border).pt_3().flex().items_center().gap_2()
+                            .child(Button::new("fetch-repository", "Fetch selected remote").tone(ButtonTone::Neutral).disabled(self.repository.loading()).on_click(cx.listener(|shell, _, _, cx| shell.run_repository_remote(false, cx))))
+                            .child(Button::new("push-repository", "Push current branch").tone(ButtonTone::Accent).disabled(self.repository.loading()).on_click(cx.listener(|shell, _, _, cx| shell.run_repository_remote(true, cx))))
+                            .child(div().flex_1())
+                            .child(div().text_xs().text_color(colors.muted_text).child("Network actions are manual and visible. Force push is unavailable.")))
+                        .children(result_rows)
+                        .into_any_element()
+                }
                 Modal::RepositoryBranches => {
                     let query = self.query_input.read(cx).text().trim().to_lowercase();
                     let branches = self.repository.branches();
@@ -27072,6 +27641,10 @@ impl WorkspaceShell {
                         .expect("historical file modal requires loaded file");
                     let restore_file = file.clone();
                     let status = self.repository.status().cloned();
+                    let file_permalink = status.as_ref().map(|status| format!(
+                        "sift://repository/{}/commit/{}/file/{}",
+                        status.binding_id.0, file.commit, file.path.0
+                    ));
                     div()
                         .debug_selector(|| "repository-historical-file".into())
                         .w(px(760.))
@@ -27101,6 +27674,14 @@ impl WorkspaceShell {
                                 .flex()
                                 .justify_end()
                                 .gap_2()
+                                .children(file_permalink.map(|permalink| {
+                                    Button::new("copy-repository-file-permalink", "Copy link")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(permalink.clone()));
+                                            shell.show_toast("Copied file link".into(), cx);
+                                        }))
+                                }))
                                 .child(
                                     Button::new("restore-repository-historical-file", "Restore file")
                                         .tone(ButtonTone::DangerMuted)
@@ -35744,6 +36325,56 @@ mod tests {
         assert_eq!(requested_path, path);
         assert_eq!(requested_hunk, hunk_id);
         assert!(staged);
+    }
+
+    #[gpui::test]
+    fn repository_setup_dispatches_typed_bind_and_clone_commands(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_workspace_id = Some(42);
+            shell
+                .repository_root_input
+                .update(cx, |input, cx| input.set_text("team-checkout", cx));
+            shell.submit_repository_setup(true, false, cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::BindWorkspaceRepository {
+                workspace_id: 42,
+                root_handle,
+                initialize: true,
+            }) if root_handle == "team-checkout"
+        ));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.repository_remote_url_input.update(cx, |input, cx| {
+                input.set_text("https://example.test/team/repository.git", cx)
+            });
+            shell
+                .repository_username_input
+                .update(cx, |input, cx| input.set_text("alice", cx));
+            shell
+                .repository_password_input
+                .update(cx, |input, cx| input.set_text("secret", cx));
+            shell.submit_repository_setup(false, true, cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::CloneWorkspaceRepository {
+                workspace_id: 42,
+                root_handle,
+                url,
+                username,
+                password,
+            }) if root_handle == "team-checkout"
+                && url == "https://example.test/team/repository.git"
+                && username == "alice"
+                && password == "secret"
+        ));
     }
 
     #[gpui::test]

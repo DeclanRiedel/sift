@@ -98,6 +98,10 @@ pub enum VcsAction {
     ContinueOperation,
     AbortOperation,
     RepairBinding,
+    Remotes,
+    AddRemote,
+    EditRemote,
+    RemoveRemote,
     Stage,
     Unstage,
     Commit,
@@ -106,6 +110,8 @@ pub enum VcsAction {
     Discard,
     Revert,
     SetCredential,
+    TestCredential,
+    RemoveCredential,
     Fetch,
     Push,
 }
@@ -736,7 +742,8 @@ impl Operation {
                 | VcsAction::Diff
                 | VcsAction::Branches
                 | VcsAction::History
-                | VcsAction::Conflicts => OperationKind::ReadVcs,
+                | VcsAction::Conflicts
+                | VcsAction::Remotes => OperationKind::ReadVcs,
                 VcsAction::Bind
                 | VcsAction::Unbind
                 | VcsAction::Stage
@@ -755,7 +762,12 @@ impl Operation {
                 | VcsAction::ContinueOperation
                 | VcsAction::AbortOperation
                 | VcsAction::RepairBinding
+                | VcsAction::AddRemote
+                | VcsAction::EditRemote
+                | VcsAction::RemoveRemote
                 | VcsAction::SetCredential
+                | VcsAction::TestCredential
+                | VcsAction::RemoveCredential
                 | VcsAction::Fetch
                 | VcsAction::Push => OperationKind::WriteVcs,
             },
@@ -1219,6 +1231,10 @@ single_word_audit_names!(VcsAction {
     ContinueOperation => "continue_operation",
     AbortOperation => "abort_operation",
     RepairBinding => "repair_binding",
+    Remotes => "remotes",
+    AddRemote => "add_remote",
+    EditRemote => "edit_remote",
+    RemoveRemote => "remove_remote",
     Stage => "stage",
     Unstage => "unstage",
     Commit => "commit",
@@ -1227,6 +1243,8 @@ single_word_audit_names!(VcsAction {
     Discard => "discard",
     Revert => "revert",
     SetCredential => "set_credential",
+    TestCredential => "test_credential",
+    RemoveCredential => "remove_credential",
     Fetch => "fetch",
     Push => "push",
 });
