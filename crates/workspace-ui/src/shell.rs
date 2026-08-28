@@ -5626,6 +5626,8 @@ pub struct WorkspaceShell {
     saved_queries_error: Option<String>,
     saved_query_editing: Option<sift_api_types::SavedQueryId>,
     pending_saved_query_renames: HashMap<u64, String>,
+    saved_query_delete_confirmation: Option<sift_api_types::SavedQueryId>,
+    pending_saved_query_deletion: Option<(String, sift_api_types::SavedQueryId)>,
     result_cell_edit_target: Option<ResultCellEditTarget>,
     staged_result_edits: Vec<StagedResultEdit>,
     result_edit_conflicts: HashMap<usize, String>,
@@ -5943,6 +5945,7 @@ impl WorkspaceShell {
         })
         .detach();
         cx.observe(&saved_query_switcher_input, |shell, _, cx| {
+            shell.saved_query_delete_confirmation = None;
             shell.saved_query_switcher_selected = 0;
             shell
                 .saved_query_switcher_scroll_handle
@@ -6189,6 +6192,8 @@ impl WorkspaceShell {
             saved_queries_error: None,
             saved_query_editing: None,
             pending_saved_query_renames: HashMap::new(),
+            saved_query_delete_confirmation: None,
+            pending_saved_query_deletion: None,
             result_cell_edit_target: None,
             staged_result_edits: Vec::new(),
             result_edit_conflicts: HashMap::new(),
@@ -8262,13 +8267,40 @@ impl WorkspaceShell {
             }
             ExecutorEvent::SavedQueryDeleted { id, result } => {
                 self.saved_queries_loading = false;
+                let pending_instance = self.pending_saved_query_deletion.as_ref().and_then(
+                    |(instance_id, pending_id)| (*pending_id == id).then(|| instance_id.clone()),
+                );
+                if pending_instance.is_some() {
+                    self.pending_saved_query_deletion = None;
+                }
+                self.saved_query_delete_confirmation = None;
+                if pending_instance.is_some_and(|instance_id| {
+                    self.selected_instance_id.as_deref().unwrap_or("local") != instance_id.as_str()
+                }) {
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(()) => {
                         self.saved_queries.retain(|query| query.id != id);
                         self.saved_query_editing = None;
                         self.saved_queries_error = None;
+                        let detached = self.detach_deleted_saved_query_tabs(id, cx);
+                        self.persist(cx);
+                        if detached > 0 {
+                            self.show_toast(
+                                "Deleted saved query; open tab is now unsaved".into(),
+                                cx,
+                            );
+                        } else {
+                            self.show_toast("Deleted saved query".into(), cx);
+                        }
                     }
-                    Err(message) => self.saved_queries_error = Some(message),
+                    Err(message) => {
+                        self.saved_queries_error = Some(message.clone());
+                        let item_id = self.saved_query_item_id(id, cx);
+                        self.record_runtime_error(item_id, "Delete saved query", message, cx);
+                    }
                 }
                 cx.notify();
             }
@@ -12845,6 +12877,61 @@ impl WorkspaceShell {
         false
     }
 
+    fn saved_query_item_id(&self, id: sift_api_types::SavedQueryId, cx: &App) -> Option<u64> {
+        self.panes.iter().find_map(|pane| {
+            pane.read(cx).items.iter().find_map(|item| {
+                matches!(
+                    item.source.as_ref(),
+                    Some(ItemSource::SavedQuery(source)) if source.saved_query_id == id.0
+                )
+                .then_some(item.id)
+            })
+        })
+    }
+
+    fn detach_deleted_saved_query_tabs(
+        &mut self,
+        id: sift_api_types::SavedQueryId,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let mut detached = 0;
+        let instance_id = self
+            .selected_instance_id
+            .clone()
+            .unwrap_or_else(|| "local".into());
+        for pane in &self.panes {
+            detached += pane.update(cx, |pane, cx| {
+                let item_ids = pane
+                    .items
+                    .iter()
+                    .filter_map(|item| {
+                        matches!(
+                            item.source.as_ref(),
+                            Some(ItemSource::SavedQuery(source))
+                                if source.saved_query_id == id.0
+                                    && source.instance_id == instance_id
+                        )
+                        .then_some(item.id)
+                    })
+                    .collect::<Vec<_>>();
+                for item_id in &item_ids {
+                    if let Some(item) = pane.items.iter_mut().find(|item| item.id == *item_id) {
+                        item.source = None;
+                        item.dirty = true;
+                    }
+                    // No clean baseline means every later edit remains dirty,
+                    // including undo back to the pre-deletion SQL text.
+                    pane.clean_documents.remove(item_id);
+                }
+                if !item_ids.is_empty() {
+                    cx.notify();
+                }
+                item_ids.len()
+            });
+        }
+        detached
+    }
+
     fn active_query_snapshot(&self, cx: &App) -> Option<ActiveQuerySnapshot> {
         let pane = self.panes.get(self.active_pane)?.read(cx);
         let item = pane.active_item()?;
@@ -13108,17 +13195,78 @@ impl WorkspaceShell {
         id: sift_api_types::SavedQueryId,
         expected_revision: u64,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        if self.pending_saved_query_deletion.is_some() {
+            return false;
+        }
         let Some(sender) = &self.executor_sender else {
-            return;
+            let message = "Saved-query executor is unavailable".to_owned();
+            self.saved_queries_error = Some(message.clone());
+            self.record_runtime_error(None, "Delete saved query", message, cx);
+            return false;
         };
-        self.saved_queries_loading = sender
+        let sent = sender
             .send(ExecutorCommand::DeleteSavedQuery {
                 id,
                 expected_revision,
             })
             .is_ok();
+        if sent {
+            self.pending_saved_query_deletion = Some((
+                self.selected_instance_id
+                    .clone()
+                    .unwrap_or_else(|| "local".into()),
+                id,
+            ));
+            self.saved_queries_loading = true;
+            self.saved_query_delete_confirmation = None;
+            self.saved_queries_error = None;
+        } else {
+            let message = "Saved-query executor stopped".to_owned();
+            self.saved_queries_error = Some(message.clone());
+            self.record_runtime_error(None, "Delete saved query", message, cx);
+        }
         cx.notify();
+        sent
+    }
+
+    fn begin_selected_saved_query_delete(&mut self, cx: &mut Context<Self>) {
+        if self.saved_queries_loading || self.pending_saved_query_deletion.is_some() {
+            return;
+        }
+        let selected = self
+            .filtered_saved_queries(cx)
+            .get(self.saved_query_switcher_selected)
+            .map(|query| query.id);
+        if let Some(id) = selected {
+            self.saved_query_delete_confirmation = Some(id);
+            self.saved_queries_error = None;
+            cx.notify();
+        }
+    }
+
+    fn cancel_saved_query_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.saved_query_delete_confirmation = None;
+        self.saved_query_switcher_input
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn confirm_saved_query_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.saved_query_delete_confirmation else {
+            return;
+        };
+        let Some(revision) = self
+            .saved_queries
+            .iter()
+            .find(|query| query.id == id)
+            .map(|query| query.revision)
+        else {
+            self.saved_query_delete_confirmation = None;
+            return;
+        };
+        self.delete_saved_query(id, revision, cx);
     }
 
     fn open_saved_query(
@@ -15434,6 +15582,7 @@ impl WorkspaceShell {
             return;
         }
         self.modal = Some(Modal::SavedQuerySwitcher);
+        self.saved_query_delete_confirmation = None;
         self.saved_query_switcher_selected = 0;
         self.saved_query_switcher_scroll_handle
             .scroll_to_item(0, ScrollStrategy::Top);
@@ -15463,6 +15612,22 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.unparse();
+        if self.modal == Some(Modal::SavedQuerySwitcher) {
+            if self.saved_query_delete_confirmation.is_some() {
+                match key.as_str() {
+                    "y" => self.confirm_saved_query_delete(cx),
+                    "escape" | "n" => self.cancel_saved_query_delete(window, cx),
+                    _ => {}
+                }
+                cx.stop_propagation();
+                return;
+            }
+            if key == "ctrl-d" {
+                self.begin_selected_saved_query_delete(cx);
+                cx.stop_propagation();
+                return;
+            }
+        }
         if self.modal == Some(Modal::CommandPalette)
             && key == "enter"
             && !event.keystroke.modifiers.modified()
@@ -17618,6 +17783,7 @@ impl WorkspaceShell {
                 .update(cx, |input, cx| input.set_text("", cx));
         }
         if self.modal == Some(Modal::SavedQuerySwitcher) {
+            self.saved_query_delete_confirmation = None;
             self.saved_query_switcher_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
@@ -21131,7 +21297,7 @@ impl WorkspaceShell {
                                         Button::new(("delete-saved-query", id.0 as usize), "Delete")
                                             .tone(ButtonTone::DangerGhost)
                                             .on_click(cx.listener(move |shell, _, _, cx| {
-                                                shell.delete_saved_query(id, revision, cx)
+                                                shell.delete_saved_query(id, revision, cx);
                                             })),
                                     ),
                             )
@@ -21519,6 +21685,82 @@ impl WorkspaceShell {
                                                     .map(|query| (index, query))
                                             })
                                             .map(|(index, query)| {
+                                                if shell.saved_query_delete_confirmation
+                                                    == Some(query.id)
+                                                {
+                                                    let cancel_id = query.id;
+                                                    return div()
+                                                        .id((
+                                                            "saved-query-delete-confirmation",
+                                                            index,
+                                                        ))
+                                                        .debug_selector(move || {
+                                                            format!(
+                                                                "saved-query-delete-confirmation-{index}"
+                                                            )
+                                                        })
+                                                        .w_full()
+                                                        .h(px(PALETTE_ROW_HEIGHT))
+                                                        .px_2()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .bg(colors.warning_muted)
+                                                        .text_color(colors.warning)
+                                                        .child(icon(
+                                                            IconName::Warning,
+                                                            colors.warning,
+                                                            13.,
+                                                        ))
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .child(format!(
+                                                                    "Delete {}?",
+                                                                    query.name
+                                                                )),
+                                                        )
+                                                        .child(KeyBinding::new("Esc"))
+                                                        .child(
+                                                            Button::new(
+                                                                (
+                                                                    "cancel-switcher-delete",
+                                                                    cancel_id.0 as usize,
+                                                                ),
+                                                                "Cancel",
+                                                            )
+                                                            .tone(ButtonTone::Ghost)
+                                                            .on_click(cx.listener(
+                                                                |shell, _, window, cx| {
+                                                                    shell.cancel_saved_query_delete(
+                                                                        window, cx,
+                                                                    )
+                                                                },
+                                                            )),
+                                                        )
+                                                        .child(KeyBinding::new("y"))
+                                                        .child(
+                                                            Button::new(
+                                                                (
+                                                                    "confirm-switcher-delete",
+                                                                    query.id.0 as usize,
+                                                                ),
+                                                                "Delete",
+                                                            )
+                                                            .tone(ButtonTone::DangerGhost)
+                                                            .on_click(cx.listener(
+                                                                |shell, _, _, cx| {
+                                                                    shell
+                                                                        .confirm_saved_query_delete(
+                                                                            cx,
+                                                                        )
+                                                                },
+                                                            )),
+                                                        )
+                                                        .into_any_element();
+                                                }
                                                 let open_query = query.clone();
                                                 let scope = if query.owner_principal_id.is_some() {
                                                     "Personal"
@@ -21577,6 +21819,7 @@ impl WorkspaceShell {
                                                             .text_color(colors.muted_text)
                                                             .child(detail),
                                                     )
+                                                    .into_any_element()
                                             })
                                             .collect()
                                     }),
@@ -21589,7 +21832,7 @@ impl WorkspaceShell {
                         .when(query_count == 0, |palette| {
                             let (message, color) = if loading {
                                 ("Loading saved queries…".to_owned(), colors.muted_text)
-                            } else if let Some(error) = error {
+                            } else if let Some(error) = error.clone() {
                                 (error, colors.danger)
                             } else if self.saved_queries.is_empty() {
                                 ("No saved queries yet".to_owned(), colors.muted_text)
@@ -21604,9 +21847,25 @@ impl WorkspaceShell {
                                     .items_center()
                                     .justify_center()
                                     .text_color(color)
-                                    .child(message),
+                                .child(message),
                             )
                         })
+                        .when_some(
+                            error.filter(|_| query_count > 0),
+                            |palette, message| {
+                                palette.child(
+                                    div()
+                                        .debug_selector(|| "saved-query-switcher-error".into())
+                                        .px_3()
+                                        .py_2()
+                                        .border_t_1()
+                                        .border_color(colors.subtle_border)
+                                        .text_xs()
+                                        .text_color(colors.danger)
+                                        .child(message),
+                                )
+                            },
+                        )
                         .child(
                             div()
                                 .h(px(28.))
@@ -21618,8 +21877,16 @@ impl WorkspaceShell {
                                 .border_color(colors.subtle_border)
                                 .text_xs()
                                 .text_color(colors.muted_text)
-                                .child("↑/↓ or Ctrl-J/K navigate  ·  Enter open")
-                                .child("Esc close"),
+                                .child(if self.saved_query_delete_confirmation.is_some() {
+                                    "y delete  ·  Esc cancel"
+                                } else {
+                                    "↑/↓ or Ctrl-J/K navigate  ·  Enter open"
+                                })
+                                .child(if self.saved_query_delete_confirmation.is_some() {
+                                    ""
+                                } else {
+                                    "Ctrl-D delete  ·  Esc close"
+                                }),
                         )
                         .into_any_element()
                 }
@@ -32304,6 +32571,134 @@ mod tests {
             CommandRegistry::definition(CommandId::OpenSavedQuery).language,
             "<leader> q o"
         );
+    }
+
+    #[gpui::test]
+    fn saved_query_switcher_deletes_inline_and_detaches_open_tab(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let timestamp = "2026-08-28T10:00:00Z".parse().unwrap();
+        let saved = sift_api_types::SavedQuery {
+            id: sift_api_types::SavedQueryId(12),
+            tenant_id: sift_api_types::TenantId(1),
+            owner_principal_id: Some(sift_api_types::PrincipalId(7)),
+            name: "Temporary report".into(),
+            sql_text: "select * from temporary_report".into(),
+            connection_profile_id: None,
+            tags: vec!["cleanup".into()],
+            created_at: timestamp,
+            updated_at: timestamp,
+            revision: 6,
+        };
+
+        let item_id = workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "demo".into(),
+                rooms: Vec::new(),
+                connections: Vec::new(),
+            }];
+            shell.open_saved_query(saved.clone(), window, cx);
+            let item_id = shell.panes[shell.active_pane]
+                .read(cx)
+                .active_item()
+                .unwrap()
+                .id;
+            shell.open_saved_query_switcher(window, cx);
+            item_id
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadSavedQueries { tenant_id: 1 })
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQueriesLoaded {
+                    tenant_id: 1,
+                    result: Ok(vec![saved.clone()]),
+                },
+                cx,
+            );
+        });
+
+        cx.simulate_keystrokes("ctrl-d");
+        cx.run_until_parked();
+        assert!(cx
+            .debug_bounds("saved-query-delete-confirmation-0")
+            .is_some());
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell.saved_query_delete_confirmation,
+                Some(sift_api_types::SavedQueryId(12))
+            );
+            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
+        });
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.saved_query_delete_confirmation.is_none());
+            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
+        });
+
+        cx.simulate_keystrokes("ctrl-d y");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::DeleteSavedQuery {
+                id: sift_api_types::SavedQueryId(12),
+                expected_revision: 6,
+            })
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQueryDeleted {
+                    id: sift_api_types::SavedQueryId(12),
+                    result: Err("shared query requires owner role".into()),
+                },
+                cx,
+            );
+            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
+            assert_eq!(shell.saved_queries.len(), 1);
+            assert_eq!(
+                shell.saved_queries_error.as_deref(),
+                Some("shared query requires owner role")
+            );
+            assert!(shell.global_problems.last().is_some_and(|problem| {
+                problem.item_id == item_id && problem.title.starts_with("Delete saved query")
+            }));
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert!(matches!(
+                pane.active_item().and_then(|item| item.source.as_ref()),
+                Some(ItemSource::SavedQuery(source)) if source.saved_query_id == 12
+            ));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("saved-query-switcher-error").is_some());
+
+        cx.simulate_keystrokes("ctrl-d y");
+        assert!(commands.try_recv().is_ok());
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQueryDeleted {
+                    id: sift_api_types::SavedQueryId(12),
+                    result: Ok(()),
+                },
+                cx,
+            );
+            assert!(shell.saved_queries.is_empty());
+            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.id, item_id);
+            assert!(item.source.is_none());
+            assert!(item.dirty);
+            assert!(!pane.clean_documents.contains_key(&item_id));
+            assert_eq!(
+                pane.editor(item_id).unwrap().read(cx).document().text(),
+                "select * from temporary_report"
+            );
+        });
     }
 
     #[gpui::test]
