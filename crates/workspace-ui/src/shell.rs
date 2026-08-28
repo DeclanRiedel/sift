@@ -611,6 +611,30 @@ impl ObjectGroupKind {
         }
     }
 
+    fn object_kinds(self) -> &'static [sift_protocol::ObjectKind] {
+        use sift_protocol::ObjectKind;
+        match self {
+            Self::Tables => &[
+                ObjectKind::Table,
+                ObjectKind::ForeignTable,
+                ObjectKind::PartitionedTable,
+            ],
+            Self::Views => &[ObjectKind::View, ObjectKind::MaterializedView],
+            Self::Functions => &[
+                ObjectKind::ScalarFunction,
+                ObjectKind::TableValuedFunction,
+                ObjectKind::Procedure,
+            ],
+            Self::Sequences => &[ObjectKind::Sequence],
+            Self::Other => &[
+                ObjectKind::Trigger,
+                ObjectKind::Synonym,
+                ObjectKind::Type,
+                ObjectKind::Extension,
+            ],
+        }
+    }
+
     fn from_object_kind(kind: sift_protocol::ObjectKind) -> Self {
         use sift_protocol::ObjectKind;
         match kind {
@@ -5506,6 +5530,7 @@ pub struct WorkspaceShell {
     connection_schema: ConnectionSchemaState,
     schema_search_generation: u64,
     schema_search_state: SchemaSearchState,
+    schema_search_filters: HashSet<ObjectGroupKind>,
     data_search_generation: u64,
     data_search_state: DataSearchState,
     table_definitions: HashMap<u64, TableDefinitionState>,
@@ -6018,6 +6043,7 @@ impl WorkspaceShell {
             connection_schema: ConnectionSchemaState::Unavailable,
             schema_search_generation: 0,
             schema_search_state: SchemaSearchState::Idle,
+            schema_search_filters: ObjectGroupKind::CANONICAL.into_iter().collect(),
             data_search_generation: 0,
             data_search_state: DataSearchState::Idle,
             table_definitions: HashMap::new(),
@@ -8990,9 +9016,17 @@ impl WorkspaceShell {
             cx.notify();
             return;
         }
+        let kinds =
+            (self.schema_search_filters.len() < ObjectGroupKind::CANONICAL.len()).then(|| {
+                ObjectGroupKind::CANONICAL
+                    .into_iter()
+                    .filter(|group| self.schema_search_filters.contains(group))
+                    .flat_map(|group| group.object_kinds().iter().copied())
+                    .collect()
+            });
         let request = sift_protocol::SchemaSearchRequest {
             query,
-            kinds: None,
+            kinds,
             limit: Some(80),
         };
         let sent = self.executor_sender.as_ref().is_some_and(|sender| {
@@ -9009,6 +9043,21 @@ impl WorkspaceShell {
             SchemaSearchState::Failed("Database executor is unavailable".into())
         };
         cx.notify();
+    }
+
+    fn toggle_schema_search_filter(&mut self, group: ObjectGroupKind, cx: &mut Context<Self>) {
+        if self.schema_search_filters.contains(&group) {
+            if self.schema_search_filters.len() == 1 {
+                return;
+            }
+            self.schema_search_filters.remove(&group);
+        } else {
+            self.schema_search_filters.insert(group);
+        }
+        self.schema_search_selected = 0;
+        self.schema_search_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
+        self.request_schema_search(cx);
     }
 
     fn searchable_tables(&self) -> Vec<sift_protocol::ObjectPath> {
@@ -16598,7 +16647,21 @@ impl WorkspaceShell {
             SchemaSearchState::Ready {
                 generation,
                 response,
-            } if *generation == self.schema_search_generation => response.hits.clone(),
+            } if *generation == self.schema_search_generation => response
+                .hits
+                .iter()
+                .filter(|hit| {
+                    let kind = match hit.target {
+                        sift_protocol::SearchTarget::Object { object_kind } => object_kind,
+                        sift_protocol::SearchTarget::Column => {
+                            hit.path.kind.unwrap_or(sift_protocol::ObjectKind::Table)
+                        }
+                    };
+                    self.schema_search_filters
+                        .contains(&ObjectGroupKind::from_object_kind(kind))
+                })
+                .cloned()
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -20546,6 +20609,38 @@ impl WorkspaceShell {
                                             })),
                                         ),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "schema-search-filters".into())
+                                .h(px(36.))
+                                .px_2()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .bg(colors.panel)
+                                .children(ObjectGroupKind::CANONICAL.into_iter().map(|group| {
+                                    let selected = self.schema_search_filters.contains(&group);
+                                    Button::new(
+                                        format!("schema-search-filter-{}", group.label().to_lowercase()),
+                                        group.label(),
+                                    )
+                                    .debug_selector(format!(
+                                        "schema-search-filter-{}",
+                                        group.label().to_lowercase()
+                                    ))
+                                    .tone(if selected {
+                                        ButtonTone::Neutral
+                                    } else {
+                                        ButtonTone::Ghost
+                                    })
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.toggle_schema_search_filter(group, cx)
+                                    }))
+                                })),
                         )
                         .when(hit_count > 0, |palette| {
                             palette.child(
@@ -25464,6 +25559,82 @@ mod tests {
     }
 
     #[gpui::test]
+    fn schema_search_filters_requests_and_column_hits_by_object_family(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell
+                .schema_search_input
+                .update(cx, |input, cx| input.set_text("people", cx));
+        });
+        while receiver.try_recv().is_ok() {}
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.toggle_schema_search_filter(ObjectGroupKind::Tables, cx);
+        });
+        let request = loop {
+            let command = receiver.try_recv().expect("filtered schema search command");
+            if let ExecutorCommand::SearchSchema { request, .. } = command {
+                break request;
+            }
+        };
+        let kinds = request.kinds.expect("selected object kinds");
+        assert!(!kinds.contains(&sift_protocol::ObjectKind::Table));
+        assert!(kinds.contains(&sift_protocol::ObjectKind::View));
+        assert!(kinds.contains(&sift_protocol::ObjectKind::ScalarFunction));
+
+        workspace.update(&mut cx, |shell, _| {
+            shell.schema_search_state = SchemaSearchState::Ready {
+                generation: shell.schema_search_generation,
+                response: Box::new(sift_protocol::SchemaSearchResponse {
+                    hits: vec![
+                        sift_protocol::SearchHit {
+                            target: sift_protocol::SearchTarget::Column,
+                            path: sift_protocol::ObjectPath {
+                                catalog: None,
+                                schema: Some("public".into()),
+                                name: "people".into(),
+                                kind: Some(sift_protocol::ObjectKind::Table),
+                                routine_args: None,
+                            },
+                            column: Some("name".into()),
+                            display: "public.people.name".into(),
+                            score: 10,
+                            type_display: Some("text".into()),
+                            match_ranges: Vec::new(),
+                        },
+                        sift_protocol::SearchHit {
+                            target: sift_protocol::SearchTarget::Object {
+                                object_kind: sift_protocol::ObjectKind::View,
+                            },
+                            path: sift_protocol::ObjectPath {
+                                catalog: None,
+                                schema: Some("public".into()),
+                                name: "people_view".into(),
+                                kind: Some(sift_protocol::ObjectKind::View),
+                                routine_args: None,
+                            },
+                            column: None,
+                            display: "public.people_view".into(),
+                            score: 8,
+                            type_display: None,
+                            match_ranges: Vec::new(),
+                        },
+                    ],
+                    index_state: sift_protocol::IndexState::Ready,
+                }),
+            };
+            let hits = shell.schema_palette_hits();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].display, "public.people_view");
+        });
+    }
+
+    #[gpui::test]
     fn data_search_uses_loaded_tables_and_ignores_stale_results(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -26642,7 +26813,16 @@ mod tests {
         assert!(cx.debug_bounds("schema-search-list").is_none());
         assert!(cx.debug_bounds("close-schema-search").is_some());
         assert!(cx.debug_bounds("open-schema-search").is_some());
-        assert!(cx.debug_bounds("schema-search-filter-0").is_none());
+        assert!(cx.debug_bounds("schema-search-filters").is_some());
+        for selector in [
+            "schema-search-filter-tables",
+            "schema-search-filter-views",
+            "schema-search-filter-functions",
+            "schema-search-filter-sequences",
+            "schema-search-filter-other",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some());
+        }
 
         workspace.update(&mut cx, |shell, cx| {
             let generation = shell.schema_search_generation;
