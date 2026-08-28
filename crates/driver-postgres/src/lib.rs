@@ -36,7 +36,10 @@ impl Driver for PgDriver {
 
     #[tracing::instrument(skip_all, fields(engine = "postgres", host = %spec.host))]
     async fn open(&self, spec: &ConnectionSpec) -> Result<ConnHandle, DriverError> {
-        let conn = self.open_internal(spec).await?;
+        let conn = self
+            .open_internal(spec)
+            .await
+            .map_err(|error| contextualize_open_error(spec, error))?;
         let id = self.inner.conn_id.next();
         self.inner.put_free(id, conn).await;
         self.inner.put_spec(id, spec.clone());
@@ -524,6 +527,62 @@ pub(crate) fn pg_err(e: tokio_postgres::Error) -> DriverError {
     err
 }
 
+/// Replace opaque connect/authentication errors with safe, actionable context.
+///
+/// In particular, tokio-postgres deliberately renders some database errors as
+/// `db error`. The SQLSTATE still tells us what happened, so provide useful
+/// guidance without ever copying the password or raw server error into the
+/// user-visible message.
+fn contextualize_open_error(spec: &ConnectionSpec, mut error: DriverError) -> DriverError {
+    let target = connection_target(spec);
+    let loopback_hint = is_loopback_host(&spec.host).then_some(
+        " localhost refers to the machine running the Sift server; use the database server hostname or IP when PostgreSQL runs elsewhere.",
+    );
+
+    match &error.code {
+        Code::AuthFailed => {
+            error.message = format!(
+                "PostgreSQL rejected the credentials at {target}. Verify the username, password, database, and target server.{}",
+                loopback_hint.unwrap_or_default()
+            );
+        }
+        Code::ConnectionFailed => {
+            error.message = format!(
+                "Could not connect to PostgreSQL at {target}. Verify the hostname, port, and network access.{}",
+                loopback_hint.unwrap_or_default()
+            );
+        }
+        _ => {}
+    }
+
+    error
+}
+
+fn connection_target(spec: &ConnectionSpec) -> String {
+    let host: String = spec
+        .host
+        .chars()
+        .take(255)
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect();
+
+    if spec.host.starts_with('/') {
+        format!("Unix socket {host}")
+    } else {
+        format!("{host}:{}", spec.port.unwrap_or(5432))
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1" | "[::1]")
+}
+
 fn begin_sql(mode: &TxMode) -> String {
     let iso = match mode.isolation {
         IsolationLevel::ReadUncommitted => "READ UNCOMMITTED",
@@ -714,6 +773,58 @@ mod copy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn connection_spec(host: &str) -> ConnectionSpec {
+        ConnectionSpec {
+            host: host.to_string(),
+            port: Some(5433),
+            database: Some("inventory".to_string()),
+            user: "app".to_string(),
+            password: Some("do-not-leak".to_string()),
+            ssl_mode: None,
+            engine_specific: None,
+        }
+    }
+
+    #[test]
+    fn auth_failure_explains_localhost_without_leaking_credentials() {
+        let original = DriverError::new(Code::AuthFailed, "db error")
+            .with_engine(Engine::Postgres)
+            .with_sqlstate("28P01");
+
+        let error = contextualize_open_error(&connection_spec("localhost"), original);
+
+        assert_eq!(error.code, Code::AuthFailed);
+        assert_eq!(error.native_code.as_deref(), Some("28P01"));
+        assert!(error.message.contains("localhost:5433"));
+        assert!(error.message.contains("machine running the Sift server"));
+        assert!(error.message.contains("database server hostname or IP"));
+        assert!(!error.message.contains("do-not-leak"));
+        assert!(!error.message.contains("db error"));
+    }
+
+    #[test]
+    fn remote_auth_failure_names_target_without_localhost_hint() {
+        let original = DriverError::new(Code::AuthFailed, "db error");
+
+        let error = contextualize_open_error(&connection_spec("db.internal"), original);
+
+        assert!(error.message.contains("db.internal:5433"));
+        assert!(!error.message.contains("machine running the Sift server"));
+        assert!(!error.message.contains("do-not-leak"));
+    }
+
+    #[test]
+    fn connection_failure_explains_localhost_without_leaking_credentials() {
+        let original = DriverError::new(Code::ConnectionFailed, "connection refused");
+
+        let error = contextualize_open_error(&connection_spec("127.0.0.1"), original);
+
+        assert!(error.message.contains("127.0.0.1:5433"));
+        assert!(error.message.contains("machine running the Sift server"));
+        assert!(!error.message.contains("do-not-leak"));
+        assert!(!error.message.contains("connection refused"));
+    }
 
     #[test]
     fn validate_ident_accepts_legal_names() {
