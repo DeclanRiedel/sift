@@ -5336,6 +5336,9 @@ const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from
 pub struct WorkspaceShell {
     focus_handle: FocusHandle,
     connections_focus_handle: FocusHandle,
+    connections_find_input: Entity<TextInput>,
+    connections_find_open: bool,
+    connections_find_query: String,
     inspector_focus_handle: FocusHandle,
     connections_scroll_handle: UniformListScrollHandle,
     query_input: Entity<TextInput>,
@@ -5695,6 +5698,9 @@ impl WorkspaceShell {
         let semantic_rename_input = cx.new(|cx| TextInput::new("", "New symbol name", cx));
         let saved_query_name_input = cx.new(|cx| TextInput::new("", "Saved query name…", cx));
         let result_cell_edit_input = cx.new(|cx| TextInput::new("", "New value…", cx));
+        let connections_find_input = cx.new(|cx| {
+            TextInput::new("", "Find in connections…", cx).aria_label("Find in connections")
+        });
         let schema_search_input = cx.new(|cx| {
             TextInput::new("", "Search schema…", cx).aria_label("Search database schema")
         });
@@ -5781,6 +5787,25 @@ impl WorkspaceShell {
             cx.notify();
         })
         .detach();
+        cx.observe(&connections_find_input, |shell, input, cx| {
+            shell.connections_find_query = input.read(cx).text().trim().to_lowercase();
+            shell.connection_nav_selected = 0;
+            shell
+                .connections_scroll_handle
+                .scroll_to_item(0, ScrollStrategy::Top);
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(
+            &connections_find_input,
+            window,
+            |shell, _, event: &TextInputEvent, window, cx| {
+                if *event == TextInputEvent::Submitted {
+                    shell.activate_connection_item(window, cx);
+                }
+            },
+        )
+        .detach();
         cx.observe(&schema_search_input, |shell, _, cx| {
             shell.schema_search_selected = 0;
             shell
@@ -5858,6 +5883,9 @@ impl WorkspaceShell {
         Self {
             focus_handle: cx.focus_handle(),
             connections_focus_handle: cx.focus_handle(),
+            connections_find_input,
+            connections_find_open: false,
+            connections_find_query: String::new(),
             inspector_focus_handle: cx.focus_handle(),
             connections_scroll_handle: UniformListScrollHandle::new(),
             query_input,
@@ -9322,7 +9350,7 @@ impl WorkspaceShell {
                 depth: 0,
                 action: ConnectionTreeAction::Tenant(tenant_id),
             });
-            if !self.expanded_tenants.contains(&tenant_id) {
+            if !self.connections_find_open && !self.expanded_tenants.contains(&tenant_id) {
                 continue;
             }
             for connection in &tenant.connections {
@@ -9334,7 +9362,10 @@ impl WorkspaceShell {
                     self.connection_status,
                     ConnectionStatus::Connected { profile_id, .. } if profile_id == connection.id
                 );
-                if !connected || !self.expanded_connections.contains(&connection.id) {
+                if !connected
+                    || (!self.connections_find_open
+                        && !self.expanded_connections.contains(&connection.id))
+                {
                     continue;
                 }
                 let ConnectionSchemaState::Ready {
@@ -9355,9 +9386,10 @@ impl WorkspaceShell {
                             catalog: catalog.name.clone(),
                         },
                     });
-                    if !self
-                        .expanded_catalogs
-                        .contains(&(connection.id, catalog.name.clone()))
+                    if !self.connections_find_open
+                        && !self
+                            .expanded_catalogs
+                            .contains(&(connection.id, catalog.name.clone()))
                     {
                         continue;
                     }
@@ -9370,11 +9402,13 @@ impl WorkspaceShell {
                                 schema: schema.name.clone(),
                             },
                         });
-                        if !self.expanded_schemas.contains(&(
-                            connection.id,
-                            catalog.name.clone(),
-                            schema.name.clone(),
-                        )) {
+                        if !self.connections_find_open
+                            && !self.expanded_schemas.contains(&(
+                                connection.id,
+                                catalog.name.clone(),
+                                schema.name.clone(),
+                            ))
+                        {
                             continue;
                         }
                         for group in ObjectGroupKind::CANONICAL {
@@ -9397,12 +9431,14 @@ impl WorkspaceShell {
                                     group,
                                 },
                             });
-                            if !self.expanded_object_groups.contains(&(
-                                connection.id,
-                                catalog.name.clone(),
-                                schema.name.clone(),
-                                group,
-                            )) {
+                            if !self.connections_find_open
+                                && !self.expanded_object_groups.contains(&(
+                                    connection.id,
+                                    catalog.name.clone(),
+                                    schema.name.clone(),
+                                    group,
+                                ))
+                            {
                                 continue;
                             }
                             for object in schema.objects.iter().filter(|object| {
@@ -9429,7 +9465,7 @@ impl WorkspaceShell {
                     depth: 1,
                     action: ConnectionTreeAction::Room(room_id),
                 });
-                if !self.expanded_rooms.contains(&room_id) {
+                if !self.connections_find_open && !self.expanded_rooms.contains(&room_id) {
                     continue;
                 }
                 items.extend(
@@ -9452,11 +9488,63 @@ impl WorkspaceShell {
                 );
             }
         }
+        if self.connections_find_open && !self.connections_find_query.is_empty() {
+            items.retain(|item| self.connection_item_matches(item));
+        }
         items
+    }
+
+    fn connection_item_matches(&self, item: &ConnectionTreeItem) -> bool {
+        let searchable = match &item.action {
+            ConnectionTreeAction::Tenant(tenant_id) => self
+                .lifecycle
+                .tenants
+                .iter()
+                .find(|tenant| tenant.id.0 == *tenant_id)
+                .map(|tenant| tenant.name.clone())
+                .unwrap_or_default(),
+            ConnectionTreeAction::Connection(connection) => connection.name.clone(),
+            ConnectionTreeAction::Catalog { catalog, .. } => catalog.clone(),
+            ConnectionTreeAction::Schema {
+                catalog, schema, ..
+            } => format!("{catalog}.{schema}"),
+            ConnectionTreeAction::Group {
+                catalog,
+                schema,
+                group,
+                ..
+            } => format!("{catalog}.{schema} {}", group.label()),
+            ConnectionTreeAction::Object(target) => format!(
+                "{}.{}.{} {:?}",
+                target.catalog, target.schema, target.object, target.object_kind
+            ),
+            ConnectionTreeAction::Room(room_id) => self
+                .lifecycle
+                .tenants
+                .iter()
+                .flat_map(|tenant| tenant.rooms.iter())
+                .find(|room| room.id.0 == *room_id)
+                .map(|room| room.name.clone())
+                .unwrap_or_default(),
+            ConnectionTreeAction::Workspace(workspace) => workspace.name.clone(),
+            ConnectionTreeAction::Document(document) => {
+                format!("{} {}", document.title, document.kind)
+            }
+        };
+        searchable
+            .to_lowercase()
+            .contains(&self.connections_find_query)
     }
 
     fn connection_dock_rows(&self) -> Vec<ConnectionDockRow> {
         let items = self.visible_connection_items();
+        if self.connections_find_open {
+            return items
+                .into_iter()
+                .enumerate()
+                .map(|(nav_index, item)| ConnectionDockRow::Navigation { nav_index, item })
+                .collect();
+        }
         let mut rows = Vec::with_capacity(items.len() + self.lifecycle.tenants.len() * 2);
         let mut current_tenant = None;
         let mut workspace_section_rendered = false;
@@ -13587,6 +13675,27 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_connections_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.connections_find_open = true;
+        self.connection_nav_selected = 0;
+        self.connections_scroll_handle
+            .scroll_to_item(0, ScrollStrategy::Top);
+        self.connections_find_input
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_connections_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.connections_find_open = false;
+        self.connections_find_query.clear();
+        self.connections_find_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.normalize_connection_selection();
+        self.connections_focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
     fn focus_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.right_dock.presentation.open = true;
         self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
@@ -14805,6 +14914,11 @@ impl WorkspaceShell {
                     "enter" => {
                         self.connection_nav_g_pending = false;
                         self.activate_connection_item(window, cx);
+                        true
+                    }
+                    "ctrl-f" => {
+                        self.connection_nav_g_pending = false;
+                        self.open_connections_find(window, cx);
                         true
                     }
                     "/" => {
@@ -19862,6 +19976,72 @@ impl WorkspaceShell {
                             },
                         ),
                 )
+                },
+            )
+            .when(
+                dock.id == DockId::Left
+                    && self.active_left_panel == LeftPanel::Connections
+                    && self.connections_find_open,
+                |dock_view| {
+                    let match_count = self.visible_connection_items().len();
+                    dock_view.child(
+                        div()
+                            .debug_selector(|| "connections-find-bar".into())
+                            .mx_2()
+                            .h(px(34.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .border_t_1()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .on_key_down(cx.listener(
+                                |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                    match event.keystroke.key.as_str() {
+                                        "ctrl-j" => shell.move_connection_selection(1, cx),
+                                        "ctrl-k" => shell.move_connection_selection(-1, cx),
+                                        "escape" => shell.close_connections_find(window, cx),
+                                        _ => return,
+                                    }
+                                    cx.stop_propagation();
+                                },
+                            ))
+                            .child(icon(IconName::Search, colors.muted_text, 13.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .child(self.connections_find_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(format!(
+                                        "{match_count} {}",
+                                        if match_count == 1 { "match" } else { "matches" }
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "close-connections-find".into())
+                                    .child(
+                                        IconButton::new(
+                                            "close-connections-find",
+                                            IconName::Close,
+                                            "Close connections finder",
+                                        )
+                                        .square(px(24.))
+                                        .icon_size(12.)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.close_connections_find(window, cx)
+                                        })),
+                                    ),
+                            ),
+                    )
                 },
             )
             .when(
@@ -25896,6 +26076,59 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.focused_surface),
             WorkspaceSurface::Editor
         );
+    }
+
+    #[gpui::test]
+    fn connections_ctrl_f_finds_collapsed_tree_content_and_escape_restores_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: vec![ConnectionNavEntry {
+                    id: 7,
+                    tenant_id: 1,
+                    name: "Warehouse Demo".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                }],
+            }];
+            shell.run_command(CommandId::FocusConnections, window, cx);
+            assert_eq!(shell.visible_connection_items().len(), 1);
+        });
+
+        cx.simulate_keystrokes("ctrl-f");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("connections-find-bar").is_some());
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.connections_find_open);
+            assert_eq!(shell.visible_connection_items().len(), 2);
+        });
+
+        cx.simulate_input("warehouse");
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.connections_find_query, "warehouse");
+            let matches = shell.visible_connection_items();
+            assert_eq!(matches.len(), 1);
+            assert!(matches!(
+                matches[0].action,
+                ConnectionTreeAction::Connection(_)
+            ));
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert!(!shell.connections_find_open);
+            assert!(shell.connections_find_query.is_empty());
+            assert_eq!(shell.visible_connection_items().len(), 1);
+            assert_eq!(shell.focused_surface, WorkspaceSurface::Connections);
+        });
     }
 
     #[gpui::test]
