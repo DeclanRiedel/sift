@@ -124,6 +124,16 @@ fn room_member_can_be_removed(member_count: usize, role: &sift_api_types::RoomRo
     member_count > 1 && !matches!(role, sift_api_types::RoomRole::Owner)
 }
 
+fn automation_run_is_active(run: &sift_protocol::Run) -> bool {
+    matches!(
+        run.state,
+        sift_protocol::RunState::Queued
+            | sift_protocol::RunState::Admitted
+            | sift_protocol::RunState::Preparing
+            | sift_protocol::RunState::Running
+    )
+}
+
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -7864,6 +7874,9 @@ impl WorkspaceShell {
                 match result {
                     Ok(configurations) => {
                         self.automation_configurations = configurations;
+                        self.automation_selected = self
+                            .automation_selected
+                            .min(self.automation_configurations.len().saturating_sub(1));
                         self.automations_error = None;
                     }
                     Err(message) => self.automations_error = Some(message),
@@ -7930,6 +7943,9 @@ impl WorkspaceShell {
                     Ok(()) => {
                         self.automation_configurations
                             .retain(|configuration| configuration.id != configuration_id);
+                        self.automation_selected = self
+                            .automation_selected
+                            .min(self.automation_configurations.len().saturating_sub(1));
                         for pane in &self.panes {
                             pane.update(cx, |pane, cx| {
                                 let Some(index) =
@@ -12744,16 +12760,59 @@ impl WorkspaceShell {
                 self.open_run_configuration_editor(Some(configuration), window, cx);
             }
             "n" => self.open_run_configuration_editor(None, window, cx),
-            "r" if count > 0 => {
-                let configuration = &self.automation_configurations[self.automation_selected];
-                self.start_automation(configuration.id.0, configuration.revision, cx);
-            }
+            "r" if count > 0 => self.run_selected_automation(cx),
+            "c" if count > 0 => self.cancel_selected_automation(cx),
             "R" => self.request_automations(cx),
             "escape" => self.focus_active_pane(window, cx),
             _ => return,
         }
         cx.stop_propagation();
         cx.notify();
+    }
+
+    fn run_selected_automation(&mut self, cx: &mut Context<Self>) {
+        if self.automations_loading {
+            return;
+        }
+        let Some(configuration) = self.automation_configurations.get(self.automation_selected)
+        else {
+            return;
+        };
+        if configuration
+            .variables
+            .iter()
+            .any(|variable| variable.required)
+        {
+            self.show_toast(
+                "Open this automation to provide its required values".into(),
+                cx,
+            );
+            return;
+        }
+        if self
+            .automation_runs
+            .get(&configuration.id)
+            .is_some_and(automation_run_is_active)
+        {
+            return;
+        }
+        self.start_automation(configuration.id.0, configuration.revision, cx);
+    }
+
+    fn cancel_selected_automation(&mut self, cx: &mut Context<Self>) {
+        if self.automations_loading {
+            return;
+        }
+        let Some(run_id) = self
+            .automation_configurations
+            .get(self.automation_selected)
+            .and_then(|configuration| self.automation_runs.get(&configuration.id))
+            .filter(|run| automation_run_is_active(run))
+            .map(|run| run.id.0)
+        else {
+            return;
+        };
+        self.cancel_automation(run_id, cx);
     }
 
     fn load_database_processes(&mut self, cx: &mut Context<Self>) {
@@ -25310,6 +25369,71 @@ mod tests {
     use super::*;
     use gpui::{point, EntityInputHandler, Modifiers, TestAppContext, VisualTestContext};
 
+    fn automation_configuration(
+        id: i64,
+        name: &str,
+        required_variable: bool,
+    ) -> sift_protocol::RunConfiguration {
+        let variables = required_variable.then(|| {
+            vec![serde_json::json!({
+                "name": "target",
+                "kind": "string",
+                "required": true,
+                "persist_non_secret_value": false,
+                "secret_handle_present": false
+            })]
+        });
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "workspace_id": 42,
+            "name": name,
+            "scripts": [{
+                "node_id": 9,
+                "revision_policy": "latest_at_run_start",
+                "pinned_digest": null
+            }],
+            "connection_profile_id": 7,
+            "target_schema": null,
+            "variables": variables.unwrap_or_default(),
+            "pre_tasks": [],
+            "transaction_policy": "none",
+            "error_policy": "stop",
+            "revision": 3,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn automation_run(
+        id: i64,
+        configuration_id: i64,
+        state: sift_protocol::RunState,
+    ) -> sift_protocol::Run {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "configuration_id": configuration_id,
+            "trigger": "interactive",
+            "actor_principal_id": 1,
+            "state": state,
+            "manifest": {
+                "workspace_revision": 1,
+                "scripts": [],
+                "connection_profile_id": 7,
+                "target_schema": null,
+                "provider_id": "sift/postgres",
+                "variable_names": [],
+                "pre_tasks": []
+            },
+            "previous_run_id": null,
+            "revision": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "started_at": "2026-01-01T00:00:01Z",
+            "finished_at": null
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn json_cell_parser_distinguishes_json_null_and_sql_null() {
         let original = sift_protocol::Value::Json(serde_json::json!({"enabled": true}));
@@ -30917,6 +31041,128 @@ mod tests {
             receiver.try_recv(),
             Ok(ExecutorCommand::LoadAutomations { workspace_id: 42 })
         ));
+    }
+
+    #[gpui::test]
+    fn automations_tool_uses_dense_rows_without_repeated_action_buttons(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.selected_workspace_id = Some(42);
+            shell.active_bottom_tool = BottomTool::Automations;
+            shell.bottom_dock.presentation.open = true;
+            shell.automation_configurations = vec![
+                automation_configuration(1, "Daily refresh", false),
+                automation_configuration(2, "Publish report", false),
+            ];
+            shell.automation_runs.insert(
+                sift_protocol::RunConfigurationId(1),
+                automation_run(11, 1, sift_protocol::RunState::Succeeded),
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("new-automation").is_some());
+        assert!(cx.debug_bounds("refresh-automations").is_some());
+        let first_row = cx
+            .debug_bounds("automation-configuration-0")
+            .expect("first automation row");
+        assert!(cx.debug_bounds("automation-configuration-1").is_some());
+        assert!(cx.debug_bounds("edit-automation-0").is_none());
+        assert!(cx.debug_bounds("start-automation-0").is_none());
+        assert!(cx.debug_bounds("cancel-automation-0").is_none());
+
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: first_row.center(),
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(first_row.center(), MouseButton::Left, Modifiers::default());
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(
+                shell.panes[shell.active_pane]
+                    .read(cx)
+                    .active_item()
+                    .map(|item| item.kind),
+                Some(ItemKind::RunConfiguration)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn automation_keyboard_runs_and_cancels_the_selected_row(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_workspace_id = Some(42);
+            shell.active_bottom_tool = BottomTool::Automations;
+            shell.bottom_dock.presentation.open = true;
+            shell.automation_configurations =
+                vec![automation_configuration(1, "Daily refresh", false)];
+            shell.automation_focus_handle.focus(window, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("r");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::StartAutomation {
+                configuration_id: 1,
+                expected_revision: 3
+            })
+        ));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.automations_loading = false;
+            shell.automation_runs.insert(
+                sift_protocol::RunConfigurationId(1),
+                automation_run(11, 1, sift_protocol::RunState::Running),
+            );
+            cx.notify();
+        });
+        cx.simulate_keystrokes("r");
+        assert!(commands.try_recv().is_err());
+        cx.simulate_keystrokes("c");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::CancelAutomation { run_id: 11 })
+        ));
+    }
+
+    #[gpui::test]
+    fn automation_keyboard_does_not_bypass_required_values(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.active_bottom_tool = BottomTool::Automations;
+            shell.bottom_dock.presentation.open = true;
+            shell.automation_configurations =
+                vec![automation_configuration(1, "Daily refresh", true)];
+            shell.automation_focus_handle.focus(window, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("r");
+        assert!(commands.try_recv().is_err());
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell
+                .toasts
+                .last()
+                .map(|toast| toast.message.clone())),
+            Some("Open this automation to provide its required values".into())
+        );
     }
 
     #[gpui::test]
