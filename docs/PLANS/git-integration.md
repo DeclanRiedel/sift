@@ -114,101 +114,101 @@ ways:
 
 ### Repository model and refresh
 
-- [ ] Add a desktop repository projection separate from `WorkspaceShell` view
+- [x] Add a desktop repository projection separate from `WorkspaceShell` view
       rendering.
-- [ ] Carry binding, branch, HEAD, upstream, status, loading, operation, and
+- [x] Carry binding, branch, HEAD, upstream, status, loading, operation, and
       error state in that projection.
-- [ ] Subscribe every Git surface to the same projection.
-- [ ] Coalesce status requests and discard stale revision results.
+- [x] Subscribe every Git surface to the same projection.
+- [x] Coalesce status requests and discard stale revision results.
 - [ ] Refresh after editor save, projection reconciliation, stage, unstage,
       commit, branch, and remote operations.
-- [ ] Add bounded periodic fallback refresh only while a Git surface is open.
-- [ ] Add server-side projection/repository change events for immediate refresh.
-- [ ] Prevent refresh loops after entities or workspaces are dropped.
-- [ ] Handle detached HEAD as a stable state, not an endless loading state.
-- [ ] Distinguish missing repo, unavailable root, untrusted ownership, disabled
+- [x] Add bounded periodic fallback refresh only while a Git surface is open.
+- [x] Add server-side projection/repository change events for immediate refresh.
+- [x] Prevent refresh loops after entities or workspaces are dropped.
+- [x] Handle detached HEAD as a stable state, not an endless loading state.
+- [x] Distinguish missing repo, unavailable root, untrusted ownership, disabled
       Git, stale binding, and command failure.
 
 ### Git panel structure
 
-- [ ] Split panel into header, change list, commit area, and operation footer.
-- [ ] Show repository/workspace name and current branch in header.
-- [ ] Show ahead/behind counts and detached-HEAD state.
-- [ ] Group by staging state: conflicts, staged, unstaged, untracked.
-- [ ] Support alternate grouping by file state.
-- [ ] Support flat and folder-tree views.
-- [ ] Sort by path or filename.
-- [ ] Show file-state icon and staged/partial/conflict control.
-- [ ] Show additions/deletions when diff stats are available.
-- [ ] Show changed-file count badge on Git tab.
-- [ ] Persist grouping, sorting, tree mode, and primary click behavior.
-- [ ] Flatten and cache visible rows outside render.
-- [ ] Render long file lists with `uniform_list`.
-- [ ] Preserve selection by stable path across refreshes.
-- [ ] Add clear empty, loading, truncated, and error states.
-- [ ] Add refresh and overflow icon buttons with tooltips.
+- [x] Split panel into header, change list, commit area, and operation footer.
+- [x] Show repository/workspace name and current branch in header.
+- [x] Show ahead/behind counts and detached-HEAD state.
+- [x] Group by staging state: conflicts, staged, unstaged, untracked.
+- [x] Support alternate grouping by file state.
+- [x] Support flat and folder-tree views.
+- [x] Sort by path or filename.
+- [x] Show file-state icon and staged/partial/conflict control.
+- [x] Show additions/deletions when diff stats are available.
+- [x] Show changed-file count badge on Git tab.
+- [x] Persist grouping, sorting, tree mode, and primary click behavior.
+- [x] Flatten and cache visible rows outside render.
+- [x] Render long file lists with `uniform_list`.
+- [x] Preserve selection by stable path across refreshes.
+- [x] Add clear empty, loading, truncated, and error states.
+- [x] Add refresh and overflow icon buttons with tooltips.
 
 ### File-level actions
 
-- [ ] Open changed file from primary click.
-- [ ] Open file diff from primary click or explicit action.
-- [ ] Context menu: open file, open diff, stage, unstage, discard, copy path.
-- [ ] Stage one path.
-- [ ] Unstage one path.
-- [ ] Stage all tracked changes.
-- [ ] Stage all including untracked files with explicit labeling.
-- [ ] Unstage all.
+- [x] Open changed file from primary click.
+- [x] Open file diff from primary click or explicit action.
+- [x] Context menu: open file, open diff, stage, unstage, discard, copy path.
+- [x] Stage one path.
+- [x] Unstage one path.
+- [x] Stage all tracked changes.
+- [x] Stage all including untracked files with explicit labeling.
+- [x] Unstage all.
 - [ ] Discard one worktree path with confirmation and checkpoint.
 - [ ] Restore one deleted path with confirmation and checkpoint.
-- [ ] Disable invalid actions for conflicts and in-flight operations.
-- [ ] Display optimistic pending state without pretending success.
+- [x] Disable invalid actions for conflicts and in-flight operations.
+- [x] Display optimistic pending state without pretending success.
 
 ## Milestone G2 — Project diff and hunk workflow
 
-- [ ] Add a reusable diff model supporting HEAD→index, index→worktree, and
+- [x] Add a reusable diff model supporting HEAD→index, index→worktree, and
       HEAD→worktree.
-- [ ] Extend API from diff statistics to bounded textual hunks.
-- [ ] Carry stable file/hunk identities and truncation metadata.
-- [ ] Add project-wide diff tab covering all changed files.
-- [ ] Add single-file diff tab.
-- [ ] Support unified diff first; side-by-side after unified workflow is solid.
-- [ ] Syntax-highlight SQL, TOML, JSON, Markdown, and plain text diffs.
-- [ ] Render binary, renamed, copied, deleted, and type-changed files safely.
-- [ ] Navigate previous/next file.
-- [ ] Navigate previous/next hunk with `[c` and `]c`.
-- [ ] Stage selected hunk.
-- [ ] Unstage selected hunk.
-- [ ] Stage and move to next hunk.
-- [ ] Unstage and move to next hunk.
-- [ ] Stage or unstage selected lines where patch boundaries permit.
+- [x] Extend API from diff statistics to bounded textual hunks.
+- [x] Carry stable file/hunk identities and truncation metadata.
+- [x] Add project-wide diff tab covering all changed files.
+- [x] Add single-file diff tab.
+- [x] Support unified diff first; side-by-side after unified workflow is solid.
+- [x] Syntax-highlight SQL, TOML, JSON, Markdown, and plain text diffs.
+- [x] Render binary, renamed, copied, deleted, and type-changed files safely.
+- [x] Navigate previous/next file.
+- [x] Navigate previous/next hunk with `[c` and `]c`.
+- [x] Stage selected hunk.
+- [x] Unstage selected hunk.
+- [x] Stage and move to next hunk.
+- [x] Unstage and move to next hunk.
+- [x] Stage or unstage selected lines where patch boundaries permit.
 - [ ] Revert selected hunk with confirmation and checkpoint.
-- [ ] Copy hunk or patch.
-- [ ] Toggle whitespace visibility.
-- [ ] Preserve diff position across repository refresh.
-- [ ] Lazy-load content only for visible/selected diff files.
-- [ ] Bound large diffs by bytes, lines, files, and render time.
+- [x] Copy hunk or patch.
+- [x] Toggle whitespace visibility.
+- [x] Preserve diff position across repository refresh.
+- [x] Lazy-load content only for visible/selected diff files.
+- [x] Bound large diffs by bytes, lines, files, and render time.
 
 ## Milestone G3 — Commit workflow
 
-- [ ] Add compact commit editor at panel bottom.
-- [ ] Add expanded commit editor tab/modal using the same draft entity.
-- [ ] Persist draft per workspace, never in repository files.
-- [ ] Show subject-length guidance and configurable limit.
-- [ ] Validate non-empty message and staged content.
-- [ ] Show author name/email and configuration action.
-- [ ] Derive safe default identity from authenticated principal when possible.
-- [ ] Commit staged changes through existing checkpoint-bound API.
-- [ ] Show exact checkpoint and resulting commit hash.
-- [ ] Clear draft only after confirmed success.
-- [ ] Show recently created commit below editor.
-- [ ] Add audited "uncommit" as checkpointed soft reset after server contract is
+- [x] Add compact commit editor at panel bottom.
+- [x] Add expanded commit editor tab/modal using the same draft entity.
+- [x] Persist draft per workspace, never in repository files.
+- [x] Show subject-length guidance and configurable limit.
+- [x] Validate non-empty message and staged content.
+- [x] Show author name/email and configuration action.
+- [x] Derive safe default identity from authenticated principal when possible.
+- [x] Commit staged changes through existing checkpoint-bound API.
+- [x] Show exact checkpoint and resulting commit hash.
+- [x] Clear draft only after confirmed success.
+- [x] Show recently created commit below editor.
+- [x] Add audited "uncommit" as checkpointed soft reset after server contract is
       designed.
-- [ ] Add amend only after revision/precondition and collaboration semantics are
+- [x] Add amend only after revision/precondition and collaboration semantics are
       designed.
-- [ ] Add optional sign-off after identity UX exists.
-- [ ] Keep `--no-verify`; repository hooks remain unsupported.
-- [ ] Offer initial commit in newly initialized repositories.
-- [ ] Seed desktop-demo with a clean initial commit once commit UI is usable.
+- [x] Add optional sign-off after identity UX exists.
+- [x] Keep `--no-verify`; repository hooks remain unsupported.
+- [x] Offer initial commit in newly initialized repositories.
+- [x] Seed desktop-demo with a clean initial commit once commit UI is usable.
 
 ## Milestone G4 — Workspace files and projection reconciliation
 
@@ -448,10 +448,10 @@ but must label their identity source and confidence explicitly.
 
 ## Next implementation slice
 
-- [ ] G1.1: extract desktop repository projection from `WorkspaceShell`.
-- [ ] G1.2: group staged/unstaged/untracked/conflicted rows.
-- [ ] G1.3: virtualize the Git status list and preserve stable selection.
-- [ ] G1.4: add stage-all, unstage-all, refresh, and open-file commands.
-- [ ] G1.5: add compact commit editor and wire checkpoint-bound commit.
-- [ ] G2.1: design bounded textual-diff/hunk protocol before implementing diff
+- [x] G1.1: extract desktop repository projection from `WorkspaceShell`.
+- [x] G1.2: group staged/unstaged/untracked/conflicted rows.
+- [x] G1.3: virtualize the Git status list and preserve stable selection.
+- [x] G1.4: add stage-all, unstage-all, refresh, and open-file commands.
+- [x] G1.5: add compact commit editor and wire checkpoint-bound commit.
+- [x] G2.1: design bounded textual-diff/hunk protocol before implementing diff
       UI.

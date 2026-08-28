@@ -90,6 +90,8 @@ pub enum VcsAction {
     Stage,
     Unstage,
     Commit,
+    Amend,
+    Uncommit,
     SetCredential,
     Fetch,
     Push,
@@ -723,6 +725,8 @@ impl Operation {
                 | VcsAction::Stage
                 | VcsAction::Unstage
                 | VcsAction::Commit
+                | VcsAction::Amend
+                | VcsAction::Uncommit
                 | VcsAction::SetCredential
                 | VcsAction::Fetch
                 | VcsAction::Push => OperationKind::WriteVcs,
@@ -1179,6 +1183,8 @@ single_word_audit_names!(VcsAction {
     Stage => "stage",
     Unstage => "unstage",
     Commit => "commit",
+    Amend => "amend",
+    Uncommit => "uncommit",
     SetCredential => "set_credential",
     Fetch => "fetch",
     Push => "push",

@@ -55,10 +55,11 @@ use sift_protocol::{
     ScheduleOccurrence, ScheduleOccurrenceId, SchemaFilter, SchemaScope, SshProxyAccessGrant,
     SshProxyCapabilityExchangeRequest, TransactionPreviewRequest, TransferRecipe,
     TransferRecipeAction, TransferRecipeId, UpdateConnectionPolicyRequest,
-    UpdateTenantLimitsRequest, VcsAction, VcsBranch, VcsCommitResult, VcsDiff, VcsPendingOperation,
-    VcsRemoteResult, VcsStatus, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceAction,
-    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind,
-    WsClientMessage, WsServerMessage, PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
+    UpdateTenantLimitsRequest, VcsAction, VcsBranch, VcsCommitResult, VcsDiff,
+    VcsHeadMutationResult, VcsPendingOperation, VcsRemoteResult, VcsStatus, WebAuthResponse,
+    WhoAmIResponse, Workspace, WorkspaceAction, WorkspaceCheckpoint, WorkspaceCheckpointId,
+    WorkspaceId, WorkspaceNodeId, WorkspaceNodeKind, WsClientMessage, WsServerMessage,
+    PROTOCOL_VERSION, PROTOCOL_VERSION_NUMBER,
 };
 
 use crate::config::{DeploymentPolicy, RuntimeMode, Transport};
@@ -501,8 +502,24 @@ pub fn app(state: AppState) -> Router {
             post_with(unstage_repository_paths, doc("unstageRepositoryPaths", "Unstage root-confined workspace paths")),
         )
         .api_route(
+            "/v1/metadata/repositories/:id/stage-hunk",
+            post_with(stage_repository_hunk, doc("stageRepositoryHunk", "Stage one revision-guarded typed diff hunk")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/unstage-hunk",
+            post_with(unstage_repository_hunk, doc("unstageRepositoryHunk", "Unstage one revision-guarded typed diff hunk")),
+        )
+        .api_route(
             "/v1/metadata/repositories/:id/commit",
             post_with(commit_repository, doc("commitRepository", "Commit one immutable workspace checkpoint")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/amend",
+            post_with(amend_repository, doc("amendRepository", "Amend guarded shared HEAD after a workspace checkpoint")),
+        )
+        .api_route(
+            "/v1/metadata/repositories/:id/uncommit",
+            post_with(uncommit_repository, doc("uncommitRepository", "Soft-reset guarded shared HEAD after a workspace checkpoint")),
         )
         .api_route(
             "/v1/metadata/repositories/:id/credential",
@@ -1638,8 +1655,9 @@ use sift_metadata::http::{
     StartRunRequest, UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest,
     UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
     UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
-    VcsCommitRequest, VcsDiffQuery, VcsPathsRequest, VcsRemoteRequest, WorkspaceBatchMutationItem,
-    WorkspaceBatchMutationRequest, WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
+    VcsCommitRequest, VcsDiffQuery, VcsHunkRequest, VcsPathsRequest, VcsRemoteRequest,
+    VcsUncommitRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
+    WorkspaceCheckpointPageQuery, WorkspaceTreeResponse,
 };
 
 fn metadata_room_kind(kind: sift_api_types::RoomKind) -> sift_metadata::RoomKind {
@@ -6307,6 +6325,22 @@ fn push_vcs_operation(
     );
 }
 
+fn publish_repository_changed(
+    state: &AppState,
+    workspace: &sift_metadata::WorkspaceRecord,
+    binding_id: RepositoryBindingId,
+    revision: u64,
+) {
+    state.rooms.publish_presence(
+        workspace.room_id.0,
+        RoomServerMessage::RepositoryChanged {
+            workspace_id: workspace.id.0,
+            binding_id: binding_id.0,
+            revision,
+        },
+    );
+}
+
 struct RepositoryContext {
     record: sift_metadata::RepositoryBindingRecord,
     workspace: sift_metadata::WorkspaceRecord,
@@ -6788,6 +6822,136 @@ async fn unstage_repository_paths(
     mutate_repository_paths(state, headers, id, req, false).await
 }
 
+async fn stage_repository_hunk(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsHunkRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    mutate_repository_hunk(state, headers, id, req, true).await
+}
+
+async fn unstage_repository_hunk(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsHunkRequest>,
+) -> ApiResult<Json<RepositoryBinding>> {
+    mutate_repository_hunk(state, headers, id, req, false).await
+}
+
+async fn mutate_repository_hunk(
+    state: AppState,
+    headers: HeaderMap,
+    id: i64,
+    req: VcsHunkRequest,
+    stage: bool,
+) -> ApiResult<Json<RepositoryBinding>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    let action = if stage {
+        VcsAction::Stage
+    } else {
+        VcsAction::Unstage
+    };
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.record.binding.workspace_id,
+        binding_id,
+        action,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
+            expected: req.expected_revision,
+            current: context.record.binding.revision,
+        }
+        .into());
+    }
+    let expected_side = if stage {
+        sift_protocol::VcsDiffSide::IndexToWorktree
+    } else {
+        sift_protocol::VcsDiffSide::HeadToIndex
+    };
+    if req.side != expected_side
+        || req.hunk_id.len() != 64
+        || req
+            .line_indices
+            .as_ref()
+            .is_some_and(|indices| indices.is_empty() || indices.len() > 4_096)
+    {
+        return Err(ApiError::BadRequest(
+            "hunk operation has an invalid side or line selection".into(),
+        ));
+    }
+    let diff = context
+        .adapter
+        .diff(&context.worktree, binding_id, req.side, Some(&req.path))
+        .await
+        .map_err(git_adapter_error)?;
+    let file = diff
+        .files
+        .iter()
+        .find(|file| file.path == req.path)
+        .ok_or_else(|| ApiError::Conflict("changed file is stale".into()))?;
+    let hunk = file
+        .hunks
+        .iter()
+        .find(|hunk| hunk.id == req.hunk_id)
+        .ok_or_else(|| ApiError::Conflict("diff hunk is stale".into()))?;
+    let paths = [req.path.clone()];
+    state.rooms.set_vcs_pending(
+        binding_id.0,
+        &paths,
+        if stage {
+            VcsPendingOperation::Stage
+        } else {
+            VcsPendingOperation::Unstage
+        },
+    );
+    let operation = if let Some(line_indices) = req.line_indices.as_deref() {
+        context
+            .adapter
+            .apply_lines(&context.worktree, file, hunk, line_indices, stage)
+            .await
+    } else {
+        context
+            .adapter
+            .apply_hunk(&context.worktree, file, hunk, !stage)
+            .await
+    };
+    state.rooms.clear_vcs_pending(binding_id.0, &paths);
+    operation.map_err(git_adapter_error)?;
+    let observation = context
+        .adapter
+        .discover(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let updated = metadata_blocking(move || {
+        metadata
+            .observe_repository(
+                binding_id,
+                actor,
+                sift_metadata::RepositoryObservation {
+                    expected_revision: req.expected_revision,
+                    branch: observation.branch,
+                    head: observation.head,
+                },
+            )
+            .map(|record| record.binding)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_vcs_operation(&state, actor, action, updated.workspace_id, binding_id);
+    publish_repository_changed(&state, &context.workspace, binding_id, updated.revision);
+    Ok(Json(updated))
+}
+
 async fn mutate_repository_paths(
     state: AppState,
     headers: HeaderMap,
@@ -6857,6 +7021,7 @@ async fn mutate_repository_paths(
     })
     .await?;
     push_vcs_operation(&state, actor, action, updated.workspace_id, binding_id);
+    publish_repository_changed(&state, &context.workspace, binding_id, updated.revision);
     Ok(Json(updated))
 }
 
@@ -6865,6 +7030,25 @@ async fn commit_repository(
     headers: HeaderMap,
     Path(id): Path<i64>,
     Json(req): Json<VcsCommitRequest>,
+) -> ApiResult<Json<VcsCommitResult>> {
+    mutate_repository_commit(state, headers, id, req, false).await
+}
+
+async fn amend_repository(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsCommitRequest>,
+) -> ApiResult<Json<VcsCommitResult>> {
+    mutate_repository_commit(state, headers, id, req, true).await
+}
+
+async fn mutate_repository_commit(
+    state: AppState,
+    headers: HeaderMap,
+    id: i64,
+    req: VcsCommitRequest,
+    amend: bool,
 ) -> ApiResult<Json<VcsCommitResult>> {
     use crate::git_adapter::VcsRepository as _;
     use crate::workspace_adapter::WorkspaceAdapter as _;
@@ -6879,7 +7063,11 @@ async fn commit_repository(
         &auth,
         context.record.binding.workspace_id,
         binding_id,
-        VcsAction::Commit,
+        if amend {
+            VcsAction::Amend
+        } else {
+            VcsAction::Commit
+        },
     )?;
     if context.record.binding.revision != req.expected_revision {
         return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
@@ -6887,6 +7075,14 @@ async fn commit_repository(
             current: context.record.binding.revision,
         }
         .into());
+    }
+    if amend
+        && (req.expected_head.as_deref().is_none()
+            || req.expected_head.as_deref() != context.record.binding.head.as_deref())
+    {
+        return Err(ApiError::Conflict(
+            "repository HEAD changed before amend".into(),
+        ));
     }
     let workspace_id = context.record.binding.workspace_id;
     let lock = state.rooms.workspace_lock(workspace_id.0);
@@ -6946,6 +7142,16 @@ async fn commit_repository(
             "Git index contains staged paths outside the workspace SQL tree".into(),
         ));
     }
+    if !status.entries.iter().any(|entry| {
+        matches!(
+            entry.stage,
+            sift_protocol::VcsStageState::Staged | sift_protocol::VcsStageState::PartiallyStaged
+        )
+    }) {
+        return Err(ApiError::BadRequest(
+            "Git index has no staged SQL changes to commit".into(),
+        ));
+    }
     filesystem
         .materialize(
             &inputs.binding.root_handle,
@@ -6979,25 +7185,28 @@ async fn commit_repository(
         }
     })
     .await?;
-    let paths = allowed
-        .into_iter()
-        .map(sift_protocol::WorkspacePath)
-        .collect::<Vec<_>>();
-    context
-        .adapter
-        .stage(&context.worktree, &paths)
-        .await
-        .map_err(git_adapter_error)?;
-    let observation = context
-        .adapter
-        .commit(
-            &context.worktree,
-            &req.message,
-            &req.author_name,
-            &req.author_email,
-        )
-        .await
-        .map_err(git_adapter_error)?;
+    let observation = if amend {
+        context
+            .adapter
+            .amend(
+                &context.worktree,
+                &req.message,
+                &req.author_name,
+                &req.author_email,
+            )
+            .await
+    } else {
+        context
+            .adapter
+            .commit(
+                &context.worktree,
+                &req.message,
+                &req.author_name,
+                &req.author_email,
+            )
+            .await
+    }
+    .map_err(git_adapter_error)?;
     let commit = observation
         .head
         .clone()
@@ -7023,7 +7232,23 @@ async fn commit_repository(
             .map_err(Into::into)
     })
     .await?;
-    push_vcs_operation(&state, actor, VcsAction::Commit, workspace_id, binding_id);
+    push_vcs_operation(
+        &state,
+        actor,
+        if amend {
+            VcsAction::Amend
+        } else {
+            VcsAction::Commit
+        },
+        workspace_id,
+        binding_id,
+    );
+    publish_repository_changed(
+        &state,
+        &context.workspace,
+        binding_id,
+        req.expected_revision.saturating_add(1),
+    );
     Ok(Json(VcsCommitResult {
         binding_id,
         checkpoint_id: checkpoint.id,
@@ -7031,6 +7256,147 @@ async fn commit_repository(
         commit,
         branch,
     }))
+}
+
+async fn uncommit_repository(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<VcsUncommitRequest>,
+) -> ApiResult<Json<VcsHeadMutationResult>> {
+    use crate::git_adapter::VcsRepository as _;
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let binding_id = repository_binding_id(id)?;
+    let actor = auth.principal_id;
+    let context =
+        load_repository_context(&state, metadata.clone(), actor, binding_id, true).await?;
+    authorize_vcs_operation(
+        &state,
+        &auth,
+        context.record.binding.workspace_id,
+        binding_id,
+        VcsAction::Uncommit,
+    )?;
+    if context.record.binding.revision != req.expected_revision {
+        return Err(sift_metadata::MetadataError::RepositoryRevisionConflict {
+            expected: req.expected_revision,
+            current: context.record.binding.revision,
+        }
+        .into());
+    }
+    if context.record.binding.head.as_deref() != Some(req.expected_head.as_str()) {
+        return Err(ApiError::Conflict(
+            "repository HEAD changed before uncommit".into(),
+        ));
+    }
+    let workspace_id = context.record.binding.workspace_id;
+    let lock = state.rooms.workspace_lock(workspace_id.0);
+    let _guard = lock.lock().await;
+    let checkpoint = capture_before_vcs_checkpoint(
+        &state,
+        metadata.clone(),
+        actor,
+        workspace_id,
+        context.workspace.revision,
+    )
+    .await?;
+    state.rooms.publish_presence(
+        context.workspace.room_id.0,
+        RoomServerMessage::WorkspaceChanged {
+            workspace_id: context.workspace.id.0,
+            revision: context.workspace.revision.0,
+            checkpoints_changed: true,
+        },
+    );
+    let observation = context
+        .adapter
+        .soft_reset_parent(&context.worktree)
+        .await
+        .map_err(git_adapter_error)?;
+    let head = observation.head.clone();
+    let branch = observation.branch.clone();
+    let updated = metadata_blocking(move || {
+        metadata
+            .observe_repository(
+                binding_id,
+                actor,
+                sift_metadata::RepositoryObservation {
+                    expected_revision: req.expected_revision,
+                    branch: observation.branch,
+                    head: observation.head,
+                },
+            )
+            .map(|record| record.binding)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_vcs_operation(&state, actor, VcsAction::Uncommit, workspace_id, binding_id);
+    publish_repository_changed(&state, &context.workspace, binding_id, updated.revision);
+    Ok(Json(VcsHeadMutationResult {
+        binding_id,
+        checkpoint_id: checkpoint.id,
+        workspace_revision: checkpoint.workspace_revision,
+        previous_head: req.expected_head,
+        head,
+        branch,
+    }))
+}
+
+async fn capture_before_vcs_checkpoint(
+    state: &AppState,
+    metadata: MetadataStore,
+    actor: PrincipalId,
+    workspace_id: WorkspaceId,
+    expected_revision: sift_protocol::WorkspaceRevision,
+) -> ApiResult<WorkspaceCheckpoint> {
+    let rooms = state.rooms.clone();
+    metadata_blocking(move || {
+        let workspace = metadata.get_workspace_for_principal(workspace_id, actor, true)?;
+        if workspace.revision != expected_revision {
+            return Err(sift_metadata::MetadataError::WorkspaceRevisionConflict {
+                expected: expected_revision.0,
+                current: workspace.revision.0,
+            }
+            .into());
+        }
+        let nodes = metadata.list_workspace_nodes_for_principal(workspace_id, actor)?;
+        let mut captures = Vec::new();
+        for node in nodes
+            .iter()
+            .filter(|node| node.kind == WorkspaceNodeKind::SqlDocument)
+        {
+            let document = DocumentId(
+                node.document_id
+                    .ok_or(sift_metadata::MetadataError::InvalidWorkspaceNode)?,
+            );
+            let document_actor = rooms
+                .documents()
+                .get_or_load(&metadata, document)
+                .map_err(workspace_actor_error)?;
+            let guard = document_actor
+                .lock()
+                .map_err(|_| ApiError::Internal("document actor mutex poisoned".into()))?;
+            captures.push(WorkspaceCheckpointCapture {
+                node_id: node.id,
+                snapshot_bytes: guard.snapshot().map_err(workspace_actor_error)?,
+                snapshot_version: guard.version_vector(),
+            });
+        }
+        metadata
+            .create_workspace_checkpoint(
+                workspace_id,
+                actor,
+                NewWorkspaceCheckpoint {
+                    expected_revision,
+                    reason: sift_protocol::WorkspaceCheckpointReason::BeforeVcs,
+                    name: None,
+                    captures,
+                },
+            )
+            .map_err(Into::into)
+    })
+    .await
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

@@ -160,7 +160,9 @@ pub(super) fn render_status_bar(
                         "Git workspace".into(),
                         shell.left_dock.presentation.open
                             && shell.active_left_panel == LeftPanel::Git,
-                        None,
+                        shell.repository.status().and_then(|status| {
+                            (!status.entries.is_empty()).then_some(status.entries.len())
+                        }),
                         false,
                     )
                     .on_click(

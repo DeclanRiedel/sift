@@ -1531,3 +1531,73 @@ pane removal derive from one structure instead of parallel vectors. The client
 must add tree validation, migration, recursive rendering, directional tests,
 and collapse/resize coverage. Protocol, room, result, schema, session, and CRDT
 contracts remain unchanged.
+
+---
+
+## ADR-043 — Lazy Typed Git Hunks And Checkpointed Destructive Actions
+
+**Context.** File statistics are enough for a compact change list but not for
+review, hunk staging, or safe reversion. Returning raw unbounded patch text
+would move Git parsing into clients, make remote usage expensive, and allow a
+large or malformed repository to monopolize memory and rendering. Sift also
+cannot copy an IDE's direct `git restore` behavior: the virtual workspace and
+room document remain canonical, while the checkout is only a projection.
+
+**Decision.** Project diff requests return bounded typed file statistics.
+Textual hunks are loaded lazily with a normalized workspace-relative path and a
+typed diff side (`HEAD` to index, index to worktree, or `HEAD` to worktree).
+The server parses Git output into typed hunks and lines with old/new line
+coordinates, stable content-derived hunk ids, binary markers, and truncation
+at output, file, hunk, line, and byte ceilings. Clients never parse or render
+ambient patch output as trusted structure. Hunk and line mutations must carry
+the repository binding revision, path, diff side, and patch precondition; a
+hunk id alone is not authority.
+
+Destructive file or hunk actions are not direct checkout mutations. The server
+serializes them with other repository/workspace mutations, creates a workspace
+checkpoint, verifies the repository and workspace revisions, applies the
+bounded Git operation, then reconciles the affected projection path through
+the existing virtual-workspace contract. Untracked filesystem-only content
+cannot be advertised as recoverable unless its bytes were first captured by a
+bounded checkpoint artifact. Until that capture contract exists, discard of
+untracked files stays disabled. Every accepted action is audited and publishes
+workspace and repository change events.
+
+**Consequences.** Remote and local clients share one safe diff model, project
+views can stay virtualized and lazy, and stale hunk operations fail instead of
+editing new content. Binary or oversized files remain reviewable at the file
+metadata level. Discard/restore implementation depends on projection
+reconciliation and checkpoint capture rather than bypassing the canonical room
+document, so those actions may land after the first read-only diff UI.
+
+---
+
+## ADR-044 — Guarded Shared-HEAD Amend And Uncommit
+
+**Context.** Amend and soft reset rewrite the shared repository HEAD. A local
+IDE can treat those as private convenience commands, but Sift collaborators
+share one server-owned index, branch, and projection. An unguarded rewrite can
+silently replace a commit another client has already reviewed or built upon.
+
+**Decision.** Amend and uncommit are typed server operations, never arbitrary
+Git commands. Both require the repository binding revision and exact expected
+HEAD OID, execute under the workspace/repository mutation lock, capture an
+immutable `BeforeVcs` workspace checkpoint first, audit the actor, advance the
+binding revision, and broadcast the resulting HEAD. A stale expected HEAD is a
+conflict with no Git mutation.
+
+Amend commits only the existing index, uses the same explicit author identity,
+sign-off policy, hook prohibition, projection-reconciliation guard, and
+checkpoint record as an ordinary commit. Uncommit is limited to a one-parent
+soft reset of the current HEAD; it keeps the removed commit's changes staged,
+does not cross a root commit, and does not alter collaborative document text.
+The UI requires confirmation and shows the recovery checkpoint. Neither
+operation performs merge, rebase, hard reset, or force push.
+
+**Consequences.** History convenience remains recoverable and observable, and
+two clients cannot intentionally rewrite different notions of HEAD. The
+repository commit ledger remains append-only: an amended replacement receives
+its own checkpoint mapping while the superseded commit record is retained for
+audit. Uncommit recovery uses the captured workspace checkpoint plus ordinary
+Git history; later branch/history milestones may expose that relationship more
+fully.

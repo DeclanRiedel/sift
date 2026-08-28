@@ -144,6 +144,14 @@ pub enum RoomServerMessage {
         revision: u64,
         checkpoints_changed: bool,
     },
+    /// Repository state changed for a workspace. Clients with the source-control
+    /// surface open should refetch status; `revision` identifies the binding
+    /// observation that produced this notification.
+    RepositoryChanged {
+        workspace_id: i64,
+        binding_id: i64,
+        revision: u64,
+    },
     DdlSourceChanged {
         workspace_id: i64,
         source_id: i64,

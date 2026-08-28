@@ -22,11 +22,15 @@ use crate::editor::{
     EditorEvent, EditorKeymap, EditorLanguage, JsonSchema, QueryDocument, QueryEditor,
     SemanticOutcome, SemanticRequestKind, VimMode, EDITOR_GUTTER_WIDTH,
 };
+use crate::repository::{RepositoryProjection, RepositoryRow};
 use crate::results::{
     render_value, ResultPlacement, ResultState, ResultTab, ResultsEvent, ResultsView,
     StreamProgress,
 };
-use crate::settings::{EditorMode, KeyboardProfile, KeymapSettings, SettingsStore, UserSettings};
+use crate::settings::{
+    EditorMode, KeyboardProfile, KeymapSettings, RepositoryGrouping, RepositoryPrimaryAction,
+    RepositorySort, RepositoryView, SettingsStore, UserSettings,
+};
 
 use crate::presentation::{
     BottomTool, DatabaseObjectSource, ItemKind, ItemPresentation, ItemSource, LeftPanel, PaneAxis,
@@ -464,7 +468,10 @@ enum WorkspaceSurface {
 }
 
 fn is_read_only_feed(kind: ItemKind) -> bool {
-    matches!(kind, ItemKind::Problems | ItemKind::Notifications)
+    matches!(
+        kind,
+        ItemKind::Problems | ItemKind::Notifications | ItemKind::GitDiff
+    )
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -724,6 +731,104 @@ fn shell_connection_row_menu(
         )
 }
 
+fn shell_repository_row_menu(
+    entry: sift_protocol::VcsStatusEntry,
+    colors: sift_ui::ThemeColors,
+    cx: &mut Context<WorkspaceShell>,
+) -> impl IntoElement {
+    let path = entry.path.clone();
+    let open_path = path.clone();
+    let diff_path = path.clone();
+    let stage_path = path.clone();
+    let copy_path = path.clone();
+    let staged = matches!(
+        entry.stage,
+        sift_protocol::VcsStageState::Staged | sift_protocol::VcsStageState::PartiallyStaged
+    );
+    let item = |id: &'static str, label: &'static str, icon_name: IconName| {
+        div()
+            .id(id)
+            .role(Role::MenuItem)
+            .h(px(28.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_sm()
+            .hover(|item| item.bg(colors.hovered_surface))
+            .child(icon(icon_name, colors.muted_text, 11.))
+            .child(label)
+    };
+    div()
+        .id("repository-row-menu")
+        .w(px(220.))
+        .p_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(colors.strong_border)
+        .bg(colors.elevated_surface)
+        .shadow_lg()
+        .occlude()
+        .role(Role::Menu)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down_out(cx.listener(|shell, _, _, cx| {
+            shell.repository_row_menu = None;
+            cx.notify();
+        }))
+        .child(
+            item("repository-menu-open", "Open file", IconName::Edit).on_click(cx.listener(
+                move |shell, _, window, cx| {
+                    shell.repository_row_menu = None;
+                    shell.repository.select_path(open_path.clone());
+                    shell.open_selected_repository_file(window, cx);
+                },
+            )),
+        )
+        .child(
+            item("repository-menu-diff", "Open diff", IconName::View).on_click(cx.listener(
+                move |shell, _, _, cx| {
+                    shell.repository_row_menu = None;
+                    shell.repository.select_path(diff_path.clone());
+                    shell.request_selected_repository_diff(cx);
+                },
+            )),
+        )
+        .child(
+            item(
+                "repository-menu-stage",
+                if staged { "Unstage file" } else { "Stage file" },
+                IconName::Check,
+            )
+            .on_click(cx.listener(move |shell, _, _, cx| {
+                shell.repository_row_menu = None;
+                shell.set_repository_paths_staged(vec![stage_path.clone()], !staged, cx);
+            })),
+        )
+        .child(
+            item("repository-menu-copy-path", "Copy path", IconName::Copy).on_click(cx.listener(
+                move |shell, _, _, cx| {
+                    shell.repository_row_menu = None;
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_path.0.clone()));
+                    shell.show_toast("Copied repository path".into(), cx);
+                },
+            )),
+        )
+        .child(
+            div()
+                .id("repository-menu-discard-disabled")
+                .role(Role::MenuItem)
+                .aria_label("Discard file unavailable until checkpoint reconciliation")
+                .h(px(28.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_color(colors.disabled_text)
+                .child(icon(IconName::Close, colors.disabled_text, 11.))
+                .child("Discard (checkpoint required)"),
+        )
+}
+
 /// Full-colour vendor artwork for a connection's engine, when we carry it.
 fn provider_logo_asset(provider_id: &sift_protocol::ProviderId) -> Option<&'static str> {
     match provider_id.as_str() {
@@ -901,6 +1006,8 @@ pub enum Modal {
     CatalogMigration,
     CatalogSnapshots,
     CsvImport,
+    RepositoryCommit,
+    ConfirmRepositoryUncommit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1462,6 +1569,14 @@ struct StagedResultRow {
     changes: Vec<sift_protocol::CellEdit>,
 }
 
+#[derive(Debug, Clone)]
+struct RepositoryDiffItemState {
+    path: sift_protocol::WorkspacePath,
+    side: sift_protocol::VcsDiffSide,
+    diff: Arc<sift_protocol::VcsDiff>,
+    show_whitespace: bool,
+}
+
 /// Shell → executor. The executor owns the SDK client, session, and
 /// connection; the shell only reports intent (connect / disconnect / run).
 #[derive(Clone)]
@@ -1538,12 +1653,50 @@ pub enum ExecutorCommand {
     },
     LoadRepositoryStatus {
         workspace_id: i64,
+        request_id: u64,
     },
-    SetRepositoryPathStaged {
+    SetRepositoryPathsStaged {
         workspace_id: i64,
         binding_id: i64,
         expected_revision: u64,
+        request_id: u64,
+        paths: Vec<sift_protocol::WorkspacePath>,
+        staged: bool,
+    },
+    CommitRepository {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        request_id: u64,
+        message: String,
+        author_name: String,
+        author_email: String,
+        amend: bool,
+        expected_head: Option<String>,
+    },
+    UncommitRepository {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        request_id: u64,
+        expected_head: String,
+    },
+    LoadRepositoryDiff {
+        workspace_id: i64,
+        binding_id: i64,
+        request_id: u64,
+        side: sift_protocol::VcsDiffSide,
+        path: Option<sift_protocol::WorkspacePath>,
+    },
+    SetRepositoryHunkStaged {
+        workspace_id: i64,
+        binding_id: i64,
+        expected_revision: u64,
+        request_id: u64,
+        side: sift_protocol::VcsDiffSide,
         path: sift_protocol::WorkspacePath,
+        hunk_id: String,
+        line_indices: Option<Vec<u32>>,
         staged: bool,
     },
     LoadAutomations {
@@ -1747,7 +1900,44 @@ pub enum ExecutorEvent {
     },
     RepositoryStatusLoaded {
         workspace_id: i64,
+        request_id: u64,
         result: Result<Option<sift_protocol::VcsStatus>, String>,
+    },
+    RepositoryCommitted {
+        workspace_id: i64,
+        request_id: u64,
+        result: Result<
+            (
+                sift_protocol::VcsCommitResult,
+                Option<sift_protocol::VcsStatus>,
+            ),
+            String,
+        >,
+    },
+    RepositoryUncommitted {
+        workspace_id: i64,
+        request_id: u64,
+        result: Result<
+            (
+                sift_protocol::VcsHeadMutationResult,
+                Option<sift_protocol::VcsStatus>,
+            ),
+            String,
+        >,
+    },
+    RepositoryDiffLoaded {
+        workspace_id: i64,
+        request_id: u64,
+        side: sift_protocol::VcsDiffSide,
+        path: Option<sift_protocol::WorkspacePath>,
+        result: Result<sift_protocol::VcsDiff, String>,
+    },
+    RepositoryHunkUpdated {
+        workspace_id: i64,
+        request_id: u64,
+        side: sift_protocol::VcsDiffSide,
+        path: sift_protocol::WorkspacePath,
+        result: Result<(sift_protocol::VcsStatus, sift_protocol::VcsDiff), String>,
     },
     AutomationsLoaded {
         workspace_id: i64,
@@ -2008,7 +2198,9 @@ impl Pane {
             let language = match item.kind {
                 ItemKind::Configuration if item.title.ends_with(".json") => EditorLanguage::Json,
                 ItemKind::Configuration => EditorLanguage::Toml,
-                ItemKind::Problems | ItemKind::Notifications => EditorLanguage::PlainText,
+                ItemKind::Problems | ItemKind::Notifications | ItemKind::GitDiff => {
+                    EditorLanguage::PlainText
+                }
                 ItemKind::Query | ItemKind::Schema | ItemKind::Welcome => EditorLanguage::Sql,
             };
             let keymap = if is_read_only_feed(item.kind) || vim_mode_default {
@@ -2313,7 +2505,10 @@ impl Pane {
             .filter(|item| {
                 !matches!(
                     item.kind,
-                    ItemKind::Configuration | ItemKind::Problems | ItemKind::Notifications
+                    ItemKind::Configuration
+                        | ItemKind::Problems
+                        | ItemKind::Notifications
+                        | ItemKind::GitDiff
                 )
             })
             .cloned()
@@ -4229,6 +4424,152 @@ fn staged_result_row_index(edits: &[StagedResultEdit], edit_index: usize) -> usi
 /// feel attached to the edit that caused them.
 const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(160);
 
+fn repository_diff_text(
+    path: &sift_protocol::WorkspacePath,
+    side: sift_protocol::VcsDiffSide,
+    diff: &sift_protocol::VcsDiff,
+    show_whitespace: bool,
+) -> String {
+    let side_label = match side {
+        sift_protocol::VcsDiffSide::HeadToIndex => "HEAD → index",
+        sift_protocol::VcsDiffSide::IndexToWorktree => "index → worktree",
+        sift_protocol::VcsDiffSide::HeadToWorktree => "HEAD → worktree",
+    };
+    let mut output = format!("{}  ·  {side_label}\n\n", path.0);
+    let Some(file) = diff.files.iter().find(|file| file.path == *path) else {
+        output.push_str("No changes for this path.\n");
+        return output;
+    };
+    output.push_str(&format!(
+        "+{}  -{}  {:?}\n\n",
+        file.additions, file.deletions, file.state
+    ));
+    if file.binary {
+        output.push_str("Binary content is not rendered.\n");
+        return output;
+    }
+    for hunk in &file.hunks {
+        output.push_str(&format!(
+            "@@ -{},{} +{},{} @@ {}\n",
+            hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
+        ));
+        for line in &hunk.lines {
+            let marker = match line.kind {
+                sift_protocol::VcsDiffLineKind::Context => ' ',
+                sift_protocol::VcsDiffLineKind::Addition => '+',
+                sift_protocol::VcsDiffLineKind::Deletion => '-',
+                sift_protocol::VcsDiffLineKind::NoNewline => '\\',
+            };
+            output.push(marker);
+            if show_whitespace {
+                for character in line.text.chars() {
+                    match character {
+                        ' ' => output.push('·'),
+                        '\t' => output.push_str("→   "),
+                        _ => output.push(character),
+                    }
+                }
+            } else {
+                output.push_str(&line.text);
+            }
+            output.push('\n');
+        }
+        if hunk.truncated {
+            output.push_str("… hunk truncated …\n");
+        }
+        output.push('\n');
+    }
+    if file.content_truncated || diff.truncated {
+        output.push_str("… diff truncated by server safety limits …\n");
+    }
+    output
+}
+
+fn repository_hunk_patch(
+    path: &sift_protocol::WorkspacePath,
+    hunk: &sift_protocol::VcsDiffHunk,
+) -> String {
+    let mut patch = format!(
+        "--- a/{0}\n+++ b/{0}\n@@ -{1},{2} +{3},{4} @@",
+        path.0, hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+    );
+    if !hunk.header.is_empty() {
+        patch.push(' ');
+        patch.push_str(&hunk.header);
+    }
+    patch.push('\n');
+    for line in &hunk.lines {
+        patch.push(match line.kind {
+            sift_protocol::VcsDiffLineKind::Context => ' ',
+            sift_protocol::VcsDiffLineKind::Addition => '+',
+            sift_protocol::VcsDiffLineKind::Deletion => '-',
+            sift_protocol::VcsDiffLineKind::NoNewline => '\\',
+        });
+        patch.push_str(&line.text);
+        patch.push('\n');
+    }
+    patch
+}
+
+fn repository_hunk_index_at_cursor(text: &str, cursor: usize) -> Option<usize> {
+    let markers = repository_hunk_marker_offsets(text);
+    markers
+        .iter()
+        .copied()
+        .enumerate()
+        .take_while(|(_, start)| *start <= cursor)
+        .map(|(index, _)| index)
+        .last()
+        .or_else(|| (!markers.is_empty()).then_some(0))
+}
+
+fn repository_hunk_marker_offsets(text: &str) -> Vec<usize> {
+    text.match_indices("@@ ")
+        .filter(|(start, _)| *start == 0 || text.as_bytes().get(start - 1) == Some(&b'\n'))
+        .map(|(start, _)| start)
+        .collect()
+}
+
+fn repository_diff_editor_language(path: &sift_protocol::WorkspacePath) -> EditorLanguage {
+    match path.0.rsplit_once('.').map(|(_, extension)| extension) {
+        Some(extension) if extension.eq_ignore_ascii_case("sql") => EditorLanguage::Sql,
+        Some(extension) if extension.eq_ignore_ascii_case("toml") => EditorLanguage::Toml,
+        Some(extension) if extension.eq_ignore_ascii_case("json") => EditorLanguage::Json,
+        Some(extension)
+            if extension.eq_ignore_ascii_case("md")
+                || extension.eq_ignore_ascii_case("markdown") =>
+        {
+            EditorLanguage::Markdown
+        }
+        _ => EditorLanguage::PlainText,
+    }
+}
+
+fn project_diff_text(side: sift_protocol::VcsDiffSide, diff: &sift_protocol::VcsDiff) -> String {
+    let side_label = match side {
+        sift_protocol::VcsDiffSide::HeadToIndex => "HEAD → index",
+        sift_protocol::VcsDiffSide::IndexToWorktree => "index → worktree",
+        sift_protocol::VcsDiffSide::HeadToWorktree => "HEAD → worktree",
+    };
+    let additions = diff.files.iter().map(|file| file.additions).sum::<u32>();
+    let deletions = diff.files.iter().map(|file| file.deletions).sum::<u32>();
+    let mut output = format!(
+        "Project Diff  ·  {side_label}\n{} file(s)  +{additions}  -{deletions}\n\n",
+        diff.files.len()
+    );
+    for file in &diff.files {
+        let binary = if file.binary { "  binary" } else { "" };
+        output.push_str(&format!(
+            "{:?}  {}  +{}  -{}{}\n",
+            file.state, file.path.0, file.additions, file.deletions, binary
+        ));
+    }
+    if diff.truncated {
+        output.push_str("\n… project diff truncated by server safety limits …\n");
+    }
+    output
+}
+
 pub struct WorkspaceShell {
     focus_handle: FocusHandle,
     connections_focus_handle: FocusHandle,
@@ -4238,6 +4579,10 @@ pub struct WorkspaceShell {
     semantic_rename_input: Entity<TextInput>,
     saved_query_name_input: Entity<TextInput>,
     result_cell_edit_input: Entity<TextInput>,
+    repository_commit_input: Entity<TextInput>,
+    repository_commit_drafts: HashMap<i64, String>,
+    recent_repository_commit: Option<sift_protocol::VcsCommitResult>,
+    repository_recovery_notice: Option<String>,
     /// Legacy modal slot retained while result-edit review shares the modal
     /// renderer. JSON edits now live in the database item's JSON view.
     result_json_edit_editor: Option<Entity<QueryEditor>>,
@@ -4305,6 +4650,9 @@ pub struct WorkspaceShell {
     connection_nav_selected: usize,
     connection_nav_g_pending: bool,
     connection_row_menu: Option<i64>,
+    repository_row_menu: Option<sift_protocol::WorkspacePath>,
+    repository_diff_prefix: Option<isize>,
+    repository_hunk_move_next: bool,
     app_bar_expanded: bool,
     app_bar_menu: Option<AppBarMenu>,
     toasts: Vec<Toast>,
@@ -4318,9 +4666,10 @@ pub struct WorkspaceShell {
     room_members: Vec<sift_api_types::RoomMember>,
     room_members_loading: bool,
     room_members_error: Option<String>,
-    repository_status: Option<sift_protocol::VcsStatus>,
-    repository_status_loading: bool,
-    repository_status_error: Option<String>,
+    repository: RepositoryProjection,
+    repository_scroll_handle: UniformListScrollHandle,
+    repository_diff_items: HashMap<u64, RepositoryDiffItemState>,
+    _repository_refresh_task: Option<Task<()>>,
     automation_configurations: Vec<sift_protocol::RunConfiguration>,
     automation_runs: HashMap<sift_protocol::RunConfigurationId, sift_protocol::Run>,
     automations_loading: bool,
@@ -4503,6 +4852,7 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) -> Self {
         let window_presentation = state.window.clone();
+        let repository_commit_drafts = state.repository_commit_drafts.clone();
         let vim_mode_default = settings.editor.default_mode == EditorMode::Vim;
         // Install the process-wide theme first so every child entity reads the
         // same palette through `ActiveTheme` during construction and render.
@@ -4584,6 +4934,14 @@ impl WorkspaceShell {
         let semantic_rename_input = cx.new(|cx| TextInput::new("", "New symbol name", cx));
         let saved_query_name_input = cx.new(|cx| TextInput::new("", "Saved query name…", cx));
         let result_cell_edit_input = cx.new(|cx| TextInput::new("", "New value…", cx));
+        let repository_commit_draft = selected_workspace_id
+            .and_then(|workspace_id| repository_commit_drafts.get(&workspace_id))
+            .cloned()
+            .unwrap_or_default();
+        let repository_commit_input = cx.new(|cx| {
+            TextInput::new(repository_commit_draft, "Commit message", cx)
+                .aria_label("Git commit message")
+        });
         let schema_search_input = cx.new(|cx| {
             TextInput::new("", "Search schema…", cx).aria_label("Search database schema")
         });
@@ -4650,6 +5008,19 @@ impl WorkspaceShell {
             shell
                 .palette_scroll_handle
                 .scroll_to_item(0, ScrollStrategy::Top);
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&repository_commit_input, |shell, input, cx| {
+            if let Some(workspace_id) = shell.selected_workspace_id {
+                let draft = input.read(cx).text().to_owned();
+                if draft.is_empty() {
+                    shell.repository_commit_drafts.remove(&workspace_id);
+                } else {
+                    shell.repository_commit_drafts.insert(workspace_id, draft);
+                }
+                shell.persist(cx);
+            }
             cx.notify();
         })
         .detach();
@@ -4727,6 +5098,12 @@ impl WorkspaceShell {
                 shell.intercept_ide_input(event, window, cx);
             });
         });
+        let mut repository = RepositoryProjection::new(selected_workspace_id);
+        repository.set_view_preferences(
+            settings.repository.grouping,
+            settings.repository.sort,
+            settings.repository.view,
+        );
         Self {
             focus_handle: cx.focus_handle(),
             connections_focus_handle: cx.focus_handle(),
@@ -4736,6 +5113,10 @@ impl WorkspaceShell {
             semantic_rename_input,
             saved_query_name_input,
             result_cell_edit_input,
+            repository_commit_input,
+            repository_commit_drafts,
+            recent_repository_commit: None,
+            repository_recovery_notice: None,
             result_json_edit_editor: None,
             schema_search_input,
             data_search_input,
@@ -4802,6 +5183,9 @@ impl WorkspaceShell {
             connection_nav_selected: 0,
             connection_nav_g_pending: false,
             connection_row_menu: None,
+            repository_row_menu: None,
+            repository_diff_prefix: None,
+            repository_hunk_move_next: false,
             app_bar_expanded: false,
             app_bar_menu: None,
             toasts: Vec::new(),
@@ -4814,9 +5198,10 @@ impl WorkspaceShell {
             room_members: Vec::new(),
             room_members_loading: false,
             room_members_error: None,
-            repository_status: None,
-            repository_status_loading: false,
-            repository_status_error: None,
+            repository,
+            repository_scroll_handle: UniformListScrollHandle::new(),
+            repository_diff_items: HashMap::new(),
+            _repository_refresh_task: None,
             automation_configurations: Vec::new(),
             automation_runs: HashMap::new(),
             automations_loading: false,
@@ -5296,6 +5681,7 @@ impl WorkspaceShell {
         if let Some(previous) = self.selected_instance_id.replace(instance_id.to_owned()) {
             self.workspace_sessions.insert(previous, outgoing);
         }
+        self.repository.select_workspace(self.selected_workspace_id);
 
         if let Some(sender) = &self.executor_sender {
             let _ = sender.send(ExecutorCommand::Disconnect);
@@ -5392,7 +5778,26 @@ impl WorkspaceShell {
             while let Some(event) = receiver.recv().await {
                 if shell
                     .update(cx, |shell, cx| {
+                        let repository_changed = match &event {
+                            PresenceEvent::Message(
+                                sift_protocol::RoomServerMessage::RepositoryChanged {
+                                    workspace_id,
+                                    ..
+                                }
+                                | sift_protocol::RoomServerMessage::WorkspaceChanged {
+                                    workspace_id,
+                                    ..
+                                },
+                            ) => {
+                                shell.active_left_panel == LeftPanel::Git
+                                    && shell.selected_workspace_id == Some(*workspace_id)
+                            }
+                            _ => false,
+                        };
                         shell.presence.apply(event);
+                        if repository_changed {
+                            shell.request_repository_status(cx);
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -5424,6 +5829,8 @@ impl WorkspaceShell {
     }
 
     fn on_room_document_event(&mut self, event: RoomDocumentEvent, cx: &mut Context<Self>) {
+        let projection_may_have_changed =
+            matches!(&event, RoomDocumentEvent::Text { synced: true, .. });
         match event {
             RoomDocumentEvent::Created(document) => {
                 if let Some(room) = self
@@ -5473,6 +5880,12 @@ impl WorkspaceShell {
                 cx,
             ),
             RoomDocumentEvent::ServiceFailed(message) => self.show_toast(message, cx),
+        }
+        if projection_may_have_changed
+            && self.left_dock.presentation.open
+            && self.active_left_panel == LeftPanel::Git
+        {
+            self.request_repository_status(cx);
         }
         cx.notify();
     }
@@ -6663,20 +7076,124 @@ impl WorkspaceShell {
             }
             ExecutorEvent::RepositoryStatusLoaded {
                 workspace_id,
+                request_id,
                 result,
             } => {
-                if self.selected_workspace_id != Some(workspace_id) {
-                    return;
-                }
-                self.repository_status_loading = false;
-                match result {
-                    Ok(status) => {
-                        self.repository_status = status;
-                        self.repository_status_error = None;
+                if self
+                    .repository
+                    .apply_status_result(workspace_id, request_id, result)
+                {
+                    if self.repository.take_queued_refresh() {
+                        self.request_repository_status(cx);
                     }
-                    Err(message) => self.repository_status_error = Some(message),
+                    cx.notify();
                 }
-                cx.notify();
+            }
+            ExecutorEvent::RepositoryCommitted {
+                workspace_id,
+                request_id,
+                result,
+            } => {
+                let (status_result, committed) = match result {
+                    Ok((commit, status)) => (Ok(status), Some(commit)),
+                    Err(message) => (Err(message), None),
+                };
+                if self
+                    .repository
+                    .apply_status_result(workspace_id, request_id, status_result)
+                {
+                    if let Some(commit) = committed {
+                        self.recent_repository_commit = Some(commit.clone());
+                        self.repository_commit_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                        let short = commit.commit.chars().take(8).collect::<String>();
+                        self.show_success_toast(format!("Committed {short}"), cx);
+                    }
+                    if self.repository.take_queued_refresh() {
+                        self.request_repository_status(cx);
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryUncommitted {
+                workspace_id,
+                request_id,
+                result,
+            } => {
+                let (status_result, mutation) = match result {
+                    Ok((mutation, status)) => (Ok(status), Some(mutation)),
+                    Err(message) => (Err(message), None),
+                };
+                if self
+                    .repository
+                    .apply_status_result(workspace_id, request_id, status_result)
+                {
+                    if let Some(mutation) = mutation {
+                        let previous = mutation.previous_head.chars().take(8).collect::<String>();
+                        let notice = format!(
+                            "Uncommitted {previous} · recovery checkpoint {}",
+                            mutation.checkpoint_id.0
+                        );
+                        self.repository_recovery_notice = Some(notice.clone());
+                        self.recent_repository_commit = None;
+                        self.show_success_toast(notice, cx);
+                    }
+                    if self.repository.take_queued_refresh() {
+                        self.request_repository_status(cx);
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryDiffLoaded {
+                workspace_id,
+                request_id,
+                side,
+                path,
+                result,
+            } => {
+                if let Some(applied) = self.repository.apply_diff_result(
+                    workspace_id,
+                    request_id,
+                    side,
+                    path.clone(),
+                    result,
+                ) {
+                    if let Ok(diff) = applied {
+                        if let Some(path) = path.as_ref() {
+                            self.open_repository_diff_tab(path, side, diff, cx);
+                        } else {
+                            self.open_project_diff_tab(side, &diff, cx);
+                        }
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RepositoryHunkUpdated {
+                workspace_id,
+                request_id,
+                side,
+                path,
+                result,
+            } => {
+                let move_next = std::mem::take(&mut self.repository_hunk_move_next);
+                if let Some(applied) = self.repository.apply_hunk_result(
+                    workspace_id,
+                    request_id,
+                    side,
+                    path.clone(),
+                    result,
+                ) {
+                    if let Ok(diff) = applied {
+                        self.open_repository_diff_tab(&path, side, diff, cx);
+                        if move_next {
+                            self.navigate_active_diff_hunk(1, cx);
+                        }
+                    }
+                    if self.repository.take_queued_refresh() {
+                        self.request_repository_status(cx);
+                    }
+                    cx.notify();
+                }
             }
             ExecutorEvent::AutomationsLoaded {
                 workspace_id,
@@ -10935,6 +11452,9 @@ impl WorkspaceShell {
         }
         if panel == LeftPanel::Git && self.left_dock.presentation.open {
             self.request_repository_status(cx);
+            self.start_repository_fallback_refresh(cx);
+        } else {
+            self._repository_refresh_task = None;
         }
         self.fit_side_docks_to_width(self.window_presentation.bounds.width);
         self.persist(cx);
@@ -10992,50 +11512,841 @@ impl WorkspaceShell {
     }
 
     fn request_repository_status(&mut self, cx: &mut Context<Self>) {
-        let Some(workspace_id) = self.selected_workspace_id else {
-            self.repository_status = None;
-            self.repository_status_error = Some("Select a Git-enabled workspace".into());
+        self.repository.select_workspace(self.selected_workspace_id);
+        if self.selected_workspace_id.is_none() {
+            self.repository.set_error("Select a Git-enabled workspace");
+            cx.notify();
+            return;
+        }
+        let Some((workspace_id, request_id)) = self.repository.begin_refresh() else {
             cx.notify();
             return;
         };
         let Some(sender) = &self.executor_sender else {
-            self.repository_status_error = Some("Source control is unavailable".into());
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
             cx.notify();
             return;
         };
-        self.repository_status_loading = sender
-            .send(ExecutorCommand::LoadRepositoryStatus { workspace_id })
-            .is_ok();
-        if self.repository_status_loading {
-            self.repository_status_error = None;
+        if sender
+            .send(ExecutorCommand::LoadRepositoryStatus {
+                workspace_id,
+                request_id,
+            })
+            .is_err()
+        {
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
         }
         cx.notify();
     }
 
-    fn set_repository_path_staged(
-        &mut self,
-        path: sift_protocol::WorkspacePath,
-        staged: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(status) = &self.repository_status else {
+    fn focus_source_control(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.active_left_panel = LeftPanel::Git;
+        self.left_dock.presentation.open = true;
+        self.request_repository_status(cx);
+        self.start_repository_fallback_refresh(cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn set_selected_repository_path_staged(&mut self, staged: bool, cx: &mut Context<Self>) {
+        let Some(path) = self.repository.selected_path().cloned() else {
+            self.repository.set_error("Select a changed file");
+            cx.notify();
             return;
         };
-        let Some(workspace_id) = self.selected_workspace_id else {
+        self.set_repository_paths_staged(vec![path], staged, cx);
+    }
+
+    fn activate_repository_path(
+        &mut self,
+        path: sift_protocol::WorkspacePath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.repository.select_path(path);
+        match self.settings.repository.primary_action {
+            RepositoryPrimaryAction::OpenFile => self.open_selected_repository_file(window, cx),
+            RepositoryPrimaryAction::OpenDiff => self.request_selected_repository_diff(cx),
+        }
+    }
+
+    fn open_selected_repository_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.repository.selected_path().map(|path| path.0.clone()) else {
+            self.repository.set_error("Select a changed file");
+            cx.notify();
+            return;
+        };
+        let file_name = path.rsplit('/').next().unwrap_or(&path);
+        let room_id = self.selected_workspace().map(|workspace| workspace.room_id);
+        let document = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| &tenant.rooms)
+            .filter(|room| Some(room.id.0) == room_id)
+            .flat_map(|room| &room.documents)
+            .find(|document| document.title == path || document.title == file_name)
+            .cloned();
+        if let Some(document) = document {
+            self.open_room_document(&document, window, cx);
+        } else {
+            self.repository.set_error(format!(
+                "{path} is not an openable workspace SQL document yet"
+            ));
+            cx.notify();
+        }
+    }
+
+    fn request_selected_repository_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.repository.selected_entry().cloned() else {
+            self.repository.set_error("Select a changed file");
+            cx.notify();
+            return;
+        };
+        let side = match entry.stage {
+            sift_protocol::VcsStageState::Staged => sift_protocol::VcsDiffSide::HeadToIndex,
+            sift_protocol::VcsStageState::PartiallyStaged => {
+                sift_protocol::VcsDiffSide::HeadToWorktree
+            }
+            sift_protocol::VcsStageState::Unstaged | sift_protocol::VcsStageState::Conflict => {
+                sift_protocol::VcsDiffSide::IndexToWorktree
+            }
+        };
+        let Some((workspace_id, binding_id, request_id, side, path)) =
+            self.repository.begin_diff(side, Some(entry.path))
+        else {
             return;
         };
         let Some(sender) = &self.executor_sender else {
+            let _ = self.repository.apply_diff_result(
+                workspace_id,
+                request_id,
+                side,
+                path,
+                Err("Source control is unavailable".into()),
+            );
+            cx.notify();
             return;
         };
-        self.repository_status_loading = sender
-            .send(ExecutorCommand::SetRepositoryPathStaged {
+        if sender
+            .send(ExecutorCommand::LoadRepositoryDiff {
                 workspace_id,
-                binding_id: status.binding_id.0,
-                expected_revision: status.binding_revision,
+                binding_id,
+                request_id,
+                side,
+                path: path.clone(),
+            })
+            .is_err()
+        {
+            let _ = self.repository.apply_diff_result(
+                workspace_id,
+                request_id,
+                side,
                 path,
+                Err("Source control is unavailable".into()),
+            );
+        }
+        cx.notify();
+    }
+
+    fn request_project_diff(&mut self, cx: &mut Context<Self>) {
+        let side = sift_protocol::VcsDiffSide::HeadToWorktree;
+        let Some((workspace_id, binding_id, request_id, side, path)) =
+            self.repository.begin_diff(side, None)
+        else {
+            self.repository
+                .set_error("Load a Git-enabled workspace first");
+            cx.notify();
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            let _ = self.repository.apply_diff_result(
+                workspace_id,
+                request_id,
+                side,
+                path,
+                Err("Source control is unavailable".into()),
+            );
+            cx.notify();
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::LoadRepositoryDiff {
+                workspace_id,
+                binding_id,
+                request_id,
+                side,
+                path: None,
+            })
+            .is_err()
+        {
+            let _ = self.repository.apply_diff_result(
+                workspace_id,
+                request_id,
+                side,
+                None,
+                Err("Source control is unavailable".into()),
+            );
+        }
+        cx.notify();
+    }
+
+    fn navigate_repository_file(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.repository.move_selection(delta).is_none() {
+            return;
+        }
+        if let Some(index) = self.repository.selected_row_index() {
+            self.repository_scroll_handle
+                .scroll_to_item(index, ScrollStrategy::Nearest);
+        }
+        self.request_selected_repository_diff(cx);
+    }
+
+    fn navigate_active_diff_hunk(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(editor) = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            let item = pane.active_item()?;
+            (item.kind == ItemKind::GitDiff).then(|| pane.editor(item.id))?
+        }) else {
+            return;
+        };
+        editor.update(cx, |editor, cx| {
+            editor.navigate_to_line_prefix("@@ ", delta, cx);
+        });
+    }
+
+    fn active_repository_hunk(
+        &self,
+        cx: &App,
+    ) -> Option<(RepositoryDiffItemState, sift_protocol::VcsDiffHunk)> {
+        let pane = self.panes.get(self.active_pane)?.read(cx);
+        let item = pane.active_item()?;
+        if item.kind != ItemKind::GitDiff {
+            return None;
+        }
+        let state = self.repository_diff_items.get(&item.id)?.clone();
+        let editor = pane.editor(item.id)?.read(cx);
+        let text = editor.document().text();
+        let index = repository_hunk_index_at_cursor(text, editor.cursor_offset())?;
+        let hunk = state
+            .diff
+            .files
+            .iter()
+            .find(|file| file.path == state.path)?
+            .hunks
+            .get(index)?
+            .clone();
+        Some((state, hunk))
+    }
+
+    fn set_active_repository_hunk_staged(
+        &mut self,
+        staged: bool,
+        move_next: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((state, hunk)) = self.active_repository_hunk(cx) else {
+            self.show_toast("Place the caret in a file diff hunk".into(), cx);
+            return;
+        };
+        self.dispatch_repository_hunk_update(state, hunk.id, None, staged, move_next, cx);
+    }
+
+    fn set_active_repository_lines_staged(&mut self, staged: bool, cx: &mut Context<Self>) {
+        let (state, hunk_id, line_indices) = match self.active_repository_line_selection(cx) {
+            Ok(selection) => selection,
+            Err(message) => {
+                self.show_toast(message, cx);
+                return;
+            }
+        };
+        self.dispatch_repository_hunk_update(state, hunk_id, Some(line_indices), staged, false, cx);
+    }
+
+    fn active_repository_line_selection(
+        &self,
+        cx: &App,
+    ) -> Result<(RepositoryDiffItemState, String, Vec<u32>), String> {
+        let pane = self
+            .panes
+            .get(self.active_pane)
+            .ok_or_else(|| "Open a file diff first".to_owned())?
+            .read(cx);
+        let item = pane
+            .active_item()
+            .filter(|item| item.kind == ItemKind::GitDiff)
+            .ok_or_else(|| "Open a file diff first".to_owned())?;
+        let state = self
+            .repository_diff_items
+            .get(&item.id)
+            .cloned()
+            .ok_or_else(|| "File diff state is unavailable".to_owned())?;
+        let editor = pane
+            .editor(item.id)
+            .ok_or_else(|| "File diff editor is unavailable".to_owned())?
+            .read(cx);
+        let selection = editor.document().selection();
+        if selection.is_empty() {
+            return Err("Select added or deleted diff lines in Visual mode".into());
+        }
+        let text = editor.document().text();
+        let markers = repository_hunk_marker_offsets(text);
+        let hunk_index = repository_hunk_index_at_cursor(text, selection.start)
+            .ok_or_else(|| "Select lines inside one diff hunk".to_owned())?;
+        let marker = markers[hunk_index];
+        let hunk_end = markers.get(hunk_index + 1).copied().unwrap_or(text.len());
+        if selection.end > hunk_end {
+            return Err("Select changed lines from only one diff hunk".into());
+        }
+        let hunk = state
+            .diff
+            .files
+            .iter()
+            .find(|file| file.path == state.path)
+            .and_then(|file| file.hunks.get(hunk_index))
+            .ok_or_else(|| "Selected diff hunk is stale".to_owned())?;
+        let mut line_start = text[marker..]
+            .find('\n')
+            .map(|offset| marker + offset + 1)
+            .ok_or_else(|| "Selected diff hunk is incomplete".to_owned())?;
+        let mut line_indices = Vec::new();
+        for (index, line) in hunk.lines.iter().enumerate() {
+            let line_end = text[line_start..]
+                .find('\n')
+                .map_or(text.len(), |offset| line_start + offset);
+            if selection.start <= line_end
+                && selection.end > line_start
+                && matches!(
+                    line.kind,
+                    sift_protocol::VcsDiffLineKind::Addition
+                        | sift_protocol::VcsDiffLineKind::Deletion
+                )
+            {
+                line_indices.push(index as u32);
+            }
+            line_start = line_end.saturating_add(1);
+        }
+        if line_indices.is_empty() {
+            return Err("Selection contains no added or deleted lines".into());
+        }
+        let hunk_id = hunk.id.clone();
+        Ok((state, hunk_id, line_indices))
+    }
+
+    fn dispatch_repository_hunk_update(
+        &mut self,
+        state: RepositoryDiffItemState,
+        hunk_id: String,
+        line_indices: Option<Vec<u32>>,
+        staged: bool,
+        move_next: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let valid_side = if staged {
+            sift_protocol::VcsDiffSide::IndexToWorktree
+        } else {
+            sift_protocol::VcsDiffSide::HeadToIndex
+        };
+        if state.side != valid_side {
+            self.show_toast(
+                if staged {
+                    "Stage hunks from an index → worktree diff"
+                } else {
+                    "Unstage hunks from a HEAD → index diff"
+                }
+                .into(),
+                cx,
+            );
+            return;
+        }
+        let Some((workspace_id, binding_id, expected_revision, request_id)) = self
+            .repository
+            .begin_hunk_update(state.path.clone(), staged)
+        else {
+            return;
+        };
+        self.repository_hunk_move_next = move_next;
+        let Some(sender) = &self.executor_sender else {
+            self.repository_hunk_move_next = false;
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+            cx.notify();
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::SetRepositoryHunkStaged {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                request_id,
+                side: state.side,
+                path: state.path,
+                hunk_id,
+                line_indices,
                 staged,
             })
-            .is_ok();
+            .is_err()
+        {
+            self.repository_hunk_move_next = false;
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn copy_active_repository_hunk(&mut self, cx: &mut Context<Self>) {
+        let Some((state, hunk)) = self.active_repository_hunk(cx) else {
+            self.show_toast("Place the caret in a file diff hunk".into(), cx);
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(repository_hunk_patch(
+            &state.path,
+            &hunk,
+        )));
+        self.show_toast("Copied diff hunk patch".into(), cx);
+    }
+
+    fn toggle_active_diff_whitespace(&mut self, cx: &mut Context<Self>) {
+        let Some((item_id, editor)) = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            let item = pane.active_item()?;
+            if item.kind != ItemKind::GitDiff {
+                return None;
+            }
+            Some((item.id, pane.editor(item.id)?))
+        }) else {
+            self.show_toast("Open a file diff first".into(), cx);
+            return;
+        };
+        let Some(state) = self.repository_diff_items.get_mut(&item_id) else {
+            return;
+        };
+        state.show_whitespace = !state.show_whitespace;
+        let visible = state.show_whitespace;
+        let text = repository_diff_text(&state.path, state.side, &state.diff, visible);
+        editor.update(cx, |editor, cx| editor.replace_text_from_owner(&text, cx));
+        self.show_toast(
+            if visible {
+                "Diff whitespace visible"
+            } else {
+                "Diff whitespace hidden"
+            }
+            .into(),
+            cx,
+        );
+    }
+
+    fn open_repository_diff_tab(
+        &mut self,
+        path: &sift_protocol::WorkspacePath,
+        side: sift_protocol::VcsDiffSide,
+        diff: Arc<sift_protocol::VcsDiff>,
+        cx: &mut Context<Self>,
+    ) {
+        let title = format!("Diff: {}", path.0);
+        if let Some((pane_index, item_id)) =
+            self.panes
+                .iter()
+                .enumerate()
+                .find_map(|(pane_index, pane)| {
+                    pane.read(cx)
+                        .items
+                        .iter()
+                        .find(|item| item.kind == ItemKind::GitDiff && item.title == title)
+                        .map(|item| (pane_index, item.id))
+                })
+        {
+            let show_whitespace = self
+                .repository_diff_items
+                .get(&item_id)
+                .is_some_and(|state| state.show_whitespace);
+            let anchor_hunk_id = self.repository_diff_items.get(&item_id).and_then(|state| {
+                let pane = self.panes[pane_index].read(cx);
+                let editor = pane.editor(item_id)?.read(cx);
+                let index = repository_hunk_index_at_cursor(
+                    editor.document().text(),
+                    editor.cursor_offset(),
+                )?;
+                state
+                    .diff
+                    .files
+                    .iter()
+                    .find(|file| file.path == state.path)?
+                    .hunks
+                    .get(index)
+                    .map(|hunk| hunk.id.clone())
+            });
+            let anchor_hunk_index = anchor_hunk_id.and_then(|anchor| {
+                diff.files
+                    .iter()
+                    .find(|file| file.path == *path)?
+                    .hunks
+                    .iter()
+                    .position(|hunk| hunk.id == anchor)
+            });
+            let text = repository_diff_text(path, side, &diff, show_whitespace);
+            self.active_pane = pane_index;
+            self.repository_diff_items.insert(
+                item_id,
+                RepositoryDiffItemState {
+                    path: path.clone(),
+                    side,
+                    diff,
+                    show_whitespace,
+                },
+            );
+            self.panes[pane_index].update(cx, |pane, cx| {
+                if let Some(editor) = pane.editor(item_id) {
+                    editor.update(cx, |editor, cx| {
+                        editor.replace_text_from_owner(&text, cx);
+                        if let Some(index) = anchor_hunk_index {
+                            editor.navigate_to_line_prefix_index("@@ ", index, cx);
+                        }
+                    });
+                }
+                if let Some(index) = pane.items.iter().position(|item| item.id == item_id) {
+                    pane.activate_item(index, true);
+                }
+            });
+            cx.notify();
+            return;
+        }
+        let item_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let text = repository_diff_text(path, side, &diff, false);
+        self.repository_diff_items.insert(
+            item_id,
+            RepositoryDiffItemState {
+                path: path.clone(),
+                side,
+                diff,
+                show_whitespace: false,
+            },
+        );
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&text), cx)
+                .with_diff_language(repository_diff_editor_language(path))
+                .with_keymap(EditorKeymap::Vim)
+                .read_only()
+        });
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_configuration(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::GitDiff,
+                        title,
+                        dirty: false,
+                        source: None,
+                        last_result: None,
+                    },
+                    editor,
+                    cx,
+                )
+            });
+        }
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn open_project_diff_tab(
+        &mut self,
+        side: sift_protocol::VcsDiffSide,
+        diff: &sift_protocol::VcsDiff,
+        cx: &mut Context<Self>,
+    ) {
+        let title = "Project Diff".to_owned();
+        let text = project_diff_text(side, diff);
+        if let Some((pane_index, item_id)) =
+            self.panes
+                .iter()
+                .enumerate()
+                .find_map(|(pane_index, pane)| {
+                    pane.read(cx)
+                        .items
+                        .iter()
+                        .find(|item| item.kind == ItemKind::GitDiff && item.title == title)
+                        .map(|item| (pane_index, item.id))
+                })
+        {
+            self.active_pane = pane_index;
+            self.panes[pane_index].update(cx, |pane, cx| {
+                if let Some(editor) = pane.editor(item_id) {
+                    editor.update(cx, |editor, cx| editor.replace_text_from_owner(&text, cx));
+                }
+                if let Some(index) = pane.items.iter().position(|item| item.id == item_id) {
+                    pane.activate_item(index, true);
+                }
+            });
+            cx.notify();
+            return;
+        }
+        let item_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&text), cx)
+                .with_language(EditorLanguage::PlainText)
+                .with_keymap(EditorKeymap::Vim)
+                .read_only()
+        });
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_configuration(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::GitDiff,
+                        title,
+                        dirty: false,
+                        source: None,
+                        last_result: None,
+                    },
+                    editor,
+                    cx,
+                )
+            });
+        }
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn apply_repository_preferences(&mut self, cx: &mut Context<Self>) {
+        self.repository.set_view_preferences(
+            self.settings.repository.grouping,
+            self.settings.repository.sort,
+            self.settings.repository.view,
+        );
+        let result = self
+            .settings_store
+            .as_ref()
+            .map(|store| store.save(&self.settings))
+            .transpose();
+        if let Err(error) = result {
+            self.show_toast(
+                format!("Saving source-control settings failed: {error}"),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    fn toggle_repository_grouping(&mut self, cx: &mut Context<Self>) {
+        self.settings.repository.grouping = match self.settings.repository.grouping {
+            RepositoryGrouping::Staging => RepositoryGrouping::FileState,
+            RepositoryGrouping::FileState => RepositoryGrouping::Staging,
+        };
+        self.apply_repository_preferences(cx);
+    }
+
+    fn toggle_repository_sort(&mut self, cx: &mut Context<Self>) {
+        self.settings.repository.sort = match self.settings.repository.sort {
+            RepositorySort::Path => RepositorySort::FileName,
+            RepositorySort::FileName => RepositorySort::Path,
+        };
+        self.apply_repository_preferences(cx);
+    }
+
+    fn toggle_repository_view(&mut self, cx: &mut Context<Self>) {
+        self.settings.repository.view = match self.settings.repository.view {
+            RepositoryView::Flat => RepositoryView::Tree,
+            RepositoryView::Tree => RepositoryView::Flat,
+        };
+        self.apply_repository_preferences(cx);
+    }
+
+    fn toggle_repository_primary_action(&mut self, cx: &mut Context<Self>) {
+        self.settings.repository.primary_action = match self.settings.repository.primary_action {
+            RepositoryPrimaryAction::OpenFile => RepositoryPrimaryAction::OpenDiff,
+            RepositoryPrimaryAction::OpenDiff => RepositoryPrimaryAction::OpenFile,
+        };
+        self.apply_repository_preferences(cx);
+    }
+
+    fn start_repository_fallback_refresh(&mut self, cx: &mut Context<Self>) {
+        if self._repository_refresh_task.is_some() {
+            return;
+        }
+        self._repository_refresh_task = Some(cx.spawn(async move |shell, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(5))
+                .await;
+            let keep_running = shell
+                .update(cx, |shell, cx| {
+                    let open = shell.left_dock.presentation.open
+                        && shell.active_left_panel == LeftPanel::Git;
+                    if open {
+                        shell.request_repository_status(cx);
+                    }
+                    open
+                })
+                .unwrap_or(false);
+            if !keep_running {
+                break;
+            }
+        }));
+    }
+
+    fn set_repository_paths_staged(
+        &mut self,
+        paths: Vec<sift_protocol::WorkspacePath>,
+        staged: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((workspace_id, binding_id, expected_revision, request_id, paths)) =
+            self.repository.begin_path_update(paths, staged)
+        else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+            cx.notify();
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::SetRepositoryPathsStaged {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                request_id,
+                paths,
+                staged,
+            })
+            .is_err()
+        {
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn commit_repository(&mut self, amend: bool, cx: &mut Context<Self>) {
+        let mut message = self
+            .repository_commit_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        if message.is_empty() {
+            self.repository.set_error("Enter a commit message");
+            cx.notify();
+            return;
+        }
+        if !self.repository.has_staged_changes() {
+            self.repository
+                .set_error("Stage at least one SQL change before committing");
+            cx.notify();
+            return;
+        }
+        let expected_head = if amend {
+            let Some(head) = self
+                .repository
+                .status()
+                .and_then(|status| status.head_oid.clone())
+            else {
+                self.repository
+                    .set_error("There is no HEAD commit to amend");
+                cx.notify();
+                return;
+            };
+            Some(head)
+        } else {
+            None
+        };
+        let Some((workspace_id, binding_id, expected_revision, request_id)) =
+            self.repository.begin_commit()
+        else {
+            return;
+        };
+        let (author_name, author_email) = self.repository_commit_identity();
+        if self.settings.repository.commit_sign_off && !message.contains("Signed-off-by:") {
+            message.push_str(&format!(
+                "\n\nSigned-off-by: {author_name} <{author_email}>"
+            ));
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+            cx.notify();
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::CommitRepository {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                request_id,
+                message,
+                author_name,
+                author_email,
+                amend,
+                expected_head,
+            })
+            .is_err()
+        {
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn repository_commit_identity(&self) -> (String, String) {
+        let principal = self
+            .lifecycle
+            .identity
+            .as_ref()
+            .map(|identity| &identity.principal);
+        let name = self
+            .settings
+            .repository
+            .commit_author_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_owned)
+            .or_else(|| principal.map(|principal| principal.display_name.clone()))
+            .unwrap_or_else(|| "Sift user".into());
+        let email = self
+            .settings
+            .repository
+            .commit_author_email
+            .as_deref()
+            .filter(|email| !email.trim().is_empty())
+            .map(str::to_owned)
+            .or_else(|| principal.and_then(|principal| principal.email.clone()))
+            .or_else(|| principal.map(|principal| format!("sift+{}@localhost", principal.id)))
+            .unwrap_or_else(|| "sift@localhost".into());
+        (name, email)
+    }
+
+    fn uncommit_repository(&mut self, cx: &mut Context<Self>) {
+        let Some((workspace_id, binding_id, expected_revision, request_id, expected_head)) =
+            self.repository.begin_uncommit()
+        else {
+            self.repository
+                .set_error("There is no HEAD commit to uncommit");
+            cx.notify();
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+            cx.notify();
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::UncommitRepository {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                request_id,
+                expected_head,
+            })
+            .is_err()
+        {
+            self.repository
+                .fail_to_send(request_id, "Source control is unavailable");
+        }
         cx.notify();
     }
 
@@ -11663,6 +12974,16 @@ impl WorkspaceShell {
 
     pub fn open_workspace(&mut self, workspace: &WorkspaceNavEntry, cx: &mut Context<Self>) {
         self.selected_workspace_id = Some(workspace.id);
+        let draft = self
+            .repository_commit_drafts
+            .get(&workspace.id)
+            .cloned()
+            .unwrap_or_default();
+        self.repository_commit_input
+            .update(cx, |input, cx| input.set_text(draft, cx));
+        self.recent_repository_commit = None;
+        self.repository_recovery_notice = None;
+        self.repository.select_workspace(Some(workspace.id));
         self.presence.join(RoomId(workspace.room_id));
         if self.left_dock.presentation.open && self.active_left_panel == LeftPanel::Git {
             self.request_repository_status(cx);
@@ -11716,6 +13037,7 @@ impl WorkspaceShell {
             .any(|workspace| workspace.id == selected);
         if !exists {
             self.selected_workspace_id = None;
+            self.repository.select_workspace(None);
             self.show_toast("Restored workspace is no longer available".into(), cx);
             self.persist(cx);
         }
@@ -11764,6 +13086,7 @@ impl WorkspaceShell {
                 instance_id: self.selected_instance_id.clone(),
             },
             instance_workspaces,
+            repository_commit_drafts: self.repository_commit_drafts.clone(),
             ..PresentationState::default()
         }
     }
@@ -13111,11 +14434,82 @@ impl WorkspaceShell {
                     .get("vim_mode")
                     .is_some_and(|mode| mode.as_ref() == "normal")
             });
+            let vim_visual = event.context_stack.iter().any(|context| {
+                context
+                    .get("vim_mode")
+                    .is_some_and(|mode| mode.as_ref() == "visual")
+            });
             let workspace = has_context("SiftWorkspace");
             let editor = has_context("SiftEditor");
             let results = has_context("SiftResults");
             let text_input = has_context("SiftTextInput");
             let modal = has_context("SiftModal");
+            let git_diff = self.panes.get(self.active_pane).is_some_and(|pane| {
+                pane.read(cx)
+                    .active_item()
+                    .is_some_and(|item| item.kind == ItemKind::GitDiff)
+            });
+
+            if workspace && git_diff && (vim_normal || vim_visual) && !modal && !text_input {
+                let handled = match (self.repository_diff_prefix, key.as_str()) {
+                    (None, "s") if vim_visual => {
+                        self.set_active_repository_lines_staged(true, cx);
+                        true
+                    }
+                    (None, "u") if vim_visual => {
+                        self.set_active_repository_lines_staged(false, cx);
+                        true
+                    }
+                    (_, "[") => {
+                        self.repository_diff_prefix = Some(-1);
+                        true
+                    }
+                    (_, "]") => {
+                        self.repository_diff_prefix = Some(1);
+                        true
+                    }
+                    (Some(delta), "c") => {
+                        self.repository_diff_prefix = None;
+                        self.navigate_active_diff_hunk(delta, cx);
+                        true
+                    }
+                    (Some(delta), "f") => {
+                        self.repository_diff_prefix = None;
+                        self.navigate_repository_file(delta, cx);
+                        true
+                    }
+                    (Some(_), "escape") => {
+                        self.repository_diff_prefix = None;
+                        cx.notify();
+                        true
+                    }
+                    (Some(_), _) => {
+                        self.repository_diff_prefix = None;
+                        false
+                    }
+                    (None, "s") => {
+                        self.set_active_repository_hunk_staged(true, false, cx);
+                        true
+                    }
+                    (None, "u") => {
+                        self.set_active_repository_hunk_staged(false, false, cx);
+                        true
+                    }
+                    (None, "shift-s") => {
+                        self.set_active_repository_hunk_staged(true, true, cx);
+                        true
+                    }
+                    (None, "shift-u") => {
+                        self.set_active_repository_hunk_staged(false, true, cx);
+                        true
+                    }
+                    (None, _) => false,
+                };
+                if handled {
+                    cx.stop_propagation();
+                    return;
+                }
+            }
 
             if workspace && results && !modal && !text_input && key == ":" {
                 // Result focus can move without a Pane focus event. Capture the
@@ -15283,6 +16677,55 @@ impl WorkspaceShell {
             CommandId::FocusPaneRight => {
                 self.focus_pane_direction(SplitDirection::Right, window, cx)
             }
+            CommandId::FocusGit => self.focus_source_control(window, cx),
+            CommandId::OpenRepositoryFile => self.open_selected_repository_file(window, cx),
+            CommandId::OpenRepositoryDiff => self.request_selected_repository_diff(cx),
+            CommandId::OpenProjectDiff => self.request_project_diff(cx),
+            CommandId::PreviousDiffFile => self.navigate_repository_file(-1, cx),
+            CommandId::NextDiffFile => self.navigate_repository_file(1, cx),
+            CommandId::PreviousDiffHunk => self.navigate_active_diff_hunk(-1, cx),
+            CommandId::NextDiffHunk => self.navigate_active_diff_hunk(1, cx),
+            CommandId::StageDiffHunk => self.set_active_repository_hunk_staged(true, false, cx),
+            CommandId::UnstageDiffHunk => self.set_active_repository_hunk_staged(false, false, cx),
+            CommandId::StageDiffHunkAndNext => {
+                self.set_active_repository_hunk_staged(true, true, cx)
+            }
+            CommandId::UnstageDiffHunkAndNext => {
+                self.set_active_repository_hunk_staged(false, true, cx)
+            }
+            CommandId::CopyDiffHunk => self.copy_active_repository_hunk(cx),
+            CommandId::ToggleDiffWhitespace => self.toggle_active_diff_whitespace(cx),
+            CommandId::StageDiffLines => self.set_active_repository_lines_staged(true, cx),
+            CommandId::UnstageDiffLines => self.set_active_repository_lines_staged(false, cx),
+            CommandId::RefreshRepository => self.request_repository_status(cx),
+            CommandId::StageRepositoryPath => self.set_selected_repository_path_staged(true, cx),
+            CommandId::UnstageRepositoryPath => self.set_selected_repository_path_staged(false, cx),
+            CommandId::StageAllTrackedRepositoryPaths => self.set_repository_paths_staged(
+                self.repository.stageable_tracked_paths(),
+                true,
+                cx,
+            ),
+            CommandId::StageAllRepositoryPaths => {
+                self.set_repository_paths_staged(self.repository.stageable_paths(), true, cx)
+            }
+            CommandId::UnstageAllRepositoryPaths => {
+                self.set_repository_paths_staged(self.repository.unstageable_paths(), false, cx)
+            }
+            CommandId::FocusRepositoryCommit => {
+                self.focus_source_control(window, cx);
+                self.repository_commit_input
+                    .focus_handle(cx)
+                    .focus(window, cx);
+            }
+            CommandId::AmendRepository => self.commit_repository(true, cx),
+            CommandId::UncommitRepository => {
+                self.modal = Some(Modal::ConfirmRepositoryUncommit);
+                cx.notify();
+            }
+            CommandId::ToggleRepositoryGrouping => self.toggle_repository_grouping(cx),
+            CommandId::ToggleRepositorySort => self.toggle_repository_sort(cx),
+            CommandId::ToggleRepositoryView => self.toggle_repository_view(cx),
+            CommandId::ToggleRepositoryPrimaryAction => self.toggle_repository_primary_action(cx),
             CommandId::FocusConnections => self.focus_connections(window, cx),
             CommandId::FocusEditor => self.focus_active_pane(window, cx),
             CommandId::FocusInspector => self.focus_inspector(window, cx),
@@ -15468,6 +16911,12 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         self.left_dock.presentation.open = !self.left_dock.presentation.open;
+        if self.left_dock.presentation.open && self.active_left_panel == LeftPanel::Git {
+            self.request_repository_status(cx);
+            self.start_repository_fallback_refresh(cx);
+        } else {
+            self._repository_refresh_task = None;
+        }
         self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
         self.persist(cx);
         cx.notify();
@@ -18035,6 +19484,180 @@ impl WorkspaceShell {
             .into_any_element()
     }
 
+    fn render_repository_row(
+        &self,
+        index: usize,
+        row: RepositoryRow,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors;
+        match row {
+            RepositoryRow::Section { section, count } => div()
+                .id(("repository-section", index))
+                .h(px(26.))
+                .px_3()
+                .flex()
+                .items_center()
+                .child(SectionLabel::new(format!("{} ({count})", section.label())))
+                .into_any_element(),
+            RepositoryRow::Folder { path, depth } => div()
+                .id(("repository-folder", index))
+                .h(cx.theme().metrics.row_height)
+                .pl(px(10. + depth as f32 * 12.))
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_color(colors.muted_text)
+                .child(icon(IconName::Folder, colors.muted_text, 12.))
+                .child(path.rsplit('/').next().unwrap_or(&path).to_owned())
+                .into_any_element(),
+            RepositoryRow::Entry { entry, depth } => {
+                let path = entry.path.clone();
+                let selection_path = path.clone();
+                let diff_path = path.clone();
+                let menu_path = path.clone();
+                let menu_entry = entry.clone();
+                let menu_trigger_path = entry.path.clone();
+                let menu_open = self.repository_row_menu.as_ref() == Some(&entry.path);
+                let selected = self.repository.selected_path() == Some(&entry.path);
+                let staged = entry.stage == sift_protocol::VcsStageState::Staged;
+                let conflicted = entry.stage == sift_protocol::VcsStageState::Conflict;
+                let partial = entry.stage == sift_protocol::VcsStageState::PartiallyStaged;
+                let pending = self.repository.is_path_pending(&entry.path);
+                let diff_stats = self.repository.diff_stats(&entry.path);
+                let state_icon =
+                    match entry.state {
+                        sift_protocol::VcsFileState::Added
+                        | sift_protocol::VcsFileState::Untracked => IconName::Add,
+                        sift_protocol::VcsFileState::Deleted => IconName::Close,
+                        sift_protocol::VcsFileState::Renamed
+                        | sift_protocol::VcsFileState::Copied => IconName::Edit,
+                        sift_protocol::VcsFileState::Unmerged => IconName::Warning,
+                        _ => IconName::Fallback,
+                    };
+                div()
+                    .id(("repository-path", index))
+                    .mx_2()
+                    .h(cx.theme().metrics.row_height)
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .when(selected, |row| row.bg(colors.active_surface))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |shell, _, _, cx| {
+                            cx.stop_propagation();
+                            shell.repository.select_path(menu_path.clone());
+                            shell.repository_row_menu = Some(menu_path.clone());
+                            cx.notify();
+                        }),
+                    )
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.activate_repository_path(selection_path.clone(), window, cx)
+                    }))
+                    .child(div().pl(px(depth as f32 * 12.)).child(icon(
+                        state_icon,
+                        colors.muted_text,
+                        11.,
+                    )))
+                    .child(div().flex_1().min_w_0().truncate().child(entry.path.0))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(format!("{:?}", entry.state)),
+                    )
+                    .children(diff_stats.map(|(additions, deletions)| {
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(format!("+{additions} −{deletions}"))
+                    }))
+                    .child(
+                        IconButton::new(
+                            ("open-repository-diff", index),
+                            IconName::View,
+                            "Open file diff",
+                        )
+                        .square(px(22.))
+                        .icon_size(11.)
+                        .tooltip("Open file diff")
+                        .disabled(self.repository.diff_loading())
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.repository.select_path(diff_path.clone());
+                            shell.request_selected_repository_diff(cx)
+                        })),
+                    )
+                    .child(
+                        Button::new(
+                            ("toggle-repository-path", index),
+                            if pending {
+                                "Working…"
+                            } else if partial {
+                                "Stage rest"
+                            } else if staged {
+                                "Unstage"
+                            } else {
+                                "Stage"
+                            },
+                        )
+                        .tone(ButtonTone::Ghost)
+                        .disabled(self.repository.loading() || conflicted)
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.set_repository_paths_staged(vec![path.clone()], !staged, cx)
+                        })),
+                    )
+                    .when(selected, |row| {
+                        row.child(
+                            div()
+                                .relative()
+                                .flex_none()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(
+                                    IconButton::new(
+                                        ("repository-actions", index),
+                                        IconName::Menu,
+                                        "Changed-file actions",
+                                    )
+                                    .square(px(22.))
+                                    .icon_size(11.)
+                                    .tooltip("Changed-file actions")
+                                    .on_click(cx.listener(
+                                        move |shell, _, _, cx| {
+                                            cx.stop_propagation();
+                                            shell.repository_row_menu = if menu_open {
+                                                None
+                                            } else {
+                                                Some(menu_trigger_path.clone())
+                                            };
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                                .when(menu_open, |trigger| {
+                                    trigger.child(
+                                        div().absolute().bottom_0().right_0().size_0().child(
+                                            deferred(anchored().anchor(Anchor::TopRight).child(
+                                                shell_repository_row_menu(
+                                                    menu_entry.clone(),
+                                                    colors,
+                                                    cx,
+                                                ),
+                                            ))
+                                            .with_priority(2),
+                                        ),
+                                    )
+                                }),
+                        )
+                    })
+                    .into_any_element()
+            }
+        }
+    }
+
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -18273,75 +19896,149 @@ impl WorkspaceShell {
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Git,
                 |dock_view| {
-                    let rows = self.repository_status.as_ref().into_iter().flat_map(|status| {
-                        status.entries.iter().enumerate().map(|(index, entry)| {
-                            let path = entry.path.clone();
-                            let staged = matches!(entry.stage, sift_protocol::VcsStageState::Staged);
-                            div()
-                                .id(("repository-path", index))
-                                .mx_2()
-                                .h(cx.theme().metrics.row_height)
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .border_b_1()
-                                .border_color(colors.subtle_border)
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(entry.path.0.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .child(format!("{:?}", entry.state)),
-                                )
-                                .child(
-                                    Button::new(
-                                        ("toggle-repository-path", index),
-                                        if staged { "Unstage" } else { "Stage" },
-                                    )
-                                    .tone(ButtonTone::Ghost)
-                                    .disabled(self.repository_status_loading)
-                                    .on_click(cx.listener(move |shell, _, _, cx| {
-                                        shell.set_repository_path_staged(path.clone(), !staged, cx)
-                                    })),
-                                )
-                        })
+                    let rows = self.repository.rows();
+                    let row_count = rows.len();
+                    let workspace_name = self
+                        .selected_workspace()
+                        .map(|workspace| workspace.name.clone())
+                        .unwrap_or_else(|| "Source control".into());
+                    let repository_detail = self.repository.status().map(|status| {
+                        let branch = status.branch.as_deref().unwrap_or("Detached HEAD");
+                        let remote = status.upstream.as_ref().map_or_else(String::new, |upstream| {
+                            format!(" · ↑{} ↓{}", upstream.ahead, upstream.behind)
+                        });
+                        format!("{branch}{remote} · {} change(s)", status.entries.len())
                     });
-                    let summary = self.repository_status.as_ref().map(|status| {
-                        let branch = status.branch.as_deref().unwrap_or("detached");
-                        format!("{branch} · {} change(s)", status.entries.len())
+                    let stageable = self.repository.stageable_paths();
+                    let unstageable = self.repository.unstageable_paths();
+                    let commit_message = self.repository_commit_input.read(cx).text().to_owned();
+                    let subject_length = commit_message.lines().next().unwrap_or("").chars().count();
+                    let subject_limit = self.settings.repository.commit_subject_limit.max(1);
+                    let (commit_author_name, commit_author_email) =
+                        self.repository_commit_identity();
+                    let recent_commit = self.recent_repository_commit.clone();
+                    let recovery_notice = self.repository_recovery_notice.clone();
+                    let commit_button_label = if self
+                        .repository
+                        .status()
+                        .is_some_and(|status| status.head_oid.is_none())
+                    {
+                        "Create initial commit"
+                    } else {
+                        "Commit staged SQL changes"
+                    };
+                    let can_commit = self.repository.status().is_some_and(|status| {
+                        !status.entries.is_empty()
+                            && self.repository.has_staged_changes()
+                            && !self.repository.loading()
+                            && !self.repository_commit_input.read(cx).text().trim().is_empty()
                     });
                     dock_view
                         .child(
                             div()
-                                .h(px(32.))
+                                .h(px(46.))
                                 .px_3()
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .child(summary.unwrap_or_else(|| "SOURCE CONTROL".into()))
                                 .child(
-                                    Button::new("refresh-repository-status", "Refresh")
-                                        .tone(ButtonTone::Ghost)
-                                        .disabled(self.repository_status_loading)
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.request_repository_status(cx)
-                                        })),
+                                    div()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .child(div().truncate().child(workspace_name))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .truncate()
+                                                .child(repository_detail.unwrap_or_else(|| {
+                                                    "No repository loaded".into()
+                                                })),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            IconButton::new(
+                                                "refresh-repository-status",
+                                                IconName::Refresh,
+                                                "Refresh source control",
+                                            )
+                                            .square(px(24.))
+                                            .icon_size(12.)
+                                            .tooltip("Refresh source control")
+                                            .disabled(self.repository.loading())
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.request_repository_status(cx)
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "repository-overflow",
+                                                IconName::Menu,
+                                                "More source-control actions",
+                                            )
+                                            .square(px(24.))
+                                            .icon_size(12.)
+                                            .tooltip("More source-control actions")
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_command_palette(
+                                                    &OpenCommandPalette,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })),
+                                        ),
                                 ),
                         )
-                        .children(self.repository_status_error.as_ref().map(|message| {
-                            div().mx_2().mb_2().child(ErrorBanner::new(message.clone()))
+                        .children(self.repository.error().map(|failure| {
+                            div().mx_2().mb_2().child(ErrorBanner::new(format!(
+                                "{}: {}",
+                                failure.kind.label(),
+                                failure.message
+                            )))
                         }))
+                        .children(self.repository.operation().map(|operation| {
+                            div()
+                                .mx_3()
+                                .mb_2()
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child(operation.label())
+                        }))
+                        .when(self.repository.diff_loading(), |panel| {
+                            panel.child(
+                                div()
+                                    .mx_3()
+                                    .mb_2()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child("Loading file diff…"),
+                            )
+                        })
                         .when(
-                            self.repository_status.is_none()
-                                && self.repository_status_error.is_none()
-                                && !self.repository_status_loading,
+                            self.repository
+                                .status()
+                                .is_some_and(|status| status.truncated),
+                            |panel| {
+                                panel.child(
+                                    div()
+                                        .mx_2()
+                                        .mb_2()
+                                        .child(ErrorBanner::new(
+                                            "Change list truncated by the server safety limit",
+                                        )),
+                                )
+                            },
+                        )
+                        .when(
+                            self.repository.loaded()
+                                && self.repository.status().is_none()
+                                && self.repository.error().is_none(),
                             |panel| {
                                 panel.child(
                                     div()
@@ -18352,14 +20049,175 @@ impl WorkspaceShell {
                                 )
                             },
                         )
-                        .child(
-                            div()
-                                .id("repository-status-list")
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                .children(rows),
+                        .when(
+                            self.repository
+                                .status()
+                                .is_some_and(|status| status.entries.is_empty())
+                                && !self.repository.loading(),
+                            |panel| {
+                                panel.child(
+                                    div()
+                                        .p_3()
+                                        .text_color(colors.muted_text)
+                                        .child("Working tree clean"),
+                                )
+                            },
                         )
+                        .child(
+                            uniform_list(
+                                "repository-status-list",
+                                row_count,
+                                cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                    range
+                                        .filter_map(|index| {
+                                            rows.get(index).cloned().map(|row| (index, row))
+                                        })
+                                        .map(|(index, row)| {
+                                            shell.render_repository_row(index, row, cx)
+                                        })
+                                        .collect()
+                                }),
+                            )
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .track_scroll(&self.repository_scroll_handle),
+                        )
+                        .when(self.repository.status().is_some(), |panel| {
+                            panel.child(
+                                div()
+                                    .border_t_1()
+                                    .border_color(colors.border)
+                                    .p_2()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(self.repository_commit_input.clone())
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .text_color(if subject_length > subject_limit {
+                                                colors.warning
+                                            } else {
+                                                colors.muted_text
+                                            })
+                                            .child(format!(
+                                                "Subject {subject_length}/{subject_limit}"
+                                            ))
+                                            .child(
+                                                Button::new("expand-repository-commit", "Expand")
+                                                    .tone(ButtonTone::Ghost)
+                                                    .on_click(cx.listener(
+                                                        |shell, _, window, cx| {
+                                                            shell.modal =
+                                                                Some(Modal::RepositoryCommit);
+                                                            shell.repository_commit_input
+                                                                .read(cx)
+                                                                .focus_handle(cx)
+                                                                .focus(window, cx);
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child(format!(
+                                                "Author: {commit_author_name} <{commit_author_email}>"
+                                            ))
+                                            .child(
+                                                Button::new(
+                                                    "configure-repository-author",
+                                                    "Configure",
+                                                )
+                                                .tone(ButtonTone::Ghost)
+                                                .on_click(cx.listener(
+                                                    |shell, _, window, cx| {
+                                                        shell.open_user_settings(window, cx)
+                                                    },
+                                                )),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("commit-repository", commit_button_label)
+                                            .tone(ButtonTone::Accent)
+                                            .disabled(!can_commit)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.commit_repository(false, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child("Creates a workspace checkpoint, then commits only the staged SQL changes."),
+                                    )
+                                    .children(recent_commit.map(|commit| {
+                                        let short = commit.commit.chars().take(12).collect::<String>();
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.success)
+                                            .child(format!(
+                                                "Committed {short} · checkpoint {}",
+                                                commit.checkpoint_id.0
+                                            ))
+                                    }))
+                                    .children(recovery_notice.map(|notice| {
+                                        div().text_xs().text_color(colors.warning).child(notice)
+                                    })),
+                            )
+                        })
+                        .when(self.repository.status().is_some(), |panel| {
+                            panel.child(
+                                div()
+                                    .border_t_1()
+                                    .border_color(colors.border)
+                                    .p_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        Button::new(
+                                            "stage-all-repository-paths",
+                                            "Stage all (incl. untracked)",
+                                        )
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(self.repository.loading() || stageable.is_empty())
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.set_repository_paths_staged(
+                                                stageable.clone(),
+                                                true,
+                                                cx,
+                                            )
+                                        })),
+                                    )
+                                    .child(
+                                        Button::new(
+                                            "unstage-all-repository-paths",
+                                            "Unstage all",
+                                        )
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(
+                                            self.repository.loading() || unstageable.is_empty(),
+                                        )
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.set_repository_paths_staged(
+                                                unstageable.clone(),
+                                                false,
+                                                cx,
+                                            )
+                                        })),
+                                    ),
+                            )
+                        })
                 },
             )
             .when(
@@ -22411,6 +24269,148 @@ impl WorkspaceShell {
                             .child(Button::new("apply-catalog-migration", if self.catalog_migration_pending { "Working…" } else { "Apply migration" }).tone(ButtonTone::DangerMuted).disabled(self.catalog_migration_pending || self.catalog_migration_plan.is_none() || self.catalog_migration_run.is_some()).on_click(cx.listener(|shell, _, _, cx| shell.apply_catalog_migration(cx)))))
                         .into_any_element()
                 }
+                Modal::ConfirmRepositoryUncommit => {
+                    let head = self
+                        .repository
+                        .status()
+                        .and_then(|status| status.head_oid.as_deref())
+                        .map(|head| head.chars().take(12).collect::<String>())
+                        .unwrap_or_else(|| "current HEAD".into());
+                    div()
+                        .debug_selector(|| "confirm-repository-uncommit".into())
+                        .w(px(480.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(format!("Uncommit {head}?")),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .child("Sift will capture a recovery checkpoint, move HEAD to its parent, and keep the removed commit staged."),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-repository-uncommit", "Cancel")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("confirm-repository-uncommit", "Uncommit")
+                                        .tone(ButtonTone::DangerMuted)
+                                        .disabled(self.repository.loading())
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.modal = None;
+                                            shell.uncommit_repository(cx);
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Modal::RepositoryCommit => {
+                    let message = self.repository_commit_input.read(cx).text().to_owned();
+                    let subject_length = message.lines().next().unwrap_or("").chars().count();
+                    let subject_limit = self.settings.repository.commit_subject_limit.max(1);
+                    let (author_name, author_email) = self.repository_commit_identity();
+                    let can_commit = !message.trim().is_empty()
+                        && self.repository.has_staged_changes()
+                        && !self.repository.loading();
+                    div()
+                        .debug_selector(|| "repository-commit-editor".into())
+                        .w(px(620.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Commit staged SQL changes"),
+                        )
+                        .child(self.repository_commit_input.clone())
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .text_xs()
+                                .text_color(if subject_length > subject_limit {
+                                    colors.warning
+                                } else {
+                                    colors.muted_text
+                                })
+                                .child(format!("Subject {subject_length}/{subject_limit}"))
+                                .child(format!("{author_name} <{author_email}>")),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .child("The message stays client-local until commit. Sift creates an immutable checkpoint before committing the existing Git index."),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-expanded-repository-commit", "Cancel")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("open-uncommit-confirmation", "Uncommit HEAD")
+                                        .tone(ButtonTone::DangerGhost)
+                                        .disabled(self.repository.status().is_none_or(|status| {
+                                            status.head_oid.is_none() || self.repository.loading()
+                                        }))
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.modal = Some(Modal::ConfirmRepositoryUncommit);
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("amend-expanded-repository-commit", "Amend HEAD")
+                                        .tone(ButtonTone::Neutral)
+                                        .disabled(
+                                            !can_commit
+                                                || self.repository.status().is_none_or(|status| {
+                                                    status.head_oid.is_none()
+                                                }),
+                                        )
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.commit_repository(true, cx);
+                                            if shell.repository.loading() {
+                                                shell.modal = None;
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("submit-expanded-repository-commit", "Commit")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(!can_commit)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.commit_repository(false, cx);
+                                            if shell.repository.loading() {
+                                                shell.modal = None;
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::CsvImport => {
                     let preview = self.csv_import_preview.as_ref();
                     let mappings = preview
@@ -23376,6 +25376,238 @@ mod tests {
                 display_text: "10.20.0.2".into(),
             }
         );
+    }
+
+    #[test]
+    fn diff_whitespace_display_does_not_change_the_copied_patch() {
+        let path = sift_protocol::WorkspacePath::new("query.sql").unwrap();
+        let hunk = sift_protocol::VcsDiffHunk {
+            id: "hunk-1".into(),
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            header: "statement".into(),
+            lines: vec![sift_protocol::VcsDiffLine {
+                kind: sift_protocol::VcsDiffLineKind::Addition,
+                old_line: None,
+                new_line: Some(1),
+                text: "select \t2;".into(),
+            }],
+            truncated: false,
+        };
+        let diff = sift_protocol::VcsDiff {
+            binding_id: sift_protocol::RepositoryBindingId(9),
+            side: sift_protocol::VcsDiffSide::IndexToWorktree,
+            files: vec![sift_protocol::VcsDiffFile {
+                path: path.clone(),
+                previous_path: None,
+                state: sift_protocol::VcsFileState::Modified,
+                old_digest: None,
+                new_digest: None,
+                binary: false,
+                additions: 1,
+                deletions: 0,
+                hunks: vec![hunk.clone()],
+                content_truncated: false,
+            }],
+            truncated: false,
+        };
+
+        let visible = repository_diff_text(
+            &path,
+            sift_protocol::VcsDiffSide::IndexToWorktree,
+            &diff,
+            true,
+        );
+        assert!(visible.contains("+select·→   2;"));
+        let patch = repository_hunk_patch(&path, &hunk);
+        assert!(patch.contains("+select \t2;"));
+        assert!(!patch.contains('·'));
+    }
+
+    #[test]
+    fn diff_language_is_selected_from_the_workspace_path() {
+        for (path, expected) in [
+            ("query.SQL", EditorLanguage::Sql),
+            ("sift.toml", EditorLanguage::Toml),
+            ("fixture.json", EditorLanguage::Json),
+            ("notes.md", EditorLanguage::Markdown),
+            ("README.markdown", EditorLanguage::Markdown),
+            ("LICENSE", EditorLanguage::PlainText),
+        ] {
+            assert_eq!(
+                repository_diff_editor_language(&sift_protocol::WorkspacePath::new(path).unwrap()),
+                expected
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn repository_commit_draft_round_trips_client_presentation(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.workspace_id = Some(7);
+        state
+            .repository_commit_drafts
+            .insert(7, "checkpoint message".into());
+        let window = shell_with_state(state, cx);
+        let workspace = window.root(cx).unwrap();
+
+        workspace.update(cx, |shell, cx| {
+            assert_eq!(
+                shell.repository_commit_input.read(cx).text(),
+                "checkpoint message"
+            );
+            shell
+                .repository_commit_input
+                .update(cx, |input, cx| input.set_text("updated draft", cx));
+        });
+        let snapshot = workspace.read_with(cx, |shell, cx| shell.snapshot(cx));
+        assert_eq!(
+            snapshot
+                .repository_commit_drafts
+                .get(&7)
+                .map(String::as_str),
+            Some("updated draft")
+        );
+    }
+
+    #[gpui::test]
+    fn file_diff_refresh_preserves_the_active_hunk_identity(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let path = sift_protocol::WorkspacePath::new("query.sql").unwrap();
+        let side = sift_protocol::VcsDiffSide::IndexToWorktree;
+        let hunk = |id: &str, start: u32, text: &str| sift_protocol::VcsDiffHunk {
+            id: id.into(),
+            old_start: start,
+            old_lines: 1,
+            new_start: start,
+            new_lines: 1,
+            header: String::new(),
+            lines: vec![sift_protocol::VcsDiffLine {
+                kind: sift_protocol::VcsDiffLineKind::Context,
+                old_line: Some(start),
+                new_line: Some(start),
+                text: text.into(),
+            }],
+            truncated: false,
+        };
+        let diff = |first_text: &str| {
+            Arc::new(sift_protocol::VcsDiff {
+                binding_id: sift_protocol::RepositoryBindingId(9),
+                side,
+                files: vec![sift_protocol::VcsDiffFile {
+                    path: path.clone(),
+                    previous_path: None,
+                    state: sift_protocol::VcsFileState::Modified,
+                    old_digest: None,
+                    new_digest: None,
+                    binary: false,
+                    additions: 1,
+                    deletions: 1,
+                    hunks: vec![
+                        hunk("first", 1, first_text),
+                        hunk("second", 20, "select 20;"),
+                    ],
+                    content_truncated: false,
+                }],
+                truncated: false,
+            })
+        };
+
+        workspace.update(cx, |shell, cx| {
+            shell.open_repository_diff_tab(&path, side, diff("select 1;"), cx);
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item_id = pane.active_item().unwrap().id;
+            let editor = pane.editor(item_id).unwrap();
+            editor.update(cx, |editor, cx| {
+                assert!(editor.navigate_to_line_prefix_index("@@ ", 0, cx));
+            });
+            assert_eq!(shell.active_repository_hunk(cx).unwrap().1.id, "first");
+
+            shell.open_repository_diff_tab(
+                &path,
+                side,
+                diff("select a much longer first statement;"),
+                cx,
+            );
+            assert_eq!(shell.active_repository_hunk(cx).unwrap().1.id, "first");
+        });
+    }
+
+    #[gpui::test]
+    fn visual_diff_selection_maps_only_changed_lines_to_typed_indices(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let path = sift_protocol::WorkspacePath::new("query.sql").unwrap();
+        let side = sift_protocol::VcsDiffSide::IndexToWorktree;
+        workspace.update(cx, |shell, cx| {
+            shell.open_repository_diff_tab(
+                &path,
+                side,
+                Arc::new(sift_protocol::VcsDiff {
+                    binding_id: sift_protocol::RepositoryBindingId(9),
+                    side,
+                    files: vec![sift_protocol::VcsDiffFile {
+                        path: path.clone(),
+                        previous_path: None,
+                        state: sift_protocol::VcsFileState::Modified,
+                        old_digest: None,
+                        new_digest: None,
+                        binary: false,
+                        additions: 1,
+                        deletions: 1,
+                        hunks: vec![sift_protocol::VcsDiffHunk {
+                            id: "a".repeat(64),
+                            old_start: 1,
+                            old_lines: 2,
+                            new_start: 1,
+                            new_lines: 2,
+                            header: String::new(),
+                            lines: vec![
+                                sift_protocol::VcsDiffLine {
+                                    kind: sift_protocol::VcsDiffLineKind::Context,
+                                    old_line: Some(1),
+                                    new_line: Some(1),
+                                    text: "begin;".into(),
+                                },
+                                sift_protocol::VcsDiffLine {
+                                    kind: sift_protocol::VcsDiffLineKind::Deletion,
+                                    old_line: Some(2),
+                                    new_line: None,
+                                    text: "select 1;".into(),
+                                },
+                                sift_protocol::VcsDiffLine {
+                                    kind: sift_protocol::VcsDiffLineKind::Addition,
+                                    old_line: None,
+                                    new_line: Some(2),
+                                    text: "select 2;".into(),
+                                },
+                            ],
+                            truncated: false,
+                        }],
+                        content_truncated: false,
+                    }],
+                    truncated: false,
+                }),
+                cx,
+            );
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item_id = pane.active_item().unwrap().id;
+            let editor = pane.editor(item_id).unwrap();
+            let text = editor.read(cx).document().text().to_owned();
+            let start = text.find("-select 1;").unwrap();
+            let end = text.find("+select 2;").unwrap() + "+select 2;".len();
+            editor.update(
+                cx,
+                |editor, cx| assert!(editor.select_range(start..end, cx)),
+            );
+
+            let (_, hunk_id, indices) = shell.active_repository_line_selection(cx).unwrap();
+            assert_eq!(hunk_id, "a".repeat(64));
+            assert_eq!(indices, vec![1, 2]);
+        });
     }
 
     fn table_graph() -> sift_protocol::CatalogGraph {
@@ -30097,6 +32329,111 @@ mod tests {
                 sift_protocol::Value::Text("plain text".into()),
             ]
         );
+    }
+
+    #[gpui::test]
+    fn diff_hunk_stage_routes_revision_guarded_command(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let path = sift_protocol::WorkspacePath::new("query.sql").unwrap();
+        let side = sift_protocol::VcsDiffSide::IndexToWorktree;
+        let hunk_id = "hunk:query.sql:1:1:1:1:abc".to_owned();
+
+        workspace.update(cx, |shell, cx| {
+            shell.repository.select_workspace(Some(7));
+            let (_, request_id) = shell.repository.begin_refresh().unwrap();
+            let status = serde_json::from_value(serde_json::json!({
+                "binding_id": 9,
+                "workspace_revision": 3,
+                "binding_revision": 4,
+                "head_oid": null,
+                "branch": "main",
+                "upstream": null,
+                "entries": [{
+                    "path": "query.sql",
+                    "previous_path": null,
+                    "state": "modified",
+                    "stage": "unstaged",
+                    "conflict": null,
+                    "pending": null
+                }],
+                "truncated": false,
+                "observed_at": "2026-08-28T00:00:00Z"
+            }))
+            .unwrap();
+            assert!(shell
+                .repository
+                .apply_status_result(7, request_id, Ok(Some(status))));
+            shell.executor_sender = Some(sender);
+            shell.open_repository_diff_tab(
+                &path,
+                side,
+                Arc::new(sift_protocol::VcsDiff {
+                    binding_id: sift_protocol::RepositoryBindingId(9),
+                    side,
+                    files: vec![sift_protocol::VcsDiffFile {
+                        path: path.clone(),
+                        previous_path: None,
+                        state: sift_protocol::VcsFileState::Modified,
+                        old_digest: None,
+                        new_digest: None,
+                        binary: false,
+                        additions: 1,
+                        deletions: 1,
+                        hunks: vec![sift_protocol::VcsDiffHunk {
+                            id: hunk_id.clone(),
+                            old_start: 1,
+                            old_lines: 1,
+                            new_start: 1,
+                            new_lines: 1,
+                            header: String::new(),
+                            lines: vec![
+                                sift_protocol::VcsDiffLine {
+                                    kind: sift_protocol::VcsDiffLineKind::Deletion,
+                                    old_line: Some(1),
+                                    new_line: None,
+                                    text: "select 1;".into(),
+                                },
+                                sift_protocol::VcsDiffLine {
+                                    kind: sift_protocol::VcsDiffLineKind::Addition,
+                                    old_line: None,
+                                    new_line: Some(1),
+                                    text: "select 2;".into(),
+                                },
+                            ],
+                            truncated: false,
+                        }],
+                        content_truncated: false,
+                    }],
+                    truncated: false,
+                }),
+                cx,
+            );
+            assert!(shell.active_repository_hunk(cx).is_some());
+            shell.set_active_repository_hunk_staged(true, false, cx);
+        });
+
+        let ExecutorCommand::SetRepositoryHunkStaged {
+            workspace_id,
+            binding_id,
+            expected_revision,
+            side: requested_side,
+            path: requested_path,
+            hunk_id: requested_hunk,
+            staged,
+            ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("stage hunk command should be dispatched")
+        };
+        assert_eq!(workspace_id, 7);
+        assert_eq!(binding_id, 9);
+        assert_eq!(expected_revision, 4);
+        assert_eq!(requested_side, side);
+        assert_eq!(requested_path, path);
+        assert_eq!(requested_hunk, hunk_id);
+        assert!(staged);
     }
 
     #[gpui::test]

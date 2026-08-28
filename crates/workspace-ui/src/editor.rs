@@ -729,6 +729,7 @@ pub enum EditorLanguage {
     Sql,
     Toml,
     Json,
+    Markdown,
     PlainText,
 }
 
@@ -884,6 +885,7 @@ pub struct QueryEditor {
     focus_handle: FocusHandle,
     document: QueryDocument,
     language: EditorLanguage,
+    diff_language: Option<EditorLanguage>,
     keymap: EditorKeymap,
     vim_mode: VimMode,
     vim_entered: String,
@@ -924,6 +926,7 @@ impl QueryEditor {
             focus_handle: cx.focus_handle(),
             document,
             language: EditorLanguage::Sql,
+            diff_language: None,
             keymap: EditorKeymap::Standard,
             vim_mode: VimMode::Insert,
             vim_entered: String::new(),
@@ -953,6 +956,12 @@ impl QueryEditor {
 
     pub fn with_language(mut self, language: EditorLanguage) -> Self {
         self.language = language;
+        self
+    }
+
+    pub fn with_diff_language(mut self, language: EditorLanguage) -> Self {
+        self.language = EditorLanguage::PlainText;
+        self.diff_language = Some(language);
         self
     }
 
@@ -1009,10 +1018,11 @@ impl QueryEditor {
     }
 
     pub fn set_language(&mut self, language: EditorLanguage, cx: &mut Context<Self>) {
-        if self.language == language {
+        if self.language == language && self.diff_language.is_none() {
             return;
         }
         self.language = language;
+        self.diff_language = None;
         self.semantic.invalidate();
         if self.language == EditorLanguage::Json {
             self.refresh_local_diagnostics();
@@ -1093,6 +1103,88 @@ impl QueryEditor {
 
     pub fn cursor_offset(&self) -> usize {
         self.document.cursor()
+    }
+
+    pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> bool {
+        if range.start > range.end
+            || range.end > self.document.text().len()
+            || !self.document.text().is_char_boundary(range.start)
+            || !self.document.text().is_char_boundary(range.end)
+        {
+            return false;
+        }
+        self.document.set_selection(range, false);
+        self.selection_changed(cx);
+        true
+    }
+
+    pub fn navigate_to_text(&mut self, needle: &str, delta: isize, cx: &mut Context<Self>) -> bool {
+        let matches = self.document.find_matches(needle, true);
+        self.navigate_to_matches(matches, delta, cx)
+    }
+
+    /// Navigate between occurrences that begin a line. Useful for structured
+    /// read-only buffers whose delimiter may also occur later on the line.
+    pub fn navigate_to_line_prefix(
+        &mut self,
+        prefix: &str,
+        delta: isize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let matches = self.line_prefix_matches(prefix);
+        self.navigate_to_matches(matches, delta, cx)
+    }
+
+    pub fn navigate_to_line_prefix_index(
+        &mut self,
+        prefix: &str,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let matches = self.line_prefix_matches(prefix);
+        let Some(range) = matches.get(index).cloned() else {
+            return false;
+        };
+        self.document.set_selection(range, false);
+        self.selection_changed(cx);
+        true
+    }
+
+    fn line_prefix_matches(&self, prefix: &str) -> Vec<Range<usize>> {
+        let text = self.document.text();
+        self.document
+            .find_matches(prefix, true)
+            .into_iter()
+            .filter(|range| {
+                range.start == 0 || text.as_bytes().get(range.start - 1) == Some(&b'\n')
+            })
+            .collect()
+    }
+
+    fn navigate_to_matches(
+        &mut self,
+        matches: Vec<Range<usize>>,
+        delta: isize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if matches.is_empty() {
+            return false;
+        }
+        let cursor = self.document.cursor();
+        let index = if delta < 0 {
+            matches
+                .iter()
+                .rposition(|range| range.start < cursor)
+                .unwrap_or(matches.len() - 1)
+        } else {
+            matches
+                .iter()
+                .position(|range| range.start > cursor)
+                .unwrap_or(0)
+        };
+        self.document.set_selection(matches[index].clone(), false);
+        self.selection_changed(cx);
+        true
     }
 
     /// Monotonic identity of the current buffer contents. Every semantic
@@ -1946,12 +2038,13 @@ impl QueryEditor {
         }
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let runs = match self.language {
-            EditorLanguage::Sql => sql_text_runs(line_text, style.font(), theme),
-            EditorLanguage::Toml => toml_text_runs(line_text, style.font(), theme),
-            EditorLanguage::Json => json_text_runs(line_text, style.font(), theme),
-            EditorLanguage::PlainText => plain_text_runs(line_text, style.font(), theme),
-        };
+        let runs = editor_text_runs(
+            line_text,
+            style.font(),
+            theme,
+            self.language,
+            self.diff_language,
+        );
         let layout =
             window
                 .text_system()
@@ -2395,9 +2488,11 @@ impl gpui::Render for QueryEditor {
             .key_context(key_context)
             .role(Role::TextInput)
             .aria_label(match self.language {
+                _ if self.diff_language.is_some() => "Git file diff",
                 EditorLanguage::Sql => "SQL query editor",
                 EditorLanguage::Toml => "TOML configuration editor",
                 EditorLanguage::Json => "JSON editor",
+                EditorLanguage::Markdown => "Markdown editor",
                 EditorLanguage::PlainText => "Read-only text editor",
             })
             .track_focus(&self.focus_handle)
@@ -2470,7 +2565,10 @@ impl gpui::Render for QueryEditor {
             .children(
                 match self.language {
                     EditorLanguage::Toml => toml_diagnostic(self.document.text()),
-                    EditorLanguage::Json | EditorLanguage::Sql | EditorLanguage::PlainText => None,
+                    EditorLanguage::Json
+                    | EditorLanguage::Sql
+                    | EditorLanguage::Markdown
+                    | EditorLanguage::PlainText => None,
                 }
                 .map(|diagnostic| {
                     div()
@@ -2595,6 +2693,7 @@ impl Element for QueryEditorElement {
         let cursor = editor.document.cursor();
         let theme = cx.theme();
         let language = editor.language;
+        let diff_language = editor.diff_language;
         let block_cursor = editor.keymap == EditorKeymap::Vim && editor.vim_mode == VimMode::Normal;
         let cursor_visible = editor.cursor_blink.read(cx).visible;
         let editor_focused = editor.focus_handle.is_focused(window);
@@ -2656,12 +2755,7 @@ impl Element for QueryEditorElement {
             let shaped = if let Some(line) = cached {
                 line
             } else {
-                let runs = match language {
-                    EditorLanguage::Sql => sql_text_runs(line, style.font(), theme),
-                    EditorLanguage::Toml => toml_text_runs(line, style.font(), theme),
-                    EditorLanguage::Json => json_text_runs(line, style.font(), theme),
-                    EditorLanguage::PlainText => plain_text_runs(line, style.font(), theme),
-                };
+                let runs = editor_text_runs(line, style.font(), theme, language, diff_language);
                 let shaped = window.text_system().shape_line(
                     line.to_string().into(),
                     font_size,
@@ -2940,6 +3034,92 @@ impl Element for QueryEditorElement {
             editor.last_bounds = Some(prepaint.text_bounds);
         });
     }
+}
+
+fn editor_text_runs(
+    line: &str,
+    font: gpui::Font,
+    theme: Theme,
+    language: EditorLanguage,
+    diff_language: Option<EditorLanguage>,
+) -> Vec<TextRun> {
+    if let Some(diff_language) = diff_language {
+        return diff_text_runs(line, font, theme, diff_language);
+    }
+    language_text_runs(line, font, theme, language)
+}
+
+fn language_text_runs(
+    line: &str,
+    font: gpui::Font,
+    theme: Theme,
+    language: EditorLanguage,
+) -> Vec<TextRun> {
+    match language {
+        EditorLanguage::Sql => sql_text_runs(line, font, theme),
+        EditorLanguage::Toml => toml_text_runs(line, font, theme),
+        EditorLanguage::Json => json_text_runs(line, font, theme),
+        EditorLanguage::Markdown => markdown_text_runs(line, font, theme),
+        EditorLanguage::PlainText => plain_text_runs(line, font, theme),
+    }
+}
+
+fn diff_text_runs(
+    line: &str,
+    font: gpui::Font,
+    theme: Theme,
+    language: EditorLanguage,
+) -> Vec<TextRun> {
+    if line.starts_with("@@ ") {
+        return vec![TextRun {
+            len: line.len(),
+            font,
+            color: theme.colors.accent,
+            background_color: Some(theme.colors.accent_muted),
+            underline: None,
+            strikethrough: None,
+        }];
+    }
+    let Some(marker) = line.as_bytes().first().copied() else {
+        return plain_text_runs(line, font, theme);
+    };
+    let color = match marker {
+        b'+' => theme.colors.success,
+        b'-' => theme.colors.danger,
+        b'\\' | b' ' => theme.colors.muted_text,
+        _ => return plain_text_runs(line, font, theme),
+    };
+    let mut runs = vec![TextRun {
+        len: 1,
+        font: font.clone(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+    runs.extend(language_text_runs(&line[1..], font, theme, language));
+    runs
+}
+
+fn markdown_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
+    let trimmed = line.trim_start();
+    let color = if trimmed.starts_with('#') {
+        theme.colors.syntax_keyword
+    } else if trimmed.starts_with('>') {
+        theme.colors.syntax_comment
+    } else if trimmed.starts_with("```") || trimmed.contains('`') {
+        theme.colors.syntax_string
+    } else {
+        theme.colors.text
+    };
+    vec![TextRun {
+        len: line.len(),
+        font,
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }]
 }
 
 fn sql_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
@@ -4467,6 +4647,30 @@ fn sql_presentation_runs_cover_text_and_classify_keywords() {
     assert!(runs
         .iter()
         .any(|run| run.color == theme.colors.syntax_comment));
+}
+
+#[test]
+fn diff_presentation_keeps_git_markers_and_payload_syntax() {
+    let theme = Theme::dark();
+    let text = "+select 42";
+    let runs = diff_text_runs(text, gpui::font("monospace"), theme, EditorLanguage::Sql);
+    assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
+    assert_eq!(runs[0].color, theme.colors.success);
+    assert!(runs
+        .iter()
+        .any(|run| run.color == theme.colors.syntax_keyword));
+    assert!(runs
+        .iter()
+        .any(|run| run.color == theme.colors.syntax_number));
+
+    let header = diff_text_runs(
+        "@@ -1,1 +1,1 @@",
+        gpui::font("monospace"),
+        theme,
+        EditorLanguage::PlainText,
+    );
+    assert_eq!(header[0].color, theme.colors.accent);
+    assert_eq!(header[0].background_color, Some(theme.colors.accent_muted));
 }
 
 #[test]

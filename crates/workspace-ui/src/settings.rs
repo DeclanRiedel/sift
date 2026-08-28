@@ -69,6 +69,66 @@ pub struct KeyboardSettings {
     pub profile: KeyboardProfile,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryGrouping {
+    #[default]
+    Staging,
+    FileState,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositorySort {
+    #[default]
+    Path,
+    FileName,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryView {
+    #[default]
+    Flat,
+    Tree,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryPrimaryAction {
+    #[default]
+    OpenFile,
+    OpenDiff,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RepositorySettings {
+    pub grouping: RepositoryGrouping,
+    pub sort: RepositorySort,
+    pub view: RepositoryView,
+    pub primary_action: RepositoryPrimaryAction,
+    pub commit_subject_limit: usize,
+    pub commit_author_name: Option<String>,
+    pub commit_author_email: Option<String>,
+    pub commit_sign_off: bool,
+}
+
+impl Default for RepositorySettings {
+    fn default() -> Self {
+        Self {
+            grouping: RepositoryGrouping::default(),
+            sort: RepositorySort::default(),
+            view: RepositoryView::default(),
+            primary_action: RepositoryPrimaryAction::default(),
+            commit_subject_limit: 72,
+            commit_author_name: None,
+            commit_author_email: None,
+            commit_sign_off: false,
+        }
+    }
+}
+
 impl Default for KeyboardSettings {
     fn default() -> Self {
         Self {
@@ -173,6 +233,7 @@ pub struct UserSettings {
     pub version: u32,
     pub editor: EditorSettings,
     pub keyboard: KeyboardSettings,
+    pub repository: RepositorySettings,
 }
 
 impl Default for UserSettings {
@@ -181,6 +242,7 @@ impl Default for UserSettings {
             version: SETTINGS_VERSION,
             editor: EditorSettings::default(),
             keyboard: KeyboardSettings::default(),
+            repository: RepositorySettings::default(),
         }
     }
 }

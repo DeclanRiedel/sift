@@ -4,7 +4,7 @@
 //! structured argv, typed parsed responses, one fixed executable observation,
 //! no shell, and repository configuration disabled where it could execute code.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -13,10 +13,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sift_protocol::{
-    VcsBranch, VcsConflictKind, VcsDiff, VcsDiffFile, VcsDiffSide, VcsFileState, VcsStageState,
-    VcsStatus, VcsStatusEntry, VcsUpstreamStatus, WorkspacePath, WorkspaceRevision,
+    VcsBranch, VcsConflictKind, VcsDiff, VcsDiffFile, VcsDiffHunk, VcsDiffLine, VcsDiffLineKind,
+    VcsDiffSide, VcsFileState, VcsStageState, VcsStatus, VcsStatusEntry, VcsUpstreamStatus,
+    WorkspacePath, WorkspaceRevision,
 };
-use tokio::io::{AsyncRead, AsyncReadExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 
 use crate::config::VcsConfig;
@@ -26,6 +27,8 @@ pub const GIT_ADAPTER_GENERATION: &str = "git-v1";
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STATUS_ENTRIES: usize = 20_000;
 const MAX_DIFF_FILES: usize = 2_000;
+const MAX_DIFF_HUNKS: usize = 4_000;
+const MAX_DIFF_LINES: usize = 200_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitAdapterError {
@@ -79,6 +82,7 @@ pub struct GitRepositoryObservation {
 #[derive(Debug)]
 struct GitOutput {
     stdout: Vec<u8>,
+    truncated: bool,
 }
 
 #[async_trait]
@@ -106,6 +110,21 @@ pub trait VcsRepository: Send + Sync {
     async fn branches(&self, worktree: &Path) -> Result<Vec<VcsBranch>>;
     async fn stage(&self, worktree: &Path, paths: &[WorkspacePath]) -> Result<()>;
     async fn unstage(&self, worktree: &Path, paths: &[WorkspacePath]) -> Result<()>;
+    async fn apply_hunk(
+        &self,
+        worktree: &Path,
+        file: &VcsDiffFile,
+        hunk: &VcsDiffHunk,
+        reverse: bool,
+    ) -> Result<()>;
+    async fn apply_lines(
+        &self,
+        worktree: &Path,
+        file: &VcsDiffFile,
+        hunk: &VcsDiffHunk,
+        line_indices: &[u32],
+        stage: bool,
+    ) -> Result<()>;
     async fn commit(
         &self,
         worktree: &Path,
@@ -113,6 +132,14 @@ pub trait VcsRepository: Send + Sync {
         author_name: &str,
         author_email: &str,
     ) -> Result<GitRepositoryObservation>;
+    async fn amend(
+        &self,
+        worktree: &Path,
+        message: &str,
+        author_name: &str,
+        author_email: &str,
+    ) -> Result<GitRepositoryObservation>;
+    async fn soft_reset_parent(&self, worktree: &Path) -> Result<GitRepositoryObservation>;
     async fn fetch(
         &self,
         worktree: &Path,
@@ -214,6 +241,52 @@ impl GitAdapter {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.run_with_output_policy(worktree, args, network, environment, false, None)
+            .await
+    }
+
+    async fn run_truncated<I, S>(
+        &self,
+        worktree: &Path,
+        args: I,
+        network: bool,
+        environment: &[(OsString, OsString)],
+    ) -> Result<GitOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.run_with_output_policy(worktree, args, network, environment, true, None)
+            .await
+    }
+
+    async fn run_with_input<I, S>(
+        &self,
+        worktree: &Path,
+        args: I,
+        input: &[u8],
+    ) -> Result<GitOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.run_with_output_policy(worktree, args, false, &[], false, Some(input))
+            .await
+    }
+
+    async fn run_with_output_policy<I, S>(
+        &self,
+        worktree: &Path,
+        args: I,
+        network: bool,
+        environment: &[(OsString, OsString)],
+        allow_truncated_stdout: bool,
+        input: Option<&[u8]>,
+    ) -> Result<GitOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         if network && !self.network_enabled {
             return Err(GitAdapterError::NetworkDisabled);
         }
@@ -247,10 +320,19 @@ impl GitAdapter {
             .arg("diff.external=")
             .args(args)
             .envs(environment.iter().cloned())
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = command.spawn()?;
+        if let Some(input) = input {
+            let mut stdin = child.stdin.take().ok_or(GitAdapterError::InvalidData)?;
+            stdin.write_all(input).await?;
+            stdin.shutdown().await?;
+        }
         let stdout = child.stdout.take().ok_or(GitAdapterError::InvalidData)?;
         let stderr = child.stderr.take().ok_or(GitAdapterError::InvalidData)?;
         let timeout = if network {
@@ -268,7 +350,7 @@ impl GitAdapter {
         })
         .await
         .map_err(|_| GitAdapterError::TimedOut)??;
-        if result.1 .1 || result.2 .1 {
+        if (!allow_truncated_stdout && result.1 .1) || result.2 .1 {
             return Err(GitAdapterError::OutputLimit);
         }
         if !result.0.success() {
@@ -276,6 +358,7 @@ impl GitAdapter {
         }
         Ok(GitOutput {
             stdout: result.1 .0,
+            truncated: result.1 .1,
         })
     }
 
@@ -429,7 +512,34 @@ impl VcsRepository for GitAdapter {
             stat_args.push(OsString::from(&path.0));
         }
         let stats = self.run(worktree, stat_args, false, &[]).await?;
-        parse_diff(binding_id, side, &names.stdout, &stats.stdout)
+        let mut diff = parse_diff(binding_id, side, &names.stdout, &stats.stdout)?;
+        if let Some(path) = path {
+            let binary = diff.files.first().is_some_and(|file| file.binary);
+            if !binary {
+                let mut patch_args = vec![
+                    OsString::from("diff"),
+                    OsString::from("--no-ext-diff"),
+                    OsString::from("--no-textconv"),
+                    OsString::from("--no-color"),
+                    OsString::from("--unified=3"),
+                ];
+                match side {
+                    VcsDiffSide::HeadToIndex => patch_args.push(OsString::from("--cached")),
+                    VcsDiffSide::IndexToWorktree => {}
+                    VcsDiffSide::HeadToWorktree => patch_args.push(OsString::from("HEAD")),
+                }
+                patch_args.push(OsString::from("--"));
+                patch_args.push(OsString::from(&path.0));
+                let patch = self.run_truncated(worktree, patch_args, false, &[]).await?;
+                let (hunks, parsed_truncated) =
+                    parse_patch(side, path, &patch.stdout, patch.truncated)?;
+                if let Some(file) = diff.files.first_mut() {
+                    file.hunks = hunks;
+                    file.content_truncated = parsed_truncated;
+                }
+            }
+        }
+        Ok(diff)
     }
 
     async fn branches(&self, worktree: &Path) -> Result<Vec<VcsBranch>> {
@@ -479,6 +589,64 @@ impl VcsRepository for GitAdapter {
         Ok(())
     }
 
+    async fn apply_hunk(
+        &self,
+        worktree: &Path,
+        file: &VcsDiffFile,
+        hunk: &VcsDiffHunk,
+        reverse: bool,
+    ) -> Result<()> {
+        validate_paths(std::slice::from_ref(&file.path))?;
+        if file.binary || hunk.truncated || hunk.lines.is_empty() {
+            return Err(GitAdapterError::InvalidData);
+        }
+        let patch = patch_for_hunk(file, hunk);
+        if patch.len() > MAX_GIT_OUTPUT_BYTES {
+            return Err(GitAdapterError::OutputLimit);
+        }
+        let mut args = vec![
+            OsString::from("apply"),
+            OsString::from("--cached"),
+            OsString::from("--recount"),
+            OsString::from("--whitespace=nowarn"),
+        ];
+        if reverse {
+            args.push(OsString::from("--reverse"));
+        }
+        args.push(OsString::from("-"));
+        self.run_with_input(worktree, args, patch.as_bytes())
+            .await?;
+        Ok(())
+    }
+
+    async fn apply_lines(
+        &self,
+        worktree: &Path,
+        file: &VcsDiffFile,
+        hunk: &VcsDiffHunk,
+        line_indices: &[u32],
+        stage: bool,
+    ) -> Result<()> {
+        validate_paths(std::slice::from_ref(&file.path))?;
+        let patch = patch_for_lines(file, hunk, line_indices, stage)?;
+        if patch.len() > MAX_GIT_OUTPUT_BYTES {
+            return Err(GitAdapterError::OutputLimit);
+        }
+        self.run_with_input(
+            worktree,
+            vec![
+                OsString::from("apply"),
+                OsString::from("--cached"),
+                OsString::from("--recount"),
+                OsString::from("--whitespace=nowarn"),
+                OsString::from("-"),
+            ],
+            patch.as_bytes(),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn commit(
         &self,
         worktree: &Path,
@@ -507,11 +675,60 @@ impl VcsRepository for GitAdapter {
         ];
         self.run(
             worktree,
-            ["commit", "--no-gpg-sign", "-m", message],
+            ["commit", "--no-gpg-sign", "--no-verify", "-m", message],
             false,
             &environment,
         )
         .await?;
+        self.observation(worktree).await
+    }
+
+    async fn amend(
+        &self,
+        worktree: &Path,
+        message: &str,
+        author_name: &str,
+        author_email: &str,
+    ) -> Result<GitRepositoryObservation> {
+        validate_commit_identity(message, author_name, author_email)?;
+        let environment = vec![
+            (
+                OsString::from("GIT_AUTHOR_NAME"),
+                OsString::from(author_name),
+            ),
+            (
+                OsString::from("GIT_AUTHOR_EMAIL"),
+                OsString::from(author_email),
+            ),
+            (
+                OsString::from("GIT_COMMITTER_NAME"),
+                OsString::from(author_name),
+            ),
+            (
+                OsString::from("GIT_COMMITTER_EMAIL"),
+                OsString::from(author_email),
+            ),
+        ];
+        self.run(
+            worktree,
+            [
+                "commit",
+                "--amend",
+                "--no-gpg-sign",
+                "--no-verify",
+                "-m",
+                message,
+            ],
+            false,
+            &environment,
+        )
+        .await?;
+        self.observation(worktree).await
+    }
+
+    async fn soft_reset_parent(&self, worktree: &Path) -> Result<GitRepositoryObservation> {
+        self.run(worktree, ["reset", "--soft", "HEAD^"], false, &[])
+            .await?;
         self.observation(worktree).await
     }
 
@@ -792,6 +1009,8 @@ fn parse_diff(
             binary,
             additions,
             deletions,
+            hunks: Vec::new(),
+            content_truncated: false,
         });
         if files.len() > MAX_DIFF_FILES {
             return Err(GitAdapterError::OutputLimit);
@@ -804,6 +1023,262 @@ fn parse_diff(
         files,
         truncated: false,
     })
+}
+
+fn parse_patch(
+    side: VcsDiffSide,
+    path: &WorkspacePath,
+    bytes: &[u8],
+    output_truncated: bool,
+) -> Result<(Vec<VcsDiffHunk>, bool)> {
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => return Ok((Vec::new(), true)),
+    };
+    let mut hunks = Vec::new();
+    let mut current: Option<VcsDiffHunk> = None;
+    let mut old_line = 0u32;
+    let mut new_line = 0u32;
+    let mut line_count = 0usize;
+    let mut truncated = output_truncated;
+
+    for raw_line in text.lines() {
+        if raw_line.starts_with("@@ ") {
+            if let Some(hunk) = current.take() {
+                hunks.push(finalize_hunk(side, path, hunk));
+            }
+            if hunks.len() >= MAX_DIFF_HUNKS {
+                truncated = true;
+                break;
+            }
+            let (old_start, old_lines, new_start, new_lines, header) = parse_hunk_header(raw_line)?;
+            old_line = old_start;
+            new_line = new_start;
+            current = Some(VcsDiffHunk {
+                id: String::new(),
+                old_start,
+                old_lines,
+                new_start,
+                new_lines,
+                header,
+                lines: Vec::new(),
+                truncated: false,
+            });
+            continue;
+        }
+        let Some(hunk) = current.as_mut() else {
+            continue;
+        };
+        if line_count >= MAX_DIFF_LINES {
+            hunk.truncated = true;
+            truncated = true;
+            break;
+        }
+        let Some(marker) = raw_line.as_bytes().first().copied() else {
+            return Err(GitAdapterError::InvalidData);
+        };
+        let (kind, old, new) = match marker {
+            b' ' => {
+                let coordinates = (Some(old_line), Some(new_line));
+                old_line = old_line.saturating_add(1);
+                new_line = new_line.saturating_add(1);
+                (VcsDiffLineKind::Context, coordinates.0, coordinates.1)
+            }
+            b'+' => {
+                let line = new_line;
+                new_line = new_line.saturating_add(1);
+                (VcsDiffLineKind::Addition, None, Some(line))
+            }
+            b'-' => {
+                let line = old_line;
+                old_line = old_line.saturating_add(1);
+                (VcsDiffLineKind::Deletion, Some(line), None)
+            }
+            b'\\' => (VcsDiffLineKind::NoNewline, None, None),
+            _ => return Err(GitAdapterError::InvalidData),
+        };
+        let content = raw_line.get(1..).ok_or(GitAdapterError::InvalidData)?;
+        hunk.lines.push(VcsDiffLine {
+            kind,
+            old_line: old,
+            new_line: new,
+            text: content.to_owned(),
+        });
+        line_count += 1;
+    }
+    if let Some(mut hunk) = current {
+        if output_truncated {
+            hunk.truncated = true;
+        }
+        hunks.push(finalize_hunk(side, path, hunk));
+    }
+    Ok((hunks, truncated))
+}
+
+fn patch_for_hunk(file: &VcsDiffFile, hunk: &VcsDiffHunk) -> String {
+    let old_path = if file.state == VcsFileState::Added {
+        "/dev/null".to_owned()
+    } else {
+        format!("a/{}", file.previous_path.as_ref().unwrap_or(&file.path).0)
+    };
+    let new_path = if file.state == VcsFileState::Deleted {
+        "/dev/null".to_owned()
+    } else {
+        format!("b/{}", file.path.0)
+    };
+    let mut patch = format!(
+        "--- {old_path}\n+++ {new_path}\n@@ -{},{} +{},{} @@ {}\n",
+        hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
+    );
+    for line in &hunk.lines {
+        let marker = match line.kind {
+            VcsDiffLineKind::Context => ' ',
+            VcsDiffLineKind::Addition => '+',
+            VcsDiffLineKind::Deletion => '-',
+            VcsDiffLineKind::NoNewline => '\\',
+        };
+        patch.push(marker);
+        patch.push_str(&line.text);
+        patch.push('\n');
+    }
+    patch
+}
+
+fn patch_for_lines(
+    file: &VcsDiffFile,
+    hunk: &VcsDiffHunk,
+    line_indices: &[u32],
+    stage: bool,
+) -> Result<String> {
+    if file.binary
+        || file.state != VcsFileState::Modified
+        || hunk.truncated
+        || hunk.lines.is_empty()
+        || line_indices.is_empty()
+        || line_indices.len() > hunk.lines.len()
+    {
+        return Err(GitAdapterError::InvalidData);
+    }
+    let selected = line_indices.iter().copied().collect::<BTreeSet<_>>();
+    if selected.len() != line_indices.len()
+        || selected.iter().any(|index| {
+            hunk.lines.get(*index as usize).map_or(true, |line| {
+                !matches!(
+                    line.kind,
+                    VcsDiffLineKind::Addition | VcsDiffLineKind::Deletion
+                )
+            })
+        })
+    {
+        return Err(GitAdapterError::InvalidData);
+    }
+
+    let mut lines = Vec::with_capacity(hunk.lines.len());
+    for (index, line) in hunk.lines.iter().enumerate() {
+        let chosen = selected.contains(&(index as u32));
+        let kind = if stage {
+            match (line.kind, chosen) {
+                (VcsDiffLineKind::Context, _) => Some(VcsDiffLineKind::Context),
+                (VcsDiffLineKind::Addition, true) => Some(VcsDiffLineKind::Addition),
+                (VcsDiffLineKind::Addition, false) => None,
+                (VcsDiffLineKind::Deletion, true) => Some(VcsDiffLineKind::Deletion),
+                (VcsDiffLineKind::Deletion, false) => Some(VcsDiffLineKind::Context),
+                (VcsDiffLineKind::NoNewline, _) => None,
+            }
+        } else {
+            match (line.kind, chosen) {
+                (VcsDiffLineKind::Context, _) => Some(VcsDiffLineKind::Context),
+                (VcsDiffLineKind::Addition, true) => Some(VcsDiffLineKind::Deletion),
+                (VcsDiffLineKind::Addition, false) => Some(VcsDiffLineKind::Context),
+                (VcsDiffLineKind::Deletion, true) => Some(VcsDiffLineKind::Addition),
+                (VcsDiffLineKind::Deletion, false) => None,
+                (VcsDiffLineKind::NoNewline, _) => None,
+            }
+        };
+        if let Some(kind) = kind {
+            lines.push((kind, &line.text));
+        }
+    }
+    let old_lines = lines
+        .iter()
+        .filter(|(kind, _)| *kind != VcsDiffLineKind::Addition)
+        .count();
+    let new_lines = lines
+        .iter()
+        .filter(|(kind, _)| *kind != VcsDiffLineKind::Deletion)
+        .count();
+    let start = if stage {
+        hunk.old_start
+    } else {
+        hunk.new_start
+    };
+    let mut patch = format!(
+        "--- a/{0}\n+++ b/{0}\n@@ -{1},{2} +{1},{3} @@ {4}\n",
+        file.path.0, start, old_lines, new_lines, hunk.header
+    );
+    for (kind, text) in lines {
+        patch.push(match kind {
+            VcsDiffLineKind::Context => ' ',
+            VcsDiffLineKind::Addition => '+',
+            VcsDiffLineKind::Deletion => '-',
+            VcsDiffLineKind::NoNewline => unreachable!("no-newline markers are omitted"),
+        });
+        patch.push_str(text);
+        patch.push('\n');
+    }
+    Ok(patch)
+}
+
+fn parse_hunk_header(line: &str) -> Result<(u32, u32, u32, u32, String)> {
+    let mut fields = line.split_whitespace();
+    if fields.next() != Some("@@") {
+        return Err(GitAdapterError::InvalidData);
+    }
+    let (old_start, old_lines) = parse_hunk_range(
+        fields
+            .next()
+            .and_then(|value| value.strip_prefix('-'))
+            .ok_or(GitAdapterError::InvalidData)?,
+    )?;
+    let (new_start, new_lines) = parse_hunk_range(
+        fields
+            .next()
+            .and_then(|value| value.strip_prefix('+'))
+            .ok_or(GitAdapterError::InvalidData)?,
+    )?;
+    if fields.next() != Some("@@") {
+        return Err(GitAdapterError::InvalidData);
+    }
+    let header = line
+        .split_once("@@")
+        .and_then(|(_, rest)| rest.split_once("@@"))
+        .map_or("", |(_, header)| header)
+        .trim()
+        .to_owned();
+    Ok((old_start, old_lines, new_start, new_lines, header))
+}
+
+fn parse_hunk_range(value: &str) -> Result<(u32, u32)> {
+    let (start, count) = value.split_once(',').unwrap_or((value, "1"));
+    Ok((
+        start.parse().map_err(|_| GitAdapterError::InvalidData)?,
+        count.parse().map_err(|_| GitAdapterError::InvalidData)?,
+    ))
+}
+
+fn finalize_hunk(side: VcsDiffSide, path: &WorkspacePath, mut hunk: VcsDiffHunk) -> VcsDiffHunk {
+    let mut digest = Sha256::new();
+    digest.update(format!("{side:?}\0{}\0", path.0));
+    digest.update(hunk.old_start.to_le_bytes());
+    digest.update(hunk.new_start.to_le_bytes());
+    digest.update(hunk.header.as_bytes());
+    for line in &hunk.lines {
+        digest.update([line.kind as u8]);
+        digest.update(line.text.as_bytes());
+        digest.update([0]);
+    }
+    hunk.id = format!("{:x}", digest.finalize());
+    hunk
 }
 
 fn parse_branches(bytes: &[u8]) -> Result<Vec<VcsBranch>> {
@@ -1007,6 +1482,333 @@ mod tests {
         assert_eq!(diff.files.len(), 1);
         assert_eq!(diff.files[0].additions, 1);
         assert_eq!(diff.files[0].deletions, 1);
+        assert!(diff.files[0].hunks.is_empty());
+
+        let path = WorkspacePath("query.sql".into());
+        let file_diff = adapter
+            .diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                VcsDiffSide::IndexToWorktree,
+                Some(&path),
+            )
+            .await
+            .unwrap();
+        assert_eq!(file_diff.files[0].hunks.len(), 1);
+        assert!(file_diff.files[0].hunks[0]
+            .lines
+            .iter()
+            .any(|line| line.kind == VcsDiffLineKind::Deletion && line.text == "select 1;"));
+        assert!(file_diff.files[0].hunks[0]
+            .lines
+            .iter()
+            .any(|line| line.kind == VcsDiffLineKind::Addition && line.text == "select 2;"));
+        assert_eq!(file_diff.files[0].hunks[0].id.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn one_typed_hunk_can_be_staged_and_unstaged_without_touching_the_other() {
+        let adapter = GitAdapter::for_tests().await.unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        adapter.initialize(repository.path()).await.unwrap();
+        let path = WorkspacePath("query.sql".into());
+        let original = (1..=14)
+            .map(|line| format!("select {line};"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(repository.path().join(&path.0), &original).unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        adapter
+            .commit(
+                repository.path(),
+                "initial",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap();
+        let changed = original
+            .replace("select 2;", "select 200;")
+            .replace("select 13;", "select 1300;");
+        std::fs::write(repository.path().join(&path.0), changed).unwrap();
+
+        let worktree = adapter
+            .diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                VcsDiffSide::IndexToWorktree,
+                Some(&path),
+            )
+            .await
+            .unwrap();
+        assert_eq!(worktree.files[0].hunks.len(), 2);
+        adapter
+            .apply_hunk(
+                repository.path(),
+                &worktree.files[0],
+                &worktree.files[0].hunks[0],
+                false,
+            )
+            .await
+            .unwrap();
+
+        let staged = adapter
+            .diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                VcsDiffSide::HeadToIndex,
+                Some(&path),
+            )
+            .await
+            .unwrap();
+        assert_eq!(staged.files[0].hunks.len(), 1);
+        let remaining = adapter
+            .diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                VcsDiffSide::IndexToWorktree,
+                Some(&path),
+            )
+            .await
+            .unwrap();
+        assert_eq!(remaining.files[0].hunks.len(), 1);
+
+        adapter
+            .apply_hunk(
+                repository.path(),
+                &staged.files[0],
+                &staged.files[0].hunks[0],
+                true,
+            )
+            .await
+            .unwrap();
+        let staged_after = adapter
+            .diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                VcsDiffSide::HeadToIndex,
+                Some(&path),
+            )
+            .await
+            .unwrap();
+        assert!(staged_after.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn selected_typed_lines_can_be_staged_without_the_rest_of_the_hunk() {
+        let adapter = GitAdapter::for_tests().await.unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        adapter.initialize(repository.path()).await.unwrap();
+        let path = WorkspacePath("query.sql".into());
+        let original = (1..=8)
+            .map(|line| format!("select {line};"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(repository.path().join(&path.0), &original).unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        adapter
+            .commit(
+                repository.path(),
+                "initial",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap();
+        let changed = original
+            .replace("select 3;", "select 300;")
+            .replace("select 5;", "select 500;");
+        std::fs::write(repository.path().join(&path.0), changed).unwrap();
+
+        let worktree = adapter
+            .diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                VcsDiffSide::IndexToWorktree,
+                Some(&path),
+            )
+            .await
+            .unwrap();
+        let file = &worktree.files[0];
+        assert_eq!(file.hunks.len(), 1);
+        let hunk = &file.hunks[0];
+        let selected = hunk
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| matches!(line.text.as_str(), "select 3;" | "select 300;"))
+            .map(|(index, _)| index as u32)
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), 2);
+        adapter
+            .apply_lines(repository.path(), file, hunk, &selected, true)
+            .await
+            .unwrap();
+
+        let staged = adapter
+            .diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                VcsDiffSide::HeadToIndex,
+                Some(&path),
+            )
+            .await
+            .unwrap();
+        let staged_text = staged.files[0].hunks[0]
+            .lines
+            .iter()
+            .filter(|line| line.kind != VcsDiffLineKind::Context)
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(staged_text.contains(&"select 300;"));
+        assert!(!staged_text.contains(&"select 500;"));
+        let remaining = adapter
+            .diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                VcsDiffSide::IndexToWorktree,
+                Some(&path),
+            )
+            .await
+            .unwrap();
+        let remaining_text = remaining.files[0].hunks[0]
+            .lines
+            .iter()
+            .filter(|line| line.kind != VcsDiffLineKind::Context)
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(remaining_text.contains(&"select 500;"));
+        assert!(!remaining_text.contains(&"select 300;"));
+
+        let staged_file = &staged.files[0];
+        let staged_hunk = &staged_file.hunks[0];
+        let staged_selection = staged_hunk
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| matches!(line.text.as_str(), "select 3;" | "select 300;"))
+            .map(|(index, _)| index as u32)
+            .collect::<Vec<_>>();
+        adapter
+            .apply_lines(
+                repository.path(),
+                staged_file,
+                staged_hunk,
+                &staged_selection,
+                false,
+            )
+            .await
+            .unwrap();
+        let staged_after = adapter
+            .diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                VcsDiffSide::HeadToIndex,
+                Some(&path),
+            )
+            .await
+            .unwrap();
+        assert!(staged_after.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn amend_and_soft_uncommit_keep_guarded_changes_in_the_index() {
+        let adapter = GitAdapter::for_tests().await.unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        adapter.initialize(repository.path()).await.unwrap();
+        let path = WorkspacePath("query.sql".into());
+        std::fs::write(repository.path().join(&path.0), "select 1;\n").unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        let initial = adapter
+            .commit(
+                repository.path(),
+                "initial",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap()
+            .head
+            .unwrap();
+
+        std::fs::write(repository.path().join(&path.0), "select 2;\n").unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        let second = adapter
+            .commit(
+                repository.path(),
+                "second",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap()
+            .head
+            .unwrap();
+        std::fs::write(repository.path().join(&path.0), "select 3;\n").unwrap();
+        adapter
+            .stage(repository.path(), std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        let amended = adapter
+            .amend(
+                repository.path(),
+                "second amended",
+                "Sift Test",
+                "sift@example.invalid",
+            )
+            .await
+            .unwrap()
+            .head
+            .unwrap();
+        assert_ne!(amended, second);
+
+        let reset = adapter.soft_reset_parent(repository.path()).await.unwrap();
+        assert_eq!(reset.head.as_deref(), Some(initial.as_str()));
+        let staged = adapter
+            .diff(
+                repository.path(),
+                sift_protocol::RepositoryBindingId(1),
+                VcsDiffSide::HeadToIndex,
+                Some(&path),
+            )
+            .await
+            .unwrap();
+        assert!(staged.files[0].hunks[0]
+            .lines
+            .iter()
+            .any(|line| line.kind == VcsDiffLineKind::Addition && line.text == "select 3;"));
+    }
+
+    #[test]
+    fn typed_patch_parser_preserves_coordinates_and_marks_truncation() {
+        let path = WorkspacePath("queries/report.sql".into());
+        let patch = b"diff --git a/queries/report.sql b/queries/report.sql\n--- a/queries/report.sql\n+++ b/queries/report.sql\n@@ -2,2 +2,3 @@ report\n keep\n-old\n+new\n+extra\n";
+        let (hunks, truncated) =
+            parse_patch(VcsDiffSide::IndexToWorktree, &path, patch, true).unwrap();
+
+        assert!(truncated);
+        assert_eq!(hunks.len(), 1);
+        assert!(hunks[0].truncated);
+        assert_eq!(hunks[0].header, "report");
+        assert_eq!(hunks[0].lines[0].old_line, Some(2));
+        assert_eq!(hunks[0].lines[0].new_line, Some(2));
+        assert_eq!(hunks[0].lines[1].old_line, Some(3));
+        assert_eq!(hunks[0].lines[2].new_line, Some(3));
+        assert_eq!(hunks[0].lines[3].new_line, Some(4));
     }
 
     #[test]

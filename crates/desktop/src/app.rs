@@ -16,7 +16,8 @@ fn system_epoch_millis() -> u64 {
 use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
 use sift_api_types::{
     ConnectionProfileId, CredentialMode, RoomId, StartRunRequest, TenantId,
-    UpsertConnectionProfileRequest, VcsPathsRequest,
+    UpsertConnectionProfileRequest, VcsCommitRequest, VcsDiffQuery, VcsHunkRequest,
+    VcsPathsRequest, VcsUncommitRequest,
 };
 use sift_client_sdk::{
     Client, Error as ClientError, Ingest, OpenConnectionFromProfileRequest, RoomReplica,
@@ -1147,7 +1148,10 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::LoadRepositoryStatus { workspace_id } => {
+            ExecutorCommand::LoadRepositoryStatus {
+                workspace_id,
+                request_id,
+            } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
                     Ok(client) => match client
@@ -1167,6 +1171,7 @@ async fn run_query_executor(
                 if events
                     .send(ExecutorEvent::RepositoryStatusLoaded {
                         workspace_id,
+                        request_id,
                         result,
                     })
                     .is_err()
@@ -1174,11 +1179,12 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::SetRepositoryPathStaged {
+            ExecutorCommand::SetRepositoryPathsStaged {
                 workspace_id,
                 binding_id,
                 expected_revision,
-                path,
+                request_id,
+                paths,
                 staged,
             } => {
                 let server = targets.borrow().clone();
@@ -1187,7 +1193,7 @@ async fn run_query_executor(
                         let binding = sift_protocol::RepositoryBindingId(binding_id);
                         let request = VcsPathsRequest {
                             expected_revision,
-                            paths: vec![path],
+                            paths,
                         };
                         let changed = if staged {
                             client.stage_repository_paths(binding, request).await
@@ -1210,6 +1216,200 @@ async fn run_query_executor(
                 if events
                     .send(ExecutorEvent::RepositoryStatusLoaded {
                         workspace_id,
+                        request_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CommitRepository {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                request_id,
+                message,
+                author_name,
+                author_email,
+                amend,
+                expected_head,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let binding = sift_protocol::RepositoryBindingId(binding_id);
+                        let request = VcsCommitRequest {
+                            expected_revision,
+                            expected_head,
+                            message,
+                            author_name,
+                            author_email,
+                        };
+                        let committed = if amend {
+                            client.amend_repository(binding, request).await
+                        } else {
+                            client.commit_repository(binding, request).await
+                        };
+                        match committed {
+                            Ok(commit) => client
+                                .repository_status(binding)
+                                .await
+                                .map(|status| (commit, Some(status)))
+                                .map_err(|error| {
+                                    format!("refreshing repository status failed: {error}")
+                                }),
+                            Err(error) => Err(format!("committing repository failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryCommitted {
+                        workspace_id,
+                        request_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::UncommitRepository {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                request_id,
+                expected_head,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let binding = sift_protocol::RepositoryBindingId(binding_id);
+                        match client
+                            .uncommit_repository(
+                                binding,
+                                VcsUncommitRequest {
+                                    expected_revision,
+                                    expected_head,
+                                },
+                            )
+                            .await
+                        {
+                            Ok(mutation) => client
+                                .repository_status(binding)
+                                .await
+                                .map(|status| (mutation, Some(status)))
+                                .map_err(|error| {
+                                    format!("refreshing repository status failed: {error}")
+                                }),
+                            Err(error) => Err(format!("uncommitting repository failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryUncommitted {
+                        workspace_id,
+                        request_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadRepositoryDiff {
+                workspace_id,
+                binding_id,
+                request_id,
+                side,
+                path,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .repository_diff(
+                            sift_protocol::RepositoryBindingId(binding_id),
+                            VcsDiffQuery {
+                                side,
+                                path: path.clone(),
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("loading repository diff failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryDiffLoaded {
+                        workspace_id,
+                        request_id,
+                        side,
+                        path,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SetRepositoryHunkStaged {
+                workspace_id,
+                binding_id,
+                expected_revision,
+                request_id,
+                side,
+                path,
+                hunk_id,
+                line_indices,
+                staged,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let binding = sift_protocol::RepositoryBindingId(binding_id);
+                        let request = VcsHunkRequest {
+                            expected_revision,
+                            side,
+                            path: path.clone(),
+                            hunk_id,
+                            line_indices,
+                        };
+                        let changed = if staged {
+                            client.stage_repository_hunk(binding, request).await
+                        } else {
+                            client.unstage_repository_hunk(binding, request).await
+                        };
+                        match changed {
+                            Ok(binding) => match client.repository_status(binding.id).await {
+                                Ok(status) => client
+                                    .repository_diff(
+                                        binding.id,
+                                        VcsDiffQuery {
+                                            side,
+                                            path: Some(path.clone()),
+                                        },
+                                    )
+                                    .await
+                                    .map(|diff| (status, diff))
+                                    .map_err(|error| {
+                                        format!("refreshing repository diff failed: {error}")
+                                    }),
+                                Err(error) => {
+                                    Err(format!("refreshing repository status failed: {error}"))
+                                }
+                            },
+                            Err(error) => Err(format!("updating repository hunk failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RepositoryHunkUpdated {
+                        workspace_id,
+                        request_id,
+                        side,
+                        path,
                         result,
                     })
                     .is_err()

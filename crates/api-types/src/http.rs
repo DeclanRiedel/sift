@@ -231,11 +231,31 @@ pub struct VcsPathsRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsHunkRequest {
+    pub expected_revision: u64,
+    pub side: VcsDiffSide,
+    pub path: WorkspacePath,
+    pub hunk_id: String,
+    /// Zero-based authoritative hunk-line indices. `None` applies the complete
+    /// hunk; a non-empty list applies only selected addition/deletion lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_indices: Option<Vec<u32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VcsCommitRequest {
     pub expected_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head: Option<String>,
     pub message: String,
     pub author_name: String,
     pub author_email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VcsUncommitRequest {
+    pub expected_revision: u64,
+    pub expected_head: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]

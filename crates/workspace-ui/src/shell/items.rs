@@ -37,6 +37,7 @@ impl ItemRegistry {
             ItemKind::Configuration => &CONFIGURATION,
             ItemKind::Problems => &PROBLEMS,
             ItemKind::Notifications => &NOTIFICATIONS,
+            ItemKind::GitDiff => &GIT_DIFF,
             ItemKind::Schema => &SCHEMA,
             ItemKind::Welcome => &WELCOME,
         }
@@ -75,6 +76,13 @@ const NOTIFICATIONS: ItemDefinition = ItemDefinition {
     empty_message: "Notifications feed is unavailable",
 };
 
+const GIT_DIFF: ItemDefinition = ItemDefinition {
+    kind: ItemKind::GitDiff,
+    runtime: ItemRuntimeKind::ReadOnlyText,
+    placeholder_prefix: Some("Git diff"),
+    empty_message: "Git diff is unavailable",
+};
+
 const SCHEMA: ItemDefinition = ItemDefinition {
     kind: ItemKind::Schema,
     runtime: ItemRuntimeKind::Placeholder,
@@ -89,11 +97,12 @@ const WELCOME: ItemDefinition = ItemDefinition {
     empty_message: "Open a connection or create a query to begin.",
 };
 
-const DEFINITIONS: [ItemDefinition; 6] = [
+const DEFINITIONS: [ItemDefinition; 7] = [
     QUERY,
     CONFIGURATION,
     PROBLEMS,
     NOTIFICATIONS,
+    GIT_DIFF,
     SCHEMA,
     WELCOME,
 ];
@@ -109,11 +118,12 @@ mod tests {
             ItemKind::Configuration,
             ItemKind::Problems,
             ItemKind::Notifications,
+            ItemKind::GitDiff,
             ItemKind::Schema,
             ItemKind::Welcome,
         ] {
             assert_eq!(ItemRegistry::definition(&kind).kind, kind);
         }
-        assert_eq!(ItemRegistry::definitions().len(), 6);
+        assert_eq!(ItemRegistry::definitions().len(), 7);
     }
 }

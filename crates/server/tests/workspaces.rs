@@ -495,6 +495,20 @@ async fn git_commit_is_tied_to_a_checkpoint_and_later_virtual_edits_stay_uncommi
         .clone()
         .oneshot(json_request(
             Method::POST,
+            &format!("/v1/metadata/repositories/{}/stage", binding.id.0),
+            serde_json::json!({
+                "expected_revision": binding.revision,
+                "paths": ["query.sql"]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let binding: sift_protocol::RepositoryBinding = json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
             &format!("/v1/metadata/repositories/{}/commit", binding.id.0),
             serde_json::json!({
                 "expected_revision": binding.revision,

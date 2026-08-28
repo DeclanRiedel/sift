@@ -3,6 +3,7 @@
 pub mod editor;
 mod lifecycle;
 mod presentation;
+mod repository;
 pub mod results;
 mod settings;
 mod shell;

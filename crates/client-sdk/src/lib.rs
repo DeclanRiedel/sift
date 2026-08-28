@@ -187,8 +187,12 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "setMetadataConnectionCredential",
     "setRepositoryCredential",
     "stageRepositoryPaths",
+    "stageRepositoryHunk",
     "unstageRepositoryPaths",
+    "unstageRepositoryHunk",
     "commitRepository",
+    "amendRepository",
+    "uncommitRepository",
     "fetchRepository",
     "pushRepository",
     "listRepositoryBranches",
@@ -261,8 +265,9 @@ pub use sift_api_types::{
     UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateInstanceConfigurationRequest,
     UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
     UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
-    VcsCommitRequest, VcsDiffQuery, VcsPathsRequest, VcsRemoteRequest, WorkspaceBatchMutationItem,
-    WorkspaceBatchMutationRequest, WorkspaceTreeResponse,
+    VcsCommitRequest, VcsDiffQuery, VcsHunkRequest, VcsPathsRequest, VcsRemoteRequest,
+    VcsUncommitRequest, WorkspaceBatchMutationItem, WorkspaceBatchMutationRequest,
+    WorkspaceTreeResponse,
 };
 use sift_api_types::{
     ApiTokenId, ApiTokenRow, ConnectionProfile, ConnectionProfileId, Document, DocumentId,
@@ -300,10 +305,10 @@ use sift_protocol::{
     TransactionEndAction, TransactionInfo, TransactionPreview, TransactionPreviewRequest,
     TransactionState, TransferExecutionResult, TransferRecipe, TransferRecipeId, TxHandleRef, TxId,
     TxMode, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest, ValidatedExtensionPackage,
-    Value, VcsBranch, VcsCommitResult, VcsDiff, VcsDiffSide, VcsRemoteResult, VcsStatus,
-    WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceArtifactId, WorkspaceCheckpoint,
-    WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WsClientMessage, WsServerMessage,
-    PROTOCOL_VERSION_NUMBER,
+    Value, VcsBranch, VcsCommitResult, VcsDiff, VcsDiffSide, VcsHeadMutationResult,
+    VcsRemoteResult, VcsStatus, WebAuthResponse, WhoAmIResponse, Workspace, WorkspaceArtifactId,
+    WorkspaceCheckpoint, WorkspaceCheckpointId, WorkspaceId, WorkspaceNodeId, WsClientMessage,
+    WsServerMessage, PROTOCOL_VERSION_NUMBER,
 };
 
 #[derive(Clone)]
@@ -2657,6 +2662,30 @@ impl Client {
         .await
     }
 
+    pub async fn stage_repository_hunk(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsHunkRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/stage-hunk", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn unstage_repository_hunk(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsHunkRequest,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/unstage-hunk", binding.0),
+            &request,
+        )
+        .await
+    }
+
     pub async fn commit_repository(
         &self,
         binding: RepositoryBindingId,
@@ -2664,6 +2693,30 @@ impl Client {
     ) -> Result<VcsCommitResult> {
         self.post(
             &format!("/v1/metadata/repositories/{}/commit", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn amend_repository(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsCommitRequest,
+    ) -> Result<VcsCommitResult> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/amend", binding.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn uncommit_repository(
+        &self,
+        binding: RepositoryBindingId,
+        request: VcsUncommitRequest,
+    ) -> Result<VcsHeadMutationResult> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/uncommit", binding.0),
             &request,
         )
         .await

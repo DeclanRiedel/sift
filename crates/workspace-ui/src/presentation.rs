@@ -99,6 +99,7 @@ pub enum ItemKind {
     Configuration,
     Problems,
     Notifications,
+    GitDiff,
     Schema,
     Welcome,
 }
@@ -239,6 +240,10 @@ pub struct PresentationState {
     /// tabs into another.
     #[serde(default)]
     pub instance_workspaces: HashMap<String, WorkspacePresentation>,
+    /// Client-local commit drafts keyed by workspace id. These never enter a
+    /// workspace projection or repository file.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub repository_commit_drafts: HashMap<i64, String>,
 }
 
 impl Default for PresentationState {
@@ -290,6 +295,7 @@ impl Default for PresentationState {
                 instance_id: Some("local".into()),
             },
             instance_workspaces: HashMap::new(),
+            repository_commit_drafts: HashMap::new(),
         }
     }
 }
