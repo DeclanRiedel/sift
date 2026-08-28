@@ -6851,6 +6851,7 @@ impl WorkspaceShell {
                         }
                     }
                     ConnectionStatus::Failed { profile_id, reason } => {
+                        self.record_connection_problem("Database connection", reason.clone(), cx);
                         if self
                             .pending_database_execution
                             .as_ref()
@@ -7704,6 +7705,7 @@ impl WorkspaceShell {
             ExecutorEvent::ProfileCreationFailed(message) => {
                 self.database_connection_pending = false;
                 self.database_connection_error = Some(message.clone());
+                self.record_connection_problem("Save database connection", message, cx);
                 cx.notify();
             }
             ExecutorEvent::ProfileLoaded(result) => {
@@ -11567,7 +11569,8 @@ impl WorkspaceShell {
         let parsed = match parse_connection_url(self.connection_url_input.read(cx).text()) {
             Ok(parsed) => parsed,
             Err(error) => {
-                self.database_connection_error = Some(error);
+                self.database_connection_error = Some(error.clone());
+                self.record_connection_problem("Parse database connection URL", error, cx);
                 cx.notify();
                 return;
             }
@@ -11584,7 +11587,9 @@ impl WorkspaceShell {
             })
             .is_err()
         {
-            self.database_connection_error = Some("Database connection manager stopped".into());
+            let message = "Database connection manager stopped".to_owned();
+            self.database_connection_error = Some(message.clone());
+            self.record_connection_problem("Save database connection", message, cx);
         } else {
             self.database_connection_pending = true;
             self.database_connection_error = None;
@@ -12070,6 +12075,19 @@ impl WorkspaceShell {
             self.global_problems.drain(..overflow);
         }
         self.sync_global_problems_editor(cx);
+    }
+
+    fn record_connection_problem(
+        &mut self,
+        operation: &'static str,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        // Never print the driver/server message here: it is useful in Problems,
+        // but terminal logs must remain safe even if a provider returns secret
+        // material in an unexpected error string.
+        eprintln!("sift: {operation} failed; details are available in Problems");
+        self.record_runtime_error(None, operation, message, cx);
     }
 
     fn global_problems_text(&self) -> String {
@@ -29468,6 +29486,54 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.account_error.clone()),
             Some("Username and password are required".into())
         );
+    }
+
+    #[gpui::test]
+    fn connection_url_failures_are_retained_in_global_problems(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Failed {
+                    profile_id: 42,
+                    reason: "opening a connection failed: password authentication failed".into(),
+                }),
+                cx,
+            );
+            assert_eq!(shell.global_problems.len(), 1);
+            assert_eq!(shell.global_problems[0].title, "Database connection");
+            assert_eq!(
+                shell.global_problems[0].message,
+                "opening a connection failed: password authentication failed"
+            );
+            assert!(!shell.global_problems[0].transient);
+        });
+    }
+
+    #[gpui::test]
+    fn connection_profile_save_failures_remain_inline_and_in_problems(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.modal = Some(Modal::ConnectionUrl);
+            shell.database_connection_pending = true;
+            shell.on_executor_event(
+                ExecutorEvent::ProfileCreationFailed("provider configuration is invalid".into()),
+                cx,
+            );
+            assert_eq!(
+                shell.database_connection_error.as_deref(),
+                Some("provider configuration is invalid")
+            );
+            assert_eq!(shell.modal, Some(Modal::ConnectionUrl));
+            assert_eq!(shell.global_problems.len(), 1);
+            assert_eq!(shell.global_problems[0].title, "Save database connection");
+            assert!(!shell.global_problems[0].transient);
+        });
     }
 
     #[gpui::test]
