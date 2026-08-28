@@ -448,18 +448,17 @@ pub(super) fn render_status_bar(
                 })
                 .child(separator())
                 .child(
-                    button(
-                        "footer-console",
-                        IconName::Terminal,
-                        "Query console".into(),
-                        shell.bottom_dock.presentation.open
-                            && shell.active_bottom_tool == BottomTool::Console,
-                        None,
-                        false,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.select_bottom_tool(BottomTool::Console, cx)
-                    })),
+                    div().debug_selector(|| "footer-console".into()).child(
+                        button(
+                            "footer-console",
+                            IconName::Terminal,
+                            "New query · <leader> q n".into(),
+                            false,
+                            None,
+                            false,
+                        )
+                        .on_click(cx.listener(|shell, _, window, cx| shell.new_query(window, cx))),
+                    ),
                 )
                 .child(
                     button(

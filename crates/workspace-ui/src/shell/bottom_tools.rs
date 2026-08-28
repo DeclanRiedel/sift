@@ -12,8 +12,7 @@ pub(super) fn render_bottom_panel(
     let colors = theme.colors;
     let body = match shell.active_bottom_tool {
         BottomTool::Console => Some(
-            "Query editors are Sift consoles. Dedicated scratch-console creation arrives with restored query documents."
-                .to_owned(),
+            "Use New Query in the footer or press <leader> q n to open a query tab.".to_owned(),
         ),
         BottomTool::Monitor => None,
         BottomTool::Automations => None,

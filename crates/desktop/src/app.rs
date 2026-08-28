@@ -1754,7 +1754,25 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::CreateSavedQuery { request } => {
+            ExecutorCommand::LoadSavedQuery { item_id, id } => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .saved_query(id)
+                        .await
+                        .map_err(|error| format!("loading saved query failed: {error}"))
+                }
+                .await;
+                if events
+                    .send(ExecutorEvent::SavedQueryLoaded { item_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateSavedQuery { item_id, request } => {
                 let server = targets.borrow().clone();
                 let result = async {
                     server
@@ -1765,11 +1783,18 @@ async fn run_query_executor(
                         .map_err(|error| format!("saving query failed: {error}"))
                 }
                 .await;
-                if events.send(ExecutorEvent::SavedQuerySaved(result)).is_err() {
+                if events
+                    .send(ExecutorEvent::SavedQuerySaved { item_id, result })
+                    .is_err()
+                {
                     return;
                 }
             }
-            ExecutorCommand::UpdateSavedQuery { id, request } => {
+            ExecutorCommand::UpdateSavedQuery {
+                item_id,
+                id,
+                request,
+            } => {
                 let server = targets.borrow().clone();
                 let result = async {
                     server
@@ -1780,7 +1805,10 @@ async fn run_query_executor(
                         .map_err(|error| format!("updating saved query failed: {error}"))
                 }
                 .await;
-                if events.send(ExecutorEvent::SavedQuerySaved(result)).is_err() {
+                if events
+                    .send(ExecutorEvent::SavedQuerySaved { item_id, result })
+                    .is_err()
+                {
                     return;
                 }
             }

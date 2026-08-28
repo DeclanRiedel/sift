@@ -31,7 +31,8 @@ use crate::settings::{EditorMode, KeyboardProfile, KeymapSettings, SettingsStore
 use crate::presentation::{
     BottomTool, DatabaseObjectSource, ItemKind, ItemPresentation, ItemSource, LeftPanel, PaneAxis,
     PaneLayoutPresentation, PanePresentation, PresentationState, PresentationStore,
-    ResultReference, RoomDocumentSource, WindowPresentation, WorkspacePresentation,
+    ResultReference, RoomDocumentSource, SavedQuerySource, WindowPresentation,
+    WorkspacePresentation,
 };
 use crate::{
     ConnectionNavEntry, DocumentNavEntry, LifecycleEvent, LifecycleProjection, PresenceEvent,
@@ -1849,10 +1850,16 @@ pub enum ExecutorCommand {
     LoadSavedQueries {
         tenant_id: i64,
     },
+    LoadSavedQuery {
+        item_id: u64,
+        id: sift_api_types::SavedQueryId,
+    },
     CreateSavedQuery {
+        item_id: Option<u64>,
         request: sift_api_types::CreateSavedQueryRequest,
     },
     UpdateSavedQuery {
+        item_id: Option<u64>,
         id: sift_api_types::SavedQueryId,
         request: sift_api_types::UpdateSavedQueryRequest,
     },
@@ -2083,7 +2090,14 @@ pub enum ExecutorEvent {
         tenant_id: i64,
         result: Result<Vec<sift_api_types::SavedQuery>, String>,
     },
-    SavedQuerySaved(Result<sift_api_types::SavedQuery, String>),
+    SavedQueryLoaded {
+        item_id: u64,
+        result: Result<sift_api_types::SavedQuery, String>,
+    },
+    SavedQuerySaved {
+        item_id: Option<u64>,
+        result: Result<sift_api_types::SavedQuery, String>,
+    },
     SavedQueryDeleted {
         id: sift_api_types::SavedQueryId,
         result: Result<(), String>,
@@ -2260,6 +2274,7 @@ impl Pane {
                     table_preview_sql(&source.provider_id, &source.schema, &source.object)
                 }
                 Some(ItemSource::RoomDocument(_)) => String::new(),
+                Some(ItemSource::SavedQuery(_)) => String::new(),
                 None => String::new(),
             };
             let document = QueryDocument::with_random_peer(&restored_text);
@@ -2652,7 +2667,7 @@ impl Pane {
             .and_then(|item| item.source.as_ref())
             .and_then(|source| match source {
                 ItemSource::DatabaseObject(source) => Some(source.clone()),
-                ItemSource::RoomDocument(_) => None,
+                ItemSource::RoomDocument(_) | ItemSource::SavedQuery(_) => None,
             })
     }
 
@@ -2663,7 +2678,7 @@ impl Pane {
             .and_then(|item| item.source.as_ref())
             .and_then(|source| match source {
                 ItemSource::RoomDocument(source) => Some(source.clone()),
-                ItemSource::DatabaseObject(_) => None,
+                ItemSource::DatabaseObject(_) | ItemSource::SavedQuery(_) => None,
             })
     }
 
@@ -5347,6 +5362,14 @@ fn staged_result_row_index(edits: &[StagedResultEdit], edit_index: usize) -> usi
 /// feel attached to the edit that caused them.
 const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(160);
 
+struct ActiveQuerySnapshot {
+    item_id: u64,
+    name: String,
+    sql_text: String,
+    connection_profile_id: Option<i64>,
+    saved_source: Option<SavedQuerySource>,
+}
+
 pub struct WorkspaceShell {
     focus_handle: FocusHandle,
     connections_focus_handle: FocusHandle,
@@ -6391,6 +6414,7 @@ impl WorkspaceShell {
                         shell.status.connection = shell.lifecycle.status_label();
                         shell.reconcile_restored_workspace(cx);
                         if instance_changed {
+                            shell.reconcile_saved_query_tabs(cx);
                             shell.persist(cx);
                         }
                         cx.notify();
@@ -6714,6 +6738,7 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         self.executor_sender = Some(sender);
+        self.reconcile_saved_query_tabs(cx);
         self._executor_task = Some(cx.spawn(async move |shell, cx| {
             while let Some(event) = receiver.recv().await {
                 if shell
@@ -6724,6 +6749,23 @@ impl WorkspaceShell {
                 }
             }
         }));
+    }
+
+    fn reconcile_saved_query_tabs(&self, cx: &App) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        for pane in &self.panes {
+            for item in &pane.read(cx).items {
+                let Some(ItemSource::SavedQuery(source)) = item.source.as_ref() else {
+                    continue;
+                };
+                let _ = sender.send(ExecutorCommand::LoadSavedQuery {
+                    item_id: item.id,
+                    id: sift_api_types::SavedQueryId(source.saved_query_id),
+                });
+            }
+        }
     }
 
     pub fn attach_instance_manager(
@@ -8008,10 +8050,29 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
-            ExecutorEvent::SavedQuerySaved(result) => {
+            ExecutorEvent::SavedQueryLoaded { item_id, result } => {
+                match result {
+                    Ok(saved) => {
+                        self.apply_saved_query_to_item(item_id, &saved, true, cx);
+                    }
+                    Err(message) => {
+                        self.record_runtime_error(
+                            Some(item_id),
+                            "Restore saved query",
+                            message,
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            }
+            ExecutorEvent::SavedQuerySaved { item_id, result } => {
                 self.saved_queries_loading = false;
                 match result {
                     Ok(saved) => {
+                        if let Some(item_id) = item_id {
+                            self.apply_saved_query_to_item(item_id, &saved, false, cx);
+                        }
                         if let Some(existing) = self
                             .saved_queries
                             .iter_mut()
@@ -8026,7 +8087,12 @@ impl WorkspaceShell {
                         self.saved_queries_error = None;
                         self.show_toast("Saved query".into(), cx);
                     }
-                    Err(message) => self.saved_queries_error = Some(message),
+                    Err(message) => {
+                        self.saved_queries_error = Some(message.clone());
+                        if let Some(item_id) = item_id {
+                            self.record_runtime_error(Some(item_id), "Save query", message, cx);
+                        }
+                    }
                 }
                 cx.notify();
             }
@@ -12521,7 +12587,56 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn active_query_snapshot(&self, cx: &App) -> Option<(String, String, Option<i64>)> {
+    fn apply_saved_query_to_item(
+        &mut self,
+        item_id: u64,
+        saved: &sift_api_types::SavedQuery,
+        rehydrate_text: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let instance_id = self
+            .selected_instance_id
+            .clone()
+            .unwrap_or_else(|| "local".into());
+        for pane in &self.panes {
+            if !pane.read(cx).contains_item(item_id) {
+                continue;
+            }
+            return pane.update(cx, |pane, cx| {
+                let Some(item) = pane.items.iter().find(|item| item.id == item_id) else {
+                    return false;
+                };
+                if rehydrate_text && item.dirty {
+                    return false;
+                }
+                if rehydrate_text {
+                    let Some(editor) = pane.editor(item_id) else {
+                        return false;
+                    };
+                    editor.update(cx, |editor, cx| {
+                        editor.replace_text_from_owner(&saved.sql_text, cx)
+                    });
+                }
+                if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
+                    item.title = format!("{}.sql", saved.name);
+                    item.source = Some(ItemSource::SavedQuery(SavedQuerySource {
+                        instance_id,
+                        tenant_id: saved.tenant_id.0,
+                        saved_query_id: saved.id.0,
+                        revision: saved.revision,
+                        connection_profile_id: saved.connection_profile_id.map(|profile| profile.0),
+                    }));
+                }
+                pane.mark_clean(item_id, cx);
+                pane.pending_close_item = None;
+                cx.notify();
+                true
+            });
+        }
+        false
+    }
+
+    fn active_query_snapshot(&self, cx: &App) -> Option<ActiveQuerySnapshot> {
         let pane = self.panes.get(self.active_pane)?.read(cx);
         let item = pane.active_item()?;
         if item.kind != ItemKind::Query {
@@ -12530,48 +12645,72 @@ impl WorkspaceShell {
         let sql = pane.editor(item.id)?.read(cx).document().text().to_owned();
         let profile_id = match item.source.as_ref() {
             Some(ItemSource::DatabaseObject(source)) => Some(source.profile_id),
+            Some(ItemSource::SavedQuery(source)) => source.connection_profile_id,
             _ => match self.connection_status {
                 ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
                 _ => None,
             },
         };
-        Some((
-            item.title.trim_end_matches(".sql").to_owned(),
-            sql,
-            profile_id,
-        ))
+        Some(ActiveQuerySnapshot {
+            item_id: item.id,
+            name: item.title.trim_end_matches(".sql").to_owned(),
+            sql_text: sql,
+            connection_profile_id: profile_id,
+            saved_source: item.source.as_ref().and_then(|source| match source {
+                ItemSource::SavedQuery(source) => Some(source.clone()),
+                ItemSource::DatabaseObject(_) | ItemSource::RoomDocument(_) => None,
+            }),
+        })
     }
 
     fn save_active_query(&mut self, cx: &mut Context<Self>) {
-        let Some((name, sql_text, connection_profile_id)) = self.active_query_snapshot(cx) else {
+        let Some(snapshot) = self.active_query_snapshot(cx) else {
             self.show_toast("Focus a query tab before saving".into(), cx);
             return;
         };
-        let Some(tenant_id) = self.selected_tenant_id() else {
-            self.show_toast("No tenant is available".into(), cx);
-            return;
-        };
-        let owner_principal_id = self
-            .lifecycle
-            .identity
-            .as_ref()
-            .map(|identity| identity.principal.id);
         let Some(sender) = &self.executor_sender else {
             self.show_toast("Saved-query executor is unavailable".into(), cx);
             return;
         };
-        self.saved_queries_loading = sender
-            .send(ExecutorCommand::CreateSavedQuery {
+        let command = if let Some(source) = snapshot.saved_source {
+            ExecutorCommand::UpdateSavedQuery {
+                item_id: Some(snapshot.item_id),
+                id: sift_api_types::SavedQueryId(source.saved_query_id),
+                request: sift_api_types::UpdateSavedQueryRequest {
+                    expected_revision: source.revision,
+                    name: Some(snapshot.name),
+                    sql_text: Some(snapshot.sql_text),
+                    connection_profile_id: Some(snapshot.connection_profile_id),
+                    tags: None,
+                },
+            }
+        } else {
+            let Some(tenant_id) = self.selected_tenant_id() else {
+                self.show_toast("No tenant is available".into(), cx);
+                return;
+            };
+            let Some(owner_principal_id) = self
+                .lifecycle
+                .identity
+                .as_ref()
+                .map(|identity| identity.principal.id)
+            else {
+                self.show_toast("Sign in before saving a private query".into(), cx);
+                return;
+            };
+            ExecutorCommand::CreateSavedQuery {
+                item_id: Some(snapshot.item_id),
                 request: sift_api_types::CreateSavedQueryRequest {
                     tenant_id,
-                    owner_principal_id,
-                    name,
-                    sql_text,
-                    connection_profile_id,
+                    owner_principal_id: Some(owner_principal_id),
+                    name: snapshot.name,
+                    sql_text: snapshot.sql_text,
+                    connection_profile_id: snapshot.connection_profile_id,
                     tags: Vec::new(),
                 },
-            })
-            .is_ok();
+            }
+        };
+        self.saved_queries_loading = sender.send(command).is_ok();
         cx.notify();
     }
 
@@ -12581,7 +12720,7 @@ impl WorkspaceShell {
         revision: u64,
         cx: &mut Context<Self>,
     ) {
-        let Some((_, sql_text, connection_profile_id)) = self.active_query_snapshot(cx) else {
+        let Some(snapshot) = self.active_query_snapshot(cx) else {
             self.show_toast("Focus the query version to save".into(), cx);
             return;
         };
@@ -12590,11 +12729,12 @@ impl WorkspaceShell {
         };
         self.saved_queries_loading = sender
             .send(ExecutorCommand::UpdateSavedQuery {
+                item_id: None,
                 id,
                 request: sift_api_types::UpdateSavedQueryRequest {
                     expected_revision: revision,
-                    sql_text: Some(sql_text),
-                    connection_profile_id: Some(connection_profile_id),
+                    sql_text: Some(snapshot.sql_text),
+                    connection_profile_id: Some(snapshot.connection_profile_id),
                     ..Default::default()
                 },
             })
@@ -12636,6 +12776,7 @@ impl WorkspaceShell {
         };
         self.saved_queries_loading = sender
             .send(ExecutorCommand::UpdateSavedQuery {
+                item_id: None,
                 id,
                 request: sift_api_types::UpdateSavedQueryRequest {
                     expected_revision: revision,
@@ -12671,10 +12812,31 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = format!("{}.sql", query.name);
-        if self.focus_open_item(ItemKind::Query, &title, window, cx) {
+        let saved_query_id = query.id.0;
+        if let Some((pane_index, item_index)) =
+            self.panes
+                .iter()
+                .enumerate()
+                .find_map(|(pane_index, pane)| {
+                    pane.read(cx)
+                        .items
+                        .iter()
+                        .position(|item| {
+                            matches!(
+                                item.source.as_ref(),
+                                Some(ItemSource::SavedQuery(source))
+                                    if source.saved_query_id == saved_query_id
+                            )
+                        })
+                        .map(|item_index| (pane_index, item_index))
+                })
+        {
+            self.active_pane = pane_index;
+            self.panes[pane_index].update(cx, |pane, _| pane.activate_item(item_index, true));
+            self.focus_active_pane(window, cx);
             return;
         }
+        let title = format!("{}.sql", query.name);
         let item_id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         let keymap = if self.vim_mode_default() {
@@ -12685,6 +12847,62 @@ impl WorkspaceShell {
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&query.sql_text), cx)
                 .with_keymap(keymap)
+        });
+        let results = cx.new(ResultsView::new);
+        let source = SavedQuerySource {
+            instance_id: self
+                .selected_instance_id
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            tenant_id: query.tenant_id.0,
+            saved_query_id,
+            revision: query.revision,
+            connection_profile_id: query.connection_profile_id.map(|profile| profile.0),
+        };
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_query(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Query,
+                        title,
+                        dirty: false,
+                        source: Some(ItemSource::SavedQuery(source)),
+                        last_result: None,
+                    },
+                    editor,
+                    results,
+                    cx,
+                )
+            });
+        }
+        self.focus_active_pane(window, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn new_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bottom_dock.presentation.open && self.active_bottom_tool == BottomTool::Console {
+            self.bottom_dock.presentation.open = false;
+        }
+        let mut ordinal = 1;
+        loop {
+            let candidate = format!("query-{ordinal}.sql");
+            if !self.panes.iter().any(|pane| {
+                pane.read(cx)
+                    .items
+                    .iter()
+                    .any(|item| item.title == candidate)
+            }) {
+                break;
+            }
+            ordinal += 1;
+        }
+        let title = format!("query-{ordinal}.sql");
+        let item_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(""), cx).with_keymap(EditorKeymap::Vim)
         });
         let results = cx.new(ResultsView::new);
         if let Some(pane) = self.panes.get(self.active_pane) {
@@ -14774,6 +14992,20 @@ impl WorkspaceShell {
             }
             self.focus_results(window, cx);
             self.apply_result_cell_edit(cx);
+            return;
+        }
+        let active_query_source = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            pane.active_item()
+                .filter(|item| item.kind == ItemKind::Query)
+                .map(|item| item.source.clone())
+        });
+        if let Some(source) = active_query_source {
+            if matches!(source, Some(ItemSource::RoomDocument(_))) {
+                self.show_toast("Room queries save automatically".into(), cx);
+            } else {
+                self.save_active_query(cx);
+            }
             return;
         }
         let active_run_configuration = self.panes.get(self.active_pane).and_then(|pane| {
@@ -17039,6 +17271,7 @@ impl WorkspaceShell {
                 self.open_server_connection(&OpenServerConnection, window, cx)
             }
             CommandId::AddConnectionByUrl => self.open_connection_url(window, cx),
+            CommandId::NewQuery => self.new_query(window, cx),
             CommandId::ExecuteStatement => {
                 self.dispatch_active_editor_action(&crate::editor::ExecuteStatement, window, cx)
             }
@@ -31365,6 +31598,223 @@ mod tests {
     }
 
     #[gpui::test]
+    fn new_query_command_and_footer_open_numbered_blank_tabs(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.run_command(CommandId::NewQuery, window, cx);
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.title, "query-1.sql");
+            assert_eq!(item.kind, ItemKind::Query);
+            assert!(item.source.is_none());
+            assert!(!item.dirty);
+            assert_eq!(pane.editor(item.id).unwrap().read(cx).document().text(), "");
+        });
+
+        cx.run_until_parked();
+        let footer = cx.debug_bounds("footer-console").expect("New Query footer");
+        cx.simulate_click(footer.center(), Modifiers::default());
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(
+                shell.panes[shell.active_pane]
+                    .read(cx)
+                    .active_item()
+                    .map(|item| item.title.as_str()),
+                Some("query-2.sql")
+            );
+            assert!(shell.modal.is_none());
+            assert!(!shell.bottom_dock.presentation.open);
+        });
+        assert_eq!(
+            CommandRegistry::definition(CommandId::NewQuery).language,
+            "<leader> q n"
+        );
+    }
+
+    #[gpui::test]
+    fn new_query_first_save_creates_personal_record_then_updates_it(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+
+        let item_id = workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.apply(LifecycleEvent::Authenticated(
+                sift_protocol::WhoAmIResponse {
+                    principal: sift_protocol::AuthPrincipal {
+                        id: 7,
+                        display_name: "Analyst".into(),
+                        email: None,
+                        avatar_url: None,
+                        is_instance_admin: false,
+                    },
+                    memberships: Vec::new(),
+                    github_login: None,
+                    auth_session_id: Some("session".into()),
+                },
+            ));
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "demo".into(),
+                rooms: Vec::new(),
+                connections: Vec::new(),
+            }];
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "demo/postgres".into(),
+            };
+            shell.new_query(window, cx);
+            let pane = shell.panes[shell.active_pane].clone();
+            let item_id = pane.read(cx).active_item().unwrap().id;
+            pane.read(cx)
+                .editor(item_id)
+                .unwrap()
+                .update(cx, |editor, cx| {
+                    editor.replace_text_from_owner("select 42;", cx)
+                });
+            shell.save_active_item(&SaveActiveItem, window, cx);
+            item_id
+        });
+
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::CreateSavedQuery {
+                item_id: Some(saved_item_id),
+                request,
+            }) if saved_item_id == item_id
+                && request.owner_principal_id == Some(7)
+                && request.name == "query-1"
+                && request.sql_text == "select 42;"
+                && request.connection_profile_id == Some(2)
+        ));
+
+        let saved = sift_api_types::SavedQuery {
+            id: sift_api_types::SavedQueryId(9),
+            tenant_id: sift_api_types::TenantId(1),
+            owner_principal_id: Some(sift_api_types::PrincipalId(7)),
+            name: "query-1".into(),
+            sql_text: "select 42;".into(),
+            connection_profile_id: Some(sift_api_types::ConnectionProfileId(2)),
+            tags: Vec::new(),
+            created_at: "2026-08-28T10:00:00Z".parse().unwrap(),
+            updated_at: "2026-08-28T10:00:00Z".parse().unwrap(),
+            revision: 4,
+        };
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQuerySaved {
+                    item_id: Some(item_id),
+                    result: Ok(saved.clone()),
+                },
+                cx,
+            );
+            let pane = shell.panes[shell.active_pane].clone();
+            assert!(matches!(
+                pane.read(cx).active_item().and_then(|item| item.source.as_ref()),
+                Some(ItemSource::SavedQuery(source))
+                    if source.saved_query_id == 9 && source.revision == 4
+            ));
+            assert!(!pane.read(cx).active_item().unwrap().dirty);
+            pane.read(cx)
+                .editor(item_id)
+                .unwrap()
+                .update(cx, |editor, cx| {
+                    editor.replace_text_from_owner("select 43;", cx)
+                });
+            shell.save_active_item(&SaveActiveItem, window, cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::UpdateSavedQuery {
+                item_id: Some(saved_item_id),
+                id: sift_api_types::SavedQueryId(9),
+                request,
+            }) if saved_item_id == item_id
+                && request.expected_revision == 4
+                && request.sql_text.as_deref() == Some("select 43;")
+        ));
+    }
+
+    #[gpui::test]
+    fn saved_query_reference_rehydrates_without_persisting_sql(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items[0].title = "Recent events.sql".into();
+        state.workspace.panes[0].items[0].source = Some(ItemSource::SavedQuery(SavedQuerySource {
+            instance_id: "local".into(),
+            tenant_id: 1,
+            saved_query_id: 9,
+            revision: 3,
+            connection_profile_id: Some(2),
+        }));
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (_events_sender, events) = tokio::sync::mpsc::unbounded_channel();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_executor(sender, events, cx);
+        });
+        let item_id = match commands.try_recv() {
+            Ok(ExecutorCommand::LoadSavedQuery {
+                item_id,
+                id: sift_api_types::SavedQueryId(9),
+            }) => item_id,
+            _ => panic!("expected saved-query rehydration request"),
+        };
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(
+                shell.panes[0]
+                    .read(cx)
+                    .editor(item_id)
+                    .unwrap()
+                    .read(cx)
+                    .document()
+                    .text(),
+                ""
+            );
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQueryLoaded {
+                    item_id,
+                    result: Ok(sift_api_types::SavedQuery {
+                        id: sift_api_types::SavedQueryId(9),
+                        tenant_id: sift_api_types::TenantId(1),
+                        owner_principal_id: Some(sift_api_types::PrincipalId(7)),
+                        name: "Recent events".into(),
+                        sql_text: "select * from audit.events;".into(),
+                        connection_profile_id: Some(sift_api_types::ConnectionProfileId(2)),
+                        tags: Vec::new(),
+                        created_at: "2026-08-28T10:00:00Z".parse().unwrap(),
+                        updated_at: "2026-08-28T10:00:00Z".parse().unwrap(),
+                        revision: 4,
+                    }),
+                },
+                cx,
+            );
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[0].read(cx);
+            assert_eq!(
+                pane.editor(item_id).unwrap().read(cx).document().text(),
+                "select * from audit.events;"
+            );
+            assert!(matches!(
+                pane.active_item().and_then(|item| item.source.as_ref()),
+                Some(ItemSource::SavedQuery(source)) if source.revision == 4
+            ));
+        });
+    }
+
+    #[gpui::test]
     fn saved_queries_panel_routes_crud_and_reopens_sql(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -31416,6 +31866,11 @@ mod tests {
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().unwrap();
             assert_eq!(item.title, "Recent events.sql");
+            assert!(matches!(
+                item.source.as_ref(),
+                Some(ItemSource::SavedQuery(source))
+                    if source.saved_query_id == saved.id.0 && source.revision == saved.revision
+            ));
             assert_eq!(
                 pane.editor(item.id).unwrap().read(cx).document().text(),
                 saved.sql_text
@@ -31425,15 +31880,22 @@ mod tests {
         workspace.update(&mut cx, |shell, cx| shell.save_active_query(cx));
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::CreateSavedQuery { request })
-                if request.name == "Recent events" && request.sql_text == saved.sql_text
+            Ok(ExecutorCommand::UpdateSavedQuery {
+                item_id: Some(_),
+                id,
+                request,
+            }) if id == saved.id && request.sql_text.as_deref() == Some(saved.sql_text.as_str())
         ));
         workspace.update(&mut cx, |shell, cx| {
             shell.update_saved_query_from_active(saved.id, saved.revision, cx)
         });
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::UpdateSavedQuery { id, request })
+            Ok(ExecutorCommand::UpdateSavedQuery {
+                item_id: None,
+                id,
+                request,
+            })
                 if id == saved.id && request.sql_text.as_deref() == Some(saved.sql_text.as_str())
         ));
         workspace.update(&mut cx, |shell, cx| {
@@ -31445,7 +31907,11 @@ mod tests {
         });
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::UpdateSavedQuery { id, request })
+            Ok(ExecutorCommand::UpdateSavedQuery {
+                item_id: None,
+                id,
+                request,
+            })
                 if id == saved.id && request.name.as_deref() == Some("Audit trail")
         ));
         workspace.update(&mut cx, |shell, cx| {
