@@ -48,6 +48,7 @@ pub(super) fn menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
         AppBarMenu::File => vec![
             Item::available(CommandId::NewQuery),
             Item::available(CommandId::OpenSavedQuery),
+            Item::available(CommandId::RenameQuery),
             Item::available(CommandId::SaveItem),
             Item::available(CommandId::CloseItem),
             Item::available(CommandId::ClosePane),

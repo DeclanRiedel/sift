@@ -1371,6 +1371,10 @@ pub enum PaneEvent {
     SaveItemRequested {
         item_id: u64,
     },
+    RenameItemRequested {
+        item_id: u64,
+        name: String,
+    },
     SaveRunConfigurationRequested {
         item_id: u64,
     },
@@ -2187,6 +2191,12 @@ pub enum RoomDocumentEvent {
 
 /// A pane owns its ordered items and focus handle. The workspace owns panes;
 /// items never reach sideways into sibling panes.
+struct TabRenameState {
+    item_id: u64,
+    input: Entity<TextInput>,
+    _subscription: Subscription,
+}
+
 pub struct Pane {
     id: u64,
     items: Vec<ItemPresentation>,
@@ -2237,6 +2247,7 @@ pub struct Pane {
     tab_bar_drag_bounds: Option<Bounds<Pixels>>,
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
+    tab_rename: Option<TabRenameState>,
     /// The live result entity is mounted in the workspace modal while this is
     /// set, so it never renders twice with one scroll handle.
     expanded_result_item: Option<u64>,
@@ -2366,6 +2377,7 @@ impl Pane {
             suppress_tab_drag_preview: false,
             tab_bar_drag_bounds: None,
             pending_close_item: None,
+            tab_rename: None,
             expanded_result_item: None,
             notification_filter: None,
         }
@@ -2852,6 +2864,13 @@ impl Pane {
         if self.pending_close_item == Some(item_id) {
             self.pending_close_item = None;
         }
+        if self
+            .tab_rename
+            .as_ref()
+            .is_some_and(|rename| rename.item_id == item_id)
+        {
+            self.tab_rename = None;
+        }
     }
 
     fn replace_new_pane_placeholder(&mut self) -> bool {
@@ -2880,6 +2899,71 @@ impl Pane {
         }
         if let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) {
             item.dirty = false;
+        }
+    }
+
+    fn begin_query_rename(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let item = self
+            .active_item()
+            .filter(|item| item.kind == ItemKind::Query)
+            .ok_or_else(|| "Focus a query tab before renaming".to_owned())?;
+        if matches!(
+            item.source,
+            Some(ItemSource::DatabaseObject(_) | ItemSource::RoomDocument(_))
+        ) {
+            return Err("Only new and saved query tabs can be renamed".into());
+        }
+        let item_id = item.id;
+        let original_title = item.title.clone();
+        let initial_name = original_title.trim_end_matches(".sql").to_owned();
+        let input =
+            cx.new(|cx| TextInput::new(initial_name, "Query name", cx).aria_label("Rename query"));
+        let event_input = input.clone();
+        let subscription = cx.subscribe(&input, move |_, _, event, cx| {
+            if *event == TextInputEvent::Submitted {
+                cx.emit(PaneEvent::RenameItemRequested {
+                    item_id,
+                    name: event_input.read(cx).text().to_owned(),
+                });
+            }
+        });
+        input.focus_handle(cx).focus(window, cx);
+        self.tab_rename = Some(TabRenameState {
+            item_id,
+            input,
+            _subscription: subscription,
+        });
+        cx.notify();
+        Ok(())
+    }
+
+    fn finish_tab_rename(&mut self, item_id: u64, title: String, cx: &mut Context<Self>) {
+        if let Some(item) = self.items.iter_mut().find(|item| item.id == item_id) {
+            item.title = title;
+        }
+        self.tab_rename = None;
+        cx.notify();
+    }
+
+    fn cancel_tab_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab_rename = None;
+        self.active_focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn handle_tab_rename_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key == "escape" {
+            self.cancel_tab_rename(window, cx);
+            cx.stop_propagation();
         }
     }
 
@@ -4169,6 +4253,10 @@ impl gpui::Render for Pane {
         let can_go_forward = self.can_navigate_forward();
         let item_count = self.items.len();
         let pane_id = self.id;
+        let tab_rename = self
+            .tab_rename
+            .as_ref()
+            .map(|rename| (rename.item_id, rename.input.clone()));
         div()
             .id(("pane", self.id as usize))
             .relative()
@@ -4308,6 +4396,10 @@ impl gpui::Render for Pane {
                                         let selected = index == self.active_item;
                                         let item_id = item.id;
                                         let tab_debug = format!("tab-{item_id}");
+                                        let rename_input = tab_rename
+                                            .as_ref()
+                                            .filter(|(rename_id, _)| *rename_id == item_id)
+                                            .map(|(_, input)| input.clone());
                                         PaneTab::new(("tab", item.id as usize))
                                             .debug_selector(move || tab_debug.clone())
                                             .selected(selected)
@@ -4346,7 +4438,25 @@ impl gpui::Render for Pane {
                                                     )
                                                 },
                                             ))
-                                            .child(
+                                            .child(if let Some(rename_input) = rename_input {
+                                                div()
+                                                    .id(("tab-rename", item.id as usize))
+                                                    .debug_selector(move || {
+                                                        format!("tab-rename-{item_id}")
+                                                    })
+                                                    .key_context("SiftTabRename")
+                                                    .on_key_down(
+                                                        cx.listener(Self::handle_tab_rename_key),
+                                                    )
+                                                    .flex()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .items_center()
+                                                    .h_full()
+                                                    .px_1()
+                                                    .child(rename_input)
+                                                    .into_any_element()
+                                            } else {
                                                 div()
                                                     .id(("tab-label", item.id as usize))
                                                     .flex()
@@ -4401,8 +4511,9 @@ impl gpui::Render for Pane {
                                                                 },
                                                             )
                                                             .child(item.title.clone()),
-                                                    ),
-                                            )
+                                                    )
+                                                    .into_any_element()
+                                            })
                                             .child(
                                                 IconButton::new(
                                                     ("tab-close", item.id as usize),
@@ -5514,6 +5625,7 @@ pub struct WorkspaceShell {
     saved_queries_loading: bool,
     saved_queries_error: Option<String>,
     saved_query_editing: Option<sift_api_types::SavedQueryId>,
+    pending_saved_query_renames: HashMap<u64, String>,
     result_cell_edit_target: Option<ResultCellEditTarget>,
     staged_result_edits: Vec<StagedResultEdit>,
     result_edit_conflicts: HashMap<usize, String>,
@@ -6076,6 +6188,7 @@ impl WorkspaceShell {
             saved_queries_loading: false,
             saved_queries_error: None,
             saved_query_editing: None,
+            pending_saved_query_renames: HashMap::new(),
             result_cell_edit_target: None,
             staged_result_edits: Vec::new(),
             result_edit_conflicts: HashMap::new(),
@@ -8095,10 +8208,19 @@ impl WorkspaceShell {
             }
             ExecutorEvent::SavedQuerySaved { item_id, result } => {
                 self.saved_queries_loading = false;
+                let renamed_from = item_id.and_then(|item_id| {
+                    self.pending_saved_query_renames
+                        .remove(&item_id)
+                        .map(|title| (item_id, title))
+                });
                 match result {
                     Ok(saved) => {
                         if let Some(item_id) = item_id {
-                            self.apply_saved_query_to_item(item_id, &saved, false, cx);
+                            if renamed_from.is_some() {
+                                self.apply_saved_query_rename_to_item(item_id, &saved, cx);
+                            } else {
+                                self.apply_saved_query_to_item(item_id, &saved, false, cx);
+                            }
                         }
                         if let Some(existing) = self
                             .saved_queries
@@ -8112,12 +8234,27 @@ impl WorkspaceShell {
                         self.saved_queries.sort_by(|a, b| a.name.cmp(&b.name));
                         self.saved_query_editing = None;
                         self.saved_queries_error = None;
-                        self.show_toast("Saved query".into(), cx);
+                        if renamed_from.is_some() {
+                            self.persist(cx);
+                            self.show_toast("Renamed query".into(), cx);
+                        } else {
+                            self.show_toast("Saved query".into(), cx);
+                        }
                     }
                     Err(message) => {
                         self.saved_queries_error = Some(message.clone());
                         if let Some(item_id) = item_id {
-                            self.record_runtime_error(Some(item_id), "Save query", message, cx);
+                            if let Some((_, old_title)) = renamed_from {
+                                self.set_item_title(item_id, old_title, cx);
+                                self.record_runtime_error(
+                                    Some(item_id),
+                                    "Rename query",
+                                    message,
+                                    cx,
+                                );
+                            } else {
+                                self.record_runtime_error(Some(item_id), "Save query", message, cx);
+                            }
                         }
                     }
                 }
@@ -12663,6 +12800,51 @@ impl WorkspaceShell {
         false
     }
 
+    fn apply_saved_query_rename_to_item(
+        &mut self,
+        item_id: u64,
+        saved: &sift_api_types::SavedQuery,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        for pane in &self.panes {
+            if !pane.read(cx).contains_item(item_id) {
+                continue;
+            }
+            return pane.update(cx, |pane, cx| {
+                let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) else {
+                    return false;
+                };
+                item.title = format!("{}.sql", saved.name);
+                if let Some(ItemSource::SavedQuery(source)) = item.source.as_mut() {
+                    source.tenant_id = saved.tenant_id.0;
+                    source.revision = saved.revision;
+                    source.connection_profile_id =
+                        saved.connection_profile_id.map(|profile| profile.0);
+                }
+                cx.notify();
+                true
+            });
+        }
+        false
+    }
+
+    fn set_item_title(&mut self, item_id: u64, title: String, cx: &mut Context<Self>) -> bool {
+        for pane in &self.panes {
+            if !pane.read(cx).contains_item(item_id) {
+                continue;
+            }
+            return pane.update(cx, |pane, cx| {
+                let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) else {
+                    return false;
+                };
+                item.title = title;
+                cx.notify();
+                true
+            });
+        }
+        false
+    }
+
     fn active_query_snapshot(&self, cx: &App) -> Option<ActiveQuerySnapshot> {
         let pane = self.panes.get(self.active_pane)?.read(cx);
         let item = pane.active_item()?;
@@ -12695,6 +12877,13 @@ impl WorkspaceShell {
             self.show_toast("Focus a query tab before saving".into(), cx);
             return;
         };
+        if self
+            .pending_saved_query_renames
+            .contains_key(&snapshot.item_id)
+        {
+            self.show_toast("Wait for the query rename to finish".into(), cx);
+            return;
+        }
         let Some(sender) = &self.executor_sender else {
             self.show_toast("Saved-query executor is unavailable".into(), cx);
             return;
@@ -12738,6 +12927,105 @@ impl WorkspaceShell {
             }
         };
         self.saved_queries_loading = sender.send(command).is_ok();
+        cx.notify();
+    }
+
+    fn begin_active_query_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.get(self.active_pane) else {
+            return;
+        };
+        if pane
+            .read(cx)
+            .active_item()
+            .is_some_and(|item| self.pending_saved_query_renames.contains_key(&item.id))
+        {
+            self.show_toast("Query rename is already saving".into(), cx);
+            return;
+        }
+        if let Err(message) = pane.update(cx, |pane, cx| pane.begin_query_rename(window, cx)) {
+            self.show_toast(message, cx);
+        }
+    }
+
+    fn rename_query_item(
+        &mut self,
+        pane: &Entity<Pane>,
+        item_id: u64,
+        requested_name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = requested_name
+            .trim()
+            .trim_end_matches(".sql")
+            .trim()
+            .to_owned();
+        if name.is_empty() {
+            self.show_toast("Query name cannot be empty".into(), cx);
+            return;
+        }
+        let Some((old_title, source)) = pane.read(cx).items.iter().find_map(|item| {
+            (item.id == item_id).then(|| (item.title.clone(), item.source.clone()))
+        }) else {
+            return;
+        };
+        let title = format!("{name}.sql");
+        if title == old_title {
+            pane.update(cx, |pane, cx| {
+                pane.finish_tab_rename(item_id, title, cx);
+                pane.active_focus_handle(cx).focus(window, cx);
+            });
+            return;
+        }
+        match source {
+            None => {
+                pane.update(cx, |pane, cx| {
+                    pane.finish_tab_rename(item_id, title, cx);
+                    pane.active_focus_handle(cx).focus(window, cx);
+                });
+                self.persist(cx);
+            }
+            Some(ItemSource::SavedQuery(source)) => {
+                let Some(sender) = &self.executor_sender else {
+                    self.record_runtime_error(
+                        Some(item_id),
+                        "Rename query",
+                        "Saved-query executor is unavailable".into(),
+                        cx,
+                    );
+                    return;
+                };
+                let sent = sender
+                    .send(ExecutorCommand::UpdateSavedQuery {
+                        item_id: Some(item_id),
+                        id: sift_api_types::SavedQueryId(source.saved_query_id),
+                        request: sift_api_types::UpdateSavedQueryRequest {
+                            expected_revision: source.revision,
+                            name: Some(name),
+                            ..Default::default()
+                        },
+                    })
+                    .is_ok();
+                if !sent {
+                    self.record_runtime_error(
+                        Some(item_id),
+                        "Rename query",
+                        "Saved-query executor stopped".into(),
+                        cx,
+                    );
+                    return;
+                }
+                self.pending_saved_query_renames.insert(item_id, old_title);
+                self.saved_queries_loading = true;
+                pane.update(cx, |pane, cx| {
+                    pane.finish_tab_rename(item_id, title, cx);
+                    pane.active_focus_handle(cx).focus(window, cx);
+                });
+            }
+            Some(ItemSource::DatabaseObject(_) | ItemSource::RoomDocument(_)) => {
+                self.show_toast("Only new and saved query tabs can be renamed".into(), cx);
+            }
+        }
         cx.notify();
     }
 
@@ -14285,6 +14573,10 @@ impl WorkspaceShell {
                     }
                 });
                 self.save_active_item(&SaveActiveItem, window, cx);
+            }
+            PaneEvent::RenameItemRequested { item_id, name } => {
+                self.active_pane = index;
+                self.rename_query_item(emitter, *item_id, name, window, cx);
             }
             PaneEvent::SaveRunConfigurationRequested { item_id } => {
                 self.active_pane = index;
@@ -17286,6 +17578,16 @@ impl WorkspaceShell {
             cx.notify();
             return;
         }
+        if self.modal.is_none() {
+            if let Some(pane) = self
+                .panes
+                .iter()
+                .find(|pane| pane.read(cx).tab_rename.is_some())
+            {
+                pane.update(cx, |pane, cx| pane.cancel_tab_rename(window, cx));
+                return;
+            }
+        }
         if self.modal == Some(Modal::ServerConnection) {
             self.server_token_input
                 .update(cx, |input, cx| input.set_text("", cx));
@@ -17371,6 +17673,7 @@ impl WorkspaceShell {
             CommandId::AddConnectionByUrl => self.open_connection_url(window, cx),
             CommandId::NewQuery => self.new_query(window, cx),
             CommandId::OpenSavedQuery => self.open_saved_query_switcher(window, cx),
+            CommandId::RenameQuery => self.begin_active_query_rename(window, cx),
             CommandId::ExecuteStatement => {
                 self.dispatch_active_editor_action(&crate::editor::ExecuteStatement, window, cx)
             }
@@ -32001,6 +32304,162 @@ mod tests {
             CommandRegistry::definition(CommandId::OpenSavedQuery).language,
             "<leader> q o"
         );
+    }
+
+    #[gpui::test]
+    fn query_rename_edits_the_tab_inline_and_escape_cancels(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.run_command(CommandId::NewQuery, window, cx);
+            shell.run_command(CommandId::RenameQuery, window, cx);
+            assert!(shell.modal.is_none());
+            let input = shell.panes[shell.active_pane]
+                .read(cx)
+                .tab_rename
+                .as_ref()
+                .unwrap()
+                .input
+                .clone();
+            input.update(cx, |input, cx| input.set_text("discarded", cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tab-rename-2").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert!(pane.tab_rename.is_none());
+            assert_eq!(pane.active_item().unwrap().title, "query-1.sql");
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.run_command(CommandId::RenameQuery, window, cx);
+            let input = shell.panes[shell.active_pane]
+                .read(cx)
+                .tab_rename
+                .as_ref()
+                .unwrap()
+                .input
+                .clone();
+            input.update(cx, |input, cx| input.set_text("monthly revenue.sql", cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert!(pane.tab_rename.is_none());
+            assert_eq!(pane.active_item().unwrap().title, "monthly revenue.sql");
+            assert_eq!(
+                shell.active_query_snapshot(cx).unwrap().name,
+                "monthly revenue"
+            );
+        });
+        assert_eq!(
+            CommandRegistry::definition(CommandId::RenameQuery).language,
+            "<leader> q r"
+        );
+    }
+
+    #[gpui::test]
+    fn saved_query_rename_rolls_back_failure_and_preserves_dirty_sql(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let timestamp = "2026-08-28T10:00:00Z".parse().unwrap();
+        let saved = sift_api_types::SavedQuery {
+            id: sift_api_types::SavedQueryId(9),
+            tenant_id: sift_api_types::TenantId(1),
+            owner_principal_id: Some(sift_api_types::PrincipalId(7)),
+            name: "Original".into(),
+            sql_text: "select 1".into(),
+            connection_profile_id: None,
+            tags: Vec::new(),
+            created_at: timestamp,
+            updated_at: timestamp,
+            revision: 3,
+        };
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.open_saved_query(saved.clone(), window, cx);
+            let pane = shell.panes[shell.active_pane].clone();
+            pane.update(cx, |pane, _| pane.items.last_mut().unwrap().dirty = true);
+            shell.run_command(CommandId::RenameQuery, window, cx);
+            let input = pane.read(cx).tab_rename.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| input.set_text("Renamed", cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::UpdateSavedQuery {
+                item_id: Some(_),
+                id: sift_api_types::SavedQueryId(9),
+                request,
+            }) if request.expected_revision == 3 && request.name.as_deref() == Some("Renamed")
+        ));
+        let item_id = workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.title, "Renamed.sql");
+            assert!(item.dirty);
+            item.id
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQuerySaved {
+                    item_id: Some(item_id),
+                    result: Err("revision conflict".into()),
+                },
+                cx,
+            );
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert_eq!(pane.active_item().unwrap().title, "Original.sql");
+            assert!(pane.active_item().unwrap().dirty);
+            assert!(shell.global_problems.last().is_some_and(|problem| {
+                problem.title.starts_with("Rename query") && problem.message == "revision conflict"
+            }));
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.run_command(CommandId::RenameQuery, window, cx);
+            let input = shell.panes[shell.active_pane]
+                .read(cx)
+                .tab_rename
+                .as_ref()
+                .unwrap()
+                .input
+                .clone();
+            input.update(cx, |input, cx| input.set_text("Renamed", cx));
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(commands.try_recv().is_ok());
+        let mut renamed = saved;
+        renamed.name = "Renamed".into();
+        renamed.revision = 4;
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SavedQuerySaved {
+                    item_id: Some(item_id),
+                    result: Ok(renamed),
+                },
+                cx,
+            );
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.title, "Renamed.sql");
+            assert!(item.dirty);
+            assert!(matches!(
+                item.source.as_ref(),
+                Some(ItemSource::SavedQuery(source)) if source.revision == 4
+            ));
+        });
     }
 
     #[gpui::test]
