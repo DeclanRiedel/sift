@@ -111,6 +111,7 @@ semver = "1"
 toml = "0.8"
 toml_edit = "0.22"
 url = "2"
+percent-encoding = "2"
 zip = { version = "2", default-features = false, features = ["aes-crypto", "deflate"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "tds73", "chrono"] }

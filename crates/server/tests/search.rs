@@ -51,13 +51,14 @@ fn bulk_pages() -> Vec<Page> {
                 text_col("table_name"),
                 text_col("column_name"),
                 text_col("data_type"),
+                text_col("parent_object_kind"),
             ],
         },
         Page::Rows {
             rows: vec![
-                row(&["public", "users", "email", "text"]),
-                row(&["public", "users", "id", "integer"]),
-                row(&["public", "orders", "note", "text"]),
+                row(&["public", "users", "email", "text", "table"]),
+                row(&["public", "users", "id", "integer", "table"]),
+                row(&["public", "orders", "note", "text", "table"]),
             ],
         },
         Page::Done {
@@ -181,13 +182,17 @@ async fn schema_search_kinds_filter_excludes_nonmatching_objects() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let resp: SchemaSearchResponse = body_json(res.into_body()).await;
-    // No table objects should appear (filter = view only); the users table is excluded.
+    // No table object or table column should appear when only views are selected.
     assert!(!resp.hits.iter().any(|h| matches!(
         h.target,
         SearchTarget::Object {
             object_kind: ObjectKind::Table
         }
     )));
+    assert!(!resp
+        .hits
+        .iter()
+        .any(|hit| matches!(hit.target, SearchTarget::Column)));
 }
 
 #[tokio::test]

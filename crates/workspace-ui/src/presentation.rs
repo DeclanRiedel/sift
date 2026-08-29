@@ -63,6 +63,7 @@ pub enum LeftPanel {
     Collaboration,
     QueryOutline,
     SavedQueries,
+    QueryHistory,
 }
 
 impl LeftPanel {
@@ -73,6 +74,7 @@ impl LeftPanel {
             Self::Collaboration => "Collab",
             Self::QueryOutline => "Query Outline",
             Self::SavedQueries => "Saved Queries",
+            Self::QueryHistory => "Query History",
         }
     }
 }
@@ -101,6 +103,7 @@ impl BottomTool {
 pub enum ItemKind {
     Query,
     Configuration,
+    RunConfiguration,
     Problems,
     Notifications,
     GitDiff,
@@ -136,11 +139,24 @@ pub struct RoomDocumentSource {
     pub document_id: i64,
 }
 
+/// Stable server reference for a private or tenant-shared saved query. SQL
+/// stays server-owned and is rehydrated through the saved-query API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedQuerySource {
+    pub instance_id: String,
+    pub tenant_id: i64,
+    pub saved_query_id: i64,
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_profile_id: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemSource {
     DatabaseObject(DatabaseObjectSource),
     RoomDocument(RoomDocumentSource),
+    SavedQuery(SavedQuerySource),
 }
 
 /// What a finished run left behind, durable across restarts.

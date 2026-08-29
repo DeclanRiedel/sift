@@ -47,7 +47,7 @@ pub struct SearchIndex {
 
 impl SearchIndex {
     /// Build from a shallow schema snapshot (objects) plus decoded column rows
-    /// from the bulk catalog query (`(schema, table, column, type)`).
+    /// from the bulk catalog query (`(schema, table, column, type, kind)`).
     pub fn build(snapshot: &SchemaSnapshot, columns: Vec<CatalogColumn>) -> Self {
         let mut entries = Vec::new();
         for tree in &snapshot.trees {
@@ -62,7 +62,7 @@ impl SearchIndex {
             let haystack_lower = display.to_lowercase().into_boxed_str();
             let mut path = ObjectPath::new(c.table);
             path.schema = Some(c.schema);
-            path.kind = Some(ObjectKind::Table);
+            path.kind = Some(c.object_kind);
             entries.push(SearchEntry {
                 target: SearchTarget::Column,
                 path,
@@ -104,19 +104,32 @@ pub struct CatalogColumn {
     pub table: String,
     pub column: String,
     pub data_type: String,
+    pub object_kind: ObjectKind,
 }
 
-/// Engine SQL that lists every user column as `(schema, table, column, type)`.
+/// Engine SQL that lists every user column as
+/// `(schema, table, column, type, parent_object_kind)`.
 pub fn bulk_columns_sql(engine: Engine) -> &'static str {
     match engine {
         Engine::Postgres => {
-            "SELECT table_schema, table_name, column_name, data_type \
-             FROM information_schema.columns \
-             WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
-             ORDER BY table_schema, table_name, ordinal_position"
+            "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, \
+                    CASE cls.relkind \
+                        WHEN 'v' THEN 'view' \
+                        WHEN 'm' THEN 'materialized_view' \
+                        WHEN 'f' THEN 'foreign_table' \
+                        WHEN 'p' THEN 'partitioned_table' \
+                        ELSE 'table' \
+                    END \
+             FROM information_schema.columns c \
+             JOIN pg_catalog.pg_namespace ns ON ns.nspname = c.table_schema \
+             JOIN pg_catalog.pg_class cls \
+               ON cls.relnamespace = ns.oid AND cls.relname = c.table_name \
+             WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY c.table_schema, c.table_name, c.ordinal_position"
         }
         Engine::SqlServer => {
-            "SELECT s.name, t.name, c.name, ty.name \
+            "SELECT s.name, t.name, c.name, ty.name, \
+                    CASE t.type WHEN 'V' THEN 'view' ELSE 'table' END \
              FROM sys.columns c \
              JOIN sys.objects t ON c.object_id = t.object_id \
              JOIN sys.schemas s ON t.schema_id = s.schema_id \
@@ -127,13 +140,13 @@ pub fn bulk_columns_sql(engine: Engine) -> &'static str {
     }
 }
 
-/// Decode bulk-column-query rows into [`CatalogColumn`]s. Rows whose first four
-/// values aren't text are skipped.
+/// Decode bulk-column-query rows into [`CatalogColumn`]s. Rows whose five
+/// values aren't recognized text are skipped.
 pub fn decode_catalog_columns(rows: Vec<sift_protocol::Row>) -> Vec<CatalogColumn> {
     rows.into_iter()
         .filter_map(|r| {
             let v = r.values;
-            if v.len() < 4 {
+            if v.len() < 5 {
                 return None;
             }
             Some(CatalogColumn {
@@ -141,9 +154,21 @@ pub fn decode_catalog_columns(rows: Vec<sift_protocol::Row>) -> Vec<CatalogColum
                 table: as_text(&v[1])?,
                 column: as_text(&v[2])?,
                 data_type: as_text(&v[3])?,
+                object_kind: object_kind_label(as_text(&v[4])?)?,
             })
         })
         .collect()
+}
+
+fn object_kind_label(label: String) -> Option<ObjectKind> {
+    match label.as_str() {
+        "table" => Some(ObjectKind::Table),
+        "view" => Some(ObjectKind::View),
+        "materialized_view" => Some(ObjectKind::MaterializedView),
+        "foreign_table" => Some(ObjectKind::ForeignTable),
+        "partitioned_table" => Some(ObjectKind::PartitionedTable),
+        _ => None,
+    }
 }
 
 fn as_text(v: &Value) -> Option<String> {
@@ -153,8 +178,9 @@ fn as_text(v: &Value) -> Option<String> {
     }
 }
 
-/// Rank the index against `query`. `kinds` (when set) restricts *object* hits;
-/// column hits are always considered. Returns hits sorted best-first, capped.
+/// Rank the index against `query`. `kinds` (when set) restricts object hits and
+/// column hits by their parent object's kind. Returns hits sorted best-first,
+/// capped.
 pub fn rank(
     index: &SearchIndex,
     query: &str,
@@ -165,9 +191,12 @@ pub fn rank(
     let mut hits: Vec<SearchHit> = index
         .entries
         .iter()
-        .filter(|e| match (&e.target, kinds) {
-            (SearchTarget::Object { object_kind }, Some(ks)) => ks.contains(object_kind),
-            _ => true,
+        .filter(|e| match kinds {
+            Some(kinds) => match e.target {
+                SearchTarget::Object { object_kind } => kinds.contains(&object_kind),
+                SearchTarget::Column => e.path.kind.is_some_and(|kind| kinds.contains(&kind)),
+            },
+            None => true,
         })
         .filter_map(|e| {
             let m = fuzzy_match(query, &e.haystack_lower)?;
@@ -314,7 +343,7 @@ mod tests {
 
     fn index_with(
         objects: Vec<(&str, ObjectKind)>,
-        cols: Vec<(&str, &str, &str, &str)>,
+        cols: Vec<(&str, &str, &str, &str, ObjectKind)>,
     ) -> SearchIndex {
         let snap = SchemaSnapshot {
             trees: vec![CatalogTree {
@@ -334,11 +363,12 @@ mod tests {
         };
         let columns = cols
             .into_iter()
-            .map(|(s, t, c, ty)| CatalogColumn {
+            .map(|(s, t, c, ty, object_kind)| CatalogColumn {
                 schema: s.into(),
                 table: t.into(),
                 column: c.into(),
                 data_type: ty.into(),
+                object_kind,
             })
             .collect();
         SearchIndex::build(&snap, columns)
@@ -349,8 +379,8 @@ mod tests {
         let idx = index_with(
             vec![("users", ObjectKind::Table), ("orders", ObjectKind::Table)],
             vec![
-                ("public", "users", "email", "text"),
-                ("public", "users", "id", "integer"),
+                ("public", "users", "email", "text", ObjectKind::Table),
+                ("public", "users", "id", "integer", ObjectKind::Table),
             ],
         );
         let hits = rank(&idx, "email", None, 10);
@@ -358,21 +388,23 @@ mod tests {
     }
 
     #[test]
-    fn kinds_filter_restricts_objects_only() {
+    fn kinds_filter_restricts_objects_and_columns() {
         let idx = index_with(
             vec![("users", ObjectKind::Table), ("uview", ObjectKind::View)],
-            vec![("public", "users", "uu", "text")],
+            vec![
+                ("public", "users", "uuid", "text", ObjectKind::Table),
+                ("public", "uview", "user_name", "text", ObjectKind::View),
+            ],
         );
         let hits = rank(&idx, "u", Some(&[ObjectKind::Table]), 50);
-        // The view object must be filtered out...
         assert!(!hits.iter().any(|h| matches!(
             h.target,
             SearchTarget::Object {
                 object_kind: ObjectKind::View
             }
         )));
-        // ...but the column hit survives the object-kind filter.
-        assert!(hits.iter().any(|h| h.column.as_deref() == Some("uu")));
+        assert!(!hits.iter().any(|h| h.display.contains("uview")));
+        assert!(hits.iter().any(|h| h.column.as_deref() == Some("uuid")));
     }
 
     #[test]

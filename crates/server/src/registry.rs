@@ -1642,6 +1642,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn builtin_provider_schema_accepts_untagged_engine_options_before_normalization() {
+        let schema = builtin_configuration_schema(Engine::Postgres);
+        let validator = jsonschema::draft202012::new(&schema).unwrap();
+        let public_configuration = serde_json::json!({
+            "host": "localhost",
+            "port": 5433,
+            "database": "anywherewms",
+            "user": "anywherewms",
+            "ssl_mode": "disable",
+            "engine_specific": {"application_name": "sift"}
+        });
+        assert!(validator.is_valid(&public_configuration));
+
+        let mut tagged = public_configuration.clone();
+        tagged["engine_specific"]["engine"] = serde_json::json!("postgres");
+        assert!(!validator.is_valid(&tagged));
+
+        let normalized = normalize_builtin_configuration(public_configuration, Engine::Postgres);
+        serde_json::from_value::<sift_protocol::ConnectionSpec>(normalized).unwrap();
+    }
+
+    #[test]
     fn legacy_builtin_configuration_receives_only_missing_runtime_fields() {
         let normalized = normalize_builtin_configuration(
             serde_json::json!({

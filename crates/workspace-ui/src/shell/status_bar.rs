@@ -149,8 +149,8 @@ pub(super) fn render_status_bar(
                         None,
                         false,
                     )
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.select_left_panel(LeftPanel::Connections, cx)
+                    .on_click(cx.listener(|shell, _, window, cx| {
+                        shell.select_left_panel(LeftPanel::Connections, window, cx)
                     })),
                 )
                 .child(
@@ -165,9 +165,9 @@ pub(super) fn render_status_bar(
                         }),
                         false,
                     )
-                    .on_click(
-                        cx.listener(|shell, _, _, cx| shell.select_left_panel(LeftPanel::Git, cx)),
-                    ),
+                    .on_click(cx.listener(|shell, _, window, cx| {
+                        shell.select_left_panel(LeftPanel::Git, window, cx)
+                    })),
                 )
                 .children(shell.repository.status().map(|status| {
                     let branch = status.branch.as_deref().unwrap_or("detached");
@@ -199,8 +199,8 @@ pub(super) fn render_status_bar(
                         Some(shell.presence.participants.len()),
                         false,
                     )
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.select_left_panel(LeftPanel::Collaboration, cx)
+                    .on_click(cx.listener(|shell, _, window, cx| {
+                        shell.select_left_panel(LeftPanel::Collaboration, window, cx)
                     })),
                 )
                 .child(
@@ -217,8 +217,8 @@ pub(super) fn render_status_bar(
                                 false,
                             )
                             .on_click(cx.listener(
-                                |shell, _, _, cx| {
-                                    shell.select_left_panel(LeftPanel::QueryOutline, cx)
+                                |shell, _, window, cx| {
+                                    shell.select_left_panel(LeftPanel::QueryOutline, window, cx)
                                 },
                             )),
                         ),
@@ -237,8 +237,28 @@ pub(super) fn render_status_bar(
                                 false,
                             )
                             .on_click(cx.listener(
-                                |shell, _, _, cx| {
-                                    shell.select_left_panel(LeftPanel::SavedQueries, cx)
+                                |shell, _, window, cx| {
+                                    shell.select_left_panel(LeftPanel::SavedQueries, window, cx)
+                                },
+                            )),
+                        ),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "footer-query-history".into())
+                        .child(
+                            button(
+                                "footer-query-history",
+                                IconName::Activity,
+                                "Query history".into(),
+                                shell.left_dock.presentation.open
+                                    && shell.active_left_panel == LeftPanel::QueryHistory,
+                                None,
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                |shell, _, window, cx| {
+                                    shell.select_left_panel(LeftPanel::QueryHistory, window, cx)
                                 },
                             )),
                         ),
@@ -257,10 +277,14 @@ pub(super) fn render_status_bar(
                     button(
                         "footer-problems",
                         IconName::Warning,
-                        format!("Open problems ({})", shell.global_problems.len()),
+                        if shell.unread_problems == 0 {
+                            "Open problems".into()
+                        } else {
+                            format!("Open problems ({})", shell.unread_problems)
+                        },
                         false,
-                        Some(shell.global_problems.len()),
-                        !shell.global_problems.is_empty(),
+                        Some(shell.unread_problems),
+                        shell.unread_problems > 0,
                     )
                     .on_click(
                         cx.listener(|shell, _, window, cx| shell.show_global_problems(window, cx)),
@@ -463,18 +487,17 @@ pub(super) fn render_status_bar(
                 })
                 .child(separator())
                 .child(
-                    button(
-                        "footer-console",
-                        IconName::Terminal,
-                        "Query console".into(),
-                        shell.bottom_dock.presentation.open
-                            && shell.active_bottom_tool == BottomTool::Console,
-                        None,
-                        false,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.select_bottom_tool(BottomTool::Console, cx)
-                    })),
+                    div().debug_selector(|| "footer-console".into()).child(
+                        button(
+                            "footer-console",
+                            IconName::Terminal,
+                            "New query · <leader> q n".into(),
+                            false,
+                            None,
+                            false,
+                        )
+                        .on_click(cx.listener(|shell, _, window, cx| shell.new_query(window, cx))),
+                    ),
                 )
                 .child(
                     button(

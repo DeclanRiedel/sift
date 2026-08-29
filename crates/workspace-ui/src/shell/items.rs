@@ -10,6 +10,7 @@ use crate::presentation::ItemKind;
 pub enum ItemRuntimeKind {
     Query,
     Configuration,
+    RunConfiguration,
     ReadOnlyText,
     Placeholder,
 }
@@ -35,6 +36,7 @@ impl ItemRegistry {
         match kind {
             ItemKind::Query => &QUERY,
             ItemKind::Configuration => &CONFIGURATION,
+            ItemKind::RunConfiguration => &RUN_CONFIGURATION,
             ItemKind::Problems => &PROBLEMS,
             ItemKind::Notifications => &NOTIFICATIONS,
             ItemKind::GitDiff => &GIT_DIFF,
@@ -60,6 +62,13 @@ const CONFIGURATION: ItemDefinition = ItemDefinition {
     runtime: ItemRuntimeKind::Configuration,
     placeholder_prefix: Some("TOML editor"),
     empty_message: "Configuration editor is unavailable",
+};
+
+const RUN_CONFIGURATION: ItemDefinition = ItemDefinition {
+    kind: ItemKind::RunConfiguration,
+    runtime: ItemRuntimeKind::RunConfiguration,
+    placeholder_prefix: Some("Run configuration"),
+    empty_message: "Run configuration editor is unavailable",
 };
 
 const PROBLEMS: ItemDefinition = ItemDefinition {
@@ -97,9 +106,10 @@ const WELCOME: ItemDefinition = ItemDefinition {
     empty_message: "Open a connection or create a query to begin.",
 };
 
-const DEFINITIONS: [ItemDefinition; 7] = [
+const DEFINITIONS: [ItemDefinition; 8] = [
     QUERY,
     CONFIGURATION,
+    RUN_CONFIGURATION,
     PROBLEMS,
     NOTIFICATIONS,
     GIT_DIFF,
@@ -116,6 +126,7 @@ mod tests {
         for kind in [
             ItemKind::Query,
             ItemKind::Configuration,
+            ItemKind::RunConfiguration,
             ItemKind::Problems,
             ItemKind::Notifications,
             ItemKind::GitDiff,
@@ -124,6 +135,6 @@ mod tests {
         ] {
             assert_eq!(ItemRegistry::definition(&kind).kind, kind);
         }
-        assert_eq!(ItemRegistry::definitions().len(), 7);
+        assert_eq!(ItemRegistry::definitions().len(), 8);
     }
 }

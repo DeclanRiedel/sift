@@ -144,12 +144,37 @@ pub struct SemanticStatement {
     pub recovered: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticOutlineSymbolKind {
+    Cte,
+    Object,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SemanticOutlineSymbol {
+    pub symbol_id: String,
+    pub statement_id: String,
+    pub kind: SemanticOutlineSymbolKind,
+    pub name: String,
+    pub range: TextRange,
+    #[serde(default)]
+    pub definition_range: Option<TextRange>,
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    pub usage_kind: SqlUsageKind,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StatementSelection {
     pub document_id: SemanticDocumentId,
     pub revision: u64,
     pub selection: Option<TextRange>,
     pub statements: Vec<SemanticStatement>,
+    #[serde(default)]
+    pub symbols: Vec<SemanticOutlineSymbol>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

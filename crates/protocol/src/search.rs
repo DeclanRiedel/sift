@@ -24,8 +24,8 @@ use crate::{ObjectKind, ObjectPath, Row};
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SchemaSearchRequest {
     pub query: String,
-    /// Restrict object hits to these kinds. `None` = all kinds. Column hits are
-    /// unaffected.
+    /// Restrict object hits and column hits (by their parent object) to these
+    /// kinds. `None` = all kinds.
     #[serde(default)]
     pub kinds: Option<Vec<ObjectKind>>,
     /// Maximum hits to return (server clamps to a hard ceiling).

@@ -2937,27 +2937,129 @@ async fn run_query_executor(
                 git_commit,
             } => {
                 let server = targets.borrow().clone();
-                let result = match server.client().await {
-                    Ok(client) => async {
+                let (result, nodes) = match server.client().await {
+                    Ok(client) => {
                         let workspace = sift_protocol::WorkspaceId(workspace_id);
-                        let configurations = client.run_configurations(workspace).await?;
-                        let last_success = match git_commit {
-                            Some(commit) => {
-                                client
-                                    .latest_successful_run_for_commit(workspace, &commit)
-                                    .await?
-                            }
-                            None => None,
-                        };
-                        Ok::<_, sift_client_sdk::Error>((configurations, last_success))
+                        let result = async {
+                            let configurations = client.run_configurations(workspace).await?;
+                            let last_success = match git_commit {
+                                Some(commit) => {
+                                    client
+                                        .latest_successful_run_for_commit(workspace, &commit)
+                                        .await?
+                                }
+                                None => None,
+                            };
+                            Ok::<_, sift_client_sdk::Error>((configurations, last_success))
+                        }
+                        .await
+                        .map_err(|error| format!("loading automations failed: {error}"));
+                        let nodes = client
+                            .workspace_nodes(workspace)
+                            .await
+                            .map(|tree| tree.nodes)
+                            .map_err(|error| format!("loading automation scripts failed: {error}"));
+                        (result, nodes)
                     }
-                    .await
-                    .map_err(|error| format!("loading automations failed: {error}")),
-                    Err(error) => Err(error),
+                    Err(error) => (Err(error.clone()), Err(error)),
                 };
                 if events
                     .send(ExecutorEvent::AutomationsLoaded {
                         workspace_id,
+                        result,
+                        nodes,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SaveRunConfiguration {
+                item_id,
+                workspace_id,
+                configuration_id,
+                expected_revision,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let saved = match configuration_id {
+                            Some(configuration_id) => {
+                                let Some(expected_revision) = expected_revision else {
+                                    let _ = events.send(ExecutorEvent::RunConfigurationSaved {
+                                        item_id,
+                                        result: Err(
+                                            "updating run configuration requires a revision".into(),
+                                        ),
+                                    });
+                                    continue;
+                                };
+                                client
+                                    .update_run_configuration(
+                                        configuration_id,
+                                        sift_api_types::UpdateRunConfigurationRequest {
+                                            expected_revision,
+                                            configuration: request,
+                                        },
+                                    )
+                                    .await
+                            }
+                            None => {
+                                client
+                                    .create_run_configuration(
+                                        sift_protocol::WorkspaceId(workspace_id),
+                                        request,
+                                    )
+                                    .await
+                            }
+                        };
+                        match saved {
+                            Ok(configuration) => {
+                                let validation = client
+                                    .validate_run_configuration(configuration.id)
+                                    .await
+                                    .map_err(|error| {
+                                        format!(
+                                            "configuration saved but validation failed: {error}"
+                                        )
+                                    });
+                                Ok((configuration, validation))
+                            }
+                            Err(error) => Err(format!("saving run configuration failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RunConfigurationSaved { item_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteRunConfiguration {
+                item_id,
+                configuration_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_run_configuration(
+                            configuration_id,
+                            sift_api_types::ExpectedRunConfigurationRevisionRequest {
+                                expected_revision,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("deleting run configuration failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RunConfigurationDeleted {
+                        item_id,
+                        configuration_id,
                         result,
                     })
                     .is_err()
@@ -3472,6 +3574,39 @@ async fn run_query_executor(
                     });
                 }));
             }
+            ExecutorCommand::LoadGlobalHistory {
+                instance_id,
+                generation,
+                cursor,
+            } => {
+                let append = cursor.is_some();
+                let connected_client = context.as_ref().map(|opened| opened.client.clone());
+                let server = targets.borrow().clone();
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let load = async {
+                        let client = match connected_client {
+                            Some(client) => client,
+                            None => server.client().await?,
+                        };
+                        client
+                            .history_page(None, cursor.as_deref(), Some(100))
+                            .await
+                            .map_err(|error| format!("loading query history failed: {error}"))
+                    };
+                    let page = tokio::time::timeout(HISTORY_LOAD_TIMEOUT, load)
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err("Loading query history timed out after 10 seconds".into())
+                        });
+                    let _ = events.send(ExecutorEvent::GlobalHistoryLoaded {
+                        instance_id,
+                        generation,
+                        append,
+                        page,
+                    });
+                }));
+            }
             ExecutorCommand::LoadSavedQueries { tenant_id } => {
                 let server = targets.borrow().clone();
                 let result = async {
@@ -3494,7 +3629,25 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::CreateSavedQuery { request } => {
+            ExecutorCommand::LoadSavedQuery { item_id, id } => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .saved_query(id)
+                        .await
+                        .map_err(|error| format!("loading saved query failed: {error}"))
+                }
+                .await;
+                if events
+                    .send(ExecutorEvent::SavedQueryLoaded { item_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateSavedQuery { item_id, request } => {
                 let server = targets.borrow().clone();
                 let result = async {
                     server
@@ -3505,11 +3658,18 @@ async fn run_query_executor(
                         .map_err(|error| format!("saving query failed: {error}"))
                 }
                 .await;
-                if events.send(ExecutorEvent::SavedQuerySaved(result)).is_err() {
+                if events
+                    .send(ExecutorEvent::SavedQuerySaved { item_id, result })
+                    .is_err()
+                {
                     return;
                 }
             }
-            ExecutorCommand::UpdateSavedQuery { id, request } => {
+            ExecutorCommand::UpdateSavedQuery {
+                item_id,
+                id,
+                request,
+            } => {
                 let server = targets.borrow().clone();
                 let result = async {
                     server
@@ -3520,7 +3680,10 @@ async fn run_query_executor(
                         .map_err(|error| format!("updating saved query failed: {error}"))
                 }
                 .await;
-                if events.send(ExecutorEvent::SavedQuerySaved(result)).is_err() {
+                if events
+                    .send(ExecutorEvent::SavedQuerySaved { item_id, result })
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -3818,6 +3981,7 @@ async fn run_query_executor(
                 text,
                 request,
             } => {
+                let outline = matches!(request, SemanticRequestKind::Outline { .. });
                 let job = SemanticJob {
                     item_id,
                     text_revision,
@@ -3832,9 +3996,15 @@ async fn run_query_executor(
                         .send(ExecutorEvent::Semantic {
                             item_id,
                             text_revision,
-                            outcome: Box::new(SemanticOutcome::Failed(
-                                "Not connected — SQL analysis needs a connection.".into(),
-                            )),
+                            outcome: Box::new(if outline {
+                                SemanticOutcome::OutlineFailed(
+                                    "Not connected — query outline needs a connection.".into(),
+                                )
+                            } else {
+                                SemanticOutcome::Failed(
+                                    "Not connected — SQL analysis needs a connection.".into(),
+                                )
+                            }),
                         })
                         .is_err()
                 {
@@ -4637,12 +4807,15 @@ fn admissible_jobs(
             continue;
         }
         if job.request != SemanticRequestKind::Analyze {
+            let outcome = if matches!(job.request, SemanticRequestKind::Outline { .. }) {
+                SemanticOutcome::OutlineFailed("Buffer changed before the request ran.".into())
+            } else {
+                SemanticOutcome::Failed("Buffer changed before the request ran.".into())
+            };
             let _ = events.send(ExecutorEvent::Semantic {
                 item_id: job.item_id,
                 text_revision: job.text_revision,
-                outcome: Box::new(SemanticOutcome::Failed(
-                    "Buffer changed before the request ran.".into(),
-                )),
+                outcome: Box::new(outcome),
             });
         }
     }
@@ -4942,6 +5115,35 @@ async fn semantic_outcome(
                     outcome => outcome,
                 },
                 Err(error) => SemanticOutcome::Failed(format!("preparing rename failed: {error}")),
+            }
+        }
+        SemanticRequestKind::Outline { end } => {
+            if end == 0 {
+                return SemanticOutcome::Outline {
+                    statements: Vec::new(),
+                    symbols: Vec::new(),
+                };
+            }
+            match client
+                .select_semantic_statement(
+                    session,
+                    connection,
+                    document,
+                    sift_protocol::SelectStatementRequest {
+                        revision,
+                        cursor: 0,
+                        selection: Some(sift_protocol::TextRange { start: 0, end }),
+                    },
+                )
+                .await
+            {
+                Ok(selection) => SemanticOutcome::Outline {
+                    statements: selection.statements,
+                    symbols: selection.symbols,
+                },
+                Err(error) => {
+                    SemanticOutcome::OutlineFailed(format!("loading query outline failed: {error}"))
+                }
             }
         }
     }

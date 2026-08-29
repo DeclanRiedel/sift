@@ -12,14 +12,21 @@ pub(super) fn render_bottom_panel(
     let colors = theme.colors;
     let body = match shell.active_bottom_tool {
         BottomTool::Console => Some(
-            "Query editors are Sift consoles. Dedicated scratch-console creation arrives with restored query documents."
-                .to_owned(),
+            "Use New Query in the footer or press <leader> q n to open a query tab.".to_owned(),
         ),
         BottomTool::Monitor => None,
         BottomTool::Automations => None,
     };
     div()
         .debug_selector(|| "bottom-dock".into())
+        .track_focus(&shell.automation_focus_handle)
+        .when(
+            shell.active_bottom_tool == BottomTool::Automations,
+            |dock| {
+                dock.key_context("SiftAutomations")
+                    .on_key_down(cx.listener(WorkspaceShell::handle_automation_key))
+            },
+        )
         .relative()
         .h(px(dock.presentation.size))
         .flex_none()
@@ -31,6 +38,7 @@ pub(super) fn render_bottom_panel(
         .child(
             div()
                 .flex_none()
+                .h(px(30.))
                 .border_b_1()
                 .border_color(colors.subtle_border)
                 .pl_3()
@@ -38,9 +46,59 @@ pub(super) fn render_bottom_panel(
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(SectionLabel::new(
-                    shell.active_bottom_tool.label().to_uppercase(),
-                )),
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(SectionLabel::new(
+                            shell.active_bottom_tool.label().to_uppercase(),
+                        ))
+                        .children((shell.active_bottom_tool == BottomTool::Automations).then(
+                            || {
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.disabled_text)
+                                    .child(shell.automation_configurations.len().to_string())
+                            },
+                        )),
+                )
+                .children(
+                    (shell.active_bottom_tool == BottomTool::Automations).then(|| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                Button::new("new-automation", "New")
+                                    .debug_selector("new-automation")
+                                    .tone(ButtonTone::Ghost)
+                                    .start_icon(IconName::Add)
+                                    .disabled(shell.selected_workspace_id.is_none())
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.open_run_configuration_editor(None, window, cx)
+                                    })),
+                            )
+                            .child(
+                                div().debug_selector(|| "refresh-automations".into()).child(
+                                    IconButton::new(
+                                        "refresh-automations",
+                                        IconName::Refresh,
+                                        "Refresh automations",
+                                    )
+                                    .square(px(24.))
+                                    .icon_size(12.)
+                                    .tooltip("Refresh automations · Shift+R")
+                                    .disabled(shell.automations_loading)
+                                    .on_click(
+                                        cx.listener(|shell, _, _, cx| {
+                                            shell.request_automations(cx)
+                                        }),
+                                    ),
+                                ),
+                            )
+                    }),
+                ),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {
             let transaction = shell.transaction.as_ref().map(|transaction| {
@@ -226,32 +284,79 @@ pub(super) fn render_bottom_panel(
                     .iter()
                     .enumerate()
                     .map(|(index, configuration)| {
-                        let configuration_id = configuration.id.0;
-                        let revision = configuration.revision;
+                        let edit_configuration = configuration.clone();
                         let run = shell.automation_runs.get(&configuration.id);
-                        let running = run.is_some_and(|run| {
-                            matches!(
-                                run.state,
-                                sift_protocol::RunState::Queued
-                                    | sift_protocol::RunState::Admitted
-                                    | sift_protocol::RunState::Preparing
-                                    | sift_protocol::RunState::Running
-                            )
-                        });
-                        let run_id = run.map(|run| run.id.0);
+                        let running = run.is_some_and(automation_run_is_active);
                         let requires_variables = configuration
                             .variables
                             .iter()
                             .any(|variable| variable.required);
+                        let selected = index == shell.automation_selected;
+                        let (status, status_color, status_background) =
+                            match run.map(|run| run.state) {
+                                None => ("Never run", colors.disabled_text, colors.panel),
+                                Some(sift_protocol::RunState::Queued) => {
+                                    ("Queued", colors.warning, colors.warning_muted)
+                                }
+                                Some(sift_protocol::RunState::Admitted) => {
+                                    ("Admitted", colors.warning, colors.warning_muted)
+                                }
+                                Some(sift_protocol::RunState::Preparing) => {
+                                    ("Preparing", colors.warning, colors.warning_muted)
+                                }
+                                Some(sift_protocol::RunState::Running) => {
+                                    ("Running", colors.accent_hover, colors.accent_muted)
+                                }
+                                Some(sift_protocol::RunState::Succeeded) => {
+                                    ("Succeeded", colors.success, colors.success_muted)
+                                }
+                                Some(sift_protocol::RunState::Failed) => {
+                                    ("Failed", colors.danger, colors.danger_muted)
+                                }
+                                Some(sift_protocol::RunState::Cancelled) => {
+                                    ("Cancelled", colors.muted_text, colors.panel)
+                                }
+                                Some(sift_protocol::RunState::OutcomeUnknown) => {
+                                    ("Unknown", colors.danger, colors.danger_muted)
+                                }
+                                Some(sift_protocol::RunState::Blocked) => {
+                                    ("Blocked", colors.warning, colors.warning_muted)
+                                }
+                                Some(sift_protocol::RunState::Rejected) => {
+                                    ("Rejected", colors.danger, colors.danger_muted)
+                                }
+                            };
                         div()
                             .id(("automation-configuration", index))
-                            .h(px(38.))
+                            .debug_selector(move || format!("automation-configuration-{index}"))
+                            .role(Role::Button)
+                            .h(px(36.))
                             .px_3()
                             .flex()
                             .items_center()
                             .gap_3()
                             .border_b_1()
                             .border_color(colors.subtle_border)
+                            .hover(|row| row.bg(colors.hovered_surface))
+                            .when(selected, |row| row.bg(colors.active_surface))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(
+                                    move |shell, event: &gpui::MouseDownEvent, window, cx| {
+                                        shell.automation_selected = index;
+                                        shell.automation_focus_handle.focus(window, cx);
+                                        if event.click_count >= 2 {
+                                            shell.open_run_configuration_editor(
+                                                Some(edit_configuration.clone()),
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    },
+                                ),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -262,41 +367,47 @@ pub(super) fn render_bottom_panel(
                             )
                             .child(
                                 div()
+                                    .w(px(72.))
                                     .text_xs()
-                                    .child(format!("{} step(s)", configuration.scripts.len())),
+                                    .text_color(colors.muted_text)
+                                    .child(format!("{}", configuration.scripts.len())),
                             )
-                            .children(run.map(|run| {
+                            .child(
+                                div().w(px(104.)).flex().items_center().child(
+                                    div()
+                                        .px_2()
+                                        .py(px(2.))
+                                        .rounded_sm()
+                                        .bg(status_background)
+                                        .text_xs()
+                                        .text_color(status_color)
+                                        .child(status),
+                                ),
+                            )
+                            .child(
                                 div()
+                                    .w(px(224.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .gap_1()
                                     .text_xs()
-                                    .text_color(
-                                        if matches!(run.state, sift_protocol::RunState::Failed) {
-                                            colors.danger
-                                        } else {
-                                            colors.muted_text
-                                        },
-                                    )
-                                    .child(format!("{:?}", run.state))
-                            }))
-                            .when_some(run_id.filter(|_| running), |row, run_id| {
-                                row.child(
-                                    Button::new(("cancel-automation", index), "Cancel")
-                                        .tone(ButtonTone::DangerGhost)
-                                        .disabled(shell.automations_loading)
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.cancel_automation(run_id, cx)
-                                        })),
-                                )
-                            })
-                            .when(!running, |row| {
-                                row.child(
-                                    Button::new(("start-automation", index), "Run")
-                                        .tone(ButtonTone::Accent)
-                                        .disabled(shell.automations_loading || requires_variables)
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.start_automation(configuration_id, revision, cx)
-                                        })),
-                                )
-                            })
+                                    .text_color(colors.disabled_text)
+                                    .when(selected, |hints| {
+                                        hints
+                                            .child(KeyBinding::new("Enter"))
+                                            .child("Edit")
+                                            .when(running, |hints| {
+                                                hints.child(KeyBinding::new("c")).child("Cancel")
+                                            })
+                                            .when(!running && !requires_variables, |hints| {
+                                                hints.child(KeyBinding::new("r")).child("Run")
+                                            })
+                                            .when(requires_variables, |hints| {
+                                                hints.child("Values required")
+                                            })
+                                    }),
+                            )
                     });
             div()
                 .flex()
@@ -305,22 +416,23 @@ pub(super) fn render_bottom_panel(
                 .flex_col()
                 .child(
                     div()
-                        .h(px(30.))
+                        .h(px(26.))
                         .px_3()
                         .flex()
                         .items_center()
-                        .justify_between()
-                        .child(format!(
-                            "{} configuration(s)",
-                            shell.automation_configurations.len()
-                        ))
+                        .gap_3()
+                        .border_b_1()
+                        .border_color(colors.subtle_border)
+                        .text_xs()
+                        .text_color(colors.disabled_text)
+                        .child(div().flex_1().min_w_0().child("CONFIGURATION"))
+                        .child(div().w(px(72.)).child("STEPS"))
+                        .child(div().w(px(104.)).child("STATUS"))
                         .child(
-                            Button::new("refresh-automations", "Refresh")
-                                .tone(ButtonTone::Ghost)
-                                .disabled(shell.automations_loading)
-                                .on_click(
-                                    cx.listener(|shell, _, _, cx| shell.request_automations(cx)),
-                                ),
+                            div()
+                                .w(px(224.))
+                                .text_right()
+                                .child("j/k SELECT · DOUBLE-CLICK EDIT"),
                         ),
                 )
                 .children(
@@ -337,7 +449,8 @@ pub(super) fn render_bottom_panel(
                             div()
                                 .p_4()
                                 .text_center()
-                                .child("No run configurations in this workspace."),
+                                .whitespace_normal()
+                                .child("No automations yet. Press n or choose New to create one."),
                         )
                     },
                 )

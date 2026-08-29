@@ -104,6 +104,8 @@ pub fn shell_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", DismissModal, context),
         KeyBinding::new("up", PaletteUp, context),
         KeyBinding::new("down", PaletteDown, context),
+        KeyBinding::new("ctrl-k", PaletteUp, Some("SiftModal")),
+        KeyBinding::new("ctrl-j", PaletteDown, Some("SiftModal")),
         KeyBinding::new("enter", PaletteConfirm, context),
         KeyBinding::new(
             &format!("{primary}-enter"),
@@ -171,6 +173,6 @@ mod tests {
 
     #[test]
     fn keymap_has_stable_action_coverage() {
-        assert_eq!(shell_key_bindings().len(), 17);
+        assert_eq!(shell_key_bindings().len(), 19);
     }
 }
