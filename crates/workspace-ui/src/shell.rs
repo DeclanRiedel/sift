@@ -18675,6 +18675,86 @@ impl WorkspaceShell {
         }
     }
 
+    /// Headless renderer benchmark hooks for the keyboard-driven surfaces.
+    /// Each one drives the same internal path the product keybinding does, so a
+    /// benchmark measures the real work rather than a reimplementation.
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
+    pub fn open_command_palette_benchmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_command_palette(&OpenCommandPalette, window, cx);
+    }
+
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
+    pub fn palette_step_benchmark(
+        &mut self,
+        down: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if down {
+            self.palette_down(&PaletteDown, window, cx);
+        } else {
+            self.palette_up(&PaletteUp, window, cx);
+        }
+    }
+
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
+    pub fn set_palette_filter_benchmark(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.query_input
+            .update(cx, |input, cx| input.set_text(text, cx));
+        self.palette_selected = 0;
+        cx.notify();
+    }
+
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
+    pub fn filtered_command_count_benchmark(&self, cx: &App) -> usize {
+        self.filtered_commands(cx).len()
+    }
+
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
+    pub fn seed_query_outline_benchmark(
+        &mut self,
+        statements: Vec<sift_protocol::SemanticStatement>,
+        symbols: Vec<sift_protocol::SemanticOutlineSymbol>,
+        cx: &mut Context<Self>,
+    ) {
+        self.query_outline_statements = statements;
+        self.query_outline_symbols = symbols;
+        self.query_outline_loading = false;
+        self.query_outline_error = None;
+        self.query_outline_selected = 0;
+        self.active_left_panel = LeftPanel::QueryOutline;
+        self.left_dock.presentation.open = true;
+        cx.notify();
+    }
+
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
+    pub fn step_query_outline_benchmark(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.move_query_outline_selection(delta, cx);
+    }
+
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
+    pub fn seed_change_ledger_benchmark(
+        &mut self,
+        entries: Vec<sift_protocol::ChangeLedgerEntry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.change_ledger_entries = entries;
+        self.change_ledger_loading = false;
+        self.change_ledger_error = None;
+        self.change_ledger_chain_verified = true;
+        self.modal = Some(Modal::ChangeLedger);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
     /// Headless renderer benchmark hook. Product code receives the same state
     /// through `ExecutorEvent::RepositoryStatusLoaded`.
     #[cfg(feature = "benchmark")]

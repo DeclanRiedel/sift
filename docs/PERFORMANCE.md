@@ -29,6 +29,12 @@ renderer submission rather than timing isolated model functions.
 | `retained_grid_navigation` | 10,000 retained rows × 20 columns | p95 draw ≤ 8.3 ms; offscreen cells remain unshaped |
 | `git_panel_first_frame` | 20,000 changed paths (adapter response cap) | record first materialization separately from steady refresh |
 | `git_panel_steady_refresh` | unchanged 20,000-path status | unchanged identities reuse flattened rows and diff metadata |
+| `command_palette_open` | full command registry, empty filter | p95 draw ≤ 8.3 ms |
+| `command_palette_arrow_navigation` | up/down through the filtered registry | p95 draw ≤ 8.3 ms; selection must not rebuild the registry |
+| `command_palette_filter_typing` | five-keystroke prefix over the registry | p95 draw ≤ 8.3 ms |
+| `query_outline_first_frame` | 2,000 statements + 4,000 symbols | record first materialization separately from navigation |
+| `query_outline_navigation` | j/k through the same outline | p95 draw ≤ 8.3 ms |
+| `change_ledger_first_frame` | 1,000 ledger entries | p95 draw ≤ 16.7 ms |
 
 Benchmarks are comparison gates, not portable absolute scores. Record CPU, GPU,
 display server, compositor, build revision, and benchmark output when publishing
@@ -120,3 +126,41 @@ Measure resident set size after warm-up, after an 8,000-line editor, after a
 bounded by the documented result window; closing tabs must release their row and
 shape caches. Publish steady-state and post-close RSS deltas with the frame
 baseline instead of committing machine-specific values here.
+
+### UI component survey
+
+Quick Criterion run on 2026-08-29, revision `ba63253`, 13th Gen Intel Core
+i7-13620H, GPUI headless Blade renderer. Ranked slowest first by draw p95.
+Quick mode includes Criterion warm-up and calibration frames and takes as few
+as one sample per benchmark, so treat these as a *relative* ranking, not
+absolute per-interaction latency. Use the full command for graduation evidence.
+
+| Benchmark | Draw p50 | Draw p95 | Budget overruns | Invalidations/frame |
+| --- | --- | --- | --- | --- |
+| `change_ledger_first_frame` | 7545.55 ms | 7545.55 ms | 905 | 2.00 |
+| `first_result_page` | 374.60 ms | 385.35 ms | 134 | 3.00 |
+| `retained_grid_navigation` | 186.12 ms | 187.30 ms | 66 | 1.00 |
+| `git_panel_first_frame` | 164.89 ms | 167.38 ms | 58 | 1.00 |
+| `git_panel_steady_refresh` | 163.71 ms | 165.94 ms | 57 | 1.00 |
+| `query_outline_first_frame` | 146.93 ms | 161.61 ms | 121 | 1.00 |
+| `query_outline_navigation` | 143.26 ms | 146.28 ms | 51 | 1.00 |
+| `command_palette_filter_typing` | 91.36 ms | 94.90 ms | 31 | 3.00 |
+| `command_palette_open` | 85.52 ms | 86.25 ms | 29 | 3.00 |
+| `command_palette_arrow_navigation` | 79.43 ms | 79.82 ms | 27 | 1.00 |
+| `vim_typing_large_document` | 9.86 ms | 12.93 ms | 6 | 1.50 |
+
+Two findings are structural rather than a matter of degree:
+
+- **The change ledger list is not virtualized.** Every other large list in the
+  shell renders through `uniform_list`; the ledger modal builds all rows eagerly
+  with `.children(rows)` inside a plain `overflow_y_scroll` container, so a
+  1,000-row ledger lays out 1,000 rows per frame. This is the single largest
+  number in the table by two orders of magnitude.
+- **Command palette selection rebuilds the command registry.** `palette_down`
+  calls `filtered_commands`, which rebuilds every `CommandSpec` — including each
+  command's disabled-reason evaluation — solely to clamp the selection index
+  against the list length. Arrow navigation should read a cached count.
+
+Outline navigation is comparable to outline first paint, which points the same
+way: `filtered_query_outline_entries` is recomputed per keystroke and again per
+`uniform_list` batch.

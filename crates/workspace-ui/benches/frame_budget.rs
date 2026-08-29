@@ -15,6 +15,9 @@ const FIRST_PAGE_ROWS: usize = 500;
 const RESULT_COLUMNS: usize = 20;
 const RETAINED_RESULT_ROWS: usize = 10_000;
 const GIT_STATUS_ROWS: usize = 20_000;
+const OUTLINE_STATEMENTS: usize = 2_000;
+const OUTLINE_SYMBOLS: usize = 4_000;
+const CHANGE_LEDGER_ROWS: usize = 1_000;
 
 fn large_sql() -> String {
     (0..LARGE_SQL_LINES)
@@ -100,6 +103,238 @@ fn vim_typing_large_document(cx: &mut BenchAppContext) {
             window.dispatch_keystroke(insert.clone(), cx);
             window.dispatch_keystroke(backspace.clone(), cx);
         });
+    });
+}
+
+fn outline_statements() -> Vec<sift_protocol::SemanticStatement> {
+    (0..OUTLINE_STATEMENTS)
+        .map(|index| {
+            let start = (index * 64) as u32;
+            sift_protocol::SemanticStatement {
+                statement_id: format!("statement-{index}"),
+                ordinal: index as u32,
+                full_range: sift_protocol::TextRange {
+                    start,
+                    end: start + 63,
+                },
+                executable_range: sift_protocol::TextRange {
+                    start,
+                    end: start + 63,
+                },
+                kind: sift_protocol::StatementKind::Query,
+                recovered: index % 97 == 0,
+            }
+        })
+        .collect()
+}
+
+fn outline_symbols() -> Vec<sift_protocol::SemanticOutlineSymbol> {
+    (0..OUTLINE_SYMBOLS)
+        .map(|index| {
+            let start = (index * 32) as u32;
+            sift_protocol::SemanticOutlineSymbol {
+                symbol_id: format!("symbol-{index}"),
+                statement_id: format!("statement-{}", index / 2),
+                kind: if index % 2 == 0 {
+                    sift_protocol::SemanticOutlineSymbolKind::Cte
+                } else {
+                    sift_protocol::SemanticOutlineSymbolKind::Object
+                },
+                name: format!("relation_{index}"),
+                range: sift_protocol::TextRange {
+                    start,
+                    end: start + 31,
+                },
+                definition_range: None,
+                alias: (index % 3 == 0).then(|| format!("alias_{index}")),
+                target: Some(format!("public.relation_{index}")),
+                usage_kind: sift_protocol::SqlUsageKind::Read,
+            }
+        })
+        .collect()
+}
+
+fn change_ledger_entries() -> Vec<sift_protocol::ChangeLedgerEntry> {
+    let at: chrono::DateTime<chrono::Utc> = "2026-08-29T12:00:00Z".parse().unwrap();
+    (0..CHANGE_LEDGER_ROWS)
+        .map(|index| sift_protocol::ChangeLedgerEntry {
+            id: index as i64,
+            at,
+            tenant_id: Some(1),
+            room_id: None,
+            connection_profile_id: Some(2),
+            database_target: Some("warehouse".into()),
+            operation: sift_protocol::ChangeLedgerOperation::GridUpdate,
+            affected_object: Some(format!("public.table_{index}")),
+            row_count: Some(index as i64),
+            sql_fingerprint: Some(format!("fingerprint-{index}")),
+            row_identity_fingerprint: None,
+            transaction_id: None,
+            correlation_id: None,
+            workspace_id: None,
+            workspace_revision: None,
+            checkpoint_id: None,
+            workspace_path: None,
+            git_commit: Some(format!("{index:040x}")),
+            source_workflow: "grid".into(),
+            authored_by: None,
+            approved_by: None,
+            executed_by: 7,
+            database_actor: None,
+            outcome: sift_protocol::ChangeLedgerOutcome::Committed,
+            result_code: None,
+            identity_source: sift_protocol::ChangeIdentitySource::Sift,
+            identity_confidence: sift_protocol::ChangeIdentityConfidence::Authenticated,
+            previous_hash: format!("{index:064x}"),
+            entry_hash: format!("{:064x}", index + 1),
+        })
+        .collect()
+}
+
+#[gpui::bench(fps = 120)]
+fn command_palette_open(cx: &mut BenchAppContext) {
+    let mut window = cx.add_empty_window();
+    let shell = window
+        .replace_root_view(|window, cx| {
+            WorkspaceShell::new(
+                PresentationState::default(),
+                UserSettings::default(),
+                None,
+                None,
+                window,
+                cx,
+            )
+        })
+        .unwrap();
+    cx.bench_renderer(shell, move |shell, window, cx| {
+        shell.open_command_palette_benchmark(window, cx);
+    });
+}
+
+#[gpui::bench(fps = 120)]
+fn command_palette_arrow_navigation(cx: &mut BenchAppContext) {
+    let mut window = cx.add_empty_window();
+    let shell = window
+        .replace_root_view(|window, cx| {
+            WorkspaceShell::new(
+                PresentationState::default(),
+                UserSettings::default(),
+                None,
+                None,
+                window,
+                cx,
+            )
+        })
+        .unwrap();
+    window.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_command_palette_benchmark(window, cx);
+        });
+    });
+    let mut down = true;
+    cx.bench_renderer(shell, move |shell, window, cx| {
+        shell.palette_step_benchmark(down, window, cx);
+        down = !down;
+    });
+}
+
+#[gpui::bench(fps = 120)]
+fn command_palette_filter_typing(cx: &mut BenchAppContext) {
+    let mut window = cx.add_empty_window();
+    let shell = window
+        .replace_root_view(|window, cx| {
+            WorkspaceShell::new(
+                PresentationState::default(),
+                UserSettings::default(),
+                None,
+                None,
+                window,
+                cx,
+            )
+        })
+        .unwrap();
+    window.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_command_palette_benchmark(window, cx);
+        });
+    });
+    let queries = ["q", "qu", "que", "quer", "query"];
+    let mut index = 0usize;
+    cx.bench_renderer(shell, move |shell, _, cx| {
+        shell.set_palette_filter_benchmark(queries[index % queries.len()], cx);
+        index += 1;
+    });
+}
+
+#[gpui::bench(fps = 120)]
+fn query_outline_first_frame(cx: &mut BenchAppContext) {
+    let statements = outline_statements();
+    let symbols = outline_symbols();
+    let mut window = cx.add_empty_window();
+    let shell = window
+        .replace_root_view(|window, cx| {
+            WorkspaceShell::new(
+                PresentationState::default(),
+                UserSettings::default(),
+                None,
+                None,
+                window,
+                cx,
+            )
+        })
+        .unwrap();
+    cx.bench_renderer(shell, move |shell, _, cx| {
+        shell.seed_query_outline_benchmark(statements.clone(), symbols.clone(), cx);
+    });
+}
+
+#[gpui::bench(fps = 120)]
+fn query_outline_navigation(cx: &mut BenchAppContext) {
+    let statements = outline_statements();
+    let symbols = outline_symbols();
+    let mut window = cx.add_empty_window();
+    let shell = window
+        .replace_root_view(|window, cx| {
+            WorkspaceShell::new(
+                PresentationState::default(),
+                UserSettings::default(),
+                None,
+                None,
+                window,
+                cx,
+            )
+        })
+        .unwrap();
+    window.update(|_, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.seed_query_outline_benchmark(statements, symbols, cx);
+        });
+    });
+    let mut down = true;
+    cx.bench_renderer(shell, move |shell, _, cx| {
+        shell.step_query_outline_benchmark(if down { 1 } else { -1 }, cx);
+        down = !down;
+    });
+}
+
+#[gpui::bench(fps = 120)]
+fn change_ledger_first_frame(cx: &mut BenchAppContext) {
+    let entries = change_ledger_entries();
+    let mut window = cx.add_empty_window();
+    let shell = window
+        .replace_root_view(|window, cx| {
+            WorkspaceShell::new(
+                PresentationState::default(),
+                UserSettings::default(),
+                None,
+                None,
+                window,
+                cx,
+            )
+        })
+        .unwrap();
+    cx.bench_renderer(shell, move |shell, window, cx| {
+        shell.seed_change_ledger_benchmark(entries.clone(), window, cx);
     });
 }
 
@@ -209,6 +444,12 @@ gpui::bench_group!(
     first_result_page,
     retained_grid_navigation,
     git_panel_first_frame,
-    git_panel_steady_refresh
+    git_panel_steady_refresh,
+    command_palette_open,
+    command_palette_arrow_navigation,
+    command_palette_filter_typing,
+    query_outline_first_frame,
+    query_outline_navigation,
+    change_ledger_first_frame
 );
 gpui::bench_main!(benches);
