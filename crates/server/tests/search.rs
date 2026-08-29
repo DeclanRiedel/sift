@@ -1,4 +1,4 @@
-//! HTTP integration tests for the Phase D search endpoints
+//! HTTP integration tests for the search endpoints
 //! (`/search/schema`, `/search/data`) over a `MockDriver`.
 
 use axum::body::{to_bytes, Body};

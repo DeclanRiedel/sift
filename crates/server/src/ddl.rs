@@ -1,4 +1,4 @@
-//! DDL generation (Phase D).
+//! DDL generation.
 //!
 //! Composes CREATE statements for a database object by calling
 //! existing `Driver` methods — no new trait method is required, so

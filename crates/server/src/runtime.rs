@@ -1,4 +1,4 @@
-//! Runtime identity and daemon singleton state for Phase H.
+//! Runtime identity and daemon singleton state.
 
 use crate::config::{Config, RuntimeMode};
 use anyhow::{bail, Context};

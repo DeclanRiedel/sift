@@ -73,7 +73,7 @@ pub struct Config {
     pub extensions: ExtensionsConfig,
     /// Operational timeouts.
     pub timeouts: TimeoutConfig,
-    /// Minimal Phase 0 auth hook.
+    /// Minimal auth hook.
     pub auth: AuthConfig,
     /// Local metadata store configuration.
     pub metadata: MetadataConfig,
@@ -81,7 +81,7 @@ pub struct Config {
     pub audit: AuditConfig,
     /// Result-size limits for synchronous responses.
     pub limits: LimitsConfig,
-    /// General authenticated API rate limits (Phase F).
+    /// General authenticated API rate limits.
     pub rate_limits: RateLimitsConfig,
     /// Default and operator-maximum per-tenant resource limits.
     pub tenant_limits: TenantLimitsConfig,

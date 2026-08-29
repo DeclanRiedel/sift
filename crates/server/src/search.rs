@@ -1,11 +1,10 @@
-//! Schema & data search (Phase D).
+//! Schema & data search.
 //!
 //! Schema search runs over an in-memory per-connection [`SearchIndex`] of
 //! object + column names using the `sift-completion` fuzzy matcher — no DB
 //! round-trip on the hot path. Data search is a bounded, parameterized live
 //! `LIKE` fan-out over a chosen scope. Composes over `Driver::schema` +
 //! `SessionStore::execute_http`; no new `Driver` method (ADR-017 preserved).
-//! See `docs/PLANS/schema-data-search.md` (ADR-024 candidate).
 
 use sift_completion::fuzzy::fuzzy_match;
 use sift_protocol::{

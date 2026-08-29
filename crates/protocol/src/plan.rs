@@ -1,9 +1,8 @@
-//! Execution plans (Phase D).
+//! Execution plans.
 //!
 //! A query's execution plan captured as an engine-neutral, typed [`PlanNode`]
-//! tree. Per the design in `docs/PLANS/execution-plans.md` (ADR-025): Postgres
-//! `EXPLAIN (FORMAT JSON)` and SQL Server showplan XML both normalize into the
-//! same tree — a small typed core plus an `extra` map for engine-specific
+//! tree. Postgres `EXPLAIN (FORMAT JSON)` and SQL Server showplan XML both
+//! normalize into the same tree — a small typed core plus an `extra` map for engine-specific
 //! attributes, plus the untouched raw plan on the response.
 //!
 //! Pure serde: capture + parsing live in the server (`crates/server/src/plan.rs`).

@@ -1,4 +1,4 @@
-//! Durable operation audit (Phase B reliability step 4).
+//! Durable operation audit.
 //!
 //! Drives the axum surface against a mock driver with a metadata store wired
 //! as the audit sink, and asserts that operations land in the durable

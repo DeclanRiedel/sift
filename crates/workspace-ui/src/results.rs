@@ -356,7 +356,7 @@ pub struct ResultData {
 }
 
 /// The distinct outcome states a result surface can be in. Each is a separate,
-/// non-collapsible UI state per the Phase M error/trust model.
+/// non-collapsible UI state per the error/trust model.
 #[derive(Debug, Clone)]
 pub enum ResultState {
     /// Nothing has been run yet.

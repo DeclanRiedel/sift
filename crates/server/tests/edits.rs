@@ -1,4 +1,4 @@
-//! HTTP integration tests for the Phase D inline-edit endpoints
+//! HTTP integration tests for the inline-edit endpoints
 //! (`/edits/preview`, `/edits/apply`). Boots axum over a `MockDriver` with a
 //! canned deep `SchemaSnapshot` and canned execute pages.
 

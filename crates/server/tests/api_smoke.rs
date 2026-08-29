@@ -566,10 +566,7 @@ async fn openapi_is_published() {
         "/v1/sessions/{id}/connections/{conn_id}/import/csv",
         "/v1/sessions/{id}/transactions/{tx_id}/preview",
     ] {
-        assert!(
-            body["paths"][path].is_object(),
-            "missing Phase D path {path}"
-        );
+        assert!(body["paths"][path].is_object(), "missing path {path}");
     }
     for schema in [
         "CompletionRequest",
@@ -596,7 +593,7 @@ async fn openapi_is_published() {
     ] {
         assert!(
             body["components"]["schemas"][schema].is_object(),
-            "missing Phase D schema {schema}"
+            "missing schema {schema}"
         );
     }
     assert!(body["components"]["schemas"]["ExecuteResponse"]["properties"]["rows"].is_object());
@@ -2941,7 +2938,7 @@ async fn room_scoped_execute_gates_on_submitter_role() {
     );
 }
 
-// --- Phase G collaborative document tests (Loro over the room WebSocket) ---
+// --- Collaborative document tests (Loro over the room WebSocket) ---
 
 /// Serve `state` on an ephemeral port and return its base URL plus the task.
 async fn serve_app(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
@@ -3111,7 +3108,6 @@ async fn viewer_synchronizes_but_cannot_submit() {
     state.auth.loopback_bypass = false;
     let metadata = state.metadata.as_ref().unwrap().clone();
     let (room, document) = seed_room_document(&metadata, "select 1");
-    // A viewer principal.
     let viewer = metadata.create_principal("test:v", "V", None).unwrap();
     metadata
         .upsert_tenant_membership(TenantId(1), viewer.id, MembershipRole::Member)

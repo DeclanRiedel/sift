@@ -8,8 +8,7 @@
 //! byte offset), a schema snapshot, and the engine, it returns a
 //! [`CompletionResponse`] with ranked candidates.
 //!
-//! Design notes are in `docs/PLANS/server-build-list-v2.md` (Phase D) and
-//! parallel the existing `crates/server/src/ddl.rs` server-side
+//! Design notes parallel the existing `crates/server/src/ddl.rs` server-side
 //! composition pattern — no new `Driver` trait method (ADR-017).
 
 use sift_protocol::completion::{CompletionRequest, CompletionResponse};

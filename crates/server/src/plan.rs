@@ -1,10 +1,10 @@
-//! Execution plans (Phase D).
+//! Execution plans.
 //!
 //! Captures a query's plan and normalizes it into the engine-neutral
 //! [`PlanNode`] tree. Postgres `EXPLAIN (FORMAT JSON)` parses via `serde_json`;
 //! SQL Server showplan XML parses via `roxmltree`. Composes over
 //! `SessionStore::execute_http` + the transaction path — no new `Driver`
-//! method (ADR-017 preserved). See `docs/PLANS/execution-plans.md` (ADR-025).
+//! method (ADR-017 preserved).
 //!
 //! ANALYZE safety: for a statement that is not a plain read, `analyze=true`
 //! runs inside a transaction that always rolls back, so DML side effects are

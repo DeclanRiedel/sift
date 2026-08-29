@@ -1,4 +1,4 @@
-//! Autocomplete orchestration (Phase D).
+//! Autocomplete orchestration.
 //!
 //! Server-side composition on top of the existing `Driver::schema()` +
 //! `SchemaCache` — no new `Driver` trait method (ADR-017), no protocol

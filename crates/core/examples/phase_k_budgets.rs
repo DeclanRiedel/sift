@@ -1,4 +1,4 @@
-//! Repeatable synthetic Phase K CPU/retained-byte budget harness.
+//! Repeatable synthetic CPU/retained-byte budget harness.
 //!
 //! Run with:
 //! `cargo run -p sift-core --release --example phase_k_budgets`

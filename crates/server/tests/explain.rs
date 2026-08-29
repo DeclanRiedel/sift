@@ -1,4 +1,4 @@
-//! HTTP integration tests for the Phase D execution-plan endpoint
+//! HTTP integration tests for the execution-plan endpoint
 //! (`/explain`) over a `MockDriver`.
 
 use axum::body::{to_bytes, Body};

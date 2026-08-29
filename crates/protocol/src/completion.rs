@@ -1,4 +1,4 @@
-//! Wire types for the autocomplete API (Phase D).
+//! Wire types for the autocomplete API.
 //!
 //! The server exposes `POST /v1/sessions/:id/connections/:conn_id/complete`
 //! taking [`CompletionRequest`] and returning [`CompletionResponse`].

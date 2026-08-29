@@ -1,4 +1,4 @@
-//! Per-request timeout + spawn discipline (Phase B reliability step 1).
+//! Per-request timeout + spawn discipline.
 //!
 //! These drive `SessionStore` against a `MockDriver` programmed to wedge, and
 //! assert that a slow/wedged driver call surfaces `Code::QueryTimedOut` within

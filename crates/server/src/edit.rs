@@ -1,11 +1,11 @@
-//! Inline-edit → DML generation (Phase D).
+//! Inline-edit → DML generation.
 //!
 //! Turns an [`EditSet`] of result-grid edits into minimal, parameterized
 //! `INSERT` / `UPDATE` / `DELETE` statements. Composes over `Driver::schema`
 //! (for row identity + column metadata) — no new `Driver` method, so the
 //! ADR-017 trait lock is undisturbed. The transactional apply lives in
 //! `SessionStore::apply_edits`; this module only *generates* SQL and never
-//! executes it. See `docs/PLANS/inline-edit-dml.md` (ADR-023 candidate).
+//! executes it.
 
 use sift_driver_api::{ConnHandle, Driver};
 use sift_protocol::{

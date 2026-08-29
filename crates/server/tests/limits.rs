@@ -1,4 +1,4 @@
-//! HTTP execute result caps (Phase B). The synchronous execute path bounds
+//! HTTP execute result caps. The synchronous execute path bounds
 //! both row count and total bytes so a large result cannot OOM the server;
 //! exceeding either returns `Code::ResultTooLarge`.
 

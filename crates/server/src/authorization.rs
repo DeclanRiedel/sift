@@ -1,4 +1,4 @@
-//! Central Phase F authorization evaluator (ADR-020).
+//! Central authorization evaluator (ADR-020).
 
 use sift_protocol::{ConnectionPolicy, OperationClassification, OperationKind, TenantRole};
 

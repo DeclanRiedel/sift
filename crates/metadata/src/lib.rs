@@ -871,7 +871,7 @@ impl MetadataStore {
         }
     }
 
-    /// Strip process-local Phase L state from an offline backup snapshot.
+    /// Strip process-local runtime state from an offline backup snapshot.
     /// Definitions and completed history remain durable, while restoring the
     /// archive cannot resume a checkout, credential, lease, artifact, or
     /// in-flight database operation.

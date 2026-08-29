@@ -1,4 +1,4 @@
-//! HTTP integration test for the Phase D autocomplete endpoint.
+//! HTTP integration test for the autocomplete endpoint.
 //!
 //! Boots the axum server against a `MockDriver` that returns a canned
 //! `SchemaSnapshot`, then exercises `POST /complete` end-to-end.

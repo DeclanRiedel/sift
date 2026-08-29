@@ -1,4 +1,4 @@
-//! Request correlation IDs (Phase B reliability step 5).
+//! Request correlation IDs.
 //!
 //! Every HTTP request and WebSocket connection carries a correlation ID —
 //! taken from the inbound `x-correlation-id` header or generated when absent.

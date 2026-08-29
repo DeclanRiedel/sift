@@ -1,4 +1,4 @@
-//! Bounded table and retained-result comparison wire contract (Phase K).
+//! Bounded table and retained-result comparison wire contract.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

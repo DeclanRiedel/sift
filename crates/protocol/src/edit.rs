@@ -1,9 +1,9 @@
-//! Inline-edit → DML generation (Phase D).
+//! Inline-edit → DML generation.
 //!
 //! Turns a set of result-grid edits (cell changes, new rows, deletes) into
 //! minimal, parameterized `INSERT` / `UPDATE` / `DELETE` statements with a
 //! preview step and a transactional apply that detects concurrent
-//! modification. See `docs/PLANS/inline-edit-dml.md` (ADR-023 candidate).
+//! modification.
 //!
 //! Pure serde: the actual SQL generation and transactional apply live in the
 //! server (`crates/server/src/edit.rs`), composed over existing `Driver`

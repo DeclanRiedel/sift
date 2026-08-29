@@ -142,7 +142,7 @@ struct SessionStoreInner {
     /// Per-spec schema cache with TTL + engine-specific invalidators.
     schema_cache: SchemaCache,
     /// Per-connection schema-search index (object + column names), built lazily
-    /// and cached with a TTL (Phase D schema search). Keyed by connection since
+    /// and cached with a TTL. Keyed by connection since
     /// search scope is the active connection.
     search_indexes: DashMap<ConnectionId, (Arc<crate::search::SearchIndex>, Instant)>,
     /// Process-local parsed SQL document state (ADR-032).
@@ -3282,7 +3282,7 @@ impl SessionStore {
             return Err(ApiError::Driver(
                 DriverError::new(
                     sift_protocol::Code::UnsupportedForEngine,
-                    "SQL Server native bulk format needs typed rows and is not part of the locked Phase A driver trait",
+                    "SQL Server native bulk format needs typed rows and is not part of the locked driver trait",
                 )
                 .with_engine(Engine::SqlServer),
             ));
@@ -5340,8 +5340,8 @@ impl SessionStore {
         Ok(f(&session))
     }
 
-    /// Reap sessions idle longer than `max_idle`. Phase 0: not wired into a
-    /// background task yet; tests call it directly.
+    /// Reap sessions idle longer than `max_idle`. Not wired into a background
+    /// task yet; tests call it directly.
     pub fn reap_idle(&self, max_idle: Duration) -> usize {
         let now = chrono::Utc::now();
         let cutoff = now

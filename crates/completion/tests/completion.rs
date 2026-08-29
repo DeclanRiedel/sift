@@ -1,6 +1,5 @@
 //! Public-API smoke tests for `sift-completion`. Covers the three
-//! contract points from `docs/PLANS/server-build-list-v2.md` Phase D:
-//! context detection (FROM slot, dotted qualifier), ranking order
+//! contract points: context detection (FROM slot, dotted qualifier), ranking order
 //! (prefix > substring), engine-specific identifier quoting.
 
 use sift_completion::{complete, detect_context, Dictionary};

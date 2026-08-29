@@ -1,4 +1,4 @@
-//! Server-side result export (Phase D).
+//! Server-side result export.
 //!
 //! Runs a SQL query on a driver connection and streams the result as
 //! bytes in CSV / TSV / JSON Lines / JSON Array format. The row

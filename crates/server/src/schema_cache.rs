@@ -1,5 +1,5 @@
 //! Per-spec schema cache with 60s TTL + engine-specific invalidators
-//! (ADR-lite; Phase C schema cache item).
+//! (ADR-lite).
 //!
 //! Key = `(spec_hash, canonical_scope_json)`; two connections to the
 //! same DB share cache entries. Invalidation paths:

@@ -1259,7 +1259,7 @@ mod tests {
                 .unwrap()
                 .len(),
             1,
-            "durable Phase L definitions survive backup and restore"
+            "durable definitions survive backup and restore"
         );
         let repository = restored
             .repository_binding_for_workspace(WorkspaceId(1), PrincipalId(1))

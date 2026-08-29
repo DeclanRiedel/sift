@@ -19,7 +19,7 @@ actions!(
     ]
 );
 
-/// Minimal single-line GPUI text input used to prove the Phase M input
+/// Minimal single-line GPUI text input used to prove the input
 /// boundary. The full SQL editor will build on the same input-handler contract.
 pub struct TextInput {
     id: usize,

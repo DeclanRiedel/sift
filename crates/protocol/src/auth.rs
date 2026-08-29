@@ -315,7 +315,7 @@ pub struct IssuedPasswordResetResponse {
     pub expires_at: DateTime<Utc>,
 }
 
-/// Claims carried by the Phase H SSH-proxy capability.
+/// Claims carried by the SSH-proxy capability.
 ///
 /// The capability is issued through the authenticated SSH agent path and
 /// exchanged once over the forwarded HTTP transport.

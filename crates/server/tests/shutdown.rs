@@ -1,4 +1,4 @@
-//! Graceful-shutdown drain gate (ADR-018, Phase B reliability step 2).
+//! Graceful-shutdown drain gate (ADR-018).
 //!
 //! Drives the axum surface via `tower::ServiceExt::oneshot` and asserts that
 //! once the drain gate flips, new work (sessions, connections) is refused with

@@ -1,8 +1,6 @@
 //! Curated engine-specific keyword and builtin-function tables.
 //!
-//! Lists are static and compile-time. They are the "engine-specific
-//! function/keyword tables" called out in the Phase D plan. Kept
-//! deliberately small — the common cases a typing user actually reaches
+//! Lists are static and compile-time. Kept deliberately small — the common cases a typing user actually reaches
 //! for, not exhaustive references. Extend as friction shows up.
 
 use sift_protocol::Engine;

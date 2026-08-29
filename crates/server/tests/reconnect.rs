@@ -1,4 +1,4 @@
-//! Connection recovery behavior (Phase B reliability step 6).
+//! Connection recovery behavior.
 //!
 //! Idempotent operations (ping, schema) transparently re-establish a broken
 //! connection and retry once; the retry boundary stops there — a persistent

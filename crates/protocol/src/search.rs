@@ -1,7 +1,6 @@
-//! Schema & data search (Phase D).
+//! Schema & data search.
 //!
-//! Two surfaces, per the design in `docs/PLANS/schema-data-search.md`
-//! (ADR-024 candidate):
+//! Two surfaces:
 //!
 //! - **Schema search**: fuzzy search over object + column *names*, served from
 //!   an in-memory per-connection index. Fast (no DB round-trip on the hot

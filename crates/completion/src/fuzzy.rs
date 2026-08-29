@@ -1,4 +1,4 @@
-//! Fuzzy subsequence matcher for schema search (Phase D).
+//! Fuzzy subsequence matcher for schema search.
 //!
 //! Command-palette style: `usml` matches `user_email`. A candidate matches
 //! only if every query char appears in order in the haystack (cheap
@@ -55,7 +55,6 @@ pub fn fuzzy_match(query: &str, haystack_lower: &str) -> Option<FuzzyMatch> {
             continue;
         }
         if ch == q[qi] {
-            // A match. Score it.
             score += BONUS_MATCH;
 
             // Word boundary: start of string, or right after a separator such
