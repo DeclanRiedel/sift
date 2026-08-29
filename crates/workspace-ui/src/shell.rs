@@ -15509,7 +15509,12 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn open_change_ledger(&mut self, git_commit: Option<String>, cx: &mut Context<Self>) {
+    fn open_change_ledger(
+        &mut self,
+        git_commit: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let profile_id = match self.connection_status {
             ConnectionStatus::Connected { profile_id, .. }
             | ConnectionStatus::Connecting { profile_id } => Some(profile_id),
@@ -15530,6 +15535,10 @@ impl WorkspaceShell {
         self.change_ledger_next_before_id = None;
         self.change_ledger_chain_verified = false;
         self.modal = Some(Modal::ChangeLedger);
+        // Take focus so the workspace escape binding can dismiss the modal. A
+        // toolbar click leaves focus wherever it was, and an unfocused window
+        // dispatches no action at all.
+        self.focus_handle.focus(window, cx);
         self.request_change_ledger(false, cx);
     }
 
@@ -23726,7 +23735,7 @@ impl WorkspaceShell {
                 self.modal = Some(Modal::WorkspaceHistory);
                 cx.notify();
             }
-            CommandId::OpenChangeLedger => self.open_change_ledger(None, cx),
+            CommandId::OpenChangeLedger => self.open_change_ledger(None, window, cx),
             CommandId::CompareWorkspaceDdl => self.prepare_workspace_ddl_migration(cx),
             CommandId::ReconcileWorkspaceProjection => self.open_workspace_reconcile(cx),
             CommandId::ToggleRepositoryGrouping => self.toggle_repository_grouping(cx),
@@ -25209,11 +25218,15 @@ impl WorkspaceShell {
                     )
                     .child(div().flex_1())
                     .child(
-                        Button::new("result-change-ledger", "Ledger")
-                            .tone(ButtonTone::Ghost)
-                            .on_click(
-                                cx.listener(|shell, _, _, cx| shell.open_change_ledger(None, cx)),
-                            ),
+                        IconButton::new(
+                            "result-change-ledger",
+                            IconName::Activity,
+                            "Database change ledger",
+                        )
+                        .tooltip("Database change ledger")
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            shell.open_change_ledger(None, window, cx)
+                        })),
                     ),
             )
             .child(match selected {
@@ -25660,10 +25673,16 @@ impl WorkspaceShell {
                 let mut left_actions = Vec::new();
                 let mut right_actions = Vec::new();
                 right_actions.push(
-                    Button::new("table-change-ledger", "Change ledger")
-                        .tone(ButtonTone::Ghost)
-                        .on_click(cx.listener(|shell, _, _, cx| shell.open_change_ledger(None, cx)))
-                        .into_any_element(),
+                    IconButton::new(
+                        "table-change-ledger",
+                        IconName::Activity,
+                        "Database change ledger",
+                    )
+                    .tooltip("Database change ledger")
+                    .on_click(cx.listener(|shell, _, window, cx| {
+                        shell.open_change_ledger(None, window, cx)
+                    }))
+                    .into_any_element(),
                 );
                 if editing {
                     let ddl_pending = designer.is_some_and(|designer| designer.pending);
@@ -34397,8 +34416,8 @@ impl WorkspaceShell {
                                 .child(
                                     Button::new("repository-commit-executions", "Database executions")
                                         .tone(ButtonTone::Ghost)
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.open_change_ledger(Some(executions_hash.clone()), cx)
+                                        .on_click(cx.listener(move |shell, _, window, cx| {
+                                            shell.open_change_ledger(Some(executions_hash.clone()), window, cx)
                                         })),
                                 )
                                 .child(
@@ -43023,6 +43042,29 @@ mod tests {
             CommandRegistry::definition(CommandId::OpenSavedQuery).language,
             "<leader> q o"
         );
+    }
+
+    #[gpui::test]
+    fn change_ledger_modal_closes_on_escape(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.update(|_, cx| {
+            cx.bind_keys([gpui::KeyBinding::new(
+                "escape",
+                DismissModal,
+                Some("SiftWorkspace"),
+            )]);
+        });
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_change_ledger(None, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.modal, Some(Modal::ChangeLedger))
+        });
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(&cx, |shell, _| assert!(shell.modal.is_none()));
     }
 
     #[gpui::test]
