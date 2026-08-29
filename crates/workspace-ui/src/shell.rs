@@ -6611,6 +6611,7 @@ pub struct WorkspaceShell {
     pending_repository_diff: Option<(sift_protocol::WorkspacePath, sift_protocol::VcsDiffSide)>,
     change_ledger_filter: sift_protocol::ChangeLedgerFilter,
     change_ledger_entries: Vec<sift_protocol::ChangeLedgerEntry>,
+    change_ledger_scroll_handle: UniformListScrollHandle,
     change_ledger_next_before_id: Option<i64>,
     change_ledger_chain_verified: bool,
     change_ledger_loading: bool,
@@ -7438,6 +7439,7 @@ impl WorkspaceShell {
             pending_repository_diff,
             change_ledger_filter: sift_protocol::ChangeLedgerFilter::default(),
             change_ledger_entries: Vec::new(),
+            change_ledger_scroll_handle: UniformListScrollHandle::new(),
             change_ledger_next_before_id: None,
             change_ledger_chain_verified: false,
             change_ledger_loading: false,
@@ -34273,19 +34275,7 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::ChangeLedger => {
-                    let rows = self.change_ledger_entries.iter().enumerate().map(|(index, entry)| {
-                        let object = entry.affected_object.as_deref().unwrap_or("database");
-                        let commit = entry.git_commit.as_deref().map(|oid| oid.chars().take(8).collect::<String>());
-                        div().id(("change-ledger-row", index)).px_2().py_2().flex().items_center().gap_3()
-                            .border_b_1().border_color(colors.subtle_border)
-                            .child(div().w(px(150.)).text_xs().text_color(colors.muted_text).child(entry.at.to_rfc3339()))
-                            .child(div().w(px(92.)).font_family("monospace").text_xs().child(format!("user:{}", entry.executed_by)))
-                            .child(div().w(px(118.)).child(format!("{:?}", entry.operation)))
-                            .child(div().flex_1().min_w_0().truncate().child(object.to_owned()))
-                            .child(div().w(px(70.)).text_xs().text_color(colors.muted_text).child(entry.row_count.map(|count| format!("{count} rows")).unwrap_or_default()))
-                            .child(div().w(px(74.)).font_family("monospace").text_xs().text_color(colors.muted_text).child(commit.unwrap_or_default()))
-                            .child(div().w(px(90.)).text_xs().child(format!("{:?}", entry.outcome)))
-                    });
+                    let ledger_count = self.change_ledger_entries.len();
                     let filter_summary = [
                         self.change_ledger_filter.tenant_id.map(|id| format!("tenant {id}")),
                         self.change_ledger_filter.connection_profile_id.map(|id| format!("connection {id}")),
@@ -34302,9 +34292,34 @@ impl WorkspaceShell {
                         .child(div().px_2().h(px(28.)).flex().items_center().gap_3().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(colors.muted_text)
                             .child(div().w(px(150.)).child("TIME")).child(div().w(px(92.)).child("EXECUTOR")).child(div().w(px(118.)).child("OPERATION"))
                             .child(div().flex_1().child("OBJECT")).child(div().w(px(70.)).child("ROWS")).child(div().w(px(74.)).child("COMMIT")).child(div().w(px(90.)).child("OUTCOME")))
-                        .child(div().id("change-ledger-list").flex_1().min_h_0().overflow_y_scroll().border_1().border_color(colors.subtle_border)
+                        .child(div().id("change-ledger-list").flex_1().min_h_0().flex().flex_col().border_1().border_color(colors.subtle_border)
                             .when(self.change_ledger_entries.is_empty() && !self.change_ledger_loading, |view| view.child(div().p_4().text_color(colors.muted_text).child("No matching database changes")))
-                            .children(rows))
+                            .child(uniform_list(
+                                "change-ledger-rows",
+                                ledger_count,
+                                cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                    let colors = cx.theme().colors;
+                                    range
+                                        .filter_map(|index| {
+                                            shell.change_ledger_entries.get(index).map(|entry| (index, entry))
+                                        })
+                                        .map(|(index, entry)| {
+                                            let object = entry.affected_object.as_deref().unwrap_or("database");
+                                            let commit = entry.git_commit.as_deref().map(|oid| oid.chars().take(8).collect::<String>());
+                                            div().id(("change-ledger-row", index)).h(px(34.)).px_2().flex().items_center().gap_3()
+                                                .border_b_1().border_color(colors.subtle_border)
+                                                .child(div().w(px(150.)).text_xs().text_color(colors.muted_text).child(entry.at.to_rfc3339()))
+                                                .child(div().w(px(92.)).font_family("monospace").text_xs().child(format!("user:{}", entry.executed_by)))
+                                                .child(div().w(px(118.)).child(format!("{:?}", entry.operation)))
+                                                .child(div().flex_1().min_w_0().truncate().child(object.to_owned()))
+                                                .child(div().w(px(70.)).text_xs().text_color(colors.muted_text).child(entry.row_count.map(|count| format!("{count} rows")).unwrap_or_default()))
+                                                .child(div().w(px(74.)).font_family("monospace").text_xs().text_color(colors.muted_text).child(commit.unwrap_or_default()))
+                                                .child(div().w(px(90.)).text_xs().child(format!("{:?}", entry.outcome)))
+                                                .into_any_element()
+                                        })
+                                        .collect()
+                                }),
+                            ).flex_1().min_h_0().w_full().track_scroll(&self.change_ledger_scroll_handle)))
                         .child(div().flex().justify_between()
                             .child(Button::new("more-change-ledger", if self.change_ledger_loading { "Loading…" } else { "Load older" }).tone(ButtonTone::Ghost)
                                 .disabled(self.change_ledger_loading || self.change_ledger_next_before_id.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.request_change_ledger(true, cx))))
