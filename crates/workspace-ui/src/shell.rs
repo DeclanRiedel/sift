@@ -28389,17 +28389,11 @@ impl WorkspaceShell {
                                                 .id(("query-outline-row", index))
                                                 .debug_selector(move || format!("query-outline-row-{index}"))
                                                 .h(px(52.))
-                                                .mx_2()
-                                                .px_2()
-                                                .py_1()
+                                                .w_full()
                                                 .flex()
-                                                .flex_col()
-                                                .justify_center()
-                                                .gap_1()
-                                                .rounded_sm()
+                                                .items_stretch()
                                                 .border_b_1()
                                                 .border_color(colors.subtle_border)
-                                                .when(contains_cursor, |row| row.border_l_2().border_color(colors.accent))
                                                 .when(selected, |row| row.bg(colors.active_surface))
                                                 .hover(|row| row.bg(colors.hovered_surface))
                                                 .on_mouse_down(MouseButton::Left, cx.listener(
@@ -28413,14 +28407,38 @@ impl WorkspaceShell {
                                                         cx.notify();
                                                     },
                                                 ))
-                                                .child(div().text_xs().text_color(tone).child(heading))
+                                                // The marker column is always present so row
+                                                // text keeps one x-origin; only its color changes.
+                                                .child(div().w(px(2.)).flex_none().when(
+                                                    contains_cursor,
+                                                    |marker| marker.bg(colors.accent),
+                                                ))
                                                 .child(
                                                     div()
+                                                        .flex_1()
                                                         .min_w_0()
-                                                        .truncate()
-                                                        .font_family("monospace")
-                                                        .text_color(colors.muted_text)
-                                                        .child(detail),
+                                                        .px_3()
+                                                        .py_1()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .justify_center()
+                                                        .gap_1()
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .text_xs()
+                                                                .text_color(tone)
+                                                                .child(heading),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .font_family("monospace")
+                                                                .text_color(colors.muted_text)
+                                                                .child(detail),
+                                                        ),
                                                 )
                                                 .into_any_element()
                                         })
@@ -42928,7 +42946,9 @@ mod tests {
         });
 
         cx.run_until_parked();
-        let footer = cx.debug_bounds("footer-console").expect("New Query footer");
+        let footer = cx
+            .debug_bounds("footer-new-query")
+            .expect("New Query footer");
         cx.simulate_click(footer.center(), Modifiers::default());
         workspace.read_with(&cx, |shell, cx| {
             assert_eq!(

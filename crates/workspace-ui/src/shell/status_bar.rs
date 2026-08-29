@@ -487,10 +487,10 @@ pub(super) fn render_status_bar(
                 })
                 .child(separator())
                 .child(
-                    div().debug_selector(|| "footer-console".into()).child(
+                    div().debug_selector(|| "footer-new-query".into()).child(
                         button(
-                            "footer-console",
-                            IconName::Terminal,
+                            "footer-new-query",
+                            IconName::Add,
                             "New query · <leader> q n".into(),
                             false,
                             None,
