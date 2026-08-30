@@ -99,6 +99,35 @@ struct GitOutput {
     truncated: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkAccess {
+    Local,
+    Remote,
+}
+
+impl From<bool> for NetworkAccess {
+    fn from(network: bool) -> Self {
+        if network {
+            Self::Remote
+        } else {
+            Self::Local
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdoutPolicy {
+    Complete,
+    AllowTruncated,
+}
+
+struct GitRunPolicy<'a> {
+    network: NetworkAccess,
+    environment: &'a [(OsString, OsString)],
+    stdout: StdoutPolicy,
+    input: Option<&'a [u8]>,
+}
+
 #[async_trait]
 pub trait VcsRepository: Send + Sync {
     fn adapter_id(&self) -> &'static str;
@@ -476,8 +505,17 @@ impl GitAdapter {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.run_with_output_policy(worktree, args, network, environment, false, None)
-            .await
+        self.run_with_policy(
+            worktree,
+            args,
+            GitRunPolicy {
+                network: NetworkAccess::from(network),
+                environment,
+                stdout: StdoutPolicy::Complete,
+                input: None,
+            },
+        )
+        .await
     }
 
     async fn run_truncated<I, S>(
@@ -491,8 +529,17 @@ impl GitAdapter {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.run_with_output_policy(worktree, args, network, environment, true, None)
-            .await
+        self.run_with_policy(
+            worktree,
+            args,
+            GitRunPolicy {
+                network: NetworkAccess::from(network),
+                environment,
+                stdout: StdoutPolicy::AllowTruncated,
+                input: None,
+            },
+        )
+        .await
     }
 
     async fn run_with_input<I, S>(
@@ -505,24 +552,30 @@ impl GitAdapter {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.run_with_output_policy(worktree, args, false, &[], false, Some(input))
-            .await
+        self.run_with_policy(
+            worktree,
+            args,
+            GitRunPolicy {
+                network: NetworkAccess::Local,
+                environment: &[],
+                stdout: StdoutPolicy::Complete,
+                input: Some(input),
+            },
+        )
+        .await
     }
 
-    async fn run_with_output_policy<I, S>(
+    async fn run_with_policy<I, S>(
         &self,
         worktree: &Path,
         args: I,
-        network: bool,
-        environment: &[(OsString, OsString)],
-        allow_truncated_stdout: bool,
-        input: Option<&[u8]>,
+        policy: GitRunPolicy<'_>,
     ) -> Result<GitOutput>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        if network && !self.network_enabled {
+        if policy.network == NetworkAccess::Remote && !self.network_enabled {
             return Err(GitAdapterError::NetworkDisabled);
         }
         let mut command = Command::new(&self.executable);
@@ -554,8 +607,8 @@ impl GitAdapter {
             .arg("-c")
             .arg("diff.external=")
             .args(args)
-            .envs(environment.iter().cloned())
-            .stdin(if input.is_some() {
+            .envs(policy.environment.iter().cloned())
+            .stdin(if policy.input.is_some() {
                 Stdio::piped()
             } else {
                 Stdio::null()
@@ -563,14 +616,14 @@ impl GitAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = command.spawn()?;
-        if let Some(input) = input {
+        if let Some(input) = policy.input {
             let mut stdin = child.stdin.take().ok_or(GitAdapterError::InvalidData)?;
             stdin.write_all(input).await?;
             stdin.shutdown().await?;
         }
         let stdout = child.stdout.take().ok_or(GitAdapterError::InvalidData)?;
         let stderr = child.stderr.take().ok_or(GitAdapterError::InvalidData)?;
-        let timeout = if network {
+        let timeout = if policy.network == NetworkAccess::Remote {
             self.network_timeout
         } else {
             self.local_timeout
@@ -585,11 +638,11 @@ impl GitAdapter {
         })
         .await
         .map_err(|_| GitAdapterError::TimedOut)??;
-        if (!allow_truncated_stdout && result.1 .1) || result.2 .1 {
+        if (policy.stdout == StdoutPolicy::Complete && result.1 .1) || result.2 .1 {
             return Err(GitAdapterError::OutputLimit);
         }
         if !result.0.success() {
-            if network {
+            if policy.network == NetworkAccess::Remote {
                 return Err(classify_network_error(&result.2 .0));
             }
             return Err(classify_local_error(result.0.code(), &result.2 .0));

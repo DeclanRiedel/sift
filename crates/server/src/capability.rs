@@ -36,18 +36,26 @@ pub fn evaluate(
         Some(transaction) => active.is_some_and(|state| state.transaction.tx_id == transaction),
         None => false,
     };
+    let scope = match (context.session, context.connection) {
+        (None, None) => CapabilityScope::Global,
+        (Some(_), None) => CapabilityScope::Session,
+        (Some(_), Some(_)) => CapabilityScope::Connection {
+            engine,
+            transaction: if selected_transaction {
+                TransactionContext::Selected
+            } else if active.is_some() {
+                TransactionContext::Active
+            } else {
+                TransactionContext::None
+            },
+        },
+        (None, Some(_)) => unreachable!("connection context was validated above"),
+    };
 
     Ok(OperationKind::ALL
         .into_iter()
         .map(|operation| {
-            let mut reason = unavailable_reason(
-                operation,
-                context.session.is_some(),
-                context.connection.is_some(),
-                engine,
-                active.is_some(),
-                selected_transaction,
-            );
+            let mut reason = unavailable_reason(operation, scope);
             if reason.is_none()
                 && driver
                     .as_ref()
@@ -84,14 +92,64 @@ fn active_transaction(
         .find(|state| Some(state.transaction.connection) == connection)
 }
 
-fn unavailable_reason(
-    operation: OperationKind,
-    has_session: bool,
-    has_connection: bool,
-    engine: Option<Engine>,
-    has_active_transaction: bool,
-    selected_transaction: bool,
-) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityScope {
+    Global,
+    Session,
+    Connection {
+        engine: Option<Engine>,
+        transaction: TransactionContext,
+    },
+}
+
+impl CapabilityScope {
+    fn has_session(self) -> bool {
+        !matches!(self, Self::Global)
+    }
+
+    fn has_connection(self) -> bool {
+        matches!(self, Self::Connection { .. })
+    }
+
+    fn engine(self) -> Option<Engine> {
+        match self {
+            Self::Connection { engine, .. } => engine,
+            Self::Global | Self::Session => None,
+        }
+    }
+
+    fn transaction(self) -> TransactionContext {
+        match self {
+            Self::Connection { transaction, .. } => transaction,
+            Self::Global | Self::Session => TransactionContext::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionContext {
+    None,
+    Active,
+    Selected,
+}
+
+impl TransactionContext {
+    fn active(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn selected(self) -> bool {
+        matches!(self, Self::Selected)
+    }
+}
+
+fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Option<&'static str> {
+    let has_session = scope.has_session();
+    let has_connection = scope.has_connection();
+    let engine = scope.engine();
+    let transaction = scope.transaction();
+    let has_active_transaction = transaction.active();
+    let selected_transaction = transaction.selected();
     use OperationKind::*;
     match operation {
         Authenticate => Some("available only before authentication"),
@@ -263,7 +321,7 @@ mod tests {
     #[test]
     fn all_operation_kinds_are_classified_without_context() {
         for operation in OperationKind::ALL {
-            let _ = unavailable_reason(operation, false, false, None, false, false);
+            let _ = unavailable_reason(operation, CapabilityScope::Global);
         }
     }
 }
