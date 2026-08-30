@@ -49,7 +49,9 @@ use crate::{
 
 mod app_bar;
 mod bottom_tools;
+mod catalog_diagram;
 mod commands;
+mod database_monitor;
 mod dock_layout;
 mod docks;
 mod items;
@@ -65,6 +67,8 @@ pub use items::{ItemDefinition, ItemRegistry, ItemRuntimeKind};
 pub use status_bar::StatusBar;
 
 use app_bar::AppBarMenu;
+use catalog_diagram::CatalogDiagramState;
+use database_monitor::DatabaseMonitorState;
 use pane_layout::SplitDirection;
 
 const PALETTE_VISIBLE_ROWS: usize = 10;
@@ -6811,9 +6815,7 @@ pub struct WorkspaceShell {
     room_document_sender: Option<tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>>,
     room_document_generations: HashMap<i64, u64>,
     running_queries: HashMap<u64, u64>,
-    database_processes: Vec<sift_protocol::DatabaseProcess>,
-    database_processes_request: RequestState,
-    selected_database_process: Option<i64>,
+    database_monitor: DatabaseMonitorState,
     transaction_state: TransactionUiState,
     savepoints: Vec<String>,
     next_savepoint: u64,
@@ -6876,8 +6878,7 @@ pub struct WorkspaceShell {
     pending_database_execution: Option<PendingDatabaseExecution>,
     pending_production_execution: Option<PendingProductionExecution>,
     pending_database_explain: Option<PendingDatabaseExplain>,
-    catalog_diagram: Option<Box<sift_protocol::CatalogDiagram>>,
-    catalog_diagram_request: RequestState,
+    catalog_diagram: CatalogDiagramState,
     catalog_diff: Option<Box<sift_protocol::SchemaDiff>>,
     catalog_migration_plan: Option<Box<sift_protocol::MigrationPlan>>,
     catalog_migration_pending: bool,
@@ -7658,9 +7659,7 @@ impl WorkspaceShell {
             room_document_sender: None,
             room_document_generations: HashMap::new(),
             running_queries: HashMap::new(),
-            database_processes: Vec::new(),
-            database_processes_request: RequestState::Idle,
-            selected_database_process: None,
+            database_monitor: DatabaseMonitorState::default(),
             transaction_state: TransactionUiState::Idle,
             savepoints: Vec::new(),
             next_savepoint: 1,
@@ -7716,8 +7715,7 @@ impl WorkspaceShell {
             pending_database_execution: None,
             pending_production_execution: None,
             pending_database_explain: None,
-            catalog_diagram: None,
-            catalog_diagram_request: RequestState::Idle,
+            catalog_diagram: CatalogDiagramState::default(),
             catalog_diff: None,
             catalog_migration_plan: None,
             catalog_migration_pending: false,
@@ -10716,43 +10714,17 @@ impl WorkspaceShell {
                 self.show_error_toast(message, cx);
             }
             ExecutorEvent::DatabaseProcessesLoaded(result) => {
-                match result {
-                    Ok(processes) => {
-                        if self.selected_database_process.is_some_and(|selected| {
-                            !processes
-                                .iter()
-                                .any(|process| process.process_id == selected)
-                        }) {
-                            self.selected_database_process = None;
-                        }
-                        self.database_processes = processes;
-                        self.database_processes_request.succeed();
-                    }
-                    Err(message) => self.database_processes_request.fail(message),
-                }
+                self.database_monitor.finish_loading(result);
                 cx.notify();
             }
             ExecutorEvent::CatalogDiagramLoaded(result) => {
-                match result {
-                    Ok(diagram) => {
-                        self.catalog_diagram = Some(diagram);
-                        self.catalog_diagram_request.succeed();
-                    }
-                    Err(message) => {
-                        self.catalog_diagram = None;
-                        self.catalog_diagram_request.fail(message);
-                    }
-                }
+                self.catalog_diagram.finish_loading(result);
                 cx.notify();
             }
             ExecutorEvent::DatabaseProcessTerminated { process_id, result } => {
                 match result {
                     Ok(true) => {
-                        self.database_processes
-                            .retain(|process| process.process_id != process_id);
-                        if self.selected_database_process == Some(process_id) {
-                            self.selected_database_process = None;
-                        }
+                        self.database_monitor.terminated(process_id);
                         self.show_success_toast(format!("Terminated process {process_id}"), cx);
                     }
                     Ok(false) => self
@@ -18287,19 +18259,19 @@ impl WorkspaceShell {
     }
 
     fn load_database_processes(&mut self, cx: &mut Context<Self>) {
-        if self.database_processes_request.loading() {
+        if self.database_monitor.request().loading() {
             return;
         }
         let Some(sender) = &self.executor_sender else {
-            self.database_processes_request
-                .fail("Database executor is unavailable");
+            self.database_monitor
+                .fail_loading("Database executor is unavailable");
             return;
         };
         if sender.send(ExecutorCommand::LoadDatabaseProcesses).is_ok() {
-            self.database_processes_request.start();
+            self.database_monitor.start_loading();
         } else {
-            self.database_processes_request
-                .fail("Database executor is unavailable");
+            self.database_monitor
+                .fail_loading("Database executor is unavailable");
         }
         cx.notify();
     }
@@ -18605,23 +18577,18 @@ impl WorkspaceShell {
     }
 
     fn select_database_process(&mut self, process_id: i64, cx: &mut Context<Self>) {
-        self.selected_database_process = Some(process_id);
+        self.database_monitor.select(process_id);
         cx.notify();
     }
 
     fn close_database_process_details(&mut self, cx: &mut Context<Self>) {
-        self.selected_database_process = None;
+        self.database_monitor.clear_selection();
         cx.notify();
     }
 
     fn copy_database_process_statement(&self, process_id: i64, cx: &mut Context<Self>) {
-        if let Some(statement) = self
-            .database_processes
-            .iter()
-            .find(|process| process.process_id == process_id)
-            .and_then(|process| process.statement.clone())
-        {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(statement));
+        if let Some(statement) = self.database_monitor.statement(process_id) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(statement.to_string()));
         }
     }
 
@@ -21336,7 +21303,7 @@ impl WorkspaceShell {
             return;
         };
         if sender.send(ExecutorCommand::LoadCatalogDiagram).is_ok() {
-            self.catalog_diagram_request.start();
+            self.catalog_diagram.start_loading();
             self.modal = Some(Modal::CatalogDiagram);
             cx.notify();
         }
@@ -21386,7 +21353,7 @@ impl WorkspaceShell {
     }
 
     fn catalog_diagram_mermaid(&self) -> Option<String> {
-        let diagram = self.catalog_diagram.as_ref()?;
+        let diagram = self.catalog_diagram.diagram()?;
         let node_ids = diagram
             .nodes
             .iter()
@@ -33927,7 +33894,7 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::CatalogDiagram => {
-                    let (summary, cards) = self.catalog_diagram.as_ref().map_or_else(
+                    let (summary, cards) = self.catalog_diagram.diagram().map_or_else(
                         || ("Catalog diagram".to_owned(), Vec::new()),
                         |diagram| {
                             let names = diagram
@@ -33992,11 +33959,12 @@ impl WorkspaceShell {
                                 .child(div().text_xs().text_color(colors.muted_text).child(summary)),
                         )
                         .children(
-                            self.catalog_diagram_request
+                            self.catalog_diagram
+                                .request()
                                 .error()
                                 .map(|message| ErrorBanner::new(message.to_string())),
                         )
-                        .when(self.catalog_diagram_request.loading(), |diagram| diagram.child(div().p_4().text_center().text_color(colors.muted_text).child("Loading catalog relationships…")))
+                        .when(self.catalog_diagram.request().loading(), |diagram| diagram.child(div().p_4().text_center().text_color(colors.muted_text).child("Loading catalog relationships…")))
                         .child(
                             div()
                                 .id("catalog-diagram-cards")
@@ -34014,9 +33982,9 @@ impl WorkspaceShell {
                                 .flex()
                                 .justify_end()
                                 .gap_2()
-                                .child(Button::new("copy-catalog-mermaid", "Copy Mermaid").debug_selector("copy-catalog-mermaid").tone(ButtonTone::Ghost).disabled(self.catalog_diagram.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.copy_catalog_diagram_mermaid(cx))))
-                                .child(Button::new("refresh-catalog-diagram", "Refresh").debug_selector("refresh-catalog-diagram").tone(ButtonTone::Neutral).loading(self.catalog_diagram_request.loading()).on_click(cx.listener(|shell, _, _, cx| shell.open_catalog_diagram(cx))))
-                                .child(Button::new("compare-catalog-diagram", "Compare to baseline…").debug_selector("compare-catalog-diagram").tone(ButtonTone::Accent).disabled(self.catalog_diagram_request.loading()).on_click(cx.listener(|shell, _, _, cx| shell.prepare_catalog_migration(cx))))
+                                .child(Button::new("copy-catalog-mermaid", "Copy Mermaid").debug_selector("copy-catalog-mermaid").tone(ButtonTone::Ghost).disabled(self.catalog_diagram.diagram().is_none()).on_click(cx.listener(|shell, _, _, cx| shell.copy_catalog_diagram_mermaid(cx))))
+                                .child(Button::new("refresh-catalog-diagram", "Refresh").debug_selector("refresh-catalog-diagram").tone(ButtonTone::Neutral).loading(self.catalog_diagram.request().loading()).on_click(cx.listener(|shell, _, _, cx| shell.open_catalog_diagram(cx))))
+                                .child(Button::new("compare-catalog-diagram", "Compare to baseline…").debug_selector("compare-catalog-diagram").tone(ButtonTone::Accent).disabled(self.catalog_diagram.request().loading()).on_click(cx.listener(|shell, _, _, cx| shell.prepare_catalog_migration(cx))))
                         )
                         .into_any_element()
                 }

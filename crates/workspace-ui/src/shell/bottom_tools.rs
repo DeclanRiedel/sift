@@ -184,11 +184,12 @@ pub(super) fn render_bottom_panel(
                     })
                     .children(savepoints)
             });
-            let processes = Arc::new(database_process_rows(&shell.database_processes));
+            let processes = Arc::new(database_process_rows(shell.database_monitor.processes()));
             let process_count = processes.len();
-            let process_details = shell.selected_database_process.and_then(|process_id| {
+            let process_details = shell.database_monitor.selected().and_then(|process_id| {
                 shell
-                    .database_processes
+                    .database_monitor
+                    .processes()
                     .iter()
                     .find(|process| process.process_id == process_id)
                     .cloned()
@@ -227,14 +228,14 @@ pub(super) fn render_bottom_panel(
                             div().w(px(84.)).flex().justify_end().child(
                                 Button::new(
                                     "refresh-database-processes",
-                                    if shell.database_processes_request.loading() {
+                                    if shell.database_monitor.request().loading() {
                                         "Loading…"
                                     } else {
                                         "Refresh"
                                     },
                                 )
                                 .tone(ButtonTone::Ghost)
-                                .disabled(shell.database_processes_request.loading())
+                                .disabled(shell.database_monitor.request().loading())
                                 .on_click(
                                     cx.listener(|shell, _, _, cx| {
                                         shell.load_database_processes(cx)
@@ -258,16 +259,16 @@ pub(super) fn render_bottom_panel(
                         .size_full(),
                     ),
                 )
-                .children(shell.database_processes_request.error().map(|message| {
+                .children(shell.database_monitor.request().error().map(|message| {
                     div()
                         .p_2()
                         .text_color(colors.danger)
                         .child(message.to_string())
                 }))
                 .when(
-                    shell.database_processes.is_empty()
-                        && !shell.database_processes_request.loading()
-                        && shell.database_processes_request.error().is_none(),
+                    shell.database_monitor.processes().is_empty()
+                        && !shell.database_monitor.request().loading()
+                        && shell.database_monitor.request().error().is_none(),
                     |panel| {
                         panel.child(
                             div()
