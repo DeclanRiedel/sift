@@ -25,7 +25,7 @@ use crate::editor::{
 use crate::repository::{RepositoryProjection, RepositoryRow};
 use crate::results::{
     render_value, ResultPlacement, ResultState, ResultTab, ResultsEvent, ResultsView,
-    StreamProgress,
+    StreamCompletion, StreamProgress, StreamUpdate,
 };
 use crate::settings::{
     EditorMode, KeyboardProfile, KeymapSettings, RepositoryGrouping, RepositoryPrimaryAction,
@@ -3372,10 +3372,12 @@ impl Pane {
         item_id: u64,
         page: crate::results::PreparedResultPage,
         cx: &mut Context<Self>,
-    ) -> Option<(StreamProgress, ResultState)> {
+    ) -> Option<StreamUpdate> {
         let result = self.results.get(&item_id)?;
-        let progress = result.update(cx, |result, cx| result.apply_stream_page(page, cx));
-        Some((progress, result.read(cx).state().clone()))
+        Some(result.update(cx, |result, cx| {
+            let progress = result.apply_stream_page(page, cx);
+            result.stream_update(progress)
+        }))
     }
 
     /// Discard the retained window so the held page can be consumed.
@@ -9011,13 +9013,13 @@ impl WorkspaceShell {
                         break;
                     }
                 }
-                let Some((progress, state)) = applied else {
+                let Some(update) = applied else {
                     // No surface owns this item any more; releasing the page
                     // lets the executor tear the stream down.
                     return;
                 };
-                self.status.execution = state.status_label();
-                if progress == StreamProgress::WindowFull {
+                self.status.execution = update.status_label;
+                if update.progress == StreamProgress::WindowFull {
                     // Hold the page — and with it the whole server stream —
                     // until the user chooses to move past the retained window.
                     self.held_result_pages.insert(
@@ -9032,11 +9034,16 @@ impl WorkspaceShell {
                     cx.notify();
                     return;
                 }
-                if progress == StreamProgress::Terminal {
+                if update.progress == StreamProgress::Terminal {
                     self.running_queries.remove(&item_id);
                     self.held_result_pages.remove(&item_id);
-                    self.replace_global_problems(item_id, &state, cx);
-                    self.record_result_reference(item_id, &state, Some(cursor_id.0), cx);
+                    let completion = update
+                        .completion
+                        .as_ref()
+                        .expect("terminal stream update has completion metadata");
+                    self.replace_stream_problems(item_id, completion, cx);
+                    let reference = completion.reference(cursor_id.0, epoch_millis());
+                    self.record_result_reference_value(item_id, reference, cx);
                 }
                 let _ = acknowledge.send(());
                 cx.notify();
@@ -11452,6 +11459,15 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         let reference = state.reference(cursor_id, epoch_millis());
+        self.record_result_reference_value(item_id, reference, cx);
+    }
+
+    fn record_result_reference_value(
+        &mut self,
+        item_id: u64,
+        reference: Option<ResultReference>,
+        cx: &mut Context<Self>,
+    ) {
         for pane in &self.panes {
             if pane.update(cx, |pane, _| {
                 pane.set_last_result(item_id, reference.clone())
@@ -11460,6 +11476,49 @@ impl WorkspaceShell {
             }
         }
         self.persist(cx);
+    }
+
+    fn replace_stream_problems(
+        &mut self,
+        item_id: u64,
+        completion: &StreamCompletion,
+        cx: &mut Context<Self>,
+    ) {
+        self.global_problems
+            .retain(|problem| problem.item_id != item_id || !problem.transient);
+        let title = self.query_item_title(item_id, cx);
+        let mut added = 0usize;
+        let mut push = |severity, message: String| {
+            self.global_problems.push(GlobalProblem {
+                item_id,
+                title: title.clone(),
+                severity,
+                message,
+                transient: true,
+            });
+            added = added.saturating_add(1);
+        };
+        match completion {
+            StreamCompletion::Ready { warnings, .. } => {
+                for warning in warnings {
+                    push(ProblemSeverity::Warning, warning.message.clone());
+                }
+            }
+            StreamCompletion::Failed(message) => {
+                push(ProblemSeverity::Error, message.clone());
+            }
+            StreamCompletion::TimedOut => {
+                push(ProblemSeverity::Error, "Query timed out".into());
+            }
+            StreamCompletion::OutcomeUnknown => {
+                push(ProblemSeverity::Error, "Query outcome is unknown".into());
+            }
+            StreamCompletion::Cancelled => {}
+        }
+        if added > 0 && !self.problems_tab_active(cx) {
+            self.unread_problems = self.unread_problems.saturating_add(added);
+        }
+        self.sync_global_problems_editor(cx);
     }
 
     fn editor_for_item(&self, item_id: u64, cx: &App) -> Option<Entity<QueryEditor>> {

@@ -643,6 +643,54 @@ pub enum StreamProgress {
     Terminal,
 }
 
+/// The small portion of a completed stream that the workspace chrome needs.
+/// Retained rows and rendered cells deliberately stay owned by `ResultsView`.
+#[derive(Debug, Clone)]
+pub(crate) enum StreamCompletion {
+    Ready {
+        row_count: u64,
+        affected_rows: Option<u64>,
+        has_more: bool,
+        warnings: Vec<DriverWarning>,
+    },
+    Failed(String),
+    Cancelled,
+    TimedOut,
+    OutcomeUnknown,
+}
+
+impl StreamCompletion {
+    pub(crate) fn reference(
+        &self,
+        cursor_id: u64,
+        completed_at_ms: u64,
+    ) -> Option<ResultReference> {
+        let Self::Ready {
+            row_count,
+            affected_rows,
+            has_more,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(ResultReference {
+            cursor_id: Some(cursor_id),
+            row_count: *row_count,
+            affected_rows: *affected_rows,
+            has_more: *has_more,
+            completed_at_ms,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StreamUpdate {
+    pub progress: StreamProgress,
+    pub status_label: String,
+    pub completion: Option<StreamCompletion>,
+}
+
 /// Raised for the owning query tab. The results surface never reaches the
 /// executor itself; it reports intent and the workspace dispatches.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1751,6 +1799,34 @@ impl ResultsView {
                 cx.notify();
                 StreamProgress::Terminal
             }
+        }
+    }
+
+    pub(crate) fn stream_update(&self, progress: StreamProgress) -> StreamUpdate {
+        let completion = (progress == StreamProgress::Terminal).then(|| match &self.state {
+            ResultState::Ready(data) => StreamCompletion::Ready {
+                row_count: data.rows.len() as u64,
+                affected_rows: data.affected_rows,
+                has_more: data.has_more,
+                warnings: data.warnings.clone(),
+            },
+            ResultState::Failed(message) | ResultState::Unavailable(message) => {
+                StreamCompletion::Failed(message.clone())
+            }
+            ResultState::Cancelled => StreamCompletion::Cancelled,
+            ResultState::TimedOut => StreamCompletion::TimedOut,
+            ResultState::OutcomeUnknown => StreamCompletion::OutcomeUnknown,
+            ResultState::Idle
+            | ResultState::Detached(_)
+            | ResultState::Pending
+            | ResultState::Streaming(_) => {
+                unreachable!("terminal stream progress must have a terminal result state")
+            }
+        });
+        StreamUpdate {
+            progress,
+            status_label: self.state.status_label(),
+            completion,
         }
     }
 
@@ -6110,16 +6186,19 @@ mod tests {
                 ),
                 StreamProgress::Consumed
             );
-            assert_eq!(
-                view.apply_stream_page(
-                    Page::Done {
-                        affected_rows: None,
-                        warnings: Vec::new(),
-                    },
-                    cx,
-                ),
-                StreamProgress::Terminal
+            let progress = view.apply_stream_page(
+                Page::Done {
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                },
+                cx,
             );
+            assert_eq!(progress, StreamProgress::Terminal);
+            let update = view.stream_update(progress);
+            let Some(StreamCompletion::Ready { row_count, .. }) = update.completion else {
+                panic!("terminal page should return compact completion metadata")
+            };
+            assert_eq!(row_count, 1);
             let ResultState::Ready(data) = view.state() else {
                 panic!("terminal page should complete the result")
             };
