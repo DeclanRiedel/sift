@@ -34,6 +34,7 @@ const COLUMN_RESIZE_HANDLE_WIDTH: f32 = 7.0;
 pub(crate) const ROW_NUMBER_WIDTH: f32 = 46.0;
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
 const HEADER_HEIGHT: f32 = 40.0;
+const INITIAL_GRID_VIEWPORT_WIDTH: f32 = 1_024.0;
 /// Hard UI retention bound. WebSocket ACK backpressure limits pages in flight;
 /// this separately prevents an arbitrarily large completed query from growing
 /// desktop memory without bound.
@@ -4028,14 +4029,22 @@ impl ResultsView {
     /// remaining cells keep their x-positions and the horizontal scrollbar
     /// keeps its range.
     ///
-    /// Before the first layout the viewport width is still zero; render every
-    /// column in that case rather than guess.
+    /// Before the first layout the viewport width is still zero. Use a bounded
+    /// provisional desktop viewport so the first result frame does not build
+    /// every column; the tracked scroll bounds replace it on the next frame.
     fn visible_column_span(&self, widths: &[f32]) -> (Range<usize>, f32, f32) {
         const COLUMN_OVERSCAN: usize = 1;
-        let viewport = f32::from(self.grid_scroll_handle.bounds().size.width);
-        if viewport <= 0.0 || widths.is_empty() {
-            return (0..widths.len(), 0.0, 0.0);
+        if widths.is_empty() {
+            return (0..0, 0.0, 0.0);
         }
+        let measured_viewport = f32::from(self.grid_scroll_handle.bounds().size.width);
+        let viewport = if measured_viewport > 0.0 {
+            measured_viewport
+        } else if self.placement == ResultPlacement::Right && !self.large_view {
+            self.right_width.max(MIN_COLUMN_WIDTH)
+        } else {
+            INITIAL_GRID_VIEWPORT_WIDTH
+        };
         let left = -f32::from(self.grid_scroll_handle.offset().x);
         let right = left + viewport;
         let mut first = widths.len();
@@ -7089,12 +7098,13 @@ mod tests {
             view.grid_scroll_handle
                 .set_offset(gpui::point(px(0.), px(0.)));
         });
+        let shaped_after_horizontal_navigation = view.read_with(&cx, |view, _| shaped_count(view));
 
         view.update(&mut cx, |view, cx| view.select_cell(0, 1, cx));
         cx.run_until_parked();
         assert_eq!(
             view.read_with(&cx, |view, _| shaped_count(view)),
-            initially_shaped,
+            shaped_after_horizontal_navigation,
             "selection repaint must reuse visible shaped lines"
         );
 
