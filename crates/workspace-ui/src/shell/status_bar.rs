@@ -328,7 +328,7 @@ pub(super) fn render_status_bar(
                                 .child(shell.status.database.clone()),
                         ),
                 )
-                .children(shell.transaction.as_ref().map(|_| {
+                .children(shell.transaction_state.transaction().map(|_| {
                     div()
                         .flex_none()
                         .flex()
@@ -338,7 +338,10 @@ pub(super) fn render_status_bar(
                         .child(
                             Button::new("footer-create-savepoint", "Savepoint")
                                 .tone(ButtonTone::Neutral)
-                                .disabled(shell.transaction_pending || shell.transaction_aborted)
+                                .disabled(
+                                    shell.transaction_state.is_pending()
+                                        || shell.transaction_state.is_aborted(),
+                                )
                                 .on_click(
                                     cx.listener(|shell, _, _, cx| shell.create_savepoint(cx)),
                                 ),
@@ -352,7 +355,7 @@ pub(super) fn render_status_bar(
                                 .child(
                                     Button::new("footer-rollback-savepoint", "Undo to")
                                         .tone(ButtonTone::Neutral)
-                                        .disabled(shell.transaction_pending)
+                                        .disabled(shell.transaction_state.is_pending())
                                         .on_click(cx.listener(|shell, _, _, cx| {
                                             shell.rollback_last_savepoint(cx)
                                         })),
@@ -360,7 +363,7 @@ pub(super) fn render_status_bar(
                                 .child(
                                     Button::new("footer-release-savepoint", "Release")
                                         .tone(ButtonTone::Ghost)
-                                        .disabled(shell.transaction_pending)
+                                        .disabled(shell.transaction_state.is_pending())
                                         .on_click(cx.listener(|shell, _, _, cx| {
                                             shell.release_last_savepoint(cx)
                                         })),
@@ -371,10 +374,9 @@ pub(super) fn render_status_bar(
                                 .debug_selector("footer-commit-transaction")
                                 .tone(ButtonTone::Accent)
                                 .disabled(
-                                    shell.transaction_pending
+                                    shell.transaction_state.is_pending()
                                         || !shell.running_queries.is_empty()
-                                        || shell.transaction_aborted
-                                        || shell.transaction_error.is_some(),
+                                        || shell.transaction_state.is_aborted(),
                                 )
                                 .on_click(cx.listener(|shell, _, _, cx| {
                                     shell.finish_transaction(true, cx)
@@ -384,7 +386,7 @@ pub(super) fn render_status_bar(
                             Button::new("footer-rollback-transaction", "Rollback")
                                 .debug_selector("footer-rollback-transaction")
                                 .tone(ButtonTone::DangerGhost)
-                                .disabled(shell.transaction_pending)
+                                .disabled(shell.transaction_state.is_pending())
                                 .on_click(cx.listener(|shell, _, _, cx| {
                                     shell.finish_transaction(false, cx)
                                 })),

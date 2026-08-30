@@ -101,7 +101,7 @@ pub(super) fn render_bottom_panel(
                 ),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {
-            let transaction = shell.transaction.as_ref().map(|transaction| {
+            let transaction = shell.transaction_state.transaction().map(|transaction| {
                 let savepoints =
                     shell
                         .savepoints
@@ -130,7 +130,7 @@ pub(super) fn render_bottom_panel(
                                             "rollback-savepoint-{rollback_name}"
                                         ))
                                         .tone(ButtonTone::Neutral)
-                                        .disabled(shell.transaction_pending)
+                                        .disabled(shell.transaction_state.is_pending())
                                         .on_click(cx.listener(move |shell, _, _, cx| {
                                             shell.rollback_to_savepoint(rollback_name.clone(), cx)
                                         })),
@@ -139,7 +139,7 @@ pub(super) fn render_bottom_panel(
                                     Button::new(("release-savepoint", index), "Release")
                                         .debug_selector(format!("release-savepoint-{release_name}"))
                                         .tone(ButtonTone::Ghost)
-                                        .disabled(shell.transaction_pending)
+                                        .disabled(shell.transaction_state.is_pending())
                                         .on_click(cx.listener(move |shell, _, _, cx| {
                                             shell.release_savepoint(release_name.clone(), cx)
                                         })),
@@ -171,7 +171,8 @@ pub(super) fn render_bottom_panel(
                                 Button::new("monitor-create-savepoint", "New savepoint")
                                     .tone(ButtonTone::Neutral)
                                     .disabled(
-                                        shell.transaction_pending || shell.transaction_aborted,
+                                        shell.transaction_state.is_pending()
+                                            || shell.transaction_state.is_aborted(),
                                     )
                                     .on_click(
                                         cx.listener(|shell, _, _, cx| shell.create_savepoint(cx)),

@@ -744,12 +744,25 @@ struct StagedEditHistory {
 }
 
 #[derive(Debug, Clone, Default)]
+enum HistoryLoadState {
+    #[default]
+    NotLoaded,
+    Loading,
+    Ready,
+    Failed(String),
+}
+
+impl HistoryLoadState {
+    fn is_loading(&self) -> bool {
+        matches!(self, Self::Loading)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 struct HistoryState {
     rows: Vec<QueryHistory>,
     next_cursor: Option<String>,
-    loading: bool,
-    error: Option<String>,
-    loaded: bool,
+    load_state: HistoryLoadState,
 }
 
 #[derive(Debug, Clone)]
@@ -765,8 +778,14 @@ struct InlineCellEdit {
     column: usize,
     input: Entity<TextInput>,
     _subscription: Subscription,
-    error: bool,
-    pending: bool,
+    submission: InlineEditSubmission,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineEditSubmission {
+    Editing,
+    Pending,
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -1027,9 +1046,12 @@ impl ResultsView {
 
     #[cfg(test)]
     pub(crate) fn inline_cell_edit_status(&self, cx: &App) -> Option<(String, bool)> {
-        self.inline_cell_edit
-            .as_ref()
-            .map(|edit| (edit.input.read(cx).text().to_string(), edit.pending))
+        self.inline_cell_edit.as_ref().map(|edit| {
+            (
+                edit.input.read(cx).text().to_string(),
+                edit.submission == InlineEditSubmission::Pending,
+            )
+        })
     }
 
     #[cfg(test)]
@@ -1405,8 +1427,7 @@ impl ResultsView {
             column,
             input,
             _subscription: subscription,
-            error: false,
-            pending: false,
+            submission: InlineEditSubmission::Editing,
         });
         self.editing_cell = Some((row, column));
         cx.notify();
@@ -1423,10 +1444,10 @@ impl ResultsView {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_inline_cell_edit_pending(&mut self, pending: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_inline_cell_edit_pending(&mut self, cx: &mut Context<Self>) {
         if let Some(edit) = self.inline_cell_edit.as_mut() {
-            if edit.pending != pending {
-                edit.pending = pending;
+            if edit.submission != InlineEditSubmission::Pending {
+                edit.submission = InlineEditSubmission::Pending;
                 cx.notify();
             }
         }
@@ -1444,8 +1465,7 @@ impl ResultsView {
 
     pub(crate) fn set_inline_cell_edit_error(&mut self, cx: &mut Context<Self>) {
         if let Some(edit) = self.inline_cell_edit.as_mut() {
-            edit.error = true;
-            edit.pending = false;
+            edit.submission = InlineEditSubmission::Failed;
             cx.notify();
         }
     }
@@ -1464,7 +1484,7 @@ impl ResultsView {
         let Some(edit) = self.inline_cell_edit.as_ref() else {
             return;
         };
-        if edit.pending {
+        if edit.submission == InlineEditSubmission::Pending {
             return;
         }
         cx.emit(ResultsEvent::SubmitCellEdit {
@@ -1877,18 +1897,19 @@ impl ResultsView {
         } else {
             tab
         };
-        if self.tab == ResultTab::History && !self.history.loaded && !self.history.loading {
+        if self.tab == ResultTab::History
+            && matches!(self.history.load_state, HistoryLoadState::NotLoaded)
+        {
             self.request_history(None, cx);
         }
         cx.notify();
     }
 
     fn request_history(&mut self, cursor: Option<String>, cx: &mut Context<Self>) {
-        if self.history.loading {
+        if self.history.load_state.is_loading() {
             return;
         }
-        self.history.loading = true;
-        self.history.error = None;
+        self.history.load_state = HistoryLoadState::Loading;
         cx.emit(ResultsEvent::HistoryRequested { cursor });
         cx.notify();
     }
@@ -1903,8 +1924,6 @@ impl ResultsView {
         append: bool,
         cx: &mut Context<Self>,
     ) {
-        self.history.loading = false;
-        self.history.loaded = true;
         match page {
             Ok(page) => {
                 if append {
@@ -1913,9 +1932,9 @@ impl ResultsView {
                     self.history.rows = page.items;
                 }
                 self.history.next_cursor = page.next_cursor;
-                self.history.error = None;
+                self.history.load_state = HistoryLoadState::Ready;
             }
-            Err(message) => self.history.error = Some(message),
+            Err(message) => self.history.load_state = HistoryLoadState::Failed(message),
         }
         cx.notify();
     }
@@ -4476,7 +4495,12 @@ impl ResultsView {
                                     .filter(|edit| {
                                         edit.row == row_index && edit.column == source_column
                                     })
-                                    .map(|edit| (edit.input.clone(), edit.error));
+                                    .map(|edit| {
+                                        (
+                                            edit.input.clone(),
+                                            edit.submission == InlineEditSubmission::Failed,
+                                        )
+                                    });
                                 let is_inline_edit = inline_edit.is_some();
                                 let cell = div()
                                     .id(("cell", display_row * column_count + display_column))
@@ -5138,7 +5162,7 @@ impl ResultsView {
 
     fn render_history(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = cx.theme().colors;
-        if self.history.loading && self.history.rows.is_empty() {
+        if self.history.load_state.is_loading() && self.history.rows.is_empty() {
             return div()
                 .size_full()
                 .flex()
@@ -5148,7 +5172,7 @@ impl ResultsView {
                 .child("Loading query history…")
                 .into_any_element();
         }
-        if let Some(error) = self.history.error.as_ref() {
+        if let HistoryLoadState::Failed(error) = &self.history.load_state {
             return div()
                 .size_full()
                 .flex()
@@ -5166,7 +5190,9 @@ impl ResultsView {
                 )
                 .into_any_element();
         }
-        if self.history.loaded && self.history.rows.is_empty() {
+        if matches!(self.history.load_state, HistoryLoadState::Ready)
+            && self.history.rows.is_empty()
+        {
             return div()
                 .size_full()
                 .flex()
@@ -5270,11 +5296,11 @@ impl ResultsView {
                     .child(
                         Button::new("refresh-query-history", "Refresh")
                             .tone(ButtonTone::Ghost)
-                            .disabled(self.history.loading)
+                            .disabled(self.history.load_state.is_loading())
                             .on_click(cx.listener(|view, _, _, cx| view.refresh_history(cx))),
                     ),
             )
-            .children(self.history.loading.then(|| {
+            .children(self.history.load_state.is_loading().then(|| {
                 div()
                     .ml_2()
                     .text_xs()
@@ -5483,7 +5509,7 @@ mod tests {
     fn history_pages_append_and_keep_the_next_cursor(cx: &mut TestAppContext) {
         let view = cx.update(|cx| cx.new(ResultsView::new));
         view.update(cx, |view, cx| view.select_tab(ResultTab::History, cx));
-        assert!(view.read_with(cx, |view, _| view.history.loading));
+        assert!(view.read_with(cx, |view, _| view.history.load_state.is_loading()));
 
         view.update(cx, |view, cx| {
             view.set_history_page(
@@ -5510,7 +5536,7 @@ mod tests {
             assert_eq!(view.history.rows.len(), 2);
             assert_eq!(view.history.rows[1].sql_text, "select 2");
             assert_eq!(view.history.next_cursor, None);
-            assert!(!view.history.loading);
+            assert!(!view.history.load_state.is_loading());
         });
     }
 
@@ -5566,11 +5592,16 @@ mod tests {
                 view.selected,
                 Some(GridSelection::Cell { row: 0, column: 0 })
             );
-            view.set_inline_cell_edit_pending(true, cx);
-            assert!(view.inline_cell_edit.as_ref().unwrap().pending);
+            view.set_inline_cell_edit_pending(cx);
+            assert_eq!(
+                view.inline_cell_edit.as_ref().unwrap().submission,
+                InlineEditSubmission::Pending
+            );
             view.set_inline_cell_edit_error(cx);
-            assert!(view.inline_cell_edit.as_ref().unwrap().error);
-            assert!(!view.inline_cell_edit.as_ref().unwrap().pending);
+            assert_eq!(
+                view.inline_cell_edit.as_ref().unwrap().submission,
+                InlineEditSubmission::Failed
+            );
             view.finish_inline_cell_edit(cx);
             assert!(view.inline_cell_edit.is_none());
             assert_eq!(view.editing_cell, None);
@@ -6484,7 +6515,7 @@ mod tests {
             view.read_with(&cx, |view, _| view.active_tab()),
             ResultTab::History
         );
-        assert!(view.read_with(&cx, |view, _| view.history.loading));
+        assert!(view.read_with(&cx, |view, _| view.history.load_state.is_loading()));
         let history_toolbar = cx
             .debug_bounds("result-history-toolbar")
             .expect("History toolbar");

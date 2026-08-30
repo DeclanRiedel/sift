@@ -18218,12 +18218,16 @@ async fn handle_ws(
                         )
                         .await?;
                         if let (Some(scope), Some(operation)) = (ledger_scope, change_kind) {
-                            let outcome = if terminal.failed {
-                                sift_protocol::ChangeLedgerOutcome::Failed
-                            } else if terminal.cancelled || transaction_id.is_some() {
-                                sift_protocol::ChangeLedgerOutcome::Partial
-                            } else {
-                                sift_protocol::ChangeLedgerOutcome::Committed
+                            let (outcome, result_code) = match terminal.outcome {
+                                StreamOutcome::Completed if transaction_id.is_none() => {
+                                    (sift_protocol::ChangeLedgerOutcome::Committed, None)
+                                }
+                                StreamOutcome::Completed | StreamOutcome::Cancelled => {
+                                    (sift_protocol::ChangeLedgerOutcome::Partial, None)
+                                }
+                                StreamOutcome::Failed { code } => {
+                                    (sift_protocol::ChangeLedgerOutcome::Failed, Some(code))
+                                }
                             };
                             if let Err(error) = record_database_change(
                                 &state,
@@ -18244,7 +18248,7 @@ async fn handle_ws(
                                     source_workflow: "direct_sql",
                                     approved_by: None,
                                     outcome,
-                                    result_code: terminal.result_code,
+                                    result_code,
                                     versioned_source: validated_source,
                                 },
                             )
@@ -18423,11 +18427,19 @@ enum AckOutcome {
 }
 
 #[derive(Debug, Default)]
+enum StreamOutcome {
+    #[default]
+    Completed,
+    Failed {
+        code: String,
+    },
+    Cancelled,
+}
+
+#[derive(Debug, Default)]
 struct StreamTerminal {
     affected_rows: Option<u64>,
-    result_code: Option<String>,
-    failed: bool,
-    cancelled: bool,
+    outcome: StreamOutcome,
 }
 
 async fn stream_pages_with_ack(
@@ -18470,7 +18482,7 @@ async fn stream_pages_with_ack(
             let Some(paced) = paced else {
                 let _ = sessions.cancel(session_id, connection, cursor_id).await;
                 sessions.cursor_remove(cursor_id);
-                outcome.cancelled = true;
+                outcome.outcome = StreamOutcome::Cancelled;
                 break;
             };
             if let Err(retry_after_secs) = paced {
@@ -18489,7 +18501,7 @@ async fn stream_pages_with_ack(
                 send_rate_limited(sender, None, retry_after_secs).await?;
                 let _ = sessions.cancel(session_id, connection, cursor_id).await;
                 sessions.cursor_remove(cursor_id);
-                outcome.cancelled = true;
+                outcome.outcome = StreamOutcome::Cancelled;
                 break;
             }
         }
@@ -18503,8 +18515,9 @@ async fn stream_pages_with_ack(
                 outcome.affected_rows = *affected_rows;
             }
             sift_protocol::Page::Error { error } => {
-                outcome.failed = true;
-                outcome.result_code = Some(error.code.to_string());
+                outcome.outcome = StreamOutcome::Failed {
+                    code: error.code.to_string(),
+                };
             }
             _ => {}
         }
@@ -18545,7 +18558,7 @@ async fn stream_pages_with_ack(
             }
             AckOutcome::Cancelled => {
                 sessions.cursor_remove(cursor_id);
-                outcome.cancelled = true;
+                outcome.outcome = StreamOutcome::Cancelled;
                 break;
             }
         }

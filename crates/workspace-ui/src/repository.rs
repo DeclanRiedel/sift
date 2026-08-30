@@ -66,6 +66,39 @@ pub(crate) enum RepositoryOperation {
     Network,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepositoryIndexAction {
+    Stage,
+    Unstage,
+}
+
+impl RepositoryIndexAction {
+    pub(crate) fn staged(self) -> bool {
+        matches!(self, Self::Stage)
+    }
+
+    fn operation(self) -> RepositoryOperation {
+        match self {
+            Self::Stage => RepositoryOperation::Stage,
+            Self::Unstage => RepositoryOperation::Unstage,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum RepositoryLoadState {
+    #[default]
+    NotLoaded,
+    Loading,
+    Loaded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepositoryActivity {
+    operation: RepositoryOperation,
+    request_id: Option<u64>,
+}
+
 impl RepositoryOperation {
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -122,12 +155,10 @@ pub(crate) struct RepositoryProjection {
     visible_rows: Arc<[RepositoryRow]>,
     selected_path: Option<WorkspacePath>,
     pending_paths: HashSet<WorkspacePath>,
-    loading: bool,
-    loaded: bool,
-    operation: Option<RepositoryOperation>,
+    load_state: RepositoryLoadState,
+    activity: Option<RepositoryActivity>,
     error: Option<RepositoryFailure>,
     next_request_id: u64,
-    current_request_id: Option<u64>,
     refresh_queued: bool,
     grouping: RepositoryGrouping,
     sort: RepositorySort,
@@ -169,11 +200,9 @@ impl RepositoryProjection {
         self.visible_rows = Arc::default();
         self.selected_path = None;
         self.pending_paths.clear();
-        self.loading = false;
-        self.loaded = false;
+        self.load_state = RepositoryLoadState::NotLoaded;
+        self.activity = None;
         self.error = None;
-        self.operation = None;
-        self.current_request_id = None;
         self.refresh_queued = false;
         self.diff_loading = false;
         self.current_diff_request_id = None;
@@ -277,8 +306,10 @@ impl RepositoryProjection {
         if self.mutation_in_flight() {
             return false;
         }
-        self.loading = true;
-        self.operation = Some(RepositoryOperation::Network);
+        self.activity = Some(RepositoryActivity {
+            operation: RepositoryOperation::Network,
+            request_id: None,
+        });
         self.error = None;
         true
     }
@@ -287,8 +318,7 @@ impl RepositoryProjection {
         &mut self,
         result: Result<Option<VcsRemoteResult>, String>,
     ) -> bool {
-        self.loading = false;
-        self.operation = None;
+        self.activity = None;
         match result {
             Ok(result) => {
                 self.remote_result = result;
@@ -404,17 +434,21 @@ impl RepositoryProjection {
         }
         let workspace_id = self.workspace_id?;
         let request_id = self.next_request();
-        self.loading = true;
-        self.operation = Some(RepositoryOperation::Refresh);
+        if self.load_state == RepositoryLoadState::NotLoaded {
+            self.load_state = RepositoryLoadState::Loading;
+        }
+        self.activity = Some(RepositoryActivity {
+            operation: RepositoryOperation::Refresh,
+            request_id: Some(request_id),
+        });
         self.error = None;
-        self.current_request_id = Some(request_id);
         Some((workspace_id, request_id))
     }
 
     pub(crate) fn begin_path_update(
         &mut self,
         paths: Vec<WorkspacePath>,
-        staged: bool,
+        action: RepositoryIndexAction,
     ) -> Option<(i64, i64, u64, u64, Vec<WorkspacePath>)> {
         if self.mutation_in_flight() || paths.is_empty() {
             return None;
@@ -425,14 +459,11 @@ impl RepositoryProjection {
         let binding_revision = status.binding_revision;
         let request_id = self.next_request();
         self.pending_paths.extend(paths.iter().cloned());
-        self.loading = true;
-        self.operation = Some(if staged {
-            RepositoryOperation::Stage
-        } else {
-            RepositoryOperation::Unstage
+        self.activity = Some(RepositoryActivity {
+            operation: action.operation(),
+            request_id: Some(request_id),
         });
         self.error = None;
-        self.current_request_id = Some(request_id);
         Some((
             workspace_id,
             binding_id,
@@ -451,10 +482,11 @@ impl RepositoryProjection {
         let binding_id = status.binding_id.0;
         let binding_revision = status.binding_revision;
         let request_id = self.next_request();
-        self.loading = true;
-        self.operation = Some(RepositoryOperation::Commit);
+        self.activity = Some(RepositoryActivity {
+            operation: RepositoryOperation::Commit,
+            request_id: Some(request_id),
+        });
         self.error = None;
-        self.current_request_id = Some(request_id);
         Some((workspace_id, binding_id, binding_revision, request_id))
     }
 
@@ -468,10 +500,11 @@ impl RepositoryProjection {
         let binding_revision = status.binding_revision;
         let head = status.head_oid.clone()?;
         let request_id = self.next_request();
-        self.loading = true;
-        self.operation = Some(RepositoryOperation::Uncommit);
+        self.activity = Some(RepositoryActivity {
+            operation: RepositoryOperation::Uncommit,
+            request_id: Some(request_id),
+        });
         self.error = None;
-        self.current_request_id = Some(request_id);
         Some((workspace_id, binding_id, binding_revision, request_id, head))
     }
 
@@ -491,7 +524,7 @@ impl RepositoryProjection {
     pub(crate) fn begin_hunk_update(
         &mut self,
         path: WorkspacePath,
-        staged: bool,
+        action: RepositoryIndexAction,
     ) -> Option<(i64, i64, u64, u64)> {
         if self.mutation_in_flight() || self.diff_loading {
             return None;
@@ -502,14 +535,11 @@ impl RepositoryProjection {
         let binding_revision = status.binding_revision;
         let request_id = self.next_request();
         self.pending_paths.insert(path);
-        self.loading = true;
-        self.operation = Some(if staged {
-            RepositoryOperation::Stage
-        } else {
-            RepositoryOperation::Unstage
+        self.activity = Some(RepositoryActivity {
+            operation: action.operation(),
+            request_id: Some(request_id),
         });
         self.error = None;
-        self.current_request_id = Some(request_id);
         Some((workspace_id, binding_id, binding_revision, request_id))
     }
 
@@ -535,10 +565,11 @@ impl RepositoryProjection {
         let binding_revision = status.binding_revision;
         let request_id = self.next_request();
         self.pending_paths.insert(path);
-        self.loading = true;
-        self.operation = Some(operation);
+        self.activity = Some(RepositoryActivity {
+            operation,
+            request_id: Some(request_id),
+        });
         self.error = None;
-        self.current_request_id = Some(request_id);
         Some((workspace_id, binding_id, binding_revision, request_id))
     }
 
@@ -622,14 +653,14 @@ impl RepositoryProjection {
         request_id: u64,
         result: Result<Option<VcsStatus>, String>,
     ) -> bool {
-        if self.workspace_id != Some(workspace_id) || self.current_request_id != Some(request_id) {
+        if self.workspace_id != Some(workspace_id)
+            || self.activity.and_then(|activity| activity.request_id) != Some(request_id)
+        {
             return false;
         }
-        self.loading = false;
-        self.operation = None;
-        self.loaded = true;
+        self.activity = None;
+        self.load_state = RepositoryLoadState::Loaded;
         self.pending_paths.clear();
-        self.current_request_id = None;
         match result {
             Ok(status) => {
                 let mut rebuild_rows = false;
@@ -674,12 +705,10 @@ impl RepositoryProjection {
     }
 
     pub(crate) fn fail_to_send(&mut self, request_id: u64, message: impl Into<String>) {
-        if self.current_request_id == Some(request_id) {
-            self.loading = false;
-            self.operation = None;
-            self.loaded = true;
+        if self.activity.and_then(|activity| activity.request_id) == Some(request_id) {
+            self.activity = None;
+            self.load_state = RepositoryLoadState::Loaded;
             self.pending_paths.clear();
-            self.current_request_id = None;
             self.error = Some(classify_failure(message.into()));
         }
     }
@@ -823,11 +852,11 @@ impl RepositoryProjection {
     }
 
     fn mutation_in_flight(&self) -> bool {
-        self.loading || self.shared_operation.is_some()
+        self.activity.is_some() || self.shared_operation.is_some()
     }
 
     pub(crate) fn loaded(&self) -> bool {
-        self.loaded
+        self.load_state == RepositoryLoadState::Loaded
     }
 
     pub(crate) fn error(&self) -> Option<&RepositoryFailure> {
@@ -835,7 +864,7 @@ impl RepositoryProjection {
     }
 
     pub(crate) fn operation(&self) -> Option<RepositoryOperation> {
-        self.operation
+        self.activity.map(|activity| activity.operation)
     }
 
     pub(crate) fn is_path_pending(&self, path: &WorkspacePath) -> bool {
@@ -1145,7 +1174,10 @@ mod tests {
             )])))),
         );
         let operation = projection
-            .begin_path_update(vec![WorkspacePath::new("query.sql").unwrap()], true)
+            .begin_path_update(
+                vec![WorkspacePath::new("query.sql").unwrap()],
+                RepositoryIndexAction::Stage,
+            )
             .unwrap();
         assert!(projection.is_path_pending(&operation.4[0]));
 

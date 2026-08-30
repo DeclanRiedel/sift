@@ -23,7 +23,7 @@ use crate::editor::{
     EditorEvent, EditorKeymap, EditorLanguage, JsonSchema, QueryDocument, QueryEditor,
     SemanticOutcome, SemanticRequestKind, VimMode, EDITOR_GUTTER_WIDTH,
 };
-use crate::repository::{RepositoryProjection, RepositoryRow};
+use crate::repository::{RepositoryIndexAction, RepositoryProjection, RepositoryRow};
 use crate::results::{
     render_value, ResultPlacement, ResultState, ResultTab, ResultsEvent, ResultsView,
     StreamCompletion, StreamProgress, StreamUpdate,
@@ -954,7 +954,12 @@ fn shell_repository_row_menu(
             )
             .on_click(cx.listener(move |shell, _, _, cx| {
                 shell.repository_row_menu = None;
-                shell.set_repository_paths_staged(vec![stage_path.clone()], !staged, cx);
+                let action = if staged {
+                    RepositoryIndexAction::Unstage
+                } else {
+                    RepositoryIndexAction::Stage
+                };
+                shell.set_repository_paths_staged(vec![stage_path.clone()], action, cx);
             })),
         )
         .child(
@@ -2009,6 +2014,101 @@ struct RepositoryDiffItemState {
     side: sift_protocol::VcsDiffSide,
     diff: Arc<sift_protocol::VcsDiff>,
     show_whitespace: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepositorySetupMode {
+    BindExisting,
+    Initialize,
+    Clone,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum HunkNavigation {
+    #[default]
+    Stay,
+    Next,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryHistoryAction {
+    Open,
+    Run,
+    Save,
+}
+
+#[derive(Debug, Clone, Default)]
+enum TransactionUiState {
+    #[default]
+    Idle,
+    Pending {
+        transaction: Option<sift_protocol::TransactionInfo>,
+        condition: sift_protocol::TransactionCondition,
+    },
+    Active {
+        transaction: sift_protocol::TransactionInfo,
+        condition: sift_protocol::TransactionCondition,
+    },
+    Failed {
+        transaction: Option<sift_protocol::TransactionInfo>,
+        condition: sift_protocol::TransactionCondition,
+        _message: String,
+    },
+}
+
+impl TransactionUiState {
+    fn transaction(&self) -> Option<&sift_protocol::TransactionInfo> {
+        match self {
+            Self::Idle => None,
+            Self::Pending { transaction, .. } | Self::Failed { transaction, .. } => {
+                transaction.as_ref()
+            }
+            Self::Active { transaction, .. } => Some(transaction),
+        }
+    }
+
+    fn condition(&self) -> sift_protocol::TransactionCondition {
+        match self {
+            Self::Idle => sift_protocol::TransactionCondition::Active,
+            Self::Pending { condition, .. }
+            | Self::Active { condition, .. }
+            | Self::Failed { condition, .. } => *condition,
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending { .. })
+    }
+
+    fn is_aborted(&self) -> bool {
+        self.condition() == sift_protocol::TransactionCondition::Failed
+            || matches!(self, Self::Failed { .. })
+    }
+
+    fn begin_pending(&mut self) {
+        *self = Self::Pending {
+            transaction: self.transaction().cloned(),
+            condition: self.condition(),
+        };
+    }
+
+    fn finish_pending(&mut self) {
+        *self = match self.transaction().cloned() {
+            Some(transaction) => Self::Active {
+                transaction,
+                condition: self.condition(),
+            },
+            None => Self::Idle,
+        };
+    }
+
+    fn fail(&mut self, message: String) {
+        *self = Self::Failed {
+            transaction: self.transaction().cloned(),
+            condition: self.condition(),
+            _message: message,
+        };
+    }
 }
 
 /// Shell → executor. The executor owns the SDK client, session, and
@@ -6626,7 +6726,7 @@ pub struct WorkspaceShell {
     manual_conflict_path: Option<sift_protocol::WorkspacePath>,
     manual_conflict_opened: bool,
     repository_diff_prefix: Option<isize>,
-    repository_hunk_move_next: bool,
+    repository_hunk_navigation: HunkNavigation,
     app_bar_expanded: bool,
     app_bar_menu: Option<AppBarMenu>,
     toasts: Vec<Toast>,
@@ -6682,10 +6782,7 @@ pub struct WorkspaceShell {
     database_processes_loading: bool,
     database_processes_error: Option<String>,
     selected_database_process: Option<i64>,
-    transaction: Option<sift_protocol::TransactionInfo>,
-    transaction_pending: bool,
-    transaction_aborted: bool,
-    transaction_error: Option<String>,
+    transaction_state: TransactionUiState,
     savepoints: Vec<String>,
     next_savepoint: u64,
     pending_connection_change: Option<PendingConnectionChange>,
@@ -7480,7 +7577,7 @@ impl WorkspaceShell {
             manual_conflict_path: None,
             manual_conflict_opened: false,
             repository_diff_prefix: None,
-            repository_hunk_move_next: false,
+            repository_hunk_navigation: HunkNavigation::Stay,
             app_bar_expanded: false,
             app_bar_menu: None,
             toasts: Vec::new(),
@@ -7534,10 +7631,7 @@ impl WorkspaceShell {
             database_processes_loading: false,
             database_processes_error: None,
             selected_database_process: None,
-            transaction: None,
-            transaction_pending: false,
-            transaction_aborted: false,
-            transaction_error: None,
+            transaction_state: TransactionUiState::Idle,
             savepoints: Vec::new(),
             next_savepoint: 1,
             pending_connection_change: None,
@@ -7793,9 +7887,9 @@ impl WorkspaceShell {
                 self.connection_status,
                 ConnectionStatus::Connected { .. }
             ),
-            transaction_active: self.transaction.is_some(),
-            transaction_pending: self.transaction_pending,
-            transaction_aborted: self.transaction_aborted || self.transaction_error.is_some(),
+            transaction_active: self.transaction_state.transaction().is_some(),
+            transaction_pending: self.transaction_state.is_pending(),
+            transaction_aborted: self.transaction_state.is_aborted(),
             git_workspace_loaded: self.repository.status().is_some(),
             git_path_selected: self.repository.selected_entry().is_some(),
             git_operation_active: self
@@ -8591,10 +8685,7 @@ impl WorkspaceShell {
                     status,
                     ConnectionStatus::Disconnected | ConnectionStatus::Failed { .. }
                 ) {
-                    self.transaction = None;
-                    self.transaction_pending = false;
-                    self.transaction_aborted = false;
-                    self.transaction_error = None;
+                    self.transaction_state = TransactionUiState::Idle;
                     self.status.transaction = "TX: None".into();
                     self.connection_schema = ConnectionSchemaState::Unavailable;
                     self.operation_capabilities.clear();
@@ -8686,23 +8777,26 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::TransactionChanged(result) => {
-                self.transaction_pending = false;
                 match result {
                     Ok(transaction) => {
-                        self.transaction = transaction;
-                        if self.transaction.is_none() {
+                        if transaction.is_none() {
                             self.savepoints.clear();
                             self.next_savepoint = 1;
                         }
-                        self.transaction_aborted = false;
-                        self.transaction_error = None;
-                        self.status.transaction = self.transaction.as_ref().map_or_else(
+                        self.transaction_state =
+                            transaction.map_or(TransactionUiState::Idle, |transaction| {
+                                TransactionUiState::Active {
+                                    transaction,
+                                    condition: sift_protocol::TransactionCondition::Active,
+                                }
+                            });
+                        self.status.transaction = self.transaction_state.transaction().map_or_else(
                             || "TX: None".into(),
                             |transaction| format!("TX: {}", transaction.tx_id),
                         );
                     }
                     Err(message) => {
-                        self.transaction_error = Some(message.clone());
+                        self.transaction_state.fail(message.clone());
                         self.status.transaction = "TX: Failed".into();
                         self.record_runtime_error(None, "Transaction", message.clone(), cx);
                         self.show_error_toast(message, cx);
@@ -8715,9 +8809,9 @@ impl WorkspaceShell {
                 name,
                 result,
             } => {
-                self.transaction_pending = false;
                 match result {
                     Ok(()) => {
+                        self.transaction_state.finish_pending();
                         if action == "created" {
                             self.savepoints.push(name.clone());
                         } else if action == "released" {
@@ -8726,7 +8820,7 @@ impl WorkspaceShell {
                         self.show_success_toast(format!("Savepoint {name} {action}"), cx);
                     }
                     Err(message) => {
-                        self.transaction_error = Some(message.clone());
+                        self.transaction_state.fail(message.clone());
                         self.record_runtime_error(None, "Savepoint", message.clone(), cx);
                         self.show_error_toast(message, cx);
                     }
@@ -8859,23 +8953,23 @@ impl WorkspaceShell {
             ExecutorEvent::TransactionStateRefreshed(result) => {
                 match result {
                     Ok(Some(state)) => {
-                        self.transaction = Some(state.transaction);
-                        self.transaction_aborted =
+                        let aborted =
                             state.condition == sift_protocol::TransactionCondition::Failed;
-                        self.transaction_error = None;
-                        self.status.transaction = if self.transaction_aborted {
+                        self.transaction_state = TransactionUiState::Active {
+                            transaction: state.transaction,
+                            condition: state.condition,
+                        };
+                        self.status.transaction = if aborted {
                             "TX: Failed".into()
                         } else {
                             "TX: Active".into()
                         };
                     }
                     Ok(None) => {
-                        self.transaction = None;
-                        self.transaction_aborted = false;
-                        self.transaction_error = None;
+                        self.transaction_state = TransactionUiState::Idle;
                         self.status.transaction = "TX: None".into();
                     }
-                    Err(message) => self.transaction_error = Some(message),
+                    Err(message) => self.transaction_state.fail(message),
                 }
                 cx.notify();
             }
@@ -10148,7 +10242,7 @@ impl WorkspaceShell {
                 path,
                 result,
             } => {
-                let move_next = std::mem::take(&mut self.repository_hunk_move_next);
+                let navigation = std::mem::take(&mut self.repository_hunk_navigation);
                 if let Some(applied) = self.repository.apply_hunk_result(
                     workspace_id,
                     request_id,
@@ -10158,7 +10252,7 @@ impl WorkspaceShell {
                 ) {
                     if let Ok(diff) = applied {
                         self.open_repository_diff_tab(&path, side, diff, cx);
-                        if move_next {
+                        if navigation == HunkNavigation::Next {
                             self.navigate_active_diff_hunk(1, cx);
                         }
                     }
@@ -10818,7 +10912,7 @@ impl WorkspaceShell {
 
     /// Ask the executor to open `entry`. Optimistically shows connecting.
     fn connect(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
-        if self.transaction.is_some() {
+        if self.transaction_state.transaction().is_some() {
             self.pending_connection_change = Some(PendingConnectionChange::Connect(entry.clone()));
             self.modal = Some(Modal::ConfirmTransactionDisconnect);
             cx.notify();
@@ -11801,7 +11895,7 @@ impl WorkspaceShell {
     }
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
-        if self.transaction.is_some() {
+        if self.transaction_state.transaction().is_some() {
             self.pending_connection_change = Some(PendingConnectionChange::Disconnect);
             self.modal = Some(Modal::ConfirmTransactionDisconnect);
             cx.notify();
@@ -11847,10 +11941,7 @@ impl WorkspaceShell {
         self.schema_search_state = SchemaSearchState::Idle;
         self.data_search_state = DataSearchState::Idle;
         self.status.database = "No database".into();
-        self.transaction = None;
-        self.transaction_pending = false;
-        self.transaction_aborted = false;
-        self.transaction_error = None;
+        self.transaction_state = TransactionUiState::Idle;
         self.status.transaction = "TX: None".into();
         self.sync_database_item_states(cx);
         cx.notify();
@@ -15195,7 +15286,7 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn submit_repository_setup(&mut self, initialize: bool, clone: bool, cx: &mut Context<Self>) {
+    fn submit_repository_setup(&mut self, mode: RepositorySetupMode, cx: &mut Context<Self>) {
         let Some(workspace_id) = self.selected_workspace_id else {
             return;
         };
@@ -15209,29 +15300,32 @@ impl WorkspaceShell {
             self.repository.set_error("Source control is unavailable");
             return;
         };
-        let command = if clone {
-            let url = self
-                .repository_remote_url_input
-                .read(cx)
-                .text()
-                .trim()
-                .to_owned();
-            if url.is_empty() {
-                self.repository.set_error("An HTTPS clone URL is required");
-                return;
+        let command = match mode {
+            RepositorySetupMode::Clone => {
+                let url = self
+                    .repository_remote_url_input
+                    .read(cx)
+                    .text()
+                    .trim()
+                    .to_owned();
+                if url.is_empty() {
+                    self.repository.set_error("An HTTPS clone URL is required");
+                    return;
+                }
+                ExecutorCommand::CloneWorkspaceRepository {
+                    workspace_id,
+                    root_handle,
+                    url,
+                    username: self.repository_username_input.read(cx).text().to_owned(),
+                    password: self.repository_password_input.read(cx).text().to_owned(),
+                }
             }
-            ExecutorCommand::CloneWorkspaceRepository {
-                workspace_id,
-                root_handle,
-                url,
-                username: self.repository_username_input.read(cx).text().to_owned(),
-                password: self.repository_password_input.read(cx).text().to_owned(),
-            }
-        } else {
-            ExecutorCommand::BindWorkspaceRepository {
-                workspace_id,
-                root_handle,
-                initialize,
+            RepositorySetupMode::BindExisting | RepositorySetupMode::Initialize => {
+                ExecutorCommand::BindWorkspaceRepository {
+                    workspace_id,
+                    root_handle,
+                    initialize: mode == RepositorySetupMode::Initialize,
+                }
             }
         };
         if sender.send(command).is_ok() {
@@ -16140,13 +16234,17 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn set_selected_repository_path_staged(&mut self, staged: bool, cx: &mut Context<Self>) {
+    fn set_selected_repository_path_staged(
+        &mut self,
+        action: RepositoryIndexAction,
+        cx: &mut Context<Self>,
+    ) {
         let Some(path) = self.repository.selected_path().cloned() else {
             self.repository.set_error("Select a changed file");
             cx.notify();
             return;
         };
-        self.set_repository_paths_staged(vec![path], staged, cx);
+        self.set_repository_paths_staged(vec![path], action, cx);
     }
 
     fn activate_repository_path(
@@ -16410,15 +16508,15 @@ impl WorkspaceShell {
 
     fn set_active_repository_hunk_staged(
         &mut self,
-        staged: bool,
-        move_next: bool,
+        action: RepositoryIndexAction,
+        navigation: HunkNavigation,
         cx: &mut Context<Self>,
     ) {
         let Some((state, hunk)) = self.active_repository_hunk(cx) else {
             self.show_toast("Place the caret in a file diff hunk".into(), cx);
             return;
         };
-        self.dispatch_repository_hunk_update(state, hunk.id, None, staged, move_next, cx);
+        self.dispatch_repository_hunk_update(state, hunk.id, None, action, navigation, cx);
     }
 
     fn confirm_active_repository_hunk_revert(&mut self, cx: &mut Context<Self>) {
@@ -16507,7 +16605,11 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn set_active_repository_lines_staged(&mut self, staged: bool, cx: &mut Context<Self>) {
+    fn set_active_repository_lines_staged(
+        &mut self,
+        action: RepositoryIndexAction,
+        cx: &mut Context<Self>,
+    ) {
         let (state, hunk_id, line_indices) = match self.active_repository_line_selection(cx) {
             Ok(selection) => selection,
             Err(message) => {
@@ -16515,7 +16617,14 @@ impl WorkspaceShell {
                 return;
             }
         };
-        self.dispatch_repository_hunk_update(state, hunk_id, Some(line_indices), staged, false, cx);
+        self.dispatch_repository_hunk_update(
+            state,
+            hunk_id,
+            Some(line_indices),
+            action,
+            HunkNavigation::Stay,
+            cx,
+        );
     }
 
     fn active_repository_line_selection(
@@ -16593,18 +16702,18 @@ impl WorkspaceShell {
         state: RepositoryDiffItemState,
         hunk_id: String,
         line_indices: Option<Vec<u32>>,
-        staged: bool,
-        move_next: bool,
+        action: RepositoryIndexAction,
+        navigation: HunkNavigation,
         cx: &mut Context<Self>,
     ) {
-        let valid_side = if staged {
+        let valid_side = if action.staged() {
             sift_protocol::VcsDiffSide::IndexToWorktree
         } else {
             sift_protocol::VcsDiffSide::HeadToIndex
         };
         if state.side != valid_side {
             self.show_toast(
-                if staged {
+                if action.staged() {
                     "Stage hunks from an index → worktree diff"
                 } else {
                     "Unstage hunks from a HEAD → index diff"
@@ -16616,13 +16725,13 @@ impl WorkspaceShell {
         }
         let Some((workspace_id, binding_id, expected_revision, request_id)) = self
             .repository
-            .begin_hunk_update(state.path.clone(), staged)
+            .begin_hunk_update(state.path.clone(), action)
         else {
             return;
         };
-        self.repository_hunk_move_next = move_next;
+        self.repository_hunk_navigation = navigation;
         let Some(sender) = &self.executor_sender else {
-            self.repository_hunk_move_next = false;
+            self.repository_hunk_navigation = HunkNavigation::Stay;
             self.repository
                 .fail_to_send(request_id, "Source control is unavailable");
             cx.notify();
@@ -16638,11 +16747,11 @@ impl WorkspaceShell {
                 path: state.path,
                 hunk_id,
                 line_indices,
-                staged,
+                staged: action.staged(),
             })
             .is_err()
         {
-            self.repository_hunk_move_next = false;
+            self.repository_hunk_navigation = HunkNavigation::Stay;
             self.repository
                 .fail_to_send(request_id, "Source control is unavailable");
         }
@@ -16946,11 +17055,11 @@ impl WorkspaceShell {
     fn set_repository_paths_staged(
         &mut self,
         paths: Vec<sift_protocol::WorkspacePath>,
-        staged: bool,
+        action: RepositoryIndexAction,
         cx: &mut Context<Self>,
     ) {
         let Some((workspace_id, binding_id, expected_revision, request_id, paths)) =
-            self.repository.begin_path_update(paths, staged)
+            self.repository.begin_path_update(paths, action)
         else {
             return;
         };
@@ -16967,7 +17076,7 @@ impl WorkspaceShell {
                 expected_revision,
                 request_id,
                 paths,
-                staged,
+                staged: action.staged(),
             })
             .is_err()
         {
@@ -18502,7 +18611,7 @@ impl WorkspaceShell {
         ) {
             return;
         }
-        if self.transaction.is_some() || self.transaction_pending {
+        if self.transaction_state.transaction().is_some() || self.transaction_state.is_pending() {
             return;
         }
         if !matches!(self.connection_status, ConnectionStatus::Connected { .. }) {
@@ -18512,13 +18621,15 @@ impl WorkspaceShell {
             );
             return;
         }
-        self.transaction_aborted = false;
-        self.transaction_error = None;
-        self.transaction_pending = self
+        let sent = self
             .executor_sender
             .as_ref()
             .is_some_and(|sender| sender.send(ExecutorCommand::BeginTransaction).is_ok());
-        if self.transaction_pending {
+        if sent {
+            self.transaction_state = TransactionUiState::Pending {
+                transaction: None,
+                condition: sift_protocol::TransactionCondition::Active,
+            };
             self.status.transaction = "TX: Beginning…".into();
         }
         cx.notify();
@@ -18541,21 +18652,21 @@ impl WorkspaceShell {
         ) {
             return;
         }
-        if self.transaction.is_none() || self.transaction_pending {
+        if self.transaction_state.transaction().is_none() || self.transaction_state.is_pending() {
             return;
         }
         if commit && !self.running_queries.is_empty() {
             self.show_error_toast("Wait for running queries before committing".into(), cx);
             return;
         }
-        if commit && (self.transaction_aborted || self.transaction_error.is_some()) {
+        if commit && self.transaction_state.is_aborted() {
             self.show_error_toast(
                 "This transaction cannot be committed; roll it back".into(),
                 cx,
             );
             return;
         }
-        self.transaction_pending = self.executor_sender.as_ref().is_some_and(|sender| {
+        let sent = self.executor_sender.as_ref().is_some_and(|sender| {
             sender
                 .send(if commit {
                     ExecutorCommand::CommitTransaction
@@ -18564,7 +18675,8 @@ impl WorkspaceShell {
                 })
                 .is_ok()
         });
-        if self.transaction_pending {
+        if sent {
+            self.transaction_state.begin_pending();
             self.status.transaction = if commit {
                 "TX: Committing…".into()
             } else {
@@ -18582,7 +18694,7 @@ impl WorkspaceShell {
         ) {
             return;
         }
-        if self.transaction.is_none() || self.transaction_pending {
+        if self.transaction_state.transaction().is_none() || self.transaction_state.is_pending() {
             return;
         }
         let name = format!("sift_{}", self.next_savepoint);
@@ -18629,13 +18741,16 @@ impl WorkspaceShell {
     }
 
     fn send_savepoint_command(&mut self, command: ExecutorCommand, cx: &mut Context<Self>) {
-        if self.transaction_pending {
+        if self.transaction_state.is_pending() {
             return;
         }
-        self.transaction_pending = self
+        let sent = self
             .executor_sender
             .as_ref()
             .is_some_and(|sender| sender.send(command).is_ok());
+        if sent {
+            self.transaction_state.begin_pending();
+        }
         cx.notify();
     }
 
@@ -20714,11 +20829,11 @@ impl WorkspaceShell {
             if workspace && git_diff && (vim_normal || vim_visual) && !modal && !text_input {
                 let handled = match (self.repository_diff_prefix, key.as_str()) {
                     (None, "s") if vim_visual => {
-                        self.set_active_repository_lines_staged(true, cx);
+                        self.set_active_repository_lines_staged(RepositoryIndexAction::Stage, cx);
                         true
                     }
                     (None, "u") if vim_visual => {
-                        self.set_active_repository_lines_staged(false, cx);
+                        self.set_active_repository_lines_staged(RepositoryIndexAction::Unstage, cx);
                         true
                     }
                     (_, "[") => {
@@ -20749,19 +20864,35 @@ impl WorkspaceShell {
                         false
                     }
                     (None, "s") => {
-                        self.set_active_repository_hunk_staged(true, false, cx);
+                        self.set_active_repository_hunk_staged(
+                            RepositoryIndexAction::Stage,
+                            HunkNavigation::Stay,
+                            cx,
+                        );
                         true
                     }
                     (None, "u") => {
-                        self.set_active_repository_hunk_staged(false, false, cx);
+                        self.set_active_repository_hunk_staged(
+                            RepositoryIndexAction::Unstage,
+                            HunkNavigation::Stay,
+                            cx,
+                        );
                         true
                     }
                     (None, "shift-s") => {
-                        self.set_active_repository_hunk_staged(true, true, cx);
+                        self.set_active_repository_hunk_staged(
+                            RepositoryIndexAction::Stage,
+                            HunkNavigation::Next,
+                            cx,
+                        );
                         true
                     }
                     (None, "shift-u") => {
-                        self.set_active_repository_hunk_staged(false, true, cx);
+                        self.set_active_repository_hunk_staged(
+                            RepositoryIndexAction::Unstage,
+                            HunkNavigation::Next,
+                            cx,
+                        );
                         true
                     }
                     (None, _) => false,
@@ -20930,11 +21061,14 @@ impl WorkspaceShell {
                         true
                     }
                     "s" => {
-                        self.set_selected_repository_path_staged(true, cx);
+                        self.set_selected_repository_path_staged(RepositoryIndexAction::Stage, cx);
                         true
                     }
                     "u" => {
-                        self.set_selected_repository_path_staged(false, cx);
+                        self.set_selected_repository_path_staged(
+                            RepositoryIndexAction::Unstage,
+                            cx,
+                        );
                         true
                     }
                     "d" => {
@@ -22745,7 +22879,7 @@ impl WorkspaceShell {
             bearer_token: None,
             remember_token: profile.has_saved_token,
         };
-        if self.transaction.is_some() {
+        if self.transaction_state.transaction().is_some() {
             self.pending_connection_change = Some(PendingConnectionChange::SwitchServer {
                 command,
                 label: format!("switch to {}", profile.name),
@@ -22822,7 +22956,7 @@ impl WorkspaceShell {
             bearer_token: (!token.is_empty()).then_some(token),
             remember_token: self.remember_server_token,
         };
-        if self.transaction.is_some() {
+        if self.transaction_state.transaction().is_some() {
             self.pending_connection_change = Some(PendingConnectionChange::SwitchServer {
                 command,
                 label: "switch servers".into(),
@@ -22844,7 +22978,7 @@ impl WorkspaceShell {
             return;
         }
         let command = InstanceCommand::UseLocal;
-        if self.transaction.is_some() {
+        if self.transaction_state.transaction().is_some() {
             self.pending_connection_change = Some(PendingConnectionChange::SwitchServer {
                 command,
                 label: "switch to local server".into(),
@@ -23524,8 +23658,7 @@ impl WorkspaceShell {
 
     fn activate_selected_query_history(
         &mut self,
-        run: bool,
-        save: bool,
+        action: QueryHistoryAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -23543,7 +23676,7 @@ impl WorkspaceShell {
             );
             return;
         }
-        if run {
+        if action == QueryHistoryAction::Run {
             let historical_profile = entry.connection_profile_id.map(|profile| profile.0);
             let active_profile = match self.connection_status {
                 ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
@@ -23578,18 +23711,18 @@ impl WorkspaceShell {
             cx.notify();
         });
         self.persist(cx);
-        if save {
+        if action == QueryHistoryAction::Save {
             self.save_active_query_with_profile(
                 entry.connection_profile_id.map(|profile| profile.0),
                 cx,
             );
-        } else if run {
+        } else if action == QueryHistoryAction::Run {
             self.execute_database_item(item_id, entry.sql_text, cx);
         }
     }
 
     fn open_selected_query_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.activate_selected_query_history(false, false, window, cx);
+        self.activate_selected_query_history(QueryHistoryAction::Open, window, cx);
     }
 
     fn move_query_history_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -23661,8 +23794,8 @@ impl WorkspaceShell {
             "k" | "up" => self.move_query_history_selection(-1, cx),
             "enter" => self.open_selected_query_history(window, cx),
             "/" => self.open_query_history_filter(window, cx),
-            "r" => self.activate_selected_query_history(true, false, window, cx),
-            "s" => self.activate_selected_query_history(false, true, window, cx),
+            "r" => self.activate_selected_query_history(QueryHistoryAction::Run, window, cx),
+            "s" => self.activate_selected_query_history(QueryHistoryAction::Save, window, cx),
             "1" => self.set_query_history_status_filter(QueryHistoryStatusFilter::All, cx),
             "2" => self.set_query_history_status_filter(QueryHistoryStatusFilter::Success, cx),
             "3" => self.set_query_history_status_filter(QueryHistoryStatusFilter::Failed, cx),
@@ -24019,19 +24152,35 @@ impl WorkspaceShell {
             CommandId::NextDiffFile => self.navigate_repository_file(1, cx),
             CommandId::PreviousDiffHunk => self.navigate_active_diff_hunk(-1, cx),
             CommandId::NextDiffHunk => self.navigate_active_diff_hunk(1, cx),
-            CommandId::StageDiffHunk => self.set_active_repository_hunk_staged(true, false, cx),
-            CommandId::UnstageDiffHunk => self.set_active_repository_hunk_staged(false, false, cx),
-            CommandId::StageDiffHunkAndNext => {
-                self.set_active_repository_hunk_staged(true, true, cx)
-            }
-            CommandId::UnstageDiffHunkAndNext => {
-                self.set_active_repository_hunk_staged(false, true, cx)
-            }
+            CommandId::StageDiffHunk => self.set_active_repository_hunk_staged(
+                RepositoryIndexAction::Stage,
+                HunkNavigation::Stay,
+                cx,
+            ),
+            CommandId::UnstageDiffHunk => self.set_active_repository_hunk_staged(
+                RepositoryIndexAction::Unstage,
+                HunkNavigation::Stay,
+                cx,
+            ),
+            CommandId::StageDiffHunkAndNext => self.set_active_repository_hunk_staged(
+                RepositoryIndexAction::Stage,
+                HunkNavigation::Next,
+                cx,
+            ),
+            CommandId::UnstageDiffHunkAndNext => self.set_active_repository_hunk_staged(
+                RepositoryIndexAction::Unstage,
+                HunkNavigation::Next,
+                cx,
+            ),
             CommandId::RevertDiffHunk => self.confirm_active_repository_hunk_revert(cx),
             CommandId::CopyDiffHunk => self.copy_active_repository_hunk(cx),
             CommandId::ToggleDiffWhitespace => self.toggle_active_diff_whitespace(cx),
-            CommandId::StageDiffLines => self.set_active_repository_lines_staged(true, cx),
-            CommandId::UnstageDiffLines => self.set_active_repository_lines_staged(false, cx),
+            CommandId::StageDiffLines => {
+                self.set_active_repository_lines_staged(RepositoryIndexAction::Stage, cx)
+            }
+            CommandId::UnstageDiffLines => {
+                self.set_active_repository_lines_staged(RepositoryIndexAction::Unstage, cx)
+            }
             CommandId::RefreshRepository => self.request_repository_status(cx),
             CommandId::OpenRepositorySetup => self.open_repository_setup(window, cx),
             CommandId::OpenRepositoryBranches => self.open_repository_branches(window, cx),
@@ -24055,19 +24204,27 @@ impl WorkspaceShell {
                 self.mutate_active_repository_operation(true, cx)
             }
             CommandId::RepairRepositoryBinding => self.repair_repository_binding(cx),
-            CommandId::StageRepositoryPath => self.set_selected_repository_path_staged(true, cx),
-            CommandId::UnstageRepositoryPath => self.set_selected_repository_path_staged(false, cx),
+            CommandId::StageRepositoryPath => {
+                self.set_selected_repository_path_staged(RepositoryIndexAction::Stage, cx)
+            }
+            CommandId::UnstageRepositoryPath => {
+                self.set_selected_repository_path_staged(RepositoryIndexAction::Unstage, cx)
+            }
             CommandId::StageAllTrackedRepositoryPaths => self.set_repository_paths_staged(
                 self.repository.stageable_tracked_paths(),
-                true,
+                RepositoryIndexAction::Stage,
                 cx,
             ),
-            CommandId::StageAllRepositoryPaths => {
-                self.set_repository_paths_staged(self.repository.stageable_paths(), true, cx)
-            }
-            CommandId::UnstageAllRepositoryPaths => {
-                self.set_repository_paths_staged(self.repository.unstageable_paths(), false, cx)
-            }
+            CommandId::StageAllRepositoryPaths => self.set_repository_paths_staged(
+                self.repository.stageable_paths(),
+                RepositoryIndexAction::Stage,
+                cx,
+            ),
+            CommandId::UnstageAllRepositoryPaths => self.set_repository_paths_staged(
+                self.repository.unstageable_paths(),
+                RepositoryIndexAction::Unstage,
+                cx,
+            ),
             CommandId::FocusRepositoryCommit => {
                 self.focus_source_control(window, cx);
                 self.repository_commit_input
@@ -24161,7 +24318,7 @@ impl WorkspaceShell {
                 self.open_command_palette(&OpenCommandPalette, window, cx)
             }
             CommandId::Quit => {
-                if self.transaction.is_some() {
+                if self.transaction_state.transaction().is_some() {
                     self.pending_connection_change = Some(PendingConnectionChange::Quit);
                     self.modal = Some(Modal::ConfirmTransactionDisconnect);
                     cx.notify();
@@ -27093,7 +27250,12 @@ impl WorkspaceShell {
                         .tone(ButtonTone::Ghost)
                         .disabled(self.repository.loading() || conflicted)
                         .on_click(cx.listener(move |shell, _, _, cx| {
-                            shell.set_repository_paths_staged(vec![path.clone()], !staged, cx)
+                            let action = if staged {
+                                RepositoryIndexAction::Unstage
+                            } else {
+                                RepositoryIndexAction::Stage
+                            };
+                            shell.set_repository_paths_staged(vec![path.clone()], action, cx)
                         })),
                     )
                     .when(selected, |row| {
@@ -28413,7 +28575,11 @@ impl WorkspaceShell {
                                         .disabled(self.repository.loading() || !has_stageable)
                                         .on_click(cx.listener(|shell, _, _, cx| {
                                             let paths = shell.repository.stageable_paths();
-                                            shell.set_repository_paths_staged(paths, true, cx)
+                                            shell.set_repository_paths_staged(
+                                                paths,
+                                                RepositoryIndexAction::Stage,
+                                                cx,
+                                            )
                                         })),
                                     )
                                     .child(
@@ -28427,7 +28593,11 @@ impl WorkspaceShell {
                                         )
                                         .on_click(cx.listener(|shell, _, _, cx| {
                                             let paths = shell.repository.unstageable_paths();
-                                            shell.set_repository_paths_staged(paths, false, cx)
+                                            shell.set_repository_paths_staged(
+                                                paths,
+                                                RepositoryIndexAction::Unstage,
+                                                cx,
+                                            )
                                         })),
                                     ),
                             )
@@ -34173,9 +34343,9 @@ impl WorkspaceShell {
                         .child(div().text_xs().text_color(colors.muted_text).child("Credentials are sent once and stored behind SecretStore. Clone currently supports HTTPS; managed SSH keys are deliberately unavailable until they can run without ambient agents."))
                         .child(div().flex().justify_end().gap_2()
                             .child(Button::new("cancel-repository-setup", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
-                            .child(Button::new("bind-existing-repository", "Bind existing").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(false, false, cx))))
-                            .child(Button::new("initialize-repository", "Initialize").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(true, false, cx))))
-                            .child(Button::new("clone-repository", "Clone HTTPS").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(false, true, cx)))))
+                            .child(Button::new("bind-existing-repository", "Bind existing").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(RepositorySetupMode::BindExisting, cx))))
+                            .child(Button::new("initialize-repository", "Initialize").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(RepositorySetupMode::Initialize, cx))))
+                            .child(Button::new("clone-repository", "Clone HTTPS").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(RepositorySetupMode::Clone, cx)))))
                         .into_any_element()
                 }
                 Modal::RepositoryRemotes => {
@@ -44759,12 +44929,15 @@ mod tests {
         let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
-            shell.transaction = Some(sift_protocol::TransactionInfo {
-                tx_id: sift_protocol::TxId(9),
-                connection: sift_protocol::ConnectionId(1),
-                mode: sift_protocol::TxMode::default(),
-                opened_at: "2026-08-25T00:00:00Z".parse().unwrap(),
-            });
+            shell.transaction_state = TransactionUiState::Active {
+                transaction: sift_protocol::TransactionInfo {
+                    tx_id: sift_protocol::TxId(9),
+                    connection: sift_protocol::ConnectionId(1),
+                    mode: sift_protocol::TxMode::default(),
+                    opened_at: "2026-08-25T00:00:00Z".parse().unwrap(),
+                },
+                condition: sift_protocol::TransactionCondition::Active,
+            };
             shell.create_savepoint(cx);
         });
         assert!(
@@ -44789,7 +44962,7 @@ mod tests {
             vec!["sift_1"]
         );
         workspace.update(&mut cx, |shell, cx| {
-            shell.transaction_pending = false;
+            shell.transaction_state.finish_pending();
             shell.select_bottom_tool(BottomTool::Monitor, cx);
         });
         cx.run_until_parked();
@@ -44814,7 +44987,10 @@ mod tests {
 
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
-            shell.transaction = Some(transaction);
+            shell.transaction_state = TransactionUiState::Active {
+                transaction,
+                condition: sift_protocol::TransactionCondition::Active,
+            };
             shell.running_queries.insert(1, 9);
             shell.finish_transaction(true, cx);
             assert!(receiver.try_recv().is_err());
@@ -44822,14 +44998,14 @@ mod tests {
             shell.on_executor_event(
                 ExecutorEvent::TransactionStateRefreshed(Ok(Some(
                     sift_protocol::TransactionState {
-                        transaction: shell.transaction.clone().unwrap(),
+                        transaction: shell.transaction_state.transaction().cloned().unwrap(),
                         savepoints: Vec::new(),
                         condition: sift_protocol::TransactionCondition::Failed,
                     },
                 ))),
                 cx,
             );
-            assert!(shell.transaction_aborted);
+            assert!(shell.transaction_state.is_aborted());
             assert_eq!(shell.status.transaction, "TX: Failed");
             shell.finish_transaction(true, cx);
             assert!(receiver.try_recv().is_err());
@@ -44841,7 +45017,7 @@ mod tests {
         ));
 
         workspace.update_in(&mut cx, |shell, window, cx| {
-            shell.transaction_pending = false;
+            shell.transaction_state.finish_pending();
             shell.disconnect(cx);
             assert_eq!(shell.modal, Some(Modal::ConfirmTransactionDisconnect));
             assert!(receiver.try_recv().is_err());
@@ -44851,7 +45027,10 @@ mod tests {
             receiver.try_recv(),
             Ok(ExecutorCommand::Disconnect)
         ));
-        assert!(workspace.read_with(&cx, |shell, _| shell.transaction.is_none()));
+        assert!(workspace.read_with(&cx, |shell, _| shell
+            .transaction_state
+            .transaction()
+            .is_none()));
     }
 
     #[gpui::test]
@@ -45941,7 +46120,11 @@ mod tests {
                 cx,
             );
             assert!(shell.active_repository_hunk(cx).is_some());
-            shell.set_active_repository_hunk_staged(true, false, cx);
+            shell.set_active_repository_hunk_staged(
+                RepositoryIndexAction::Stage,
+                HunkNavigation::Stay,
+                cx,
+            );
         });
 
         let ExecutorCommand::SetRepositoryHunkStaged {
@@ -45978,7 +46161,7 @@ mod tests {
             shell
                 .repository_root_input
                 .update(cx, |input, cx| input.set_text("team-checkout", cx));
-            shell.submit_repository_setup(true, false, cx);
+            shell.submit_repository_setup(RepositorySetupMode::Initialize, cx);
         });
         assert!(matches!(
             commands.try_recv(),
@@ -45999,7 +46182,7 @@ mod tests {
             shell
                 .repository_password_input
                 .update(cx, |input, cx| input.set_text("secret", cx));
-            shell.submit_repository_setup(false, true, cx);
+            shell.submit_repository_setup(RepositorySetupMode::Clone, cx);
         });
         assert!(matches!(
             commands.try_recv(),
