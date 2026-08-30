@@ -7774,6 +7774,27 @@ impl WorkspaceShell {
             .unwrap_or(workspace)
     }
 
+    fn workspace_git_context_label(&self) -> Option<String> {
+        self.selected_workspace()?.git_enabled.then(|| {
+            if let Some(status) = self.repository.status() {
+                if let Some(branch) = &status.branch {
+                    return branch.clone();
+                }
+                if let Some(head) = &status.head_oid {
+                    return format!("Detached @ {}", head.chars().take(7).collect::<String>());
+                }
+                return "No commits".into();
+            }
+            if self.repository.error().is_some() {
+                "Git unavailable".into()
+            } else if self.repository.loaded() {
+                "No repository".into()
+            } else {
+                "Git…".into()
+            }
+        })
+    }
+
     fn active_server_name(&self) -> String {
         self.lifecycle
             .selected_instance
@@ -18607,9 +18628,14 @@ impl WorkspaceShell {
         );
         self.workspace_files.select_workspace(Some(workspace.id));
         self.presence.join(RoomId(workspace.room_id));
+        if workspace.git_enabled {
+            self.request_repository_status(cx);
+        }
         if self.left_dock.presentation.open && self.active_left_panel == LeftPanel::Git {
             self.request_workspace_files(cx);
-            self.request_repository_status(cx);
+            if !workspace.git_enabled {
+                self.request_repository_status(cx);
+            }
         }
         self.persist(cx);
         cx.notify();
@@ -18651,19 +18677,25 @@ impl WorkspaceShell {
         let Some(selected) = self.selected_workspace_id else {
             return;
         };
-        let exists = self
+        let workspace = self
             .lifecycle
             .tenants
             .iter()
             .flat_map(|tenant| &tenant.rooms)
             .flat_map(|room| &room.workspaces)
-            .any(|workspace| workspace.id == selected);
-        if !exists {
+            .find(|workspace| workspace.id == selected)
+            .cloned();
+        if workspace.is_none() {
             self.selected_workspace_id = None;
             self.repository.select_workspace(None);
             self.workspace_files.select_workspace(None);
             self.show_toast("Restored workspace is no longer available".into(), cx);
             self.persist(cx);
+        } else if workspace.is_some_and(|workspace| workspace.git_enabled)
+            && !self.repository.loaded()
+            && !self.repository.loading()
+        {
+            self.request_repository_status(cx);
         }
     }
 
@@ -24338,6 +24370,7 @@ impl WorkspaceShell {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
         let workspace_label = self.workspace_context_label();
+        let git_context_label = self.workspace_git_context_label();
         let server_name = self.active_server_name();
         let status_label = self.lifecycle.status_label();
         let show_status = !matches!(self.lifecycle.phase, crate::ConnectionPhase::Ready);
@@ -24406,11 +24439,12 @@ impl WorkspaceShell {
                         div()
                             .id("toolbar-title-drag-region")
                             .h_full()
-                            .max_w(px(260.))
+                            .max_w(px(380.))
                             .min_w_0()
                             .px_3()
                             .flex()
                             .items_center()
+                            .gap_2()
                             .window_control_area(WindowControlArea::Drag)
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -24420,11 +24454,24 @@ impl WorkspaceShell {
                                     window.start_window_move();
                                 }),
                             )
-                            .truncate()
                             .text_center()
                             .text_sm()
                             .text_color(colors.muted_text)
-                            .child(workspace_label),
+                            .child(div().min_w_0().truncate().child(workspace_label))
+                            .children(git_context_label.map(|label| {
+                                div()
+                                    .id("toolbar-git-context")
+                                    .debug_selector(|| "toolbar-git-context".into())
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .pl_2()
+                                    .border_l_1()
+                                    .border_color(colors.subtle_border)
+                                    .child(icon(IconName::VersionControl, colors.muted_text, 13.))
+                                    .child(label)
+                            })),
                     ),
             )
             .child(
@@ -42175,11 +42222,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn app_bar_uses_authenticated_identity_and_room_workspace_context(cx: &mut TestAppContext) {
+    fn app_bar_uses_identity_workspace_and_git_context(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        workspace.update(&mut cx, |shell, _| {
+        workspace.update(&mut cx, |shell, cx| {
             shell.selected_workspace_id = Some(12);
             shell
                 .lifecycle
@@ -42222,12 +42269,31 @@ mod tests {
                             id: 12,
                             room_id: 4,
                             name: "Reporting".into(),
-                            git_enabled: false,
+                            git_enabled: true,
                             scheduling_enabled: false,
                         }],
                     }],
                 }));
+            shell.repository.select_workspace(Some(12));
+            let (_, request_id) = shell.repository.begin_refresh().unwrap();
+            let status = serde_json::from_value(serde_json::json!({
+                "binding_id": 9,
+                "workspace_revision": 3,
+                "binding_revision": 4,
+                "head_oid": "0123456789abcdef0123456789abcdef01234567",
+                "branch": "feature/app-bar",
+                "upstream": null,
+                "entries": [],
+                "truncated": false,
+                "observed_at": "2026-08-30T00:00:00Z"
+            }))
+            .unwrap();
+            assert!(shell
+                .repository
+                .apply_status_result(12, request_id, Ok(Some(status))));
+            cx.notify();
         });
+        cx.run_until_parked();
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.active_server_name()),
             "Team Sift"
@@ -42236,6 +42302,11 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.workspace_context_label()),
             "Research / Reporting"
         );
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.workspace_git_context_label()),
+            Some("feature/app-bar".into())
+        );
+        assert!(cx.debug_bounds("toolbar-git-context").is_some());
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.account_initials()),
             "AL"
@@ -42280,7 +42351,9 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
         workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
             shell
                 .lifecycle
                 .apply(LifecycleEvent::TenantLoaded(crate::TenantNavEntry {
@@ -42315,6 +42388,13 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.presence.room_id),
             Some(RoomId(7))
         );
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadRepositoryStatus {
+                workspace_id: 12,
+                ..
+            })
+        ));
     }
 
     #[gpui::test]
