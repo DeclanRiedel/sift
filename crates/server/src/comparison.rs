@@ -142,7 +142,7 @@ impl Default for ComparisonRegistry {
 pub struct ComparisonEntry {
     session: SessionId,
     summary: Mutex<ComparisonSummary>,
-    rows: RwLock<StoredRows>,
+    rows: RwLock<Arc<StoredRows>>,
     cancel: Arc<AtomicBool>,
     created: Instant,
     patch_context: Mutex<Option<PatchContext>>,
@@ -211,7 +211,7 @@ impl ComparisonRegistry {
         let entry = Arc::new(ComparisonEntry {
             session,
             summary: Mutex::new(summary),
-            rows: RwLock::new(StoredRows::Empty),
+            rows: RwLock::new(Arc::new(StoredRows::Empty)),
             cancel: Arc::new(AtomicBool::new(false)),
             created: Instant::now(),
             patch_context: Mutex::new(None),
@@ -331,7 +331,7 @@ impl ComparisonEntry {
                 }
             }
         };
-        *self.rows.write().unwrap() = stored;
+        *self.rows.write().unwrap() = Arc::new(stored);
         *self.summary.lock().unwrap() = summary;
         Ok(())
     }
@@ -377,7 +377,8 @@ impl ComparisonEntry {
     }
 
     fn read_rows(&self, spill_key: &[u8; 32]) -> ApiResult<Vec<RowDiff>> {
-        match &*self.rows.read().unwrap() {
+        let stored = self.rows.read().unwrap().clone();
+        match &*stored {
             StoredRows::Empty => Ok(Vec::new()),
             StoredRows::Memory { rows, .. } => Ok(rows.clone()),
             StoredRows::Spill {
@@ -669,7 +670,7 @@ mod tests {
         entry.complete(completed, vec![row]).unwrap();
 
         let guard = entry.rows.read().unwrap();
-        let StoredRows::Spill { path, .. } = &*guard else {
+        let StoredRows::Spill { path, .. } = &**guard else {
             panic!("large comparison should spill")
         };
         let ciphertext = std::fs::read(path).unwrap();

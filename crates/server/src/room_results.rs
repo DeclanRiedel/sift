@@ -264,14 +264,17 @@ impl RoomResultRegistry {
         result_id: RoomResultId,
         f: impl FnOnce(&Entry) -> T,
     ) -> ApiResult<T> {
-        let entry = self.inner.entries.get(&result_id).ok_or_else(|| {
-            ApiError::BadRequest(format!("room result {result_id} was not found or expired"))
-        })?;
-        if entry.reference.room_id != room_id {
-            return Err(ApiError::BadRequest(format!(
-                "room result {result_id} was not found or expired"
-            )));
-        }
+        let entry = {
+            let entry = self.inner.entries.get(&result_id).ok_or_else(|| {
+                ApiError::BadRequest(format!("room result {result_id} was not found or expired"))
+            })?;
+            if entry.reference.room_id != room_id {
+                return Err(ApiError::BadRequest(format!(
+                    "room result {result_id} was not found or expired"
+                )));
+            }
+            Arc::clone(entry.value())
+        };
         *entry.last_accessed.lock().unwrap() = Instant::now();
         Ok(f(&entry))
     }
