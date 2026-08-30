@@ -15,29 +15,88 @@ set -eu
 
 pgdata="${SIFT_DEMO_PGDATA:-/tmp/sift-demo-pg}"
 pglog="${SIFT_DEMO_PG_LOG:-/tmp/sift-demo-pg.log}"
-pgport="${SIFT_DEMO_PG_PORT:-5433}"
 pgsocket="${SIFT_DEMO_PG_SOCKET_DIR:-/tmp/sift-demo-pg-socket}"
+if [ -n "${SIFT_DEMO_PG_PORT+x}" ]; then
+  pgport="$SIFT_DEMO_PG_PORT"
+  pgport_explicit=1
+else
+  pgport=5433
+  pgport_explicit=0
+fi
+
+case "$pgport" in
+  '' | *[!0-9]*)
+    echo "SIFT_DEMO_PG_PORT must be a numeric TCP port (got: $pgport)." >&2
+    exit 1
+    ;;
+esac
+if [ "$pgport" -lt 1 ] || [ "$pgport" -gt 65535 ]; then
+  echo "SIFT_DEMO_PG_PORT must be between 1 and 65535 (got: $pgport)." >&2
+  exit 1
+fi
+case "$pgsocket" in
+  *"'"* | *"
+"*)
+    echo "SIFT_DEMO_PG_SOCKET_DIR cannot contain a single quote or newline." >&2
+    exit 1
+    ;;
+esac
 
 mkdir -p "$pgsocket"
+
+# Preserve a running demo cluster's port. Otherwise, when the default is not
+# explicitly configured, avoid a separate PostgreSQL service already using it.
+if [ "$pgport_explicit" = 0 ] && pg_ctl -D "$pgdata" status >/dev/null 2>&1; then
+  pgport="$(sed -n '4p' "$pgdata/postmaster.pid")"
+elif [ "$pgport_explicit" = 0 ]; then
+  requested_port="$pgport"
+  while pg_isready -q -h 127.0.0.1 -p "$pgport" >/dev/null 2>&1; do
+    if [ "$pgport" -eq 65535 ]; then
+      echo "No available demo PostgreSQL port found after $requested_port." >&2
+      exit 1
+    fi
+    pgport=$((pgport + 1))
+  done
+  if [ "$pgport" != "$requested_port" ]; then
+    echo "Demo PostgreSQL port $requested_port is occupied; using $pgport." >&2
+  fi
+fi
 
 if [ ! -f "$pgdata/PG_VERSION" ]; then
   rm -rf "$pgdata"
   initdb -D "$pgdata" -U sift --auth=trust --no-locale --encoding=UTF8 >&2
   {
     echo "listen_addresses = '127.0.0.1'"
-    echo "port = $pgport"
-    echo "unix_socket_directories = '$pgsocket'"
     # Small demo cluster: do not reserve production-shaped memory on a laptop.
     echo "shared_buffers = '64MB'"
     echo "max_connections = 40"
   } >> "$pgdata/postgresql.conf"
 fi
-if ! grep -q "unix_socket_directories = '$pgsocket'" "$pgdata/postgresql.conf"; then
-  echo "unix_socket_directories = '$pgsocket'" >> "$pgdata/postgresql.conf"
-fi
 
+# Keep launch-specific settings outside the initdb-generated configuration so
+# overrides continue to work when an existing demo cluster is reused.
+if ! grep -qx "include = 'sift-demo.conf'" "$pgdata/postgresql.conf"; then
+  echo "include = 'sift-demo.conf'" >> "$pgdata/postgresql.conf"
+fi
+{
+  echo "port = $pgport"
+  echo "unix_socket_directories = '$pgsocket'"
+} > "$pgdata/sift-demo.conf"
+
+if pg_ctl -D "$pgdata" status >/dev/null 2>&1; then
+  running_port="$(sed -n '4p' "$pgdata/postmaster.pid")"
+  running_socket="$(sed -n '5p' "$pgdata/postmaster.pid")"
+  if [ "$running_port" != "$pgport" ] || [ "$running_socket" != "$pgsocket" ]; then
+    pg_ctl -D "$pgdata" -m fast -w stop >&2
+  fi
+fi
 if ! pg_ctl -D "$pgdata" status >/dev/null 2>&1; then
-  pg_ctl -D "$pgdata" -l "$pglog" -w start >&2
+  if ! pg_ctl -D "$pgdata" -l "$pglog" -w start >&2; then
+    echo "Demo PostgreSQL failed to start on 127.0.0.1:$pgport. Recent log output:" >&2
+    tail -n 20 "$pglog" >&2 || true
+    echo "If the port is occupied, choose another SIFT_DEMO_PG_PORT in .env." >&2
+    exit 1
+  fi
 fi
 
 if [ "${SIFT_DEMO_RESET:-0}" = "1" ]; then
