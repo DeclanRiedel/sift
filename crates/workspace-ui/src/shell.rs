@@ -6593,6 +6593,7 @@ pub struct WorkspaceShell {
     workspace_sessions: HashMap<String, WorkspaceSession>,
     workspace_presentations: HashMap<String, WorkspacePresentation>,
     pane_layout: PaneLayoutPresentation,
+    pane_layout_view: Entity<PaneLayoutView>,
     workspace_resize_frame_pending: bool,
     active_pane: usize,
     selected_workspace_id: Option<i64>,
@@ -6862,6 +6863,13 @@ impl WorkspaceSession {
 }
 
 impl WorkspaceShell {
+    fn sync_pane_layout_view(&mut self, cx: &mut Context<Self>) {
+        let panes = self.panes.clone();
+        let layout = self.pane_layout.clone();
+        self.pane_layout_view
+            .update(cx, |view, cx| view.sync(panes, layout, cx));
+    }
+
     pub fn new(
         state: PresentationState,
         mut settings: UserSettings,
@@ -7302,6 +7310,11 @@ impl WorkspaceShell {
             .into_iter()
             .collect();
         let shell = cx.weak_entity();
+        let pane_layout_view = cx.new(|_| PaneLayoutView {
+            owner: shell.clone(),
+            panes: panes.clone(),
+            layout: pane_layout.clone(),
+        });
         let shell_window = window.window_handle();
         let key_interceptor_subscription = cx.intercept_keystrokes(move |event, window, cx| {
             if window.window_handle() != shell_window {
@@ -7434,6 +7447,7 @@ impl WorkspaceShell {
             workspace_sessions: HashMap::new(),
             workspace_presentations,
             pane_layout,
+            pane_layout_view,
             workspace_resize_frame_pending: false,
             active_pane,
             selected_workspace_id,
@@ -8075,6 +8089,7 @@ impl WorkspaceShell {
                 + 1,
         );
         self.sync_notifications_editor(cx);
+        self.sync_pane_layout_view(cx);
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.read(cx).active_focus_handle(cx).focus(window, cx);
         }
@@ -19244,6 +19259,7 @@ impl WorkspaceShell {
         cx.subscribe_in(&pane, window, Self::on_pane_event).detach();
         self.panes.push(pane);
         pane_layout::split(&mut self.pane_layout, target_id, id, SplitDirection::Right);
+        self.sync_pane_layout_view(cx);
         self.active_pane = self.panes.len() - 1;
         self.focus_active_pane(window, cx);
         self.persist(cx);
@@ -19903,6 +19919,7 @@ impl WorkspaceShell {
         if !collapse_before_split {
             self.remove_empty_source_pane(&source_pane, cx);
         }
+        self.sync_pane_layout_view(cx);
         self.clear_tab_drag_previews(cx);
         self.focus_active_pane(window, cx);
         self.persist(cx);
@@ -19971,6 +19988,7 @@ impl WorkspaceShell {
         };
         self.panes.insert(insertion_index, pane);
         pane_layout::split_root(&mut self.pane_layout, id, direction);
+        self.sync_pane_layout_view(cx);
         self.active_pane = insertion_index;
         self.clear_tab_drag_previews(cx);
         self.focus_active_pane(window, cx);
@@ -19981,7 +19999,7 @@ impl WorkspaceShell {
     /// Moving a pane's sole tab should not strand an empty split. This also
     /// applies to edge drops on the source pane: the replacement pane inherits
     /// the full region after the empty source is removed.
-    fn remove_empty_source_pane(&mut self, source: &Entity<Pane>, cx: &App) {
+    fn remove_empty_source_pane(&mut self, source: &Entity<Pane>, cx: &mut Context<Self>) {
         if self.panes.len() <= 1 {
             return;
         }
@@ -20000,6 +20018,7 @@ impl WorkspaceShell {
         } else {
             self.active_pane = self.active_pane.min(self.panes.len() - 1);
         }
+        self.sync_pane_layout_view(cx);
     }
 
     fn clear_tab_drag_previews(&mut self, cx: &mut Context<Self>) {
@@ -20112,6 +20131,7 @@ impl WorkspaceShell {
         let removed_pane_id = self.panes[index].read(cx).id;
         self.panes.remove(index);
         pane_layout::remove(&mut self.pane_layout, removed_pane_id);
+        self.sync_pane_layout_view(cx);
         self.active_pane = self.active_pane.min(self.panes.len() - 1);
         self.focus_active_pane(window, cx);
         self.persist(cx);
@@ -36349,7 +36369,24 @@ fn pane_resize_handle(
         .into_any_element()
 }
 
-impl WorkspaceShell {
+struct PaneLayoutView {
+    owner: gpui::WeakEntity<WorkspaceShell>,
+    panes: Vec<Entity<Pane>>,
+    layout: PaneLayoutPresentation,
+}
+
+impl PaneLayoutView {
+    fn sync(
+        &mut self,
+        panes: Vec<Entity<Pane>>,
+        layout: PaneLayoutPresentation,
+        cx: &mut Context<Self>,
+    ) {
+        self.panes = panes;
+        self.layout = layout;
+        cx.notify();
+    }
+
     fn render_pane_layout(
         &self,
         layout: &PaneLayoutPresentation,
@@ -36414,16 +36451,24 @@ impl WorkspaceShell {
                     .min_h_0()
                     .when(*axis == PaneAxis::Vertical, |split| split.flex_col())
                     .on_drag_move::<PaneResizeDrag>(cx.listener(
-                        move |shell, event: &gpui::DragMoveEvent<PaneResizeDrag>, window, cx| {
+                        move |view, event: &gpui::DragMoveEvent<PaneResizeDrag>, window, cx| {
                             if event.drag(cx).path == listener_path {
-                                shell.resize_panes(event, window, cx);
+                                if let Ok(layout) = view.owner.update(cx, |shell, cx| {
+                                    shell.resize_panes(event, window, cx);
+                                    shell.pane_layout.clone()
+                                }) {
+                                    view.layout = layout;
+                                    cx.notify();
+                                }
                             }
                         },
                     ))
                     .on_drop::<PaneResizeDrag>(cx.listener(
-                        move |shell, drag: &PaneResizeDrag, window, cx| {
+                        move |view, drag: &PaneResizeDrag, window, cx| {
                             if drag.path == drop_path {
-                                shell.finish_pane_resize(drag, window, cx);
+                                let _ = view.owner.update(cx, |shell, cx| {
+                                    shell.finish_pane_resize(drag, window, cx)
+                                });
                             }
                         },
                     ))
@@ -36431,6 +36476,13 @@ impl WorkspaceShell {
                     .into_any_element()
             }
         }
+    }
+}
+
+impl gpui::Render for PaneLayoutView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let layout = self.layout.clone();
+        self.render_pane_layout(&layout, Vec::new(), cx.theme().colors.subtle_border, cx)
     }
 }
 
@@ -36477,9 +36529,7 @@ impl gpui::Render for WorkspaceShell {
             .presentation
             .open
             .then(|| dock_resize_separator(DockId::Bottom, colors.subtle_border));
-        let pane_layout = self.pane_layout.clone();
-        let pane_elements =
-            self.render_pane_layout(&pane_layout, Vec::new(), colors.subtle_border, cx);
+        let pane_elements = self.pane_layout_view.clone();
         let (pane_preview_tint, pane_preview_border) = pane_drop_preview_colors(&cx.theme());
         let root_tab_drop_preview = self.root_tab_drop_target.map(|target| {
             div()
