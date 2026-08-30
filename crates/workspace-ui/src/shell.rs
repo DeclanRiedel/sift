@@ -80,6 +80,7 @@ const ROOT_PANE_DROP_TARGET_SIZE: f32 = 48.0;
 const RESULT_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const RESULT_MIN_EXTENT: f32 = 140.0;
 const EDITOR_MIN_EXTENT: f32 = 160.0;
+const PRESENTATION_PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn default_keymaps() -> KeymapSettings {
     KeymapSettings {
@@ -6595,6 +6596,7 @@ pub struct WorkspaceShell {
     pane_layout: PaneLayoutPresentation,
     pane_layout_view: Entity<PaneLayoutView>,
     workspace_resize_frame_pending: bool,
+    presentation_persist_pending: bool,
     active_pane: usize,
     selected_workspace_id: Option<i64>,
     selected_instance_id: Option<String>,
@@ -7449,6 +7451,7 @@ impl WorkspaceShell {
             pane_layout,
             pane_layout_view,
             workspace_resize_frame_pending: false,
+            presentation_persist_pending: false,
             active_pane,
             selected_workspace_id,
             selected_instance_id,
@@ -11816,7 +11819,10 @@ impl WorkspaceShell {
             Some(PendingConnectionChange::SwitchServer { command, .. }) => {
                 self.send_server_change(command, cx)
             }
-            Some(PendingConnectionChange::Quit) => window.remove_window(),
+            Some(PendingConnectionChange::Quit) => {
+                self.persist_now(cx);
+                window.remove_window();
+            }
             Some(PendingConnectionChange::Disconnect) | None => {}
         }
     }
@@ -19076,7 +19082,31 @@ impl WorkspaceShell {
         }
     }
 
-    fn persist(&self, cx: &mut Context<Self>) {
+    fn persist(&mut self, cx: &mut Context<Self>) {
+        if self.store.is_none() || self.presentation_persist_pending {
+            return;
+        }
+        self.presentation_persist_pending = true;
+        cx.spawn(async move |shell, cx| {
+            cx.background_executor()
+                .timer(PRESENTATION_PERSIST_DEBOUNCE)
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
+                shell.presentation_persist_pending = false;
+                let Some(store) = shell.store.clone() else {
+                    return;
+                };
+                let state = shell.snapshot(cx);
+                cx.background_spawn(async move {
+                    let _ = store.save(&state);
+                })
+                .detach();
+            });
+        })
+        .detach();
+    }
+
+    fn persist_now(&self, cx: &mut Context<Self>) {
         let Some(store) = self.store.clone() else {
             return;
         };
@@ -24136,6 +24166,7 @@ impl WorkspaceShell {
                     self.modal = Some(Modal::ConfirmTransactionDisconnect);
                     cx.notify();
                 } else {
+                    self.persist_now(cx);
                     window.remove_window();
                 }
             }
@@ -42713,6 +42744,31 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.presence.followed_attachment),
             Some(41)
         );
+    }
+
+    #[gpui::test]
+    fn presentation_persistence_coalesces_and_saves_the_latest_state(cx: &mut TestAppContext) {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("presentation.json");
+        let store = Arc::new(PresentationStore::new(&path));
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.store = Some(store.clone());
+            shell.selected_workspace_id = Some(1);
+            shell.persist(cx);
+            shell.selected_workspace_id = Some(2);
+            shell.persist(cx);
+            assert!(shell.presentation_persist_pending);
+        });
+        assert!(!path.exists(), "snapshotting should be deferred");
+
+        cx.executor().advance_clock(PRESENTATION_PERSIST_DEBOUNCE);
+        cx.run_until_parked();
+        assert_eq!(store.load().workspace.workspace_id, Some(2));
+        assert!(!workspace.read_with(&cx, |shell, _| shell.presentation_persist_pending));
     }
 
     #[gpui::test]
