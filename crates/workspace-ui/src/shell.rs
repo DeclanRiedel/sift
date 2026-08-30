@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -633,6 +634,35 @@ fn filter_row_json(value: &serde_json::Value, filter: &RowJsonFilter) -> Option<
 struct ConnectionTreeItem {
     depth: usize,
     action: ConnectionTreeAction,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct CommandProjectionKey {
+    query: String,
+    context: CommandContext,
+    revision: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct OutlineProjectionKey {
+    query: String,
+    item_id: Option<u64>,
+    text_revision: Option<u64>,
+    revision: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ConnectionProjectionKey {
+    revision: u64,
+    tenant_count: usize,
+    connection_count: usize,
+    room_count: usize,
+    workspace_count: usize,
+    document_count: usize,
+    schema_object_count: usize,
+    expanded_count: usize,
+    find_open: bool,
+    find_query: String,
 }
 
 #[derive(Debug, Clone)]
@@ -6532,6 +6562,8 @@ pub struct WorkspaceShell {
     instance_configuration_editor: Entity<QueryEditor>,
     palette_selected: usize,
     palette_scroll_handle: UniformListScrollHandle,
+    command_projection_revision: u64,
+    command_projection_cache: RefCell<Option<(CommandProjectionKey, Arc<Vec<CommandSpec>>)>>,
     saved_query_switcher_input: Entity<TextInput>,
     saved_query_tags_input: Entity<TextInput>,
     saved_query_switcher_selected: usize,
@@ -6579,6 +6611,9 @@ pub struct WorkspaceShell {
     inspector_field_selected: usize,
     inspector_g_pending: bool,
     connection_nav_selected: usize,
+    connection_projection_revision: u64,
+    connection_projection_cache:
+        RefCell<Option<(ConnectionProjectionKey, Arc<Vec<ConnectionTreeItem>>)>>,
     connection_nav_g_pending: bool,
     repository_nav_g_pending: bool,
     repository_modal_selected: usize,
@@ -6666,6 +6701,9 @@ pub struct WorkspaceShell {
     query_outline_collapsed: HashSet<QueryOutlineGroup>,
     query_outline_loading: bool,
     query_outline_error: Option<String>,
+    query_outline_projection_revision: u64,
+    query_outline_projection_cache:
+        RefCell<Option<(OutlineProjectionKey, Arc<Vec<QueryOutlineEntry>>)>>,
     pending_semantic_rename: Option<PendingSemanticRename>,
     next_execution_id: u64,
     running_explains: HashMap<u64, u64>,
@@ -7072,6 +7110,7 @@ impl WorkspaceShell {
         cx.observe(&query_input, |shell, _, cx| {
             shell.palette_selected = 0;
             shell.repository_modal_selected = 0;
+            shell.invalidate_command_projection();
             shell
                 .palette_scroll_handle
                 .scroll_to_item(0, ScrollStrategy::Top);
@@ -7124,6 +7163,7 @@ impl WorkspaceShell {
         cx.observe(&connections_find_input, |shell, input, cx| {
             shell.connections_find_query = input.read(cx).text().trim().to_lowercase();
             shell.connection_nav_selected = 0;
+            shell.invalidate_connection_projection();
             shell
                 .connections_scroll_handle
                 .scroll_to_item(0, ScrollStrategy::Top);
@@ -7150,6 +7190,7 @@ impl WorkspaceShell {
         .detach();
         cx.observe(&query_outline_filter_input, |shell, _, cx| {
             shell.query_outline_selected = 0;
+            shell.invalidate_query_outline_projection();
             shell
                 .query_outline_scroll_handle
                 .scroll_to_item(0, ScrollStrategy::Top);
@@ -7361,6 +7402,8 @@ impl WorkspaceShell {
             instance_configuration_editor,
             palette_selected: 0,
             palette_scroll_handle: UniformListScrollHandle::new(),
+            command_projection_revision: 0,
+            command_projection_cache: RefCell::new(None),
             saved_query_switcher_input,
             saved_query_tags_input,
             saved_query_switcher_selected: 0,
@@ -7409,6 +7452,8 @@ impl WorkspaceShell {
             inspector_field_selected: 0,
             inspector_g_pending: false,
             connection_nav_selected: 0,
+            connection_projection_revision: 0,
+            connection_projection_cache: RefCell::new(None),
             connection_nav_g_pending: false,
             repository_nav_g_pending: false,
             repository_modal_selected: 0,
@@ -7488,6 +7533,8 @@ impl WorkspaceShell {
             query_outline_collapsed: HashSet::new(),
             query_outline_loading: false,
             query_outline_error: None,
+            query_outline_projection_revision: 0,
+            query_outline_projection_cache: RefCell::new(None),
             pending_semantic_rename: None,
             next_execution_id: 1,
             running_explains: HashMap::new(),
@@ -7900,6 +7947,7 @@ impl WorkspaceShell {
                             }
                         }
                         shell.lifecycle.apply(event);
+                        shell.invalidate_connection_projection();
                         shell.reconcile_room_document_tabs(cx);
                         shell.status.connection = shell.lifecycle.status_label();
                         shell.reconcile_restored_workspace(cx);
@@ -7996,6 +8044,7 @@ impl WorkspaceShell {
         }
         self.connection_status = ConnectionStatus::Disconnected;
         self.connection_schema = ConnectionSchemaState::Unavailable;
+        self.invalidate_connection_projection();
         self.table_definitions.clear();
         self.table_definition_sections.clear();
         self.pending_object_ddl.clear();
@@ -8533,6 +8582,8 @@ impl WorkspaceShell {
                     self.operation_capabilities.clear();
                 }
                 self.connection_status = status.clone();
+                self.invalidate_connection_projection();
+                self.invalidate_command_projection();
                 match &status {
                     ConnectionStatus::Disconnected => self.fail_running_explains(
                         "Explain interrupted because the database disconnected",
@@ -8905,6 +8956,7 @@ impl WorkspaceShell {
                         );
                     }
                 }
+                self.invalidate_command_projection();
                 cx.notify();
             }
             ExecutorEvent::SchemaLoaded {
@@ -8950,6 +9002,7 @@ impl WorkspaceShell {
                     profile_id,
                     snapshot,
                 };
+                self.invalidate_connection_projection();
                 if !self.schema_search_input.read(cx).text().trim().is_empty() {
                     self.request_schema_search(cx);
                 }
@@ -8963,6 +9016,7 @@ impl WorkspaceShell {
                     profile_id,
                     message: message.clone(),
                 };
+                self.invalidate_connection_projection();
                 cx.notify();
             }
             ExecutorEvent::Execution {
@@ -9085,6 +9139,7 @@ impl WorkspaceShell {
                         .map(QueryOutlineEntry::key);
                     self.query_outline_statements = statements;
                     self.query_outline_symbols = symbols;
+                    self.invalidate_query_outline_projection();
                     self.query_outline_selected = selected_id
                         .and_then(|id| {
                             self.filtered_query_outline_entries(cx)
@@ -10511,6 +10566,7 @@ impl WorkspaceShell {
                 ) {
                     self.connection_status = ConnectionStatus::Disconnected;
                     self.connection_schema = ConnectionSchemaState::Unavailable;
+                    self.invalidate_connection_projection();
                     self.status.database = "No database".into();
                 }
                 self.show_toast("Connection deleted".into(), cx);
@@ -10780,6 +10836,7 @@ impl WorkspaceShell {
             self.connection_schema = ConnectionSchemaState::Loading {
                 profile_id: entry.id,
             };
+            self.invalidate_connection_projection();
             self.sync_database_item_states(cx);
             cx.notify();
         }
@@ -11593,6 +11650,7 @@ impl WorkspaceShell {
         };
         if sender.send(ExecutorCommand::RefreshSchema).is_ok() {
             self.connection_schema = ConnectionSchemaState::Loading { profile_id };
+            self.invalidate_connection_projection();
             cx.notify();
         }
     }
@@ -11764,6 +11822,7 @@ impl WorkspaceShell {
         self.connection_status = ConnectionStatus::Disconnected;
         self.operation_capabilities.clear();
         self.connection_schema = ConnectionSchemaState::Unavailable;
+        self.invalidate_connection_projection();
         self.schema_search_state = SchemaSearchState::Idle;
         self.data_search_state = DataSearchState::Idle;
         self.status.database = "No database".into();
@@ -11851,6 +11910,7 @@ impl WorkspaceShell {
         if !self.expanded_catalogs.remove(&key) {
             self.expanded_catalogs.insert(key);
         }
+        self.invalidate_connection_projection();
         cx.notify();
     }
 
@@ -11858,6 +11918,7 @@ impl WorkspaceShell {
         if !self.expanded_tenants.remove(&tenant_id) {
             self.expanded_tenants.insert(tenant_id);
         }
+        self.invalidate_connection_projection();
         cx.notify();
     }
 
@@ -11865,6 +11926,7 @@ impl WorkspaceShell {
         if !self.expanded_connections.remove(&profile_id) {
             self.expanded_connections.insert(profile_id);
         }
+        self.invalidate_connection_projection();
         cx.notify();
     }
 
@@ -11872,6 +11934,7 @@ impl WorkspaceShell {
         if !self.expanded_rooms.remove(&room_id) {
             self.expanded_rooms.insert(room_id);
         }
+        self.invalidate_connection_projection();
         cx.notify();
     }
 
@@ -11886,6 +11949,7 @@ impl WorkspaceShell {
         if !self.expanded_schemas.remove(&key) {
             self.expanded_schemas.insert(key);
         }
+        self.invalidate_connection_projection();
         cx.notify();
     }
 
@@ -11901,10 +11965,65 @@ impl WorkspaceShell {
         if !self.expanded_object_groups.remove(&key) {
             self.expanded_object_groups.insert(key);
         }
+        self.invalidate_connection_projection();
         cx.notify();
     }
 
-    fn visible_connection_items(&self) -> Vec<ConnectionTreeItem> {
+    fn invalidate_connection_projection(&mut self) {
+        self.connection_projection_revision = self.connection_projection_revision.wrapping_add(1);
+        self.connection_projection_cache.get_mut().take();
+    }
+
+    fn visible_connection_items(&self) -> Arc<Vec<ConnectionTreeItem>> {
+        let mut connection_count = 0;
+        let mut room_count = 0;
+        let mut workspace_count = 0;
+        let mut document_count = 0;
+        for tenant in &self.lifecycle.tenants {
+            connection_count += tenant.connections.len();
+            room_count += tenant.rooms.len();
+            for room in &tenant.rooms {
+                workspace_count += room.workspaces.len();
+                document_count += room.documents.len();
+            }
+        }
+        let schema_object_count = match &self.connection_schema {
+            ConnectionSchemaState::Ready { snapshot, .. } => snapshot
+                .trees
+                .iter()
+                .flat_map(|catalog| &catalog.schemas)
+                .map(|schema| schema.objects.len())
+                .sum(),
+            _ => 0,
+        };
+        let key = ConnectionProjectionKey {
+            revision: self.connection_projection_revision,
+            tenant_count: self.lifecycle.tenants.len(),
+            connection_count,
+            room_count,
+            workspace_count,
+            document_count,
+            schema_object_count,
+            expanded_count: self.expanded_tenants.len()
+                + self.expanded_connections.len()
+                + self.expanded_rooms.len()
+                + self.expanded_catalogs.len()
+                + self.expanded_schemas.len()
+                + self.expanded_object_groups.len(),
+            find_open: self.connections_find_open,
+            find_query: self.connections_find_query.clone(),
+        };
+        if let Some((cached_key, items)) = self.connection_projection_cache.borrow().as_ref() {
+            if cached_key == &key {
+                return items.clone();
+            }
+        }
+        let items = Arc::new(self.build_visible_connection_items());
+        *self.connection_projection_cache.borrow_mut() = Some((key, items.clone()));
+        items
+    }
+
+    fn build_visible_connection_items(&self) -> Vec<ConnectionTreeItem> {
         let mut items = Vec::new();
         for tenant in &self.lifecycle.tenants {
             let tenant_id = tenant.id.0;
@@ -12102,7 +12221,8 @@ impl WorkspaceShell {
         let items = self.visible_connection_items();
         if self.connections_find_open {
             return items
-                .into_iter()
+                .iter()
+                .cloned()
                 .enumerate()
                 .map(|(nav_index, item)| ConnectionDockRow::Navigation { nav_index, item })
                 .collect();
@@ -12111,7 +12231,7 @@ impl WorkspaceShell {
         let mut current_tenant = None;
         let mut workspace_section_rendered = false;
 
-        for (nav_index, item) in items.into_iter().enumerate() {
+        for (nav_index, item) in items.iter().cloned().enumerate() {
             match &item.action {
                 ConnectionTreeAction::Tenant(tenant_id) => {
                     let tenant_id = *tenant_id;
@@ -14039,6 +14159,7 @@ impl WorkspaceShell {
             return;
         }
         self.keymaps = keymaps;
+        self.invalidate_command_projection();
         self.keymaps_error = None;
         self.ide_input = None;
         self.show_toast("Saved keymaps.json".into(), cx);
@@ -18820,6 +18941,7 @@ impl WorkspaceShell {
     ) {
         self.query_outline_statements = statements;
         self.query_outline_symbols = symbols;
+        self.invalidate_query_outline_projection();
         self.query_outline_loading = false;
         self.query_outline_error = None;
         self.query_outline_selected = 0;
@@ -19153,6 +19275,7 @@ impl WorkspaceShell {
 
     fn open_connections_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.connections_find_open = true;
+        self.invalidate_connection_projection();
         self.connection_nav_selected = 0;
         self.connections_scroll_handle
             .scroll_to_item(0, ScrollStrategy::Top);
@@ -19167,6 +19290,7 @@ impl WorkspaceShell {
         self.connections_find_query.clear();
         self.connections_find_input
             .update(cx, |input, cx| input.set_text("", cx));
+        self.invalidate_connection_projection();
         self.normalize_connection_selection();
         self.connections_focus_handle.focus(window, cx);
         cx.notify();
@@ -20244,6 +20368,7 @@ impl WorkspaceShell {
                 }) {
                     Ok(keymaps) => {
                         self.keymaps = keymaps.clone();
+                        self.invalidate_command_projection();
                         self.sync_keymap_inputs(&keymaps, cx);
                         if let Some(pane) = self.panes.get(self.active_pane) {
                             pane.update(cx, |pane, cx| pane.mark_clean(item_id, cx));
@@ -22698,37 +22823,52 @@ impl WorkspaceShell {
     }
 
     /// Commands matching the palette search text (case-insensitive substring).
-    fn filtered_commands(&self, cx: &App) -> Vec<CommandSpec> {
+    fn invalidate_command_projection(&mut self) {
+        self.command_projection_revision = self.command_projection_revision.wrapping_add(1);
+        self.command_projection_cache.get_mut().take();
+    }
+
+    fn filtered_commands(&self, cx: &App) -> Arc<Vec<CommandSpec>> {
         let query = self.query_input.read(cx).text().trim().to_lowercase();
-        if query == "w" {
-            return self
-                .command_specs(cx)
-                .into_iter()
-                .filter(|command| command.id == CommandId::SaveItem)
-                .collect();
+        let key = CommandProjectionKey {
+            query: query.clone(),
+            context: self.command_context(cx),
+            revision: self.command_projection_revision,
+        };
+        if let Some((cached_key, commands)) = self.command_projection_cache.borrow().as_ref() {
+            if cached_key == &key {
+                return commands.clone();
+            }
         }
         let compact_query = query
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect::<String>();
-        self.command_specs(cx)
-            .into_iter()
-            .filter(|command| {
-                if query.is_empty() {
-                    return true;
-                }
-                let compact_language = command
-                    .language
-                    .to_lowercase()
-                    .replace("<leader>", "")
-                    .chars()
-                    .filter(|character| !character.is_whitespace())
-                    .collect::<String>();
-                command.label.to_lowercase().contains(&query)
-                    || command.id.as_str().contains(&query)
-                    || (!compact_query.is_empty() && compact_language.contains(&compact_query))
-            })
-            .collect()
+        let commands: Arc<Vec<CommandSpec>> = Arc::new(
+            self.command_specs(cx)
+                .into_iter()
+                .filter(|command| {
+                    if query == "w" {
+                        return command.id == CommandId::SaveItem;
+                    }
+                    if query.is_empty() {
+                        return true;
+                    }
+                    let compact_language = command
+                        .language
+                        .to_lowercase()
+                        .replace("<leader>", "")
+                        .chars()
+                        .filter(|character| !character.is_whitespace())
+                        .collect::<String>();
+                    command.label.to_lowercase().contains(&query)
+                        || command.id.as_str().contains(&query)
+                        || (!compact_query.is_empty() && compact_language.contains(&compact_query))
+                })
+                .collect(),
+        );
+        *self.command_projection_cache.borrow_mut() = Some((key, commands.clone()));
+        commands
     }
 
     fn filtered_saved_queries(&self, cx: &App) -> Vec<sift_api_types::SavedQuery> {
@@ -22799,6 +22939,7 @@ impl WorkspaceShell {
             self.query_outline_revision = None;
             self.query_outline_statements.clear();
             self.query_outline_symbols.clear();
+            self.invalidate_query_outline_projection();
             self.query_outline_loading = false;
             self.query_outline_error = None;
             cx.notify();
@@ -22823,6 +22964,7 @@ impl WorkspaceShell {
             self.query_outline_statements.clear();
             self.query_outline_symbols.clear();
             self.query_outline_collapsed.clear();
+            self.invalidate_query_outline_projection();
         }
         self.query_outline_item_id = Some(item_id);
         self.query_outline_revision = Some(revision);
@@ -22879,13 +23021,30 @@ impl WorkspaceShell {
             .replace(['\n', '\r'], " ")
     }
 
-    fn filtered_query_outline_entries(&self, cx: &App) -> Vec<QueryOutlineEntry> {
+    fn invalidate_query_outline_projection(&mut self) {
+        self.query_outline_projection_revision =
+            self.query_outline_projection_revision.wrapping_add(1);
+        self.query_outline_projection_cache.get_mut().take();
+    }
+
+    fn filtered_query_outline_entries(&self, cx: &App) -> Arc<Vec<QueryOutlineEntry>> {
         let query = self
             .query_outline_filter_input
             .read(cx)
             .text()
             .trim()
             .to_lowercase();
+        let key = OutlineProjectionKey {
+            query: query.clone(),
+            item_id: self.query_outline_item_id,
+            text_revision: self.query_outline_revision,
+            revision: self.query_outline_projection_revision,
+        };
+        if let Some((cached_key, entries)) = self.query_outline_projection_cache.borrow().as_ref() {
+            if cached_key == &key {
+                return entries.clone();
+            }
+        }
         let statements = self
             .query_outline_statements
             .iter()
@@ -22948,6 +23107,8 @@ impl WorkspaceShell {
                 entries.extend(symbols.into_iter().map(QueryOutlineEntry::Symbol));
             }
         }
+        let entries = Arc::new(entries);
+        *self.query_outline_projection_cache.borrow_mut() = Some((key, entries.clone()));
         entries
     }
 
@@ -22992,6 +23153,7 @@ impl WorkspaceShell {
         } else {
             self.query_outline_collapsed.remove(&group);
         }
+        self.invalidate_query_outline_projection();
         self.query_outline_selected = self
             .filtered_query_outline_entries(cx)
             .iter()
@@ -23085,6 +23247,7 @@ impl WorkspaceShell {
             if !self.query_outline_collapsed.remove(&group) {
                 self.query_outline_collapsed.insert(group);
             }
+            self.invalidate_query_outline_projection();
             cx.notify();
             return;
         }
