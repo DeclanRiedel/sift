@@ -227,14 +227,14 @@ pub(super) fn render_bottom_panel(
                             div().w(px(84.)).flex().justify_end().child(
                                 Button::new(
                                     "refresh-database-processes",
-                                    if shell.database_processes_loading {
+                                    if shell.database_processes_request.loading() {
                                         "Loading…"
                                     } else {
                                         "Refresh"
                                     },
                                 )
                                 .tone(ButtonTone::Ghost)
-                                .disabled(shell.database_processes_loading)
+                                .disabled(shell.database_processes_request.loading())
                                 .on_click(
                                     cx.listener(|shell, _, _, cx| {
                                         shell.load_database_processes(cx)
@@ -258,16 +258,16 @@ pub(super) fn render_bottom_panel(
                         .size_full(),
                     ),
                 )
-                .children(
-                    shell
-                        .database_processes_error
-                        .clone()
-                        .map(|message| div().p_2().text_color(colors.danger).child(message)),
-                )
+                .children(shell.database_processes_request.error().map(|message| {
+                    div()
+                        .p_2()
+                        .text_color(colors.danger)
+                        .child(message.to_string())
+                }))
                 .when(
                     shell.database_processes.is_empty()
-                        && !shell.database_processes_loading
-                        && shell.database_processes_error.is_none(),
+                        && !shell.database_processes_request.loading()
+                        && shell.database_processes_request.error().is_none(),
                     |panel| {
                         panel.child(
                             div()

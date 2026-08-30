@@ -2037,6 +2037,39 @@ enum QueryHistoryAction {
     Save,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum RequestState {
+    #[default]
+    Idle,
+    Loading,
+    Failed(String),
+}
+
+impl RequestState {
+    fn loading(&self) -> bool {
+        matches!(self, Self::Loading)
+    }
+
+    fn error(&self) -> Option<&str> {
+        match self {
+            Self::Failed(message) => Some(message),
+            Self::Idle | Self::Loading => None,
+        }
+    }
+
+    fn start(&mut self) {
+        *self = Self::Loading;
+    }
+
+    fn succeed(&mut self) {
+        *self = Self::Idle;
+    }
+
+    fn fail(&mut self, message: impl Into<String>) {
+        *self = Self::Failed(message.into());
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 enum TransactionUiState {
     #[default]
@@ -6779,8 +6812,7 @@ pub struct WorkspaceShell {
     room_document_generations: HashMap<i64, u64>,
     running_queries: HashMap<u64, u64>,
     database_processes: Vec<sift_protocol::DatabaseProcess>,
-    database_processes_loading: bool,
-    database_processes_error: Option<String>,
+    database_processes_request: RequestState,
     selected_database_process: Option<i64>,
     transaction_state: TransactionUiState,
     savepoints: Vec<String>,
@@ -6845,8 +6877,7 @@ pub struct WorkspaceShell {
     pending_production_execution: Option<PendingProductionExecution>,
     pending_database_explain: Option<PendingDatabaseExplain>,
     catalog_diagram: Option<Box<sift_protocol::CatalogDiagram>>,
-    catalog_diagram_loading: bool,
-    catalog_diagram_error: Option<String>,
+    catalog_diagram_request: RequestState,
     catalog_diff: Option<Box<sift_protocol::SchemaDiff>>,
     catalog_migration_plan: Option<Box<sift_protocol::MigrationPlan>>,
     catalog_migration_pending: bool,
@@ -7628,8 +7659,7 @@ impl WorkspaceShell {
             room_document_generations: HashMap::new(),
             running_queries: HashMap::new(),
             database_processes: Vec::new(),
-            database_processes_loading: false,
-            database_processes_error: None,
+            database_processes_request: RequestState::Idle,
             selected_database_process: None,
             transaction_state: TransactionUiState::Idle,
             savepoints: Vec::new(),
@@ -7687,8 +7717,7 @@ impl WorkspaceShell {
             pending_production_execution: None,
             pending_database_explain: None,
             catalog_diagram: None,
-            catalog_diagram_loading: false,
-            catalog_diagram_error: None,
+            catalog_diagram_request: RequestState::Idle,
             catalog_diff: None,
             catalog_migration_plan: None,
             catalog_migration_pending: false,
@@ -10687,7 +10716,6 @@ impl WorkspaceShell {
                 self.show_error_toast(message, cx);
             }
             ExecutorEvent::DatabaseProcessesLoaded(result) => {
-                self.database_processes_loading = false;
                 match result {
                     Ok(processes) => {
                         if self.selected_database_process.is_some_and(|selected| {
@@ -10698,22 +10726,21 @@ impl WorkspaceShell {
                             self.selected_database_process = None;
                         }
                         self.database_processes = processes;
-                        self.database_processes_error = None;
+                        self.database_processes_request.succeed();
                     }
-                    Err(message) => self.database_processes_error = Some(message),
+                    Err(message) => self.database_processes_request.fail(message),
                 }
                 cx.notify();
             }
             ExecutorEvent::CatalogDiagramLoaded(result) => {
-                self.catalog_diagram_loading = false;
                 match result {
                     Ok(diagram) => {
                         self.catalog_diagram = Some(diagram);
-                        self.catalog_diagram_error = None;
+                        self.catalog_diagram_request.succeed();
                     }
                     Err(message) => {
                         self.catalog_diagram = None;
-                        self.catalog_diagram_error = Some(message);
+                        self.catalog_diagram_request.fail(message);
                     }
                 }
                 cx.notify();
@@ -18260,17 +18287,19 @@ impl WorkspaceShell {
     }
 
     fn load_database_processes(&mut self, cx: &mut Context<Self>) {
-        if self.database_processes_loading {
+        if self.database_processes_request.loading() {
             return;
         }
         let Some(sender) = &self.executor_sender else {
-            self.database_processes_error = Some("Database executor is unavailable".into());
+            self.database_processes_request
+                .fail("Database executor is unavailable");
             return;
         };
-        self.database_processes_loading =
-            sender.send(ExecutorCommand::LoadDatabaseProcesses).is_ok();
-        if self.database_processes_loading {
-            self.database_processes_error = None;
+        if sender.send(ExecutorCommand::LoadDatabaseProcesses).is_ok() {
+            self.database_processes_request.start();
+        } else {
+            self.database_processes_request
+                .fail("Database executor is unavailable");
         }
         cx.notify();
     }
@@ -21307,8 +21336,7 @@ impl WorkspaceShell {
             return;
         };
         if sender.send(ExecutorCommand::LoadCatalogDiagram).is_ok() {
-            self.catalog_diagram_loading = true;
-            self.catalog_diagram_error = None;
+            self.catalog_diagram_request.start();
             self.modal = Some(Modal::CatalogDiagram);
             cx.notify();
         }
@@ -33963,8 +33991,12 @@ impl WorkspaceShell {
                                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Catalog diagram"))
                                 .child(div().text_xs().text_color(colors.muted_text).child(summary)),
                         )
-                        .children(self.catalog_diagram_error.clone().map(ErrorBanner::new))
-                        .when(self.catalog_diagram_loading, |diagram| diagram.child(div().p_4().text_center().text_color(colors.muted_text).child("Loading catalog relationships…")))
+                        .children(
+                            self.catalog_diagram_request
+                                .error()
+                                .map(|message| ErrorBanner::new(message.to_string())),
+                        )
+                        .when(self.catalog_diagram_request.loading(), |diagram| diagram.child(div().p_4().text_center().text_color(colors.muted_text).child("Loading catalog relationships…")))
                         .child(
                             div()
                                 .id("catalog-diagram-cards")
@@ -33983,8 +34015,8 @@ impl WorkspaceShell {
                                 .justify_end()
                                 .gap_2()
                                 .child(Button::new("copy-catalog-mermaid", "Copy Mermaid").debug_selector("copy-catalog-mermaid").tone(ButtonTone::Ghost).disabled(self.catalog_diagram.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.copy_catalog_diagram_mermaid(cx))))
-                                .child(Button::new("refresh-catalog-diagram", "Refresh").debug_selector("refresh-catalog-diagram").tone(ButtonTone::Neutral).loading(self.catalog_diagram_loading).on_click(cx.listener(|shell, _, _, cx| shell.open_catalog_diagram(cx))))
-                                .child(Button::new("compare-catalog-diagram", "Compare to baseline…").debug_selector("compare-catalog-diagram").tone(ButtonTone::Accent).disabled(self.catalog_diagram_loading).on_click(cx.listener(|shell, _, _, cx| shell.prepare_catalog_migration(cx))))
+                                .child(Button::new("refresh-catalog-diagram", "Refresh").debug_selector("refresh-catalog-diagram").tone(ButtonTone::Neutral).loading(self.catalog_diagram_request.loading()).on_click(cx.listener(|shell, _, _, cx| shell.open_catalog_diagram(cx))))
+                                .child(Button::new("compare-catalog-diagram", "Compare to baseline…").debug_selector("compare-catalog-diagram").tone(ButtonTone::Accent).disabled(self.catalog_diagram_request.loading()).on_click(cx.listener(|shell, _, _, cx| shell.prepare_catalog_migration(cx))))
                         )
                         .into_any_element()
                 }
