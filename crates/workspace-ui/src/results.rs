@@ -3942,6 +3942,47 @@ impl ResultsView {
         )
     }
 
+    /// Display-column range whose horizontal extent intersects the viewport,
+    /// plus the culled width on either side.
+    ///
+    /// Header cells and row cells are both laid out for every column, so a
+    /// wide result pays full layout cost for columns nobody can see — and it
+    /// pays it again on every repaint, including one caused by moving the
+    /// selection. The culled widths are re-inserted as plain spacers so the
+    /// remaining cells keep their x-positions and the horizontal scrollbar
+    /// keeps its range.
+    ///
+    /// Before the first layout the viewport width is still zero; render every
+    /// column in that case rather than guess.
+    fn visible_column_span(&self, widths: &[f32]) -> (Range<usize>, f32, f32) {
+        const COLUMN_OVERSCAN: usize = 1;
+        let viewport = f32::from(self.grid_scroll_handle.bounds().size.width);
+        if viewport <= 0.0 || widths.is_empty() {
+            return (0..widths.len(), 0.0, 0.0);
+        }
+        let left = -f32::from(self.grid_scroll_handle.offset().x);
+        let right = left + viewport;
+        let mut first = widths.len();
+        let mut last = 0usize;
+        let mut edge = 0.0f32;
+        for (index, width) in widths.iter().enumerate() {
+            let start = edge;
+            edge += width;
+            if edge > left && start < right {
+                first = first.min(index);
+                last = index;
+            }
+        }
+        if first > last {
+            return (0..widths.len(), 0.0, 0.0);
+        }
+        let first = first.saturating_sub(COLUMN_OVERSCAN);
+        let last = (last + COLUMN_OVERSCAN).min(widths.len() - 1);
+        let lead = widths[..first].iter().sum::<f32>();
+        let trail = widths[last + 1..].iter().sum::<f32>();
+        (first..last + 1, lead, trail)
+    }
+
     fn render_grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = cx.theme().colors;
         let Some(_) = self.state.ready() else {
@@ -3991,14 +4032,25 @@ impl ResultsView {
             })
             .collect::<Vec<_>>();
         let scrollable_min_width = px(visible_widths.iter().sum::<f32>());
+        let (column_span, lead_width, trail_width) = self.visible_column_span(&visible_widths);
+        let header_span = column_span.clone();
+        // Right edge of each column, accumulated over every column so a culled
+        // handle keeps the same absolute position as an unculled one.
         let mut resize_right = 0.0;
+        let column_right_edges = visible_widths
+            .iter()
+            .map(|width| {
+                resize_right += width;
+                resize_right
+            })
+            .collect::<Vec<_>>();
         let resize_handles = visible_columns
             .iter()
             .copied()
             .enumerate()
+            .filter(|(display_column, _)| column_span.contains(display_column))
             .map(|(display_column, source_column)| {
-                let width = visible_widths[display_column];
-                resize_right += width;
+                let resize_right = column_right_edges[display_column];
                 div()
                     .id(("resize-result-column", display_column))
                     .debug_selector(move || format!("resize-result-column-{display_column}"))
@@ -4052,169 +4104,177 @@ impl ResultsView {
             .flex_none()
             .flex_none()
             .w(scrollable_min_width)
-            .children(visible_columns.iter().enumerate().filter_map(
-                |(display_column, source_column)| {
-                    let source_column = *source_column;
-                    let column = self.rendered_columns.get(source_column)?;
-                    let width = self
-                        .column_widths
-                        .get(source_column)
-                        .copied()
-                        .unwrap_or(DEFAULT_COLUMN_WIDTH);
-                    Some(
-                        div()
-                            .id(("result-column", display_column))
-                            .debug_selector(move || format!("result-column-{display_column}"))
-                            .relative()
-                            .role(gpui::Role::Button)
-                            .aria_label(format!("Select or drag column {}", column.name))
-                            .flex_none()
-                            .w(px(width))
-                            .px_2()
-                            .flex()
-                            .flex_col()
-                            .justify_center()
-                            .overflow_hidden()
-                            .border_r_1()
-                            .border_color(colors.subtle_border)
-                            .when(
-                                self.selected.is_some_and(|selection| {
-                                    selection.highlights_column(source_column)
-                                }),
-                                |header| header.bg(colors.selected_surface).text_color(colors.text),
-                            )
-                            .on_drag(
-                                ColumnDrag {
-                                    index: source_column,
-                                    name: column.name.clone(),
-                                },
-                                |drag, _, _, cx| cx.new(|_| drag.clone()),
-                            )
-                            .drag_over::<ColumnDrag>(move |header, drag, _, cx| {
-                                if drag.index == source_column {
-                                    header
-                                } else {
-                                    header
-                                        .bg(cx.theme().colors.drop_target_background)
-                                        .border_color(cx.theme().colors.drop_target_border)
-                                        .border_l_2()
-                                }
-                            })
-                            .on_drop::<ColumnDrag>(cx.listener(
-                                move |view, drag: &ColumnDrag, _, cx| {
-                                    view.reorder_column(drag.index, source_column, cx)
-                                },
-                            ))
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                view.focus_handle.focus(window, cx);
-                                view.select_column(source_column, cx);
-                            }))
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(column.name.clone()),
-                                    )
-                                    .children(self.sorts.iter().enumerate().find_map(
-                                        |(priority, (sorted, direction))| {
-                                            (*sorted == source_column).then(|| {
-                                                div().text_xs().text_color(colors.accent).child(
-                                                    format!(
-                                                        "{}{}",
-                                                        match direction {
-                                                            SortDirection::Ascending => "↑",
-                                                            SortDirection::Descending => "↓",
+            .children((lead_width > 0.0).then(|| div().flex_none().w(px(lead_width))))
+            .children(
+                visible_columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(display_column, _)| header_span.contains(display_column))
+                    .filter_map(|(display_column, source_column)| {
+                        let source_column = *source_column;
+                        let column = self.rendered_columns.get(source_column)?;
+                        let width = self
+                            .column_widths
+                            .get(source_column)
+                            .copied()
+                            .unwrap_or(DEFAULT_COLUMN_WIDTH);
+                        Some(
+                            div()
+                                .id(("result-column", display_column))
+                                .debug_selector(move || format!("result-column-{display_column}"))
+                                .relative()
+                                .role(gpui::Role::Button)
+                                .aria_label(format!("Select or drag column {}", column.name))
+                                .flex_none()
+                                .w(px(width))
+                                .px_2()
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .overflow_hidden()
+                                .border_r_1()
+                                .border_color(colors.subtle_border)
+                                .when(
+                                    self.selected.is_some_and(|selection| {
+                                        selection.highlights_column(source_column)
+                                    }),
+                                    |header| {
+                                        header.bg(colors.selected_surface).text_color(colors.text)
+                                    },
+                                )
+                                .on_drag(
+                                    ColumnDrag {
+                                        index: source_column,
+                                        name: column.name.clone(),
+                                    },
+                                    |drag, _, _, cx| cx.new(|_| drag.clone()),
+                                )
+                                .drag_over::<ColumnDrag>(move |header, drag, _, cx| {
+                                    if drag.index == source_column {
+                                        header
+                                    } else {
+                                        header
+                                            .bg(cx.theme().colors.drop_target_background)
+                                            .border_color(cx.theme().colors.drop_target_border)
+                                            .border_l_2()
+                                    }
+                                })
+                                .on_drop::<ColumnDrag>(cx.listener(
+                                    move |view, drag: &ColumnDrag, _, cx| {
+                                        view.reorder_column(drag.index, source_column, cx)
+                                    },
+                                ))
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.focus_handle.focus(window, cx);
+                                    view.select_column(source_column, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(column.name.clone()),
+                                        )
+                                        .children(self.sorts.iter().enumerate().find_map(
+                                            |(priority, (sorted, direction))| {
+                                                (*sorted == source_column).then(|| {
+                                                    div().text_xs().text_color(colors.accent).child(
+                                                        format!(
+                                                            "{}{}",
+                                                            match direction {
+                                                                SortDirection::Ascending => "↑",
+                                                                SortDirection::Descending => "↓",
+                                                            },
+                                                            priority + 1
+                                                        ),
+                                                    )
+                                                })
+                                            },
+                                        ))
+                                        .child(
+                                            div()
+                                                .debug_selector(move || {
+                                                    format!("filter-result-column-{display_column}")
+                                                })
+                                                .child(
+                                                    IconButton::new(
+                                                        ("filter-result-column", display_column),
+                                                        IconName::Search,
+                                                        format!("Filter {}", column.name),
+                                                    )
+                                                    .square(px(20.))
+                                                    .icon_size(11.)
+                                                    .toggle_state(
+                                                        self.filter_is_active(source_column),
+                                                    )
+                                                    .tooltip(format!("Filter {}", column.name))
+                                                    .on_click(cx.listener(
+                                                        move |view, _, window, cx| {
+                                                            cx.stop_propagation();
+                                                            view.open_grid_transform(
+                                                                source_column,
+                                                                GridTransformTab::Filter,
+                                                                window,
+                                                                cx,
+                                                            );
                                                         },
-                                                        priority + 1
-                                                    ),
-                                                )
-                                            })
-                                        },
-                                    ))
-                                    .child(
-                                        div()
-                                            .debug_selector(move || {
-                                                format!("filter-result-column-{display_column}")
-                                            })
-                                            .child(
-                                                IconButton::new(
-                                                    ("filter-result-column", display_column),
-                                                    IconName::Search,
-                                                    format!("Filter {}", column.name),
-                                                )
-                                                .square(px(20.))
-                                                .icon_size(11.)
-                                                .toggle_state(self.filter_is_active(source_column))
-                                                .tooltip(format!("Filter {}", column.name))
-                                                .on_click(cx.listener(
-                                                    move |view, _, window, cx| {
-                                                        cx.stop_propagation();
-                                                        view.open_grid_transform(
-                                                            source_column,
-                                                            GridTransformTab::Filter,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .debug_selector(move || {
-                                                format!("sort-result-column-{display_column}")
-                                            })
-                                            .child(
-                                                IconButton::new(
-                                                    ("sort-result-column", display_column),
-                                                    IconName::ChevronDown,
-                                                    format!("Sort {}", column.name),
-                                                )
-                                                .square(px(20.))
-                                                .icon_size(11.)
-                                                .toggle_state(
-                                                    self.sorts.iter().any(|(column, _)| {
-                                                        *column == source_column
-                                                    }),
-                                                )
-                                                .tooltip(format!("Sort {}", column.name))
-                                                .on_click(cx.listener(
-                                                    move |view, _, window, cx| {
-                                                        cx.stop_propagation();
-                                                        view.open_grid_transform(
-                                                            source_column,
-                                                            GridTransformTab::Sort,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                            ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .truncate()
-                                    .child(format!(
-                                        "{}{}",
-                                        column.type_label,
-                                        if column.nullable { "?" } else { "" }
-                                    )),
-                            ),
-                    )
-                },
-            ))
+                                                    )),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .debug_selector(move || {
+                                                    format!("sort-result-column-{display_column}")
+                                                })
+                                                .child(
+                                                    IconButton::new(
+                                                        ("sort-result-column", display_column),
+                                                        IconName::ChevronDown,
+                                                        format!("Sort {}", column.name),
+                                                    )
+                                                    .square(px(20.))
+                                                    .icon_size(11.)
+                                                    .toggle_state(self.sorts.iter().any(
+                                                        |(column, _)| *column == source_column,
+                                                    ))
+                                                    .tooltip(format!("Sort {}", column.name))
+                                                    .on_click(cx.listener(
+                                                        move |view, _, window, cx| {
+                                                            cx.stop_propagation();
+                                                            view.open_grid_transform(
+                                                                source_column,
+                                                                GridTransformTab::Sort,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .truncate()
+                                        .child(format!(
+                                            "{}{}",
+                                            column.type_label,
+                                            if column.nullable { "?" } else { "" }
+                                        )),
+                                ),
+                        )
+                    }),
+            )
+            .children((trail_width > 0.0).then(|| div().flex_none().w(px(trail_width))))
             .children(resize_handles);
         let header = div()
             .flex()
@@ -4241,6 +4301,7 @@ impl ResultsView {
         let row_scroll_handle = self.row_scroll_handle.clone();
         let row_columns = visible_columns.clone();
         let row_widths = visible_widths;
+        let row_span = column_span.clone();
         let entity_id = cx.entity().entity_id();
         let list = uniform_list(
             "result-rows",
@@ -4285,6 +4346,7 @@ impl ResultsView {
                             .iter()
                             .copied()
                             .enumerate()
+                            .filter(|(display_column, _)| row_span.contains(display_column))
                             .map(|(display_column, source_column)| {
                                 let is_selected = match selected {
                                     Some(GridSelection::Cell { row, column }) => {
@@ -4502,7 +4564,17 @@ impl ResultsView {
                                                 .when(display_row % 2 == 1, |el| {
                                                     el.bg(colors.grid_stripe)
                                                 })
-                                                .children(cells),
+                                                .children(
+                                                    (lead_width > 0.0).then(|| {
+                                                        div().flex_none().w(px(lead_width))
+                                                    }),
+                                                )
+                                                .children(cells)
+                                                .children(
+                                                    (trail_width > 0.0).then(|| {
+                                                        div().flex_none().w(px(trail_width))
+                                                    }),
+                                                ),
                                         ),
                                 )
                                 .into_any_element(),
