@@ -9018,8 +9018,8 @@ impl WorkspaceShell {
                     // lets the executor tear the stream down.
                     return;
                 };
-                self.status.execution = update.status_label;
                 if update.progress == StreamProgress::WindowFull {
+                    self.status.execution = update.status_label;
                     // Hold the page — and with it the whole server stream —
                     // until the user chooses to move past the retained window.
                     self.held_result_pages.insert(
@@ -9035,6 +9035,7 @@ impl WorkspaceShell {
                     return;
                 }
                 if update.progress == StreamProgress::Terminal {
+                    self.status.execution = update.status_label;
                     self.running_queries.remove(&item_id);
                     self.held_result_pages.remove(&item_id);
                     let completion = update
@@ -9046,7 +9047,9 @@ impl WorkspaceShell {
                     self.record_result_reference_value(item_id, reference, cx);
                 }
                 let _ = acknowledge.send(());
-                cx.notify();
+                if update.progress == StreamProgress::Terminal {
+                    cx.notify();
+                }
             }
             ExecutorEvent::ExplainFinished {
                 item_id,
