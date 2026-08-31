@@ -54,8 +54,8 @@ Default locations:
 
 ## Themes
 
-`ayu-dark` is Sift's default. It uses Ayu Dark's cool near-black surfaces and
-warm syntax colors, with a slightly darker editor background. `light` is also
+`ayu-dark` is Sift's default. It combines Ayu Dark's warm syntax colors with
+neutral charcoal surfaces and a darker editor background. `light` is also
 built in.
 
 Custom themes are TOML files in a `themes` directory beside `settings.toml`.

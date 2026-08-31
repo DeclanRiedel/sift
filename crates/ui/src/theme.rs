@@ -398,7 +398,7 @@ mod tests {
     fn bundled_dark_theme_is_ayu_based_and_darker_than_ayu_background() {
         let theme = Theme::dark();
         assert_eq!(theme.appearance, ThemeAppearance::Dark);
-        assert_eq!(theme.colors.background, gpui::rgb(0x070b10).into());
+        assert_eq!(theme.colors.background, gpui::rgb(0x0a0b0d).into());
         assert_eq!(theme.colors.syntax_keyword, gpui::rgb(0xff8f40).into());
     }
 }

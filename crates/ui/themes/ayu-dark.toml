@@ -2,21 +2,21 @@ version = 1
 name = "Sift Ayu Dark"
 appearance = "dark"
 
-# Ayu Dark's cool near-black surfaces and warm syntax palette, with a slightly
-# darker editor background for Sift's data-dense workspace.
+# Ayu Dark's warm syntax palette over darker, more neutral charcoal surfaces
+# for Sift's data-dense workspace.
 [colors]
-background = "#070b10"
-surface = "#0a0e14"
-panel = "#0d1219"
-toolbar = "#090d13"
-elevated_surface = "#111821"
+background = "#0a0b0d"
+surface = "#0d0f12"
+panel = "#101216"
+toolbar = "#0c0e11"
+elevated_surface = "#16191d"
 hovered_surface = "#ffffff0a"
-selected_surface = "#59c2ff18"
-active_surface = "#59c2ff24"
+selected_surface = "#ffffff10"
+active_surface = "#ffffff18"
 scrim = "#00000073"
-border = "#1b2530"
-subtle_border = "#141c25"
-strong_border = "#33404d"
+border = "#24282e"
+subtle_border = "#1b1f24"
+strong_border = "#3c424a"
 text = "#b3b1ad"
 muted_text = "#737a82"
 disabled_text = "#4d5560"
