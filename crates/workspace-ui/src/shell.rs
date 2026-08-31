@@ -1822,6 +1822,9 @@ pub enum PaneEvent {
     RevertResultCellRequested {
         item_id: u64,
     },
+    DeleteResultRowRequested {
+        item_id: u64,
+    },
     ReviewStagedResultEditsRequested {
         item_id: u64,
     },
@@ -2096,6 +2099,13 @@ struct StagedResultEdit {
     column: String,
     original: sift_protocol::Value,
     value: sift_protocol::Value,
+    original_row: Vec<(String, sift_protocol::Value)>,
+    source: DatabaseObjectSource,
+}
+
+#[derive(Debug, Clone)]
+struct StagedResultDelete {
+    item_id: u64,
     original_row: Vec<(String, sift_protocol::Value)>,
     source: DatabaseObjectSource,
 }
@@ -3499,6 +3509,9 @@ impl Pane {
             }
             ResultsEvent::RevertSelectedCellRequested => {
                 cx.emit(PaneEvent::RevertResultCellRequested { item_id })
+            }
+            ResultsEvent::DeleteSelectedRowRequested => {
+                cx.emit(PaneEvent::DeleteResultRowRequested { item_id })
             }
             ResultsEvent::ReviewStagedEditsRequested => {
                 cx.emit(PaneEvent::ReviewStagedResultEditsRequested { item_id })
@@ -7286,6 +7299,7 @@ pub struct WorkspaceShell {
     query_history_next_cursor: Option<String>,
     result_cell_edit_target: Option<ResultCellEditTarget>,
     staged_result_edits: Vec<StagedResultEdit>,
+    staged_result_deletes: Vec<StagedResultDelete>,
     result_edit_conflicts: HashMap<usize, String>,
     pending_edit_set: Option<sift_protocol::EditSet>,
     result_edit_plan: Option<sift_protocol::EditPlan>,
@@ -8128,6 +8142,7 @@ impl WorkspaceShell {
             query_history_next_cursor: None,
             result_cell_edit_target: None,
             staged_result_edits: Vec::new(),
+            staged_result_deletes: Vec::new(),
             result_edit_conflicts: HashMap::new(),
             pending_edit_set: None,
             result_edit_plan: None,
@@ -9289,7 +9304,7 @@ impl WorkspaceShell {
                 edit_set,
                 result,
             } => {
-                if self.staged_result_edits.first().map(|edit| edit.item_id) != Some(item_id) {
+                if self.staged_result_item_id() != Some(item_id) {
                     return;
                 }
                 self.result_edit_pending = false;
@@ -9308,7 +9323,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::ResultEditsApplied { item_id, result } => {
-                if self.staged_result_edits.first().map(|edit| edit.item_id) != Some(item_id) {
+                if self.staged_result_item_id() != Some(item_id) {
                     return;
                 }
                 self.result_edit_pending = false;
@@ -9320,6 +9335,7 @@ impl WorkspaceShell {
                             .map(|outcome| outcome.affected_rows)
                             .sum::<u64>();
                         let applied_edits = std::mem::take(&mut self.staged_result_edits);
+                        let applied_deletes = std::mem::take(&mut self.staged_result_deletes);
                         self.modal = None;
                         self.result_cell_edit_target = None;
                         self.result_edit_conflicts.clear();
@@ -9357,6 +9373,9 @@ impl WorkspaceShell {
                                     pane.mark_clean(item_id, cx);
                                 }
                             });
+                        }
+                        if !applied_deletes.is_empty() {
+                            self.refresh_database_item(item_id, cx);
                         }
                         self.show_toast(format!("Applied edit to {affected} row(s)"), cx);
                     }
@@ -11647,11 +11666,7 @@ impl WorkspaceShell {
         transform: Option<sift_protocol::ResultTransform>,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .staged_result_edits
-            .iter()
-            .any(|edit| edit.item_id == item_id)
-        {
+        if self.staged_result_item_id() == Some(item_id) {
             self.show_toast(
                 "Apply or discard the staged table changes before re-running this result".into(),
                 cx,
@@ -20480,6 +20495,10 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.revert_selected_result_cell(emitter, *item_id, window, cx);
             }
+            PaneEvent::DeleteResultRowRequested { item_id } => {
+                self.active_pane = index;
+                self.stage_selected_result_row_delete(emitter, *item_id, window, cx);
+            }
             PaneEvent::ReviewStagedResultEditsRequested { item_id } => {
                 self.active_pane = index;
                 self.open_staged_result_edits(*item_id, window, cx);
@@ -21105,11 +21124,7 @@ impl WorkspaceShell {
             })
             .flatten();
         if let Some(item_id) = active_data_item {
-            if !self
-                .staged_result_edits
-                .iter()
-                .any(|edit| edit.item_id == item_id)
-            {
+            if self.staged_result_item_id() != Some(item_id) {
                 self.show_toast("No table changes are staged".into(), cx);
                 self.focus_results(window, cx);
                 return;
@@ -22536,9 +22551,8 @@ impl WorkspaceShell {
             return;
         };
         if self
-            .staged_result_edits
-            .first()
-            .is_some_and(|edit| edit.item_id != item_id)
+            .staged_result_item_id()
+            .is_some_and(|staged| staged != item_id)
         {
             self.show_toast(
                 "Apply or discard the staged table changes before editing another result".into(),
@@ -22620,7 +22634,7 @@ impl WorkspaceShell {
             return;
         }
         self.sync_staged_result_cells(item_id, cx);
-        if self.staged_result_edits.is_empty() {
+        if self.staged_result_change_count() == 0 {
             if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
                 results.update(cx, |results, cx| results.finish_inline_cell_edit(cx));
             }
@@ -22635,7 +22649,10 @@ impl WorkspaceShell {
         self.result_cell_edit_target = None;
         self.focus_results(window, cx);
         self.show_toast(
-            format!("{} table change(s) staged", self.staged_result_edits.len()),
+            format!(
+                "{} table change(s) staged",
+                self.staged_result_change_count()
+            ),
             cx,
         );
         cx.notify();
@@ -22658,9 +22675,8 @@ impl WorkspaceShell {
             return;
         }
         if self
-            .staged_result_edits
-            .first()
-            .is_some_and(|edit| edit.item_id != item_id)
+            .staged_result_item_id()
+            .is_some_and(|staged| staged != item_id)
         {
             self.show_error_toast(
                 "Apply or discard the staged changes for the other result first".into(),
@@ -22725,7 +22741,10 @@ impl WorkspaceShell {
         self.sync_staged_result_cells(item_id, cx);
         self.focus_results(window, cx);
         self.show_toast(
-            format!("{} table change(s) staged", self.staged_result_edits.len()),
+            format!(
+                "{} table change(s) staged",
+                self.staged_result_change_count()
+            ),
             cx,
         );
     }
@@ -22779,6 +22798,87 @@ impl WorkspaceShell {
         self.revert_staged_result_edit(index, cx);
         self.focus_results(window, cx);
         self.show_toast("Reverted staged cell change".into(), cx);
+    }
+
+    fn stage_selected_result_row_delete(
+        &mut self,
+        pane: &Entity<Pane>,
+        item_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::PreviewEdits,
+            "Delete table row",
+            cx,
+        ) {
+            return;
+        }
+        let Some(source) = pane.read(cx).database_source(item_id) else {
+            self.show_error_toast("Only database table results can be edited".into(), cx);
+            return;
+        };
+        if source.object_kind != sift_protocol::ObjectKind::Table {
+            self.show_error_toast("Only base-table rows can be deleted".into(), cx);
+            return;
+        }
+        let Some(original_row) = pane
+            .read(cx)
+            .results
+            .get(&item_id)
+            .and_then(|results| results.read(cx).selected_cell_edit())
+            .map(|selected| selected.original_row)
+        else {
+            self.show_toast("Select a table row to delete".into(), cx);
+            return;
+        };
+        if self
+            .staged_result_item_id()
+            .is_some_and(|staged| staged != item_id)
+        {
+            self.show_error_toast(
+                "Apply or discard the staged changes for the other result first".into(),
+                cx,
+            );
+            return;
+        }
+        self.staged_result_edits
+            .retain(|edit| edit.item_id != item_id || edit.original_row != original_row);
+        if let Some(index) = self
+            .staged_result_deletes
+            .iter()
+            .position(|delete| delete.item_id == item_id && delete.original_row == original_row)
+        {
+            self.staged_result_deletes.remove(index);
+            self.show_toast("Cancelled staged row deletion".into(), cx);
+        } else {
+            self.staged_result_deletes.push(StagedResultDelete {
+                item_id,
+                original_row,
+                source,
+            });
+            self.show_toast("Row deletion staged for review".into(), cx);
+        }
+        self.pending_edit_set = None;
+        self.result_edit_plan = None;
+        self.result_edit_conflicts.clear();
+        self.sync_staged_result_cells(item_id, cx);
+        self.open_staged_result_edits(item_id, window, cx);
+    }
+
+    fn staged_result_item_id(&self) -> Option<u64> {
+        self.staged_result_edits
+            .first()
+            .map(|edit| edit.item_id)
+            .or_else(|| {
+                self.staged_result_deletes
+                    .first()
+                    .map(|delete| delete.item_id)
+            })
+    }
+
+    fn staged_result_change_count(&self) -> usize {
+        self.staged_result_edits.len() + self.staged_result_deletes.len()
     }
 
     fn parse_result_cell_value(
@@ -22859,7 +22959,7 @@ impl WorkspaceShell {
             return;
         }
         self.sync_staged_result_cells(item_id, cx);
-        if self.staged_result_edits.is_empty() {
+        if self.staged_result_change_count() == 0 {
             self.result_cell_edit_target = None;
             for pane in &self.panes {
                 if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
@@ -22902,7 +23002,7 @@ impl WorkspaceShell {
 
     fn stage_current_result_edit(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(target) = self.result_cell_edit_target.clone() else {
-            return !self.staged_result_edits.is_empty();
+            return self.staged_result_change_count() > 0;
         };
         let text = self.result_cell_edit_input.read(cx).text().to_string();
         let value = match Self::parse_result_cell_value(&target.original, &text) {
@@ -22969,11 +23069,7 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .staged_result_edits
-            .iter()
-            .any(|edit| edit.item_id == item_id)
-        {
+        if self.staged_result_item_id() != Some(item_id) {
             self.show_toast("No table changes are staged".into(), cx);
             return;
         }
@@ -22989,8 +23085,14 @@ impl WorkspaceShell {
             .staged_result_edits
             .iter()
             .map(|edit| edit.item_id)
+            .chain(
+                self.staged_result_deletes
+                    .iter()
+                    .map(|delete| delete.item_id),
+            )
             .collect::<HashSet<_>>();
         self.staged_result_edits.clear();
+        self.staged_result_deletes.clear();
         self.result_cell_edit_target = None;
         self.result_edit_conflicts.clear();
         self.pending_edit_set = None;
@@ -23007,9 +23109,21 @@ impl WorkspaceShell {
     }
 
     fn staged_result_edit_set(&self) -> Option<sift_protocol::EditSet> {
-        let first = self.staged_result_edits.first()?;
+        let (item_id, source) = self
+            .staged_result_edits
+            .first()
+            .map(|edit| (edit.item_id, &edit.source))
+            .or_else(|| {
+                self.staged_result_deletes
+                    .first()
+                    .map(|delete| (delete.item_id, &delete.source))
+            })?;
         let mut rows: Vec<StagedResultRow> = Vec::new();
-        for edit in &self.staged_result_edits {
+        for edit in self
+            .staged_result_edits
+            .iter()
+            .filter(|edit| edit.item_id == item_id)
+        {
             if let Some(row) = rows
                 .iter_mut()
                 .find(|row| row.original == edit.original_row)
@@ -23030,10 +23144,10 @@ impl WorkspaceShell {
         }
         Some(sift_protocol::EditSet {
             table: sift_protocol::ObjectPath {
-                catalog: first.source.catalog.clone(),
-                schema: Some(first.source.schema.clone()),
-                name: first.source.object.clone(),
-                kind: Some(first.source.object_kind),
+                catalog: source.catalog.clone(),
+                schema: Some(source.schema.clone()),
+                name: source.object.clone(),
+                kind: Some(source.object_kind),
                 routine_args: None,
             },
             edits: rows
@@ -23066,6 +23180,23 @@ impl WorkspaceShell {
                         expected,
                     }
                 })
+                .chain(
+                    self.staged_result_deletes
+                        .iter()
+                        .filter(|delete| delete.item_id == item_id)
+                        .map(|delete| {
+                            let original = delete
+                                .original_row
+                                .iter()
+                                .cloned()
+                                .map(|(column, value)| sift_protocol::CellEdit { column, value })
+                                .collect();
+                            sift_protocol::RowEdit::Delete {
+                                key: sift_protocol::RowKey { columns: original },
+                                expected: Vec::new(),
+                            }
+                        }),
+                )
                 .collect(),
         })
     }
@@ -23076,11 +23207,13 @@ impl WorkspaceShell {
         }
         let Some(edit_set) = self.staged_result_edit_set() else {
             self.result_edit_error =
-                Some("Stage at least one changed cell before previewing".into());
+                Some("Stage at least one table change before previewing".into());
             cx.notify();
             return;
         };
-        let item_id = self.staged_result_edits[0].item_id;
+        let Some(item_id) = self.staged_result_item_id() else {
+            return;
+        };
         let Some(sender) = &self.executor_sender else {
             self.result_edit_error = Some("The database executor is unavailable".into());
             cx.notify();
@@ -23111,7 +23244,7 @@ impl WorkspaceShell {
         if self.result_edit_pending {
             return;
         }
-        let Some(item_id) = self.staged_result_edits.first().map(|edit| edit.item_id) else {
+        let Some(item_id) = self.staged_result_item_id() else {
             return;
         };
         let Some(edit_set) = self
@@ -31270,6 +31403,7 @@ impl WorkspaceShell {
                     } else {
                     let target = self.result_cell_edit_target.as_ref();
                     let staged_edits = self.staged_result_edits.clone();
+                    let staged_deletes = self.staged_result_deletes.clone();
                     let pending = self.result_edit_pending;
                     let plan = self.result_edit_plan.as_ref();
                     let can_apply = !staged_edits.is_empty() && !pending && plan.is_some();
@@ -31336,7 +31470,7 @@ impl WorkspaceShell {
                                             render_value(&edit.original).text
                                         ))
                                 }))
-                                .children((!staged_edits.is_empty()).then(|| {
+                                .children((!staged_edits.is_empty() || !staged_deletes.is_empty()).then(|| {
                                     div()
                                         .flex()
                                         .flex_col()
@@ -31348,7 +31482,7 @@ impl WorkspaceShell {
                                                 .text_color(colors.muted_text)
                                                 .child(format!(
                                                     "Staged changes ({})",
-                                                    staged_edits.len()
+                                                    staged_edits.len() + staged_deletes.len()
                                                 )),
                                         )
                                         .children(staged_edits.iter().enumerate().map(
@@ -31415,6 +31549,29 @@ impl WorkspaceShell {
                                                             .whitespace_normal()
                                                             .child(message)
                                                     }))
+                                            },
+                                        ))
+                                        .children(staged_deletes.iter().enumerate().map(
+                                            |(index, delete)| {
+                                                let identity = delete
+                                                    .original_row
+                                                    .iter()
+                                                    .take(3)
+                                                    .map(|(column, value)| format!(
+                                                        "{column}={}",
+                                                        render_value(value).text
+                                                    ))
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ");
+                                                div()
+                                                    .id(("staged-result-delete", index))
+                                                    .p_2()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(colors.danger)
+                                                    .text_sm()
+                                                    .text_color(colors.danger)
+                                                    .child(format!("Delete row · {identity}"))
                                             },
                                         ))
                                 }))
@@ -46406,6 +46563,45 @@ mod tests {
             );
             shell.discard_staged_result_edits(window, cx);
             assert!(shell.staged_result_edits.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn staged_row_deletion_uses_revision_safe_edit_pipeline(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let source = DatabaseObjectSource {
+            instance_id: "local".into(),
+            tenant_id: 1,
+            profile_id: 2,
+            profile_name: "demo/postgres".into(),
+            provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+            catalog: Some("sifttest".into()),
+            schema: "audit".into(),
+            object: "events".into(),
+            object_kind: sift_protocol::ObjectKind::Table,
+            last_refreshed_at_ms: None,
+        };
+        workspace.update(&mut cx, |shell, _| {
+            shell.staged_result_deletes.push(StagedResultDelete {
+                item_id: 1,
+                original_row: vec![
+                    ("id".into(), sift_protocol::Value::Int64(7)),
+                    ("action".into(), sift_protocol::Value::Text("open".into())),
+                ],
+                source,
+            });
+            let edit_set = shell.staged_result_edit_set().expect("delete edit set");
+            assert_eq!(edit_set.table.name, "events");
+            let [sift_protocol::RowEdit::Delete { key, expected }] = edit_set.edits.as_slice()
+            else {
+                panic!("row deletion should remain a typed delete")
+            };
+            assert_eq!(key.columns.len(), 2);
+            assert!(expected.is_empty());
+            assert_eq!(shell.staged_result_item_id(), Some(1));
+            assert_eq!(shell.staged_result_change_count(), 1);
         });
     }
 

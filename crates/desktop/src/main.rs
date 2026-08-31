@@ -91,6 +91,7 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         gpui::KeyBinding::new("p", res::PasteSelectedCell, results_ctx),
         gpui::KeyBinding::new("d", res::DeleteSelectedValues, results_ctx),
         gpui::KeyBinding::new("x", res::DeleteSelectedValues, results_ctx),
+        gpui::KeyBinding::new("shift-d", res::DeleteSelectedRow, results_ctx),
         gpui::KeyBinding::new("c", res::EditSelectedCell, results_ctx),
         gpui::KeyBinding::new("u", res::UndoStagedEdit, results_ctx),
         gpui::KeyBinding::new("ctrl-r", res::RedoStagedEdit, results_ctx),

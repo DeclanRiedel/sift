@@ -624,6 +624,7 @@ actions!(
         MoveFirstResultColumn,
         MoveLastResultColumn,
         DeleteSelectedValues,
+        DeleteSelectedRow,
         YankSelectedWithHeaders,
         PreviousResultTab,
         NextResultTab
@@ -712,6 +713,7 @@ pub enum ResultsEvent {
         text: String,
     },
     RevertSelectedCellRequested,
+    DeleteSelectedRowRequested,
     ReviewStagedEditsRequested,
     SubmitCellEdit {
         text: String,
@@ -3038,6 +3040,17 @@ impl ResultsView {
         cx.notify();
     }
 
+    fn delete_selected_row(
+        &mut self,
+        _: &DeleteSelectedRow,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_cell_edit().is_some() {
+            cx.emit(ResultsEvent::DeleteSelectedRowRequested);
+        }
+    }
+
     fn revert_selected_cell(
         &mut self,
         _: &RevertSelectedCell,
@@ -5360,6 +5373,7 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::exit_visual_selection))
             .on_action(cx.listener(Self::paste_selected_cell))
             .on_action(cx.listener(Self::delete_selected_values))
+            .on_action(cx.listener(Self::delete_selected_row))
             .on_action(cx.listener(Self::revert_selected_cell))
             .on_action(cx.listener(Self::undo_staged_edit))
             .on_action(cx.listener(Self::redo_staged_edit))
@@ -5447,6 +5461,25 @@ impl gpui::Render for ResultsView {
                                             cx.notify();
                                         }))
                                         .child("See row as JSON"),
+                                )
+                                .child(
+                                    div()
+                                        .id("result-cell-delete-row")
+                                        .debug_selector(|| "result-cell-delete-row".into())
+                                        .role(gpui::Role::MenuItem)
+                                        .h(px(28.))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .text_color(colors.danger)
+                                        .hover(|item| item.bg(colors.danger_muted))
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.context_menu_position = None;
+                                            cx.emit(ResultsEvent::DeleteSelectedRowRequested);
+                                            cx.notify();
+                                        }))
+                                        .child("Stage row deletion"),
                                 ),
                         ),
                 )
