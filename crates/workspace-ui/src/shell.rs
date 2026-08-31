@@ -28027,9 +28027,12 @@ impl WorkspaceShell {
                             div()
                                 .min_w_0()
                                 .flex_1()
+                                .flex()
+                                .justify_start()
                                 .overflow_hidden()
                                 .child(
                                     Button::new("add-database-connection", "Add connection…")
+                                        .debug_selector("add-database-connection")
                                         .tone(ButtonTone::Ghost)
                                         .start_icon(IconName::Add)
                                         .on_click(cx.listener(|shell, _, window, cx| {
@@ -45737,6 +45740,10 @@ mod tests {
         let refresh = cx
             .debug_bounds("refresh-connection-schema")
             .expect("schema refresh button");
+        let add = cx
+            .debug_bounds("add-database-connection")
+            .expect("add connection button");
+        assert!(add.left() - toolbar.left() <= px(1.));
         assert!(search.left() >= toolbar.left());
         assert!(search.left() < refresh.left());
         assert!(refresh.right() <= toolbar.right());
