@@ -25174,6 +25174,7 @@ impl WorkspaceShell {
             Some(Modal::ServerPicker | Modal::ServerConnection)
         );
         let account_active = self.modal == Some(Modal::Account);
+        let command_palette_active = self.modal == Some(Modal::CommandPalette);
         let navigation_expanded = self.app_bar_navigation_expanded();
         let launcher_content = if navigation_expanded {
             div()
@@ -25201,6 +25202,72 @@ impl WorkspaceShell {
             .then(|| self.render_app_bar_menu_button(AppBarMenu::Terminal, "Terminal", false, cx));
         let help_menu = navigation_expanded
             .then(|| self.render_app_bar_menu_button(AppBarMenu::Help, "Help", false, cx));
+        let center_content = if command_palette_active {
+            div()
+                .id("app-bar-command-palette")
+                .debug_selector(|| "app-bar-command-palette".into())
+                .h(px(28.))
+                .w(gpui::relative(0.48))
+                .min_w(px(320.))
+                .max_w(px(680.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_sm()
+                .border_1()
+                .border_color(colors.accent)
+                .bg(colors.surface)
+                .shadow_sm()
+                .child(icon(IconName::Search, colors.muted_text, 14.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(self.query_input.clone()),
+                )
+                .child(KeyBinding::new("Esc"))
+                .into_any_element()
+        } else {
+            div()
+                .id("toolbar-title-drag-region")
+                .h_full()
+                .max_w(px(380.))
+                .min_w_0()
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .window_control_area(WindowControlArea::Drag)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|shell, _, window, cx| {
+                        cx.stop_propagation();
+                        shell.dismiss_app_bar_overlays(cx);
+                        window.start_window_move();
+                    }),
+                )
+                .text_center()
+                .text_sm()
+                .text_color(colors.muted_text)
+                .child(div().min_w_0().truncate().child(workspace_label))
+                .children(git_context_label.map(|label| {
+                    div()
+                        .id("toolbar-git-context")
+                        .debug_selector(|| "toolbar-git-context".into())
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .pl_2()
+                        .border_l_1()
+                        .border_color(colors.subtle_border)
+                        .child(icon(IconName::VersionControl, colors.muted_text, 13.))
+                        .child(label)
+                }))
+                .into_any_element()
+        };
 
         div()
             .id("integrated-titlebar")
@@ -25223,44 +25290,7 @@ impl WorkspaceShell {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        div()
-                            .id("toolbar-title-drag-region")
-                            .h_full()
-                            .max_w(px(380.))
-                            .min_w_0()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .window_control_area(WindowControlArea::Drag)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|shell, _, window, cx| {
-                                    cx.stop_propagation();
-                                    shell.dismiss_app_bar_overlays(cx);
-                                    window.start_window_move();
-                                }),
-                            )
-                            .text_center()
-                            .text_sm()
-                            .text_color(colors.muted_text)
-                            .child(div().min_w_0().truncate().child(workspace_label))
-                            .children(git_context_label.map(|label| {
-                                div()
-                                    .id("toolbar-git-context")
-                                    .debug_selector(|| "toolbar-git-context".into())
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .pl_2()
-                                    .border_l_1()
-                                    .border_color(colors.subtle_border)
-                                    .child(icon(IconName::VersionControl, colors.muted_text, 13.))
-                                    .child(label)
-                            })),
-                    ),
+                    .child(center_content),
             )
             .child(
                 div()
@@ -30135,7 +30165,10 @@ impl WorkspaceShell {
             let keymaps = matches!(modal, Modal::Keymaps);
             let app_bar_modal = matches!(
                 modal,
-                Modal::ServerPicker | Modal::ServerConnection | Modal::Account
+                Modal::ServerPicker
+                    | Modal::ServerConnection
+                    | Modal::Account
+                    | Modal::CommandPalette
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
@@ -30194,41 +30227,6 @@ impl WorkspaceShell {
                     div()
                         .flex()
                         .flex_col()
-                        .child(
-                            div()
-                                .h(px(42.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .border_b_1()
-                                .border_color(colors.subtle_border)
-                                .bg(colors.toolbar)
-                                .child(icon(IconName::Search, colors.muted_text, 15.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .child(self.query_input.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .debug_selector(|| "close-command-palette".into())
-                                        .child(
-                                            IconButton::new(
-                                                "close-command-palette",
-                                                IconName::Close,
-                                                "Close command palette",
-                                            )
-                                            .square(px(26.))
-                                            .icon_size(13.)
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.dismiss_modal(&DismissModal, window, cx)
-                                            })),
-                                        ),
-                                ),
-                        )
                         .when(commands.is_empty(), |palette| {
                             palette.child(
                                 div()
@@ -30336,20 +30334,6 @@ impl WorkspaceShell {
                                 .track_scroll(&self.palette_scroll_handle),
                             )
                         })
-                        .child(
-                            div()
-                                .h(px(28.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .border_t_1()
-                                .border_color(colors.subtle_border)
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child("↑/↓ navigate  ·  Enter run")
-                                .child("Esc close"),
-                        )
                         .into_any_element()
                 }
                 Modal::SavedQuerySwitcher => {
@@ -36592,6 +36576,7 @@ impl WorkspaceShell {
                     layer.justify_start().pt_1().pl(px(38.))
                 })
                 .when(account, |layer| layer.justify_end().pt_1().pr_2())
+                .when(command_palette, |layer| layer.justify_center().pt_1())
                 .when(settings || keymaps || database_connection, |layer| {
                     layer
                         .items_center()
@@ -36608,6 +36593,7 @@ impl WorkspaceShell {
                         && !settings
                         && !keymaps
                         && !account
+                        && !command_palette
                         && !database_connection
                         && !data_results,
                     |layer| {
@@ -44090,7 +44076,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_palette_matches_schema_search_modal_chrome(cx: &mut TestAppContext) {
+    fn command_palette_uses_app_bar_dmenu_chrome(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -44098,8 +44084,13 @@ mod tests {
         cx.update(|window, cx| focus.dispatch_action(&OpenCommandPalette, window, cx));
         cx.run_until_parked();
 
-        assert_eq!(cx.debug_bounds("modal-card").unwrap().size.width, px(720.));
-        assert!(cx.debug_bounds("close-command-palette").is_some());
+        let app_bar = cx.debug_bounds("integrated-titlebar").unwrap();
+        let input = cx.debug_bounds("app-bar-command-palette").unwrap();
+        let results = cx.debug_bounds("modal-card").unwrap();
+        assert_eq!(results.size.width, px(720.));
+        assert!(input.center().y >= app_bar.top() && input.center().y <= app_bar.bottom());
+        assert!(results.top() >= app_bar.bottom());
+        assert!(cx.debug_bounds("close-command-palette").is_none());
     }
 
     #[gpui::test]
