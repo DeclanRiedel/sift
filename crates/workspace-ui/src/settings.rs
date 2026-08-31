@@ -502,14 +502,23 @@ impl SettingsStore {
         let mut document = source
             .parse::<DocumentMut>()
             .map_err(|error| format!("settings.toml is invalid: {error}"))?;
-        let decor = document["appearance"]["theme"]
-            .as_value()
+        if document.get("appearance").is_none() {
+            document["appearance"] = Item::Table(toml_edit::Table::new());
+        }
+        let decor = document
+            .get("appearance")
+            .and_then(Item::as_table)
+            .and_then(|appearance| appearance.get("theme"))
+            .and_then(Item::as_value)
             .map(|value| value.decor().clone());
         let mut theme_value = Value::from(theme);
         if let Some(decor) = decor {
             *theme_value.decor_mut() = decor;
         }
-        document["appearance"]["theme"] = Item::Value(theme_value);
+        document["appearance"]
+            .as_table_mut()
+            .expect("appearance was created as a table")
+            .insert("theme", Item::Value(theme_value));
         let updated = document.to_string();
         let settings = UserSettings::decode(&updated)?;
         self.write_source(&updated)?;

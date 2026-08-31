@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 const THEME_VERSION: u32 = 1;
 const AYU_DARK_SOURCE: &str = include_str!("../themes/ayu-dark.toml");
+const LIGHT_SOURCE: &str = include_str!("../themes/light.toml");
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -145,7 +146,7 @@ impl ThemeConfig {
     pub fn theme(&self) -> Theme {
         let mut theme = match self.appearance {
             ThemeAppearance::Dark => Theme::dark_base(),
-            ThemeAppearance::Light => Theme::light(),
+            ThemeAppearance::Light => Theme::light_base(),
         };
         theme.appearance = self.appearance;
         self.colors.apply(&mut theme.colors);
@@ -258,6 +259,12 @@ impl Theme {
     }
 
     pub fn light() -> Self {
+        ThemeConfig::decode(LIGHT_SOURCE)
+            .expect("bundled light theme must be valid")
+            .theme()
+    }
+
+    fn light_base() -> Self {
         Self {
             appearance: ThemeAppearance::Light,
             colors: ThemeColors {
@@ -372,8 +379,7 @@ mod tests {
 
     #[test]
     fn light_theme_keeps_the_rust_orange_accent() {
-        let rust_orange = hsla(0.05029586, 0.857868, 0.38627452, 1.0);
-        assert_eq!(Theme::light().colors.accent, rust_orange);
+        assert_eq!(Theme::light().colors.accent, gpui::rgb(0x985f12).into());
     }
 
     #[test]

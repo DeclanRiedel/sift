@@ -40800,6 +40800,47 @@ mod tests {
     }
 
     #[gpui::test]
+    fn theme_toggle_persists_and_renders_both_appearances(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_store = Arc::new(SettingsStore::new(directory.path().join("settings.toml")));
+        std::fs::write(settings_store.path(), "version = 1\n").unwrap();
+        let store_for_window = settings_store.clone();
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| {
+                    WorkspaceShell::new(
+                        PresentationState::default(),
+                        UserSettings::default(),
+                        None,
+                        Some(store_for_window),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| shell.toggle_theme(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx, |_, cx| cx.theme().appearance),
+            ThemeAppearance::Light
+        );
+        assert_eq!(settings_store.load().unwrap().appearance.theme, "light");
+
+        workspace.update(&mut cx, |shell, cx| shell.toggle_theme(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx, |_, cx| cx.theme().appearance),
+            ThemeAppearance::Dark
+        );
+        assert_eq!(settings_store.load().unwrap().appearance.theme, "ayu-dark");
+    }
+
+    #[gpui::test]
     fn keymaps_page_controls_the_three_state_ide_profile(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(directory.path().join("settings.toml")));
