@@ -69,7 +69,7 @@ pub use status_bar::StatusBar;
 use app_bar::AppBarMenu;
 use catalog_diagram::CatalogDiagramState;
 use database_monitor::DatabaseMonitorState;
-use pane_layout::SplitDirection;
+pub use pane_layout::SplitDirection;
 
 const PALETTE_VISIBLE_ROWS: usize = 10;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
@@ -1646,6 +1646,10 @@ pub enum PaneEvent {
     /// The pointer entered a tab strip; tab insertion must supersede every
     /// structural pane target.
     TabBarDragEntered,
+    /// Run a workspace-owned command from pane-local tab-strip chrome.
+    CommandRequested(CommandId),
+    /// Create a sibling beside this pane in the requested direction.
+    SplitRequested(SplitDirection),
     /// The pane should be removed (its close control was used, or it emptied).
     CloseRequested,
     /// A tab-local close control was used; the workspace owns dirty handling.
@@ -3154,6 +3158,12 @@ struct TabRenameState {
     _subscription: Subscription,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneChromeMenu {
+    New,
+    Split,
+}
+
 pub struct Pane {
     id: u64,
     items: Vec<ItemPresentation>,
@@ -3205,6 +3215,9 @@ pub struct Pane {
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
     tab_rename: Option<TabRenameState>,
+    tab_bar_hovered: bool,
+    hovered_tab: Option<u64>,
+    chrome_menu: Option<PaneChromeMenu>,
     /// The live result entity is mounted in the workspace modal while this is
     /// set, so it never renders twice with one scroll handle.
     expanded_result_item: Option<u64>,
@@ -3337,6 +3350,9 @@ impl Pane {
             tab_bar_drag_bounds: None,
             pending_close_item: None,
             tab_rename: None,
+            tab_bar_hovered: false,
+            hovered_tab: None,
+            chrome_menu: None,
             expanded_result_item: None,
             notification_filter: None,
         }
@@ -5189,6 +5205,110 @@ impl Pane {
     }
 }
 
+fn pane_chrome_menu(
+    menu: PaneChromeMenu,
+    colors: sift_ui::ThemeColors,
+    cx: &mut Context<Pane>,
+) -> AnyElement {
+    let item = |id: &'static str, label: &'static str, icon_name: IconName| {
+        div()
+            .id(id)
+            .debug_selector(move || id.into())
+            .role(Role::MenuItem)
+            .h(px(28.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_sm()
+            .hover(move |item| item.bg(colors.hovered_surface))
+            .child(icon(icon_name, colors.muted_text, 11.))
+            .child(label)
+    };
+    let popup = div()
+        .id("pane-chrome-menu")
+        .debug_selector(|| "pane-chrome-menu".into())
+        .w(px(190.))
+        .p_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(colors.strong_border)
+        .bg(colors.elevated_surface)
+        .shadow_lg()
+        .occlude()
+        .role(Role::Menu)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down_out(cx.listener(|pane, _, _, cx| {
+            pane.chrome_menu = None;
+            cx.notify();
+        }));
+
+    match menu {
+        PaneChromeMenu::New => popup
+            .child(
+                item("pane-new-query", "Query", IconName::Add).on_click(cx.listener(
+                    |pane, _, _, cx| {
+                        pane.chrome_menu = None;
+                        cx.emit(PaneEvent::CommandRequested(CommandId::NewQuery));
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                item("pane-new-file", "SQL file…", IconName::Edit).on_click(cx.listener(
+                    |pane, _, _, cx| {
+                        pane.chrome_menu = None;
+                        cx.emit(PaneEvent::CommandRequested(CommandId::CreateWorkspaceFile));
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                item("pane-new-folder", "Folder…", IconName::Folder).on_click(cx.listener(
+                    |pane, _, _, cx| {
+                        pane.chrome_menu = None;
+                        cx.emit(PaneEvent::CommandRequested(
+                            CommandId::CreateWorkspaceFolder,
+                        ));
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                item(
+                    "pane-new-run-configuration",
+                    "Run configuration",
+                    IconName::Automations,
+                )
+                .on_click(cx.listener(|pane, _, _, cx| {
+                    pane.chrome_menu = None;
+                    cx.emit(PaneEvent::CommandRequested(CommandId::NewRunConfiguration));
+                    cx.notify();
+                })),
+            )
+            .into_any_element(),
+        PaneChromeMenu::Split => [
+            ("pane-split-right", "Split right", SplitDirection::Right),
+            ("pane-split-down", "Split down", SplitDirection::Down),
+            ("pane-split-left", "Split left", SplitDirection::Left),
+            ("pane-split-up", "Split up", SplitDirection::Up),
+        ]
+        .into_iter()
+        .fold(popup, |menu, (id, label, direction)| {
+            menu.child(
+                item(id, label, IconName::CloseRightPane).on_click(cx.listener(
+                    move |pane, _, _, cx| {
+                        pane.chrome_menu = None;
+                        cx.emit(PaneEvent::SplitRequested(direction));
+                        cx.notify();
+                    },
+                )),
+            )
+        })
+        .into_any_element(),
+    }
+}
+
 impl gpui::Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -5215,6 +5335,11 @@ impl gpui::Render for Pane {
         let can_go_forward = self.can_navigate_forward();
         let item_count = self.items.len();
         let pane_id = self.id;
+        let chrome_visible = self.tab_bar_hovered || self.chrome_menu.is_some();
+        let active_result_item = active
+            .as_ref()
+            .filter(|item| self.results.contains_key(&item.id))
+            .map(|item| item.id);
         let tab_rename = self
             .tab_rename
             .as_ref()
@@ -5242,8 +5367,15 @@ impl gpui::Render for Pane {
             .bg(colors.background)
             .children(has_items.then(|| {
                 div()
+                    .id(("pane-tab-bar", pane_id as usize))
                     .debug_selector(|| "pane-tab-bar".into())
                     .on_drag_move::<TabDrag>(cx.listener(Self::tab_bar_drag_hover))
+                    .on_hover(cx.listener(|pane, hovered: &bool, _, cx| {
+                        if pane.tab_bar_hovered != *hovered {
+                            pane.tab_bar_hovered = *hovered;
+                            cx.notify();
+                        }
+                    }))
                     .h(theme.metrics.tab_height)
                     .flex_none()
                     .flex()
@@ -5366,6 +5498,21 @@ impl gpui::Render for Pane {
                                             .debug_selector(move || tab_debug.clone())
                                             .selected(selected)
                                             .dirty(item.dirty)
+                                            .on_hover(cx.listener(
+                                                move |pane, hovered: &bool, _, cx| {
+                                                    let next = if *hovered {
+                                                        Some(item_id)
+                                                    } else if pane.hovered_tab == Some(item_id) {
+                                                        None
+                                                    } else {
+                                                        pane.hovered_tab
+                                                    };
+                                                    if pane.hovered_tab != next {
+                                                        pane.hovered_tab = next;
+                                                        cx.notify();
+                                                    }
+                                                },
+                                            ))
                                             .on_drag(
                                                 TabDrag {
                                                     pane_id,
@@ -5476,21 +5623,39 @@ impl gpui::Render for Pane {
                                                     )
                                                     .into_any_element()
                                             })
-                                            .child(
-                                                IconButton::new(
-                                                    ("tab-close", item.id as usize),
-                                                    IconName::Close,
-                                                    format!("Close tab {}", item.title),
-                                                )
-                                                .square(px(22.))
-                                                .icon_size(12.)
-                                                .tooltip(format!("Close tab {}", item.title))
-                                                .on_click(cx.listener(move |_, _, _, cx| {
-                                                    cx.emit(PaneEvent::CloseItemRequested {
-                                                        item_id,
-                                                    });
-                                                })),
-                                            )
+                                            .children((self.hovered_tab == Some(item_id)).then(
+                                                || {
+                                                    div()
+                                                        .debug_selector(move || {
+                                                            format!("tab-close-{item_id}")
+                                                        })
+                                                        .child(
+                                                            IconButton::new(
+                                                                ("tab-close", item.id as usize),
+                                                                IconName::Close,
+                                                                format!(
+                                                                    "Close tab {}",
+                                                                    item.title
+                                                                ),
+                                                            )
+                                                            .square(px(22.))
+                                                            .icon_size(12.)
+                                                            .tooltip(format!(
+                                                                "Close tab {}",
+                                                                item.title
+                                                            ))
+                                                            .on_click(cx.listener(
+                                                                move |_, _, _, cx| {
+                                                                    cx.emit(
+                                                                        PaneEvent::CloseItemRequested {
+                                                                            item_id,
+                                                                        },
+                                                                    );
+                                                                },
+                                                            )),
+                                                        )
+                                                },
+                                            ))
                                     }))
                                     .child(
                                         div()
@@ -5515,6 +5680,134 @@ impl gpui::Render for Pane {
                                     ),
                             ),
                     )
+                    .children(chrome_visible.then(|| {
+                        div()
+                            .debug_selector(|| "pane-hover-actions".into())
+                            .h_full()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(2.))
+                            .px_1()
+                            .border_l_1()
+                            .border_color(colors.subtle_border)
+                            .bg(colors.toolbar)
+                            .child(
+                                div()
+                                    .relative()
+                                    .debug_selector(|| "pane-new-action".into())
+                                    .child(
+                                        IconButton::new(
+                                            ("pane-new", pane_id as usize),
+                                            IconName::Add,
+                                            "New…",
+                                        )
+                                        .square(px(24.))
+                                        .icon_size(12.)
+                                        .tooltip("New query, file, folder, or run configuration")
+                                        .toggle_state(self.chrome_menu == Some(PaneChromeMenu::New))
+                                        .on_click(
+                                            cx.listener(|pane, _, _, cx| {
+                                                pane.chrome_menu = (pane.chrome_menu
+                                                    != Some(PaneChromeMenu::New))
+                                                .then_some(PaneChromeMenu::New);
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .children(
+                                        (self.chrome_menu == Some(PaneChromeMenu::New)).then(
+                                            || {
+                                                div()
+                                                    .absolute()
+                                                    .bottom_0()
+                                                    .right_0()
+                                                    .size_0()
+                                                    .child(
+                                                        deferred(
+                                                            anchored()
+                                                                .anchor(Anchor::TopRight)
+                                                                .child(pane_chrome_menu(
+                                                                    PaneChromeMenu::New,
+                                                                    colors,
+                                                                    cx,
+                                                                )),
+                                                        )
+                                                        .with_priority(2),
+                                                    )
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .relative()
+                                    .debug_selector(|| "pane-split-action".into())
+                                    .child(
+                                        IconButton::new(
+                                            ("pane-split", pane_id as usize),
+                                            IconName::CloseRightPane,
+                                            "Split pane…",
+                                        )
+                                        .square(px(24.))
+                                        .icon_size(12.)
+                                        .tooltip("Split pane")
+                                        .toggle_state(
+                                            self.chrome_menu == Some(PaneChromeMenu::Split),
+                                        )
+                                        .on_click(
+                                            cx.listener(|pane, _, _, cx| {
+                                                pane.chrome_menu = (pane.chrome_menu
+                                                    != Some(PaneChromeMenu::Split))
+                                                .then_some(PaneChromeMenu::Split);
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .children(
+                                        (self.chrome_menu == Some(PaneChromeMenu::Split)).then(
+                                            || {
+                                                div()
+                                                    .absolute()
+                                                    .bottom_0()
+                                                    .right_0()
+                                                    .size_0()
+                                                    .child(
+                                                        deferred(
+                                                            anchored()
+                                                                .anchor(Anchor::TopRight)
+                                                                .child(pane_chrome_menu(
+                                                                    PaneChromeMenu::Split,
+                                                                    colors,
+                                                                    cx,
+                                                                )),
+                                                        )
+                                                        .with_priority(2),
+                                                    )
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .children(active_result_item.map(|item_id| {
+                                div()
+                                    .debug_selector(|| "pane-expand-results".into())
+                                    .child(
+                                        IconButton::new(
+                                            ("pane-expand-results", pane_id as usize),
+                                            IconName::Maximize,
+                                            "Open data in large view",
+                                        )
+                                        .square(px(24.))
+                                        .icon_size(12.)
+                                        .tooltip("Open data in large view")
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.emit(PaneEvent::OpenDataResultsRequested {
+                                                item_id,
+                                            });
+                                        })),
+                                    )
+                            }))
+                    }))
             }))
             .children(pending_close.map(|item| {
                 let item_id = item.id;
@@ -19369,6 +19662,15 @@ impl WorkspaceShell {
     }
 
     fn split_pane(&mut self, _: &SplitPane, window: &mut Window, cx: &mut Context<Self>) {
+        self.split_pane_in_direction(SplitDirection::Right, window, cx);
+    }
+
+    fn split_pane_in_direction(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.next_id;
         self.next_id += 1;
         let target_id = self.panes[self.active_pane].read(cx).id;
@@ -19399,7 +19701,7 @@ impl WorkspaceShell {
         });
         cx.subscribe_in(&pane, window, Self::on_pane_event).detach();
         self.panes.push(pane);
-        pane_layout::split(&mut self.pane_layout, target_id, id, SplitDirection::Right);
+        pane_layout::split(&mut self.pane_layout, target_id, id, direction);
         self.sync_pane_layout_view(cx);
         self.active_pane = self.panes.len() - 1;
         self.focus_active_pane(window, cx);
@@ -19700,6 +20002,14 @@ impl WorkspaceShell {
             PaneEvent::TabBarDragEntered => {
                 self.active_tab_bar_drag_bounds = emitter.read(cx).tab_bar_drag_bounds;
                 self.set_root_tab_drop_target(None, cx);
+            }
+            PaneEvent::CommandRequested(command) => {
+                self.active_pane = index;
+                self.run_command(*command, window, cx);
+            }
+            PaneEvent::SplitRequested(direction) => {
+                self.active_pane = index;
+                self.split_pane_in_direction(*direction, window, cx);
             }
             PaneEvent::CloseRequested => {
                 self.active_pane = index;
@@ -39668,13 +39978,33 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tabs_own_close_controls_and_empty_pane_hides_its_tab_bar(cx: &mut TestAppContext) {
+    fn tab_and_pane_actions_only_mount_on_hover(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         cx.run_until_parked();
         assert!(cx.debug_bounds("pane-close").is_none());
         assert!(cx.debug_bounds("pane-tab-bar").is_some());
+        assert!(cx.debug_bounds("tab-close-1").is_none());
+        assert!(cx.debug_bounds("pane-hover-actions").is_none());
+
+        let tab = cx.debug_bounds("tab-1").expect("first tab");
+        cx.simulate_mouse_move(tab.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tab-close-1").is_some());
+        assert!(cx.debug_bounds("pane-hover-actions").is_some());
+        assert!(cx.debug_bounds("pane-new-action").is_some());
+        assert!(cx.debug_bounds("pane-split-action").is_some());
+
+        let tab_bar = cx.debug_bounds("pane-tab-bar").expect("tab bar");
+        cx.simulate_mouse_move(
+            point(tab_bar.center().x, tab_bar.bottom() + px(40.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tab-close-1").is_none());
+        assert!(cx.debug_bounds("pane-hover-actions").is_none());
 
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
         cx.update(|window, cx| focus.dispatch_action(&CloseActiveItem, window, cx));
@@ -39686,6 +40016,71 @@ mod tests {
         );
         assert!(cx.debug_bounds("pane-close").is_none());
         assert!(cx.debug_bounds("pane-tab-bar").is_none());
+    }
+
+    #[gpui::test]
+    fn pane_hover_menus_create_items_and_directional_splits(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+
+        let tab = cx.debug_bounds("tab-1").expect("first tab");
+        cx.simulate_mouse_move(tab.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let new_action = cx.debug_bounds("pane-new-action").expect("new action");
+        cx.simulate_click(new_action.center(), Modifiers::default());
+        cx.run_until_parked();
+        for selector in [
+            "pane-new-query",
+            "pane-new-file",
+            "pane-new-folder",
+            "pane-new-run-configuration",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "missing {selector}");
+        }
+        let new_query = cx.debug_bounds("pane-new-query").unwrap();
+        cx.simulate_click(new_query.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, cx| workspace.active_item_count(cx)),
+            2
+        );
+
+        let tab_bar = cx.debug_bounds("pane-tab-bar").expect("tab bar");
+        cx.simulate_mouse_move(
+            point(tab_bar.right() - px(8.), tab_bar.center().y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let split_action = cx.debug_bounds("pane-split-action").expect("split action");
+        cx.simulate_click(split_action.center(), Modifiers::default());
+        cx.run_until_parked();
+        for selector in [
+            "pane-split-right",
+            "pane-split-down",
+            "pane-split-left",
+            "pane-split-up",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "missing {selector}");
+        }
+        let split_down = cx.debug_bounds("pane-split-down").unwrap();
+        cx.simulate_click(split_down.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx, |workspace, _| workspace.pane_count()),
+            2
+        );
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(matches!(
+                workspace.pane_layout,
+                PaneLayoutPresentation::Split {
+                    axis: PaneAxis::Vertical,
+                    ..
+                }
+            ));
+        });
     }
 
     #[gpui::test]
