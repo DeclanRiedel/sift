@@ -1,8 +1,9 @@
 # Phase M — GPUI Desktop Client
 
-Status: **design locked on 2026-08-11; M0–M2 complete, M3 in progress.** ADR-040 is
-normative. Every milestone below ends in a separately reviewable commit with
-the workspace quality gates green.
+Status: **design locked on 2026-08-11; M0–M2 and M4 complete, M3 awaiting
+measured performance graduation, M5 partially complete, and M6 in progress.**
+ADR-040 is normative. Every milestone below ends in a separately reviewable
+commit with the workspace quality gates green.
 
 Milestones: M0 client boundary and GPUI feasibility, M1 native application
 shell, M2 connection and workspace lifecycle, M3 daily-driver SQL vertical
@@ -487,31 +488,30 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 
 ### M4 — database navigation and editing
 
-- [ ] Implement lazy schema navigation, filtering, refresh/invalidation, object
+- [x] Implement lazy schema navigation, filtering, refresh/invalidation, object
       details, DDL, dependencies, usages, and data browsing.
-      **Partial:** the Connections dock now searches the server-side schema
-      index with object-kind filters; the inspector renders incoming usages and
-      outgoing dependencies; and full DDL upgrades its immediate catalog
-      preview to the canonical server response.
-- [ ] Render transaction state, savepoints, process control, execution plans,
-      schema/data search, saved queries, and query history.
-      **Partial:** the Explain result tab now requests estimated plans or an
-      explicit Analyze run, renders the normalized plan tree, and exposes the
-      raw engine plan for copying.
-- [ ] Implement typed edit staging, preview, optimistic conflict display,
-      approval, apply, and deterministic reconciliation.
-- [ ] Ensure read-only/capability-limited connections remain useful and explain
+- [x] Render transaction state, savepoints, process control, and execution
+      plans.
+- [x] Render schema/data search, saved queries, and query history.
+- [x] Implement typed cell, JSON, paste, and row-deletion staging with preview,
+      approval, optimistic conflict display, apply, and deterministic refresh.
+- [x] Keep read-only and capability-limited connections useful while explaining
       every disabled mutation.
 
 ### M5 — advanced product surfaces
 
-- [ ] Render catalog diagrams, comparisons, diffs, migration plans, safety
+- [x] Render catalog diagrams, comparisons, diffs, migration plans, safety
       findings, previews, and apply results.
-- [ ] Implement virtual workspace history, projection reconciliation, Git
+- [x] Implement virtual workspace history, projection reconciliation, Git
       status/diff/stage/commit/fetch/push, and conflict resolution.
-- [ ] Implement run configurations, live runs, logs, schedules, and recovery.
-- [ ] Implement import/export and transfer recipes with progress, cancellation,
-      artifact handling, and bounded previews.
+- [x] Implement run-configuration editing and live run start/cancel/status
+      controls.
+- [ ] Add schedule management, durable run-log browsing, and interrupted-run
+      recovery to the automation surface.
+- [x] Implement import/export with progress, cancellation, artifact handling,
+      and bounded previews.
+- [ ] Implement transfer-recipe creation, validation, execution, progress, and
+      cancellation in the desktop client.
 - [ ] Render Phase I declarative contributions through trusted actions, forms,
       tables, and read-only panels.
 
@@ -531,6 +531,20 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 - [ ] Produce signed desktop artifacts using the existing release/update
       lifecycle without weakening server verification.
 - [ ] Publish the Phase M graduation matrix and update product status docs.
+
+### Next feature order
+
+The remaining work should proceed in this order. Product surfaces come first;
+graduation work follows once the interaction model has stopped changing.
+
+1. Automation schedules, durable logs, and interrupted-run recovery.
+2. Transfer-recipe creation, validation, execution, progress, and cancellation.
+3. Phase I declarative contribution rendering through the trusted host UI.
+4. Numerical performance and memory graduation on the existing large fixtures.
+5. Crash, restart, offline, authentication-expiry, and outcome-unknown recovery
+   matrices.
+6. Keyboard/accessibility and Linux/macOS/Windows platform validation.
+7. Signed artifacts, update validation, and the final Phase M graduation matrix.
 
 ## Commit and quality policy
 
