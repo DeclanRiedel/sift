@@ -1228,6 +1228,8 @@ actions!(
         PaletteUp,
         PaletteDown,
         PaletteConfirm,
+        PaneNavigateBack,
+        PaneNavigateForward,
         SplitPane,
         FocusNextPane,
         CloseActivePane,
@@ -3831,6 +3833,34 @@ impl Pane {
         }
     }
 
+    fn navigate_back_action(
+        &mut self,
+        _: &PaneNavigateBack,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.can_navigate_backward() {
+            self.navigate_backward();
+            self.active_focus_handle(cx).focus(window, cx);
+            cx.emit(PaneEvent::FocusRequested);
+            cx.notify();
+        }
+    }
+
+    fn navigate_forward_action(
+        &mut self,
+        _: &PaneNavigateForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.can_navigate_forward() {
+            self.navigate_forward();
+            self.active_focus_handle(cx).focus(window, cx);
+            cx.emit(PaneEvent::FocusRequested);
+            cx.notify();
+        }
+    }
+
     fn forget_item(&mut self, item_id: u64) {
         self.backward_items.retain(|id| *id != item_id);
         self.forward_items.retain(|id| *id != item_id);
@@ -5350,6 +5380,8 @@ impl gpui::Render for Pane {
             .key_context("SiftPane")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::handle_pending_close_key))
+            .on_action(cx.listener(Self::navigate_back_action))
+            .on_action(cx.listener(Self::navigate_forward_action))
             // Clicking anywhere in the pane makes it the active pane. The
             // workspace owns the pane list, so we ask rather than reach across.
             .on_mouse_down(
@@ -5397,6 +5429,7 @@ impl gpui::Render for Pane {
                                         "pane-go-back",
                                         IconName::ChevronLeft,
                                         "Go back",
+                                        "Ctrl+Left",
                                         can_go_back,
                                         true,
                                     ),
@@ -5404,13 +5437,15 @@ impl gpui::Render for Pane {
                                         "pane-go-forward",
                                         IconName::ChevronRight,
                                         "Go forward",
+                                        "Ctrl+Right",
                                         can_go_forward,
                                         false,
                                     ),
                                 ]
                                 .into_iter()
                                 .map(
-                                    |(id, icon_name, label, enabled, backward)| {
+                                    |(id, icon_name, label, shortcut, enabled, backward)| {
+                                        let tooltip = format!("{label} · {shortcut}");
                                         div()
                                             .id((id, pane_id as usize))
                                             .role(Role::Button)
@@ -5436,14 +5471,18 @@ impl gpui::Render for Pane {
                                                     .on_click(cx.listener(
                                                         move |pane, _, window, cx| {
                                                             if backward {
-                                                                pane.navigate_backward();
+                                                                pane.navigate_back_action(
+                                                                    &PaneNavigateBack,
+                                                                    window,
+                                                                    cx,
+                                                                );
                                                             } else {
-                                                                pane.navigate_forward();
+                                                                pane.navigate_forward_action(
+                                                                    &PaneNavigateForward,
+                                                                    window,
+                                                                    cx,
+                                                                );
                                                             }
-                                                            pane.active_focus_handle(cx)
-                                                                .focus(window, cx);
-                                                            cx.emit(PaneEvent::FocusRequested);
-                                                            cx.notify();
                                                         },
                                                     ))
                                             })
@@ -5457,7 +5496,7 @@ impl gpui::Render for Pane {
                                                 12.,
                                             ))
                                             .tooltip(move |_, cx| {
-                                                cx.new(|_| Tooltip::new(label)).into()
+                                                cx.new(|_| Tooltip::new(tooltip.clone())).into()
                                             })
                                     },
                                 ),
@@ -39029,13 +39068,13 @@ mod tests {
         let workspace = window.root(&mut cx).unwrap();
         let pane = workspace.read_with(&cx, |workspace, _| workspace.panes[0].clone());
 
-        pane.update(&mut cx, |pane, _| {
+        pane.update_in(&mut cx, |pane, window, cx| {
             pane.activate_item(1, true);
             pane.activate_item(2, true);
             assert!(pane.can_navigate_backward());
-            pane.navigate_backward();
+            pane.navigate_back_action(&PaneNavigateBack, window, cx);
             assert_eq!(pane.active_item().map(|item| item.id), Some(2));
-            pane.navigate_forward();
+            pane.navigate_forward_action(&PaneNavigateForward, window, cx);
             assert_eq!(pane.active_item().map(|item| item.id), Some(3));
             pane.forget_item(2);
             assert!(!pane.backward_items.contains(&2));

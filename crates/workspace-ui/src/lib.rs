@@ -35,9 +35,9 @@ pub use shell::{
     InstanceConfigurationPresentation, InstanceCredentialKind, InstanceCredentialPresentation,
     InstanceManagerEvent, InstancePlanPresentation, ItemDefinition, ItemRegistry, ItemRuntimeKind,
     Modal, OpenCommandPalette, OpenSchemaSearch, OpenServerConnection, PaletteConfirm, PaletteDown,
-    PaletteUp, Pane, PaneEvent, ResultEditApplyFailure, RoomDocumentCommand, RoomDocumentEvent,
-    SaveActiveItem, SavedInstanceRoot, SavedServerProfile, SplitDirection, SplitPane,
-    StageJsonResultEdit, StatusBar, Toast, ToastTone, ToggleBottomDock, ToggleFrameMetrics,
-    ToggleLeftDock, ToggleRightDock, WorkspaceShell,
+    PaletteUp, Pane, PaneEvent, PaneNavigateBack, PaneNavigateForward, ResultEditApplyFailure,
+    RoomDocumentCommand, RoomDocumentEvent, SaveActiveItem, SavedInstanceRoot, SavedServerProfile,
+    SplitDirection, SplitPane, StageJsonResultEdit, StatusBar, Toast, ToastTone, ToggleBottomDock,
+    ToggleFrameMetrics, ToggleLeftDock, ToggleRightDock, WorkspaceShell,
 };
 pub use workspace::{WorkspaceFileRow, WorkspaceFilesProjection, WorkspaceFilesSnapshot};
