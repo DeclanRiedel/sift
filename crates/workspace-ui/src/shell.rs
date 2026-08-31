@@ -13269,6 +13269,8 @@ impl WorkspaceShell {
                 );
                 let icon_name = schema_object_kind_icon(target.object_kind);
                 let object_name = target.object.clone();
+                let preview_target = target.clone();
+                let ddl_target = target;
                 base(5)
                     .id(("schema-object-row", row_index))
                     .text_color(if can_preview {
@@ -13280,12 +13282,13 @@ impl WorkspaceShell {
                     .when(can_preview, |row| {
                         row.on_click(cx.listener(move |shell, _, window, cx| {
                             shell.set_connection_selection(nav_index, cx);
-                            shell.open_table_preview(target.clone(), window, cx)
+                            shell.open_table_preview(preview_target.clone(), window, cx)
                         }))
                     })
                     .when(!can_preview, |row| {
-                        row.on_click(cx.listener(move |shell, _, _, cx| {
-                            shell.set_connection_selection(nav_index, cx)
+                        row.on_click(cx.listener(move |shell, _, window, cx| {
+                            shell.set_connection_selection(nav_index, cx);
+                            shell.open_schema_search_target(ddl_target.clone(), window, cx)
                         }))
                     })
                     .child(tree_spacer_slot())
@@ -13552,17 +13555,8 @@ impl WorkspaceShell {
             ConnectionTreeAction::Connection(entry) if !matches!(self.connection_status, ConnectionStatus::Connected { profile_id, .. } if profile_id == entry.id) => {
                 self.connect(&entry, cx)
             }
-            ConnectionTreeAction::Object(target)
-                if matches!(
-                    target.object_kind,
-                    sift_protocol::ObjectKind::Table
-                        | sift_protocol::ObjectKind::View
-                        | sift_protocol::ObjectKind::MaterializedView
-                        | sift_protocol::ObjectKind::ForeignTable
-                        | sift_protocol::ObjectKind::PartitionedTable
-                ) =>
-            {
-                self.open_table_preview(target, window, cx)
+            ConnectionTreeAction::Object(target) => {
+                self.open_schema_search_target(target, window, cx)
             }
             ConnectionTreeAction::Workspace(entry) => self.open_workspace(&entry, cx),
             ConnectionTreeAction::Document(entry) => self.open_room_document(&entry, window, cx),
@@ -13584,9 +13578,47 @@ impl WorkspaceShell {
                 group,
             } => self.toggle_object_group(profile_id, catalog, schema, group, cx),
             ConnectionTreeAction::Room(id) => self.toggle_room(id, cx),
-            ConnectionTreeAction::Object(_) => {}
         }
         self.normalize_connection_selection();
+    }
+
+    fn open_selected_schema_object_ddl(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ConnectionTreeItem {
+            action: ConnectionTreeAction::Object(target),
+            ..
+        }) = self
+            .visible_connection_items()
+            .get(self.connection_nav_selected)
+            .cloned()
+        else {
+            return;
+        };
+        self.open_database_object_ddl(target, window, cx);
+    }
+
+    fn preview_selected_schema_object(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ConnectionTreeItem {
+            action: ConnectionTreeAction::Object(target),
+            ..
+        }) = self
+            .visible_connection_items()
+            .get(self.connection_nav_selected)
+            .cloned()
+        else {
+            return;
+        };
+        if matches!(
+            target.object_kind,
+            sift_protocol::ObjectKind::Table
+                | sift_protocol::ObjectKind::View
+                | sift_protocol::ObjectKind::MaterializedView
+                | sift_protocol::ObjectKind::ForeignTable
+                | sift_protocol::ObjectKind::PartitionedTable
+        ) {
+            self.open_table_preview(target, window, cx);
+        } else {
+            self.show_toast("Data preview is available for tables and views".into(), cx);
+        }
     }
 
     fn request_table_definition(
@@ -14339,6 +14371,15 @@ impl WorkspaceShell {
             return;
         }
 
+        self.open_database_object_ddl(target, window, cx);
+    }
+
+    fn open_database_object_ddl(
+        &mut self,
+        target: DatabaseObjectTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let source = DatabaseObjectSource {
             instance_id: self
                 .selected_instance_id
@@ -21546,6 +21587,16 @@ impl WorkspaceShell {
                     "enter" => {
                         self.connection_nav_g_pending = false;
                         self.activate_connection_item(window, cx);
+                        true
+                    }
+                    "d" => {
+                        self.connection_nav_g_pending = false;
+                        self.open_selected_schema_object_ddl(window, cx);
+                        true
+                    }
+                    "p" => {
+                        self.connection_nav_g_pending = false;
+                        self.preview_selected_schema_object(window, cx);
                         true
                     }
                     "ctrl-f" => {
@@ -30181,7 +30232,8 @@ impl WorkspaceShell {
                                 .border_color(colors.subtle_border)
                                 .text_xs()
                                 .text_color(colors.muted_text)
-                                .child("j/k · Enter open · / filter · R refresh")
+                                .child("j/k · Enter open · d DDL · p preview")
+                                .child("/ filter · R refresh")
                                 .child("r rename · t tags · d delete · u update"),
                         )
                 },
@@ -38685,6 +38737,51 @@ mod tests {
                     .active_item()
                     .map(|item| item.id),
                 Some(item_id)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn non_table_schema_object_opens_canonical_ddl(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.open_schema_search_target(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "Demo".into(),
+                        provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    },
+                    catalog: "sifttest".into(),
+                    schema: "lab".into(),
+                    object: "refresh_people".into(),
+                    object_kind: sift_protocol::ObjectKind::Procedure,
+                },
+                window,
+                cx,
+            );
+        });
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadObjectDdl { source, .. })
+                if source.schema == "lab"
+                    && source.object == "refresh_people"
+                    && source.object_kind == sift_protocol::ObjectKind::Procedure
+        ));
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().expect("DDL item");
+            assert_eq!(item.title, "lab.refresh_people");
+            assert_eq!(
+                pane.database_item_views.get(&item.id),
+                Some(&DatabaseItemView::Ddl)
             );
         });
     }
