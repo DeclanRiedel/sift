@@ -21378,12 +21378,21 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_command_palette_with_query("", window, cx);
+    }
+
+    fn open_command_palette_with_query(
+        &mut self,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.ide_input = None;
         self.command_palette_origin = self.focused_surface;
         self.modal = Some(Modal::CommandPalette);
         self.palette_selected = 0;
         self.query_input
-            .update(cx, |input, cx| input.set_text("", cx));
+            .update(cx, |input, cx| input.set_text(query, cx));
         self.palette_scroll_handle
             .scroll_to_item(0, ScrollStrategy::Top);
         self.query_input.focus_handle(cx).focus(window, cx);
@@ -25265,6 +25274,12 @@ impl WorkspaceShell {
             CommandId::ToggleTheme => self.toggle_theme(cx),
             CommandId::OpenCommandPalette => {
                 self.open_command_palette(&OpenCommandPalette, window, cx)
+            }
+            CommandId::OpenFileSwitcher => self.open_command_palette_with_query("/", window, cx),
+            CommandId::OpenSchemaSwitcher => self.open_command_palette_with_query("@", window, cx),
+            CommandId::OpenTabSwitcher => self.open_command_palette_with_query("#", window, cx),
+            CommandId::OpenSavedQuerySwitcher => {
+                self.open_command_palette_with_query("?", window, cx)
             }
             CommandId::Quit => {
                 if self.transaction_state.transaction().is_some() {
@@ -41317,6 +41332,45 @@ mod tests {
             workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
             Some(Modal::CommandPalette)
         );
+    }
+
+    #[gpui::test]
+    fn command_palette_mode_commands_open_their_prefixed_view(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        for (command, expected_mode, expected_query) in [
+            (
+                CommandId::OpenFileSwitcher,
+                CommandPaletteMode::WorkspaceFiles,
+                "/",
+            ),
+            (
+                CommandId::OpenSchemaSwitcher,
+                CommandPaletteMode::Schema,
+                "@",
+            ),
+            (
+                CommandId::OpenTabSwitcher,
+                CommandPaletteMode::OpenTabs,
+                "#",
+            ),
+            (
+                CommandId::OpenSavedQuerySwitcher,
+                CommandPaletteMode::SavedQueries,
+                "?",
+            ),
+        ] {
+            workspace.update_in(&mut cx, |shell, window, cx| {
+                shell.run_command(command, window, cx)
+            });
+            workspace.read_with(&cx, |shell, cx| {
+                assert_eq!(shell.modal, Some(Modal::CommandPalette));
+                let input = shell.query_input.read(cx).text();
+                assert_eq!(input, expected_query);
+                assert_eq!(CommandPaletteMode::parse(input).0, expected_mode);
+            });
+        }
     }
 
     #[gpui::test]

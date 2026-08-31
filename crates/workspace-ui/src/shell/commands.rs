@@ -126,6 +126,10 @@ pub enum CommandId {
     OpenKeymaps,
     OpenServerConfiguration,
     OpenCommandPalette,
+    OpenFileSwitcher,
+    OpenSchemaSwitcher,
+    OpenTabSwitcher,
+    OpenSavedQuerySwitcher,
     ToggleTheme,
     Quit,
 }
@@ -252,6 +256,10 @@ impl CommandId {
             Self::OpenKeymaps => "ui.open-keymaps",
             Self::OpenServerConfiguration => "instance.open-configuration",
             Self::OpenCommandPalette => "ui.command-palette",
+            Self::OpenFileSwitcher => "ui.switcher-files",
+            Self::OpenSchemaSwitcher => "ui.switcher-schema",
+            Self::OpenTabSwitcher => "ui.switcher-tabs",
+            Self::OpenSavedQuerySwitcher => "ui.switcher-saved-queries",
             Self::ToggleTheme => "ui.toggle-theme",
             Self::Quit => "window.quit",
         }
@@ -1445,6 +1453,38 @@ const DEFINITIONS: &[CommandDefinition] = &[
         AvailabilityRule::Always,
     ),
     command(
+        CommandId::OpenFileSwitcher,
+        "Find Workspace File…",
+        "",
+        "<leader> f f",
+        true,
+        AvailabilityRule::Always,
+    ),
+    command(
+        CommandId::OpenSchemaSwitcher,
+        "Find Database Object…",
+        "",
+        "<leader> f s",
+        true,
+        AvailabilityRule::ConnectedDatabase,
+    ),
+    command(
+        CommandId::OpenTabSwitcher,
+        "Find Open Tab…",
+        "",
+        "<leader> f t",
+        true,
+        AvailabilityRule::Always,
+    ),
+    command(
+        CommandId::OpenSavedQuerySwitcher,
+        "Find Saved Query…",
+        "",
+        "<leader> f q",
+        true,
+        AvailabilityRule::Always,
+    ),
+    command(
         CommandId::ToggleTheme,
         "Toggle Light/Dark Theme",
         "",
@@ -1739,6 +1779,17 @@ mod tests {
             CommandRegistry::resolve_language(&["u".into()]),
             CommandLanguageMatch::Command(CommandId::UndoQuery)
         );
+        for (keys, expected) in [
+            (["f", "f"], CommandId::OpenFileSwitcher),
+            (["f", "s"], CommandId::OpenSchemaSwitcher),
+            (["f", "t"], CommandId::OpenTabSwitcher),
+            (["f", "q"], CommandId::OpenSavedQuerySwitcher),
+        ] {
+            assert_eq!(
+                CommandRegistry::resolve_language(&keys.map(str::to_owned)),
+                CommandLanguageMatch::Command(expected)
+            );
+        }
 
         let bindings = BTreeMap::from([(
             CommandId::ExecuteStatement.as_str().to_owned(),
