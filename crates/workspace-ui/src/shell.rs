@@ -653,6 +653,7 @@ enum CommandPaletteMode {
     Commands,
     WorkspaceFiles,
     Schema,
+    Data,
     OpenTabs,
     SavedQueries,
     QueryHistory,
@@ -665,6 +666,7 @@ impl CommandPaletteMode {
             Some('>') => (Self::Commands, input[1..].trim_start()),
             Some('/') => (Self::WorkspaceFiles, input[1..].trim_start()),
             Some('@') => (Self::Schema, input[1..].trim_start()),
+            Some('$') => (Self::Data, input[1..].trim_start()),
             Some('#') => (Self::OpenTabs, input[1..].trim_start()),
             Some('?') => (Self::SavedQueries, input[1..].trim_start()),
             Some('!') => (Self::QueryHistory, input[1..].trim_start()),
@@ -677,6 +679,7 @@ impl CommandPaletteMode {
             Self::Commands => "COMMAND",
             Self::WorkspaceFiles => "FILE",
             Self::Schema => "SCHEMA",
+            Self::Data => "DATA",
             Self::OpenTabs => "TAB",
             Self::SavedQueries => "SAVED",
             Self::QueryHistory => "HISTORY",
@@ -689,6 +692,7 @@ enum CommandPaletteItem {
     Command(CommandSpec),
     WorkspaceFile(sift_protocol::WorkspaceNodeId, String),
     Schema(sift_protocol::SearchHit),
+    Data(sift_protocol::DataSearchHit),
     OpenTab {
         pane_index: usize,
         item_index: usize,
@@ -7720,6 +7724,9 @@ impl WorkspaceShell {
                     CommandPaletteMode::Schema => {
                         shell.request_schema_search_for(query.to_owned(), cx);
                     }
+                    CommandPaletteMode::Data => {
+                        shell.request_data_search_for(query.to_owned(), cx);
+                    }
                     CommandPaletteMode::SavedQueries
                         if shell.saved_queries_tenant != shell.selected_tenant_id() =>
                     {
@@ -9595,6 +9602,8 @@ impl WorkspaceShell {
                 let (mode, query) = CommandPaletteMode::parse(palette_input);
                 if mode == CommandPaletteMode::Schema && !query.trim().is_empty() {
                     self.request_schema_search_for(query.trim().to_owned(), cx);
+                } else if mode == CommandPaletteMode::Data && !query.trim().is_empty() {
+                    self.request_data_search_for(query.trim().to_owned(), cx);
                 }
                 cx.notify();
             }
@@ -12281,6 +12290,10 @@ impl WorkspaceShell {
 
     fn request_data_search(&mut self, cx: &mut Context<Self>) {
         let query = self.data_search_input.read(cx).text().trim().to_owned();
+        self.request_data_search_for(query, cx);
+    }
+
+    fn request_data_search_for(&mut self, query: String, cx: &mut Context<Self>) {
         self.data_search_generation = self.data_search_generation.wrapping_add(1);
         let generation = self.data_search_generation;
         if query.is_empty() {
@@ -21915,11 +21928,7 @@ impl WorkspaceShell {
             self.show_toast("Refresh the schema before searching table data".into(), cx);
             return;
         }
-        self.modal = Some(Modal::DataSearch);
-        self.data_search_input
-            .update(cx, |input, cx| input.set_text("", cx));
-        self.data_search_input.focus_handle(cx).focus(window, cx);
-        cx.notify();
+        self.open_command_palette_with_query("$", window, cx);
     }
 
     fn capture_catalog_snapshot(&mut self, cx: &mut Context<Self>) {
@@ -23892,6 +23901,18 @@ impl WorkspaceShell {
                     item: CommandPaletteItem::Schema(hit),
                 })
                 .collect(),
+            CommandPaletteMode::Data => match &self.data_search_state {
+                DataSearchState::Ready { response } => response
+                    .hits
+                    .iter()
+                    .cloned()
+                    .map(|hit| CommandPaletteMatch {
+                        ranges: Vec::new(),
+                        item: CommandPaletteItem::Data(hit),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
             CommandPaletteMode::OpenTabs => {
                 let mut matches = self
                     .panes
@@ -24024,6 +24045,12 @@ impl WorkspaceShell {
             CommandPaletteItem::Schema(hit) => {
                 format!("schema:{instance}:{}", hit.display)
             }
+            CommandPaletteItem::Data(hit) => format!(
+                "data:{instance}:{}:{}:{:?}",
+                hit.table.schema.as_deref().unwrap_or_default(),
+                hit.table.name,
+                hit.row.values
+            ),
             CommandPaletteItem::OpenTab { item_id, .. } => {
                 format!("tab:{instance}:{item_id}")
             }
@@ -24071,6 +24098,23 @@ impl WorkspaceShell {
             }
             CommandPaletteItem::Schema(hit) => {
                 let target = self.schema_search_target(&hit);
+                self.dismiss_modal(&DismissModal, window, cx);
+                if let Some(target) = target {
+                    self.open_schema_search_target(target, window, cx);
+                }
+            }
+            CommandPaletteItem::Data(hit) => {
+                let object_kind = hit.table.kind.unwrap_or(sift_protocol::ObjectKind::Table);
+                let schema_hit = sift_protocol::SearchHit {
+                    target: sift_protocol::SearchTarget::Object { object_kind },
+                    path: hit.table,
+                    column: None,
+                    display: String::new(),
+                    score: 0,
+                    type_display: None,
+                    match_ranges: Vec::new(),
+                };
+                let target = self.schema_search_target(&schema_hit);
                 self.dismiss_modal(&DismissModal, window, cx);
                 if let Some(target) = target {
                     self.open_schema_search_target(target, window, cx);
@@ -30823,6 +30867,11 @@ impl WorkspaceShell {
                             SchemaSearchState::Failed(message) => message.clone().into(),
                             _ => "No matching database objects".into(),
                         },
+                        CommandPaletteMode::Data => match &self.data_search_state {
+                            DataSearchState::Loading => "Searching table data…".into(),
+                            DataSearchState::Failed(message) => message.clone().into(),
+                            _ => "No matching table rows".into(),
+                        },
                         CommandPaletteMode::OpenTabs => "No matching open tabs".into(),
                         CommandPaletteMode::SavedQueries if self.saved_queries_loading => {
                             "Loading saved queries…".into()
@@ -30865,6 +30914,7 @@ impl WorkspaceShell {
                                             .gap_3()
                                             .child("/ files")
                                             .child("@ schema")
+                                            .child("$ data")
                                             .child("# tabs")
                                             .child("? saved")
                                             .child("! history"),
@@ -30917,6 +30967,28 @@ impl WorkspaceShell {
                                                     CommandPaletteItem::Schema(hit) => {
                                                         let right = hit.type_display.unwrap_or_else(|| "SCHEMA".into());
                                                         (hit.display, right, true, false)
+                                                    }
+                                                    CommandPaletteItem::Data(hit) => {
+                                                        let table = [
+                                                            hit.table.schema.as_deref(),
+                                                            Some(hit.table.name.as_str()),
+                                                        ]
+                                                        .into_iter()
+                                                        .flatten()
+                                                        .collect::<Vec<_>>()
+                                                        .join(".");
+                                                        let label = hit
+                                                            .columns
+                                                            .iter()
+                                                            .zip(hit.row.values.iter())
+                                                            .take(4)
+                                                            .map(|(column, value)| format!(
+                                                                "{column}: {}",
+                                                                render_value(value).text
+                                                            ))
+                                                            .collect::<Vec<_>>()
+                                                            .join(" · ");
+                                                        (label, table, true, false)
                                                     }
                                                     CommandPaletteItem::OpenTab { pane_index, title, .. } => {
                                                         (title, format!("PANE {}", pane_index + 1), true, false)
@@ -37516,6 +37588,10 @@ mod tests {
             (CommandPaletteMode::Schema, "public.users")
         );
         assert_eq!(
+            CommandPaletteMode::parse("$ customer@example.com"),
+            (CommandPaletteMode::Data, "customer@example.com")
+        );
+        assert_eq!(
             CommandPaletteMode::parse("# query-2"),
             (CommandPaletteMode::OpenTabs, "query-2")
         );
@@ -38471,6 +38547,40 @@ mod tests {
             assert!(matches!(
                 shell.data_search_state,
                 DataSearchState::Ready { .. }
+            ));
+            shell
+                .query_input
+                .update(cx, |input, cx| input.set_text("$ Ada", cx));
+            shell.data_search_state = DataSearchState::Ready {
+                response: Box::new(sift_protocol::DataSearchResponse {
+                    hits: vec![sift_protocol::DataSearchHit {
+                        table: sift_protocol::ObjectPath {
+                            catalog: Some("warehouse".into()),
+                            schema: Some("public".into()),
+                            name: "customers".into(),
+                            kind: Some(sift_protocol::ObjectKind::Table),
+                            routine_args: None,
+                        },
+                        columns: vec!["id".into(), "name".into()],
+                        row: sift_protocol::Row {
+                            values: vec![
+                                sift_protocol::Value::Int64(1),
+                                sift_protocol::Value::Text("Ada".into()),
+                            ],
+                        },
+                        matched_columns: vec!["name".into()],
+                    }],
+                    truncated: false,
+                    tables_searched: 1,
+                }),
+            };
+            let items = shell.command_palette_items(cx);
+            assert!(matches!(
+                items.as_slice(),
+                [CommandPaletteMatch {
+                    item: CommandPaletteItem::Data(_),
+                    ..
+                }]
             ));
         });
     }
