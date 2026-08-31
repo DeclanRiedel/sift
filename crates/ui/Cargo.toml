@@ -7,6 +7,8 @@ repository.workspace = true
 
 [dependencies]
 gpui = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
 unicode-segmentation = { workspace = true }
 
 [dev-dependencies]

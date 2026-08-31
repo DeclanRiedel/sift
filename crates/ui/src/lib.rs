@@ -16,5 +16,6 @@ pub use text_input::{
     TextInput, TextInputEvent,
 };
 pub use theme::{
-    init_theme, set_theme, ActiveTheme, GlobalTheme, Theme, ThemeColors, ThemeMetrics,
+    init_theme, set_theme, ActiveTheme, GlobalTheme, Theme, ThemeAppearance, ThemeColors,
+    ThemeConfig, ThemeMetrics,
 };
