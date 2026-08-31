@@ -648,6 +648,52 @@ struct CommandProjectionKey {
     revision: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandPaletteMode {
+    Commands,
+    WorkspaceFiles,
+    Schema,
+    OpenTabs,
+    SavedQueries,
+}
+
+impl CommandPaletteMode {
+    fn parse(input: &str) -> (Self, &str) {
+        let input = input.trim_start();
+        match input.chars().next() {
+            Some('>') => (Self::Commands, input[1..].trim_start()),
+            Some('/') => (Self::WorkspaceFiles, input[1..].trim_start()),
+            Some('@') => (Self::Schema, input[1..].trim_start()),
+            Some('#') => (Self::OpenTabs, input[1..].trim_start()),
+            Some('?') => (Self::SavedQueries, input[1..].trim_start()),
+            _ => (Self::Commands, input),
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Commands => "COMMAND",
+            Self::WorkspaceFiles => "FILE",
+            Self::Schema => "SCHEMA",
+            Self::OpenTabs => "TAB",
+            Self::SavedQueries => "SAVED",
+        }
+    }
+}
+
+#[derive(Clone)]
+enum CommandPaletteItem {
+    Command(CommandSpec),
+    WorkspaceFile(sift_protocol::WorkspaceNodeId, String),
+    Schema(sift_protocol::SearchHit),
+    OpenTab {
+        pane_index: usize,
+        item_index: usize,
+        title: String,
+    },
+    SavedQuery(sift_api_types::SavedQuery),
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct OutlineProjectionKey {
     query: String,
@@ -7459,7 +7505,7 @@ impl WorkspaceShell {
                 (definition.id, input)
             })
             .collect();
-        let query_input = cx.new(|cx| TextInput::new("", "Search commands…", cx));
+        let query_input = cx.new(|cx| TextInput::new("", "Run a command or use / @ # ?", cx));
         let saved_query_switcher_input =
             cx.new(|cx| TextInput::new("", "Open saved query…", cx).aria_label("Open saved query"));
         let saved_query_tags_input = cx
@@ -7616,13 +7662,33 @@ impl WorkspaceShell {
                 })
         });
         // Re-render the palette as the search text changes so its list filters.
-        cx.observe(&query_input, |shell, _, cx| {
+        cx.observe(&query_input, |shell, input, cx| {
             shell.palette_selected = 0;
             shell.repository_modal_selected = 0;
             shell.invalidate_command_projection();
             shell
                 .palette_scroll_handle
                 .scroll_to_item(0, ScrollStrategy::Top);
+            let text = input.read(cx).text();
+            let (mode, query) = CommandPaletteMode::parse(text);
+            if shell.modal == Some(Modal::CommandPalette) {
+                match mode {
+                    CommandPaletteMode::WorkspaceFiles
+                        if shell.workspace_files.snapshot().is_none() =>
+                    {
+                        shell.request_workspace_files(cx);
+                    }
+                    CommandPaletteMode::Schema => {
+                        shell.request_schema_search_for(query.to_owned(), cx);
+                    }
+                    CommandPaletteMode::SavedQueries
+                        if shell.saved_queries_tenant != shell.selected_tenant_id() =>
+                    {
+                        shell.request_saved_queries(cx);
+                    }
+                    _ => {}
+                }
+            }
             cx.notify();
         })
         .detach();
@@ -12143,6 +12209,10 @@ impl WorkspaceShell {
 
     fn request_schema_search(&mut self, cx: &mut Context<Self>) {
         let query = self.schema_search_input.read(cx).text().trim().to_owned();
+        self.request_schema_search_for(query, cx);
+    }
+
+    fn request_schema_search_for(&mut self, query: String, cx: &mut Context<Self>) {
         self.schema_search_generation = self.schema_search_generation.wrapping_add(1);
         let generation = self.schema_search_generation;
         if query.is_empty() {
@@ -23631,7 +23701,9 @@ impl WorkspaceShell {
     }
 
     fn filtered_commands(&self, cx: &App) -> Arc<Vec<CommandSpec>> {
-        let query = self.query_input.read(cx).text().trim().to_lowercase();
+        let input = self.query_input.read(cx).text();
+        let (_, query) = CommandPaletteMode::parse(input);
+        let query = query.trim().to_lowercase();
         let key = CommandProjectionKey {
             query: query.clone(),
             context: self.command_context(cx),
@@ -23671,6 +23743,115 @@ impl WorkspaceShell {
         );
         *self.command_projection_cache.borrow_mut() = Some((key, commands.clone()));
         commands
+    }
+
+    fn command_palette_items(&self, cx: &App) -> Vec<CommandPaletteItem> {
+        let input = self.query_input.read(cx).text();
+        let (mode, query) = CommandPaletteMode::parse(input);
+        let query = query.trim().to_lowercase();
+        match mode {
+            CommandPaletteMode::Commands => self
+                .filtered_commands(cx)
+                .iter()
+                .cloned()
+                .map(CommandPaletteItem::Command)
+                .collect(),
+            CommandPaletteMode::WorkspaceFiles => self
+                .workspace_files
+                .snapshot()
+                .into_iter()
+                .flat_map(|snapshot| snapshot.tree.nodes.iter())
+                .filter(|node| node.kind == sift_protocol::WorkspaceNodeKind::SqlDocument)
+                .filter(|node| query.is_empty() || node.path.0.to_lowercase().contains(&query))
+                .map(|node| CommandPaletteItem::WorkspaceFile(node.id, node.path.0.clone()))
+                .collect(),
+            CommandPaletteMode::Schema => self
+                .schema_palette_hits()
+                .into_iter()
+                .map(CommandPaletteItem::Schema)
+                .collect(),
+            CommandPaletteMode::OpenTabs => self
+                .panes
+                .iter()
+                .enumerate()
+                .flat_map(|(pane_index, pane)| {
+                    pane.read(cx)
+                        .items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, item)| {
+                            query.is_empty() || item.title.to_lowercase().contains(&query)
+                        })
+                        .map(move |(item_index, item)| CommandPaletteItem::OpenTab {
+                            pane_index,
+                            item_index,
+                            title: item.title.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+            CommandPaletteMode::SavedQueries => self
+                .saved_queries
+                .iter()
+                .filter(|saved| {
+                    query.is_empty()
+                        || saved.name.to_lowercase().contains(&query)
+                        || saved
+                            .tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&query))
+                })
+                .cloned()
+                .map(CommandPaletteItem::SavedQuery)
+                .collect(),
+        }
+    }
+
+    fn activate_command_palette_item(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = self.command_palette_items(cx).get(index).cloned() else {
+            return;
+        };
+        match item {
+            CommandPaletteItem::Command(command) => {
+                if command.enabled() {
+                    self.run_command(command.id, window, cx);
+                }
+            }
+            CommandPaletteItem::WorkspaceFile(node_id, _) => {
+                self.dismiss_modal(&DismissModal, window, cx);
+                self.open_workspace_file(node_id, window, cx);
+            }
+            CommandPaletteItem::Schema(hit) => {
+                let target = self.schema_search_target(&hit);
+                self.dismiss_modal(&DismissModal, window, cx);
+                if let Some(target) = target {
+                    self.open_schema_search_target(target, window, cx);
+                }
+            }
+            CommandPaletteItem::OpenTab {
+                pane_index,
+                item_index,
+                ..
+            } => {
+                self.dismiss_modal(&DismissModal, window, cx);
+                self.active_pane = pane_index;
+                if let Some(pane) = self.panes.get(pane_index) {
+                    pane.update(cx, |pane, _| pane.activate_item(item_index, true));
+                }
+                self.focus_active_pane(window, cx);
+                self.persist(cx);
+                cx.notify();
+            }
+            CommandPaletteItem::SavedQuery(query) => {
+                self.dismiss_modal(&DismissModal, window, cx);
+                self.open_saved_query(query, window, cx);
+            }
+        }
     }
 
     fn filtered_saved_queries(&self, cx: &App) -> Vec<sift_api_types::SavedQuery> {
@@ -24528,7 +24709,7 @@ impl WorkspaceShell {
     fn palette_down(&mut self, _: &PaletteDown, _: &mut Window, cx: &mut Context<Self>) {
         match self.modal {
             Some(Modal::CommandPalette) => {
-                let last = self.filtered_commands(cx).len().saturating_sub(1);
+                let last = self.command_palette_items(cx).len().saturating_sub(1);
                 self.palette_selected = (self.palette_selected + 1).min(last);
                 self.palette_scroll_handle
                     .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
@@ -24554,12 +24735,7 @@ impl WorkspaceShell {
     fn palette_confirm(&mut self, _: &PaletteConfirm, window: &mut Window, cx: &mut Context<Self>) {
         match self.modal {
             Some(Modal::CommandPalette) => {
-                let commands = self.filtered_commands(cx);
-                if let Some(command) = commands.get(self.palette_selected) {
-                    if command.enabled() {
-                        self.run_command(command.id, window, cx);
-                    }
-                }
+                self.activate_command_palette_item(self.palette_selected, window, cx);
             }
             Some(Modal::SavedQuerySwitcher) => self.open_selected_saved_query(window, cx),
             Some(Modal::SchemaSearch) => {
@@ -25438,6 +25614,10 @@ impl WorkspaceShell {
         );
         let account_active = self.modal == Some(Modal::Account);
         let command_palette_active = self.modal == Some(Modal::CommandPalette);
+        let command_palette_mode = command_palette_active.then(|| {
+            let input = self.query_input.read(cx).text();
+            CommandPaletteMode::parse(input).0
+        });
         let navigation_expanded = self.app_bar_navigation_expanded();
         let launcher_content = if navigation_expanded {
             div()
@@ -25490,6 +25670,12 @@ impl WorkspaceShell {
                         .overflow_hidden()
                         .child(self.query_input.clone()),
                 )
+                .children(command_palette_mode.map(|mode| {
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted_text)
+                        .child(mode.label())
+                }))
                 .child(KeyBinding::new("Esc"))
                 .into_any_element()
         } else {
@@ -30495,14 +30681,45 @@ impl WorkspaceShell {
             };
             let content = match modal {
                 Modal::CommandPalette => {
-                    let commands = self.filtered_commands(cx);
-                    let command_count = commands.len();
+                    let input = self.query_input.read(cx).text();
+                    let (mode, _) = CommandPaletteMode::parse(input);
+                    let items = self.command_palette_items(cx);
+                    let item_count = items.len();
                     let palette_height =
-                        command_count.min(PALETTE_VISIBLE_ROWS) as f32 * PALETTE_ROW_HEIGHT;
+                        item_count.min(PALETTE_VISIBLE_ROWS) as f32 * PALETTE_ROW_HEIGHT;
+                    let empty_message = match mode {
+                        CommandPaletteMode::Commands => "No matching commands",
+                        CommandPaletteMode::WorkspaceFiles if self.workspace_files.loading() => {
+                            "Loading workspace files…"
+                        }
+                        CommandPaletteMode::WorkspaceFiles => "No matching workspace files",
+                        CommandPaletteMode::Schema if matches!(self.schema_search_state, SchemaSearchState::Loading) => "Searching schema…",
+                        CommandPaletteMode::Schema => "No matching database objects",
+                        CommandPaletteMode::OpenTabs => "No matching open tabs",
+                        CommandPaletteMode::SavedQueries if self.saved_queries_loading => "Loading saved queries…",
+                        CommandPaletteMode::SavedQueries => "No matching saved queries",
+                    };
                     div()
                         .flex()
                         .flex_col()
-                        .when(commands.is_empty(), |palette| {
+                        .child(
+                            div()
+                                .h(px(28.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child("commands")
+                                .child("/ files")
+                                .child("@ schema")
+                                .child("# tabs")
+                                .child("? saved"),
+                        )
+                        .when(items.is_empty(), |palette| {
                             palette.child(
                                 div()
                                     .px_2()
@@ -30511,44 +30728,61 @@ impl WorkspaceShell {
                                     .items_center()
                                     .justify_center()
                                     .text_color(colors.muted_text)
-                                    .child("No matching commands"),
+                                    .child(empty_message),
                             )
                         })
-                        .when(command_count > 0, |palette| {
+                        .when(item_count > 0, |palette| {
                             palette.child(
                                 uniform_list(
                                     "command-list",
-                                    command_count,
+                                    item_count,
                                     cx.processor(move |shell, range: Range<usize>, _, cx| {
-                                        let query =
-                                            shell.query_input.read(cx).text().to_lowercase();
-                                        let commands = shell.filtered_commands(cx);
+                                        let input = shell.query_input.read(cx).text();
+                                        let (_, query) = CommandPaletteMode::parse(input);
+                                        let query = query.to_lowercase();
+                                        let items = shell.command_palette_items(cx);
                                         let selected_idx = shell
                                             .palette_selected
-                                            .min(commands.len().saturating_sub(1));
+                                            .min(items.len().saturating_sub(1));
                                         range
                                             .filter_map(|idx| {
-                                                commands
+                                                items
                                                     .get(idx)
                                                     .cloned()
-                                                    .map(|command| (idx, command))
+                                                    .map(|item| (idx, item))
                                             })
-                                            .map(|(idx, command)| {
-                                                let enabled = command.enabled();
-                                                let id = command.id;
-                                                let selected = idx == selected_idx;
-                                                let right = command
-                                                    .disabled_reason
-                                                    .clone()
-                                                    .unwrap_or_else(|| {
-                                                        if command.language.is_empty() {
-                                                            command.shortcut.into()
+                                            .map(|(idx, item)| {
+                                                let (label, right, enabled, key_binding) = match item {
+                                                    CommandPaletteItem::Command(command) => {
+                                                        let right = command.disabled_reason.clone().unwrap_or_else(|| {
+                                                            if command.language.is_empty() {
+                                                                command.shortcut.into()
+                                                            } else {
+                                                                command.language.clone()
+                                                            }
+                                                        });
+                                                        (command.label.to_owned(), right, command.enabled(), true)
+                                                    }
+                                                    CommandPaletteItem::WorkspaceFile(_, path) => (path, "FILE".into(), true, false),
+                                                    CommandPaletteItem::Schema(hit) => {
+                                                        let right = hit.type_display.unwrap_or_else(|| "SCHEMA".into());
+                                                        (hit.display, right, true, false)
+                                                    }
+                                                    CommandPaletteItem::OpenTab { pane_index, title, .. } => {
+                                                        (title, format!("PANE {}", pane_index + 1), true, false)
+                                                    }
+                                                    CommandPaletteItem::SavedQuery(saved) => {
+                                                        let right = if saved.tags.is_empty() {
+                                                            "SAVED".into()
                                                         } else {
-                                                            command.language.clone()
-                                                        }
-                                                    });
+                                                            saved.tags.join(", ")
+                                                        };
+                                                        (saved.name, right, true, false)
+                                                    }
+                                                };
+                                                let selected = idx == selected_idx;
                                                 let mut row = div()
-                                                    .id(id.as_str())
+                                                    .id(SharedString::from(format!("command-palette-item-{idx}")))
                                                     .w_full()
                                                     .flex()
                                                     .items_center()
@@ -30564,14 +30798,14 @@ impl WorkspaceShell {
                                                         row.text_color(colors.muted_text)
                                                     })
                                                     .child(highlight_match(
-                                                        command.label,
+                                                        label,
                                                         &query,
                                                         colors.accent,
                                                     ))
                                                     .when_some(
                                                         (!right.is_empty()).then_some(right),
                                                         |row, right| {
-                                                            if enabled {
+                                                            if enabled && key_binding {
                                                                 row.child(KeyBinding::new(right))
                                                             } else {
                                                                 row.child(
@@ -30595,7 +30829,7 @@ impl WorkspaceShell {
                                                         })
                                                         .on_click(cx.listener(
                                                             move |shell, _, window, cx| {
-                                                                shell.run_command(id, window, cx)
+                                                                shell.activate_command_palette_item(idx, window, cx)
                                                             },
                                                         ));
                                                 }
@@ -37809,7 +38043,12 @@ impl gpui::Render for WorkspaceShell {
 
 /// Render `label` with the case-insensitive `query` substring emphasized in the
 /// accent color, like a fuzzy-finder match highlight.
-fn highlight_match(label: &'static str, query: &str, accent: gpui::Hsla) -> impl IntoElement {
+fn highlight_match(
+    label: impl Into<SharedString>,
+    query: &str,
+    accent: gpui::Hsla,
+) -> impl IntoElement {
+    let label = label.into();
     let base = div()
         .flex()
         .flex_1()
@@ -37819,17 +38058,21 @@ fn highlight_match(label: &'static str, query: &str, accent: gpui::Hsla) -> impl
     if query.is_empty() {
         return base.child(label);
     }
-    match label.to_lowercase().find(query) {
+    let lowercase = label.to_lowercase();
+    if lowercase.len() != label.len() {
+        return base.child(label);
+    }
+    match lowercase.find(query) {
         Some(start) => {
             let end = start + query.len();
-            base.child(&label[..start])
+            base.child(SharedString::from(&label[..start]))
                 .child(
                     div()
                         .text_color(accent)
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(&label[start..end]),
+                        .child(SharedString::from(&label[start..end])),
                 )
-                .child(&label[end..])
+                .child(SharedString::from(&label[end..]))
         }
         None => base.child(label),
     }
@@ -37839,6 +38082,34 @@ fn highlight_match(label: &'static str, query: &str, accent: gpui::Hsla) -> impl
 mod tests {
     use super::*;
     use gpui::{point, EntityInputHandler, Modifiers, TestAppContext, VisualTestContext};
+
+    #[test]
+    fn command_palette_uses_commands_by_default_and_routes_resource_prefixes() {
+        assert_eq!(
+            CommandPaletteMode::parse("save active item"),
+            (CommandPaletteMode::Commands, "save active item")
+        );
+        assert_eq!(
+            CommandPaletteMode::parse("> save active item"),
+            (CommandPaletteMode::Commands, "save active item")
+        );
+        assert_eq!(
+            CommandPaletteMode::parse("/ reports/monthly.sql"),
+            (CommandPaletteMode::WorkspaceFiles, "reports/monthly.sql")
+        );
+        assert_eq!(
+            CommandPaletteMode::parse("@ public.users"),
+            (CommandPaletteMode::Schema, "public.users")
+        );
+        assert_eq!(
+            CommandPaletteMode::parse("# query-2"),
+            (CommandPaletteMode::OpenTabs, "query-2")
+        );
+        assert_eq!(
+            CommandPaletteMode::parse("? audit"),
+            (CommandPaletteMode::SavedQueries, "audit")
+        );
+    }
 
     fn automation_configuration(
         id: i64,
