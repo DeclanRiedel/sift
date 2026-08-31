@@ -25523,10 +25523,6 @@ impl WorkspaceShell {
         );
         let account_active = self.modal == Some(Modal::Account);
         let command_palette_active = self.modal == Some(Modal::CommandPalette);
-        let command_palette_mode = command_palette_active.then(|| {
-            let input = self.query_input.read(cx).text();
-            CommandPaletteMode::parse(input).0
-        });
         let navigation_expanded = self.app_bar_navigation_expanded();
         let launcher_content = if navigation_expanded {
             div()
@@ -25579,12 +25575,6 @@ impl WorkspaceShell {
                         .overflow_hidden()
                         .child(self.query_input.clone()),
                 )
-                .children(command_palette_mode.map(|mode| {
-                    div()
-                        .text_xs()
-                        .text_color(colors.muted_text)
-                        .child(mode.label())
-                }))
                 .child(KeyBinding::new("Esc"))
                 .into_any_element()
         } else {
@@ -30588,6 +30578,7 @@ impl WorkspaceShell {
                 Modal::CommandPalette => {
                     let input = self.query_input.read(cx).text();
                     let (mode, _) = CommandPaletteMode::parse(input);
+                    let show_prefix_guide = input.trim().is_empty();
                     let items = self.command_palette_items(cx);
                     let item_count = items.len();
                     let palette_height =
@@ -30628,17 +30619,30 @@ impl WorkspaceShell {
                                 .px_2()
                                 .flex()
                                 .items_center()
-                                .gap_3()
+                                .justify_between()
                                 .border_b_1()
                                 .border_color(colors.subtle_border)
                                 .text_xs()
                                 .text_color(colors.muted_text)
-                                .child("commands")
-                                .child("/ files")
-                                .child("@ schema")
-                                .child("# tabs")
-                                .child("? saved")
-                                .child("! history"),
+                                .child(
+                                    div()
+                                        .debug_selector(|| "palette-mode-heading".into())
+                                        .child(mode.label()),
+                                )
+                                .when(show_prefix_guide, |heading| {
+                                    heading.child(
+                                        div()
+                                            .debug_selector(|| "palette-prefix-guide".into())
+                                            .flex()
+                                            .items_center()
+                                            .gap_3()
+                                            .child("/ files")
+                                            .child("@ schema")
+                                            .child("# tabs")
+                                            .child("? saved")
+                                            .child("! history"),
+                                    )
+                                }),
                         )
                         .when(items.is_empty(), |palette| {
                             palette.child(
@@ -44247,6 +44251,17 @@ mod tests {
         assert!(input.center().y >= app_bar.top() && input.center().y <= app_bar.bottom());
         assert!(results.top() >= app_bar.bottom());
         assert!(cx.debug_bounds("close-command-palette").is_none());
+        assert!(cx.debug_bounds("palette-mode-heading").is_some());
+        assert!(cx.debug_bounds("palette-prefix-guide").is_some());
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .query_input
+                .update(cx, |input, cx| input.set_text("#", cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("palette-mode-heading").is_some());
+        assert!(cx.debug_bounds("palette-prefix-guide").is_none());
     }
 
     #[gpui::test]
