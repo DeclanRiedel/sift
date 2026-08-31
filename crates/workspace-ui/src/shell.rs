@@ -5719,7 +5719,7 @@ impl gpui::Render for Pane {
                                     ),
                             ),
                     )
-                    .child({
+                    .children(is_focused.then(|| {
                         div()
                             .debug_selector(|| "pane-actions".into())
                             .h_full()
@@ -5857,7 +5857,7 @@ impl gpui::Render for Pane {
                                         })),
                                     )
                             })
-                    })
+                    }))
             }))
             .children(pending_close.map(|item| {
                 let item_id = item.id;
@@ -40085,7 +40085,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tab_close_overlays_on_hover_while_pane_actions_stay_mounted(cx: &mut TestAppContext) {
+    fn tab_close_overlays_on_hover_and_pane_actions_follow_focus(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -40116,6 +40116,18 @@ mod tests {
         );
         cx.run_until_parked();
         assert!(cx.debug_bounds("tab-close-1").is_none());
+        assert!(cx.debug_bounds("pane-actions").is_some());
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.focus_connections(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-actions").is_none());
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.focus_active_pane(window, cx);
+        });
+        cx.run_until_parked();
         assert!(cx.debug_bounds("pane-actions").is_some());
 
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
