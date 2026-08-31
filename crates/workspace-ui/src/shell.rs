@@ -28606,6 +28606,8 @@ impl WorkspaceShell {
                                 .child(
                                     div()
                                         .min_w_0()
+                                        .flex_1()
+                                        .overflow_hidden()
                                         .flex()
                                         .flex_col()
                                         .child(div().truncate().child(workspace_name))
@@ -28621,6 +28623,8 @@ impl WorkspaceShell {
                                 )
                                 .child(
                                     div()
+                                        .debug_selector(|| "repository-header-actions".into())
+                                        .flex_none()
                                         .flex()
                                         .items_center()
                                         .gap_1()
@@ -28692,22 +28696,41 @@ impl WorkspaceShell {
                                 .justify_between()
                                 .border_t_1()
                                 .border_color(colors.subtle_border)
-                                .child(SectionLabel::new(format!(
-                                    "FILES ({workspace_row_count})"
-                                )))
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(SectionLabel::new(format!(
+                                            "FILES ({workspace_row_count})"
+                                        ))),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
                                         .flex()
                                         .items_center()
+                                        .justify_end()
                                         .gap_1()
                                         .text_xs()
                                         .text_color(colors.muted_text)
-                                        .children(
-                                            (editor_dirty > 0)
-                                                .then(|| format!("editor*{editor_dirty}")),
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .truncate()
+                                                .children(
+                                                    (editor_dirty > 0).then(|| {
+                                                        format!("editor*{editor_dirty}")
+                                                    }),
+                                                )
+                                                .children(
+                                                    workspace_tree_dirty.then_some("virtual*"),
+                                                )
+                                                .children(
+                                                    projection_dirty.then_some("projection*"),
+                                                ),
                                         )
-                                        .children(workspace_tree_dirty.then_some("virtual*"))
-                                        .children(projection_dirty.then_some("projection*"))
                                         .child(
                                             IconButton::new(
                                                 "create-workspace-file",
@@ -29310,6 +29333,9 @@ impl WorkspaceShell {
                                 .justify_between()
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .overflow_hidden()
                                         .flex()
                                         .items_center()
                                         .gap_2()
@@ -29323,6 +29349,8 @@ impl WorkspaceShell {
                                 )
                                 .child(
                                     div()
+                                        .debug_selector(|| "query-outline-header-actions".into())
+                                        .flex_none()
                                         .flex()
                                         .items_center()
                                         .gap_1()
@@ -29638,6 +29666,9 @@ impl WorkspaceShell {
                                 .justify_between()
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .overflow_hidden()
                                         .flex()
                                         .items_center()
                                         .gap_2()
@@ -29651,6 +29682,8 @@ impl WorkspaceShell {
                                 )
                                 .child(
                                     div()
+                                        .debug_selector(|| "saved-queries-header-actions".into())
+                                        .flex_none()
                                         .flex()
                                         .items_center()
                                         .gap_1()
@@ -30004,6 +30037,9 @@ impl WorkspaceShell {
                                 .justify_between()
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .overflow_hidden()
                                         .flex()
                                         .items_center()
                                         .gap_2()
@@ -30017,6 +30053,8 @@ impl WorkspaceShell {
                                 )
                                 .child(
                                     div()
+                                        .debug_selector(|| "query-history-header-actions".into())
+                                        .flex_none()
                                         .flex()
                                         .items_center()
                                         .gap_1()
@@ -45443,6 +45481,30 @@ mod tests {
         assert!(search.left() >= toolbar.left());
         assert!(search.left() < refresh.left());
         assert!(refresh.right() <= toolbar.right());
+    }
+
+    #[gpui::test]
+    fn narrow_dock_keeps_panel_header_actions_visible(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        for (panel, actions_id) in [
+            (LeftPanel::QueryOutline, "query-outline-header-actions"),
+            (LeftPanel::SavedQueries, "saved-queries-header-actions"),
+            (LeftPanel::QueryHistory, "query-history-header-actions"),
+        ] {
+            workspace.update(&mut cx, |shell, cx| {
+                shell.left_dock.presentation.open = true;
+                shell.left_dock.presentation.size = 132.0;
+                shell.active_left_panel = panel;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let dock = cx.debug_bounds("left-dock").expect("left dock");
+            let actions = cx.debug_bounds(actions_id).expect("header actions");
+            assert!(actions.left() >= dock.left());
+            assert!(actions.right() <= dock.right());
+        }
     }
 
     #[gpui::test]
