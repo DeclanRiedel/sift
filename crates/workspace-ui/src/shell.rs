@@ -28022,14 +28022,20 @@ impl WorkspaceShell {
                         .flex_none()
                         .flex()
                         .items_center()
-                        .justify_between()
+                        .gap_1()
                         .child(
-                            Button::new("add-database-connection", "Add connection…")
-                                .tone(ButtonTone::Ghost)
-                                .start_icon(IconName::Add)
-                                .on_click(cx.listener(|shell, _, window, cx| {
-                                    shell.open_connection_url(window, cx)
-                                })),
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .child(
+                                    Button::new("add-database-connection", "Add connection…")
+                                        .tone(ButtonTone::Ghost)
+                                        .start_icon(IconName::Add)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.open_connection_url(window, cx)
+                                        })),
+                                ),
                         )
                         .when(
                             matches!(self.connection_status, ConnectionStatus::Connected { .. }),
@@ -28037,6 +28043,7 @@ impl WorkspaceShell {
                                 toolbar.child(
                                     div()
                                         .ml_auto()
+                                        .flex_none()
                                         .flex()
                                         .items_center()
                                         .gap_1()
@@ -45704,6 +45711,35 @@ mod tests {
                 name,
             }) if name == "demo/postgres"
         ));
+    }
+
+    #[gpui::test]
+    fn narrow_connections_toolbar_keeps_schema_actions_visible(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.left_dock.presentation.size = 132.0;
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "A connection with a deliberately long name".into(),
+            };
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let toolbar = cx
+            .debug_bounds("connections-toolbar")
+            .expect("connections toolbar");
+        let search = cx
+            .debug_bounds("open-schema-search")
+            .expect("schema search button");
+        let refresh = cx
+            .debug_bounds("refresh-connection-schema")
+            .expect("schema refresh button");
+        assert!(search.left() >= toolbar.left());
+        assert!(search.left() < refresh.left());
+        assert!(refresh.right() <= toolbar.right());
     }
 
     #[gpui::test]
