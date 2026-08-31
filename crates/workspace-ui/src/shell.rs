@@ -16,7 +16,7 @@ use sift_api_types::RoomId;
 use sift_ui::{
     database_logo, icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable,
     ErrorBanner, Field, IconButton, IconName, KeyBinding, PaneTab, SectionLabel, TextInput,
-    TextInputEvent, Theme, ThemeMetrics, Toggleable, Tone, Tooltip,
+    TextInputEvent, Theme, ThemeAppearance, ThemeMetrics, Toggleable, Tone, Tooltip,
 };
 
 use crate::editor::{
@@ -7376,11 +7376,16 @@ impl WorkspaceShell {
         let vim_mode_default = settings.editor.default_mode == EditorMode::Vim;
         // Install the process-wide theme first so every child entity reads the
         // same palette through `ActiveTheme` during construction and render.
-        let theme = if state.dark_theme {
-            Theme::dark()
-        } else {
-            Theme::light()
-        };
+        let theme = settings_store
+            .as_ref()
+            .map_or_else(
+                || {
+                    Theme::builtin(&settings.appearance.theme)
+                        .ok_or_else(|| "custom themes require a settings store".to_string())
+                },
+                |store| store.load_theme(&settings.appearance.theme),
+            )
+            .unwrap_or_else(|_| Theme::dark());
         sift_ui::init_theme(theme, cx);
         let mut workspace_presentations = state.instance_workspaces;
         let workspace = if state.workspace.panes.is_empty() {
@@ -7922,7 +7927,7 @@ impl WorkspaceShell {
             query_history_scroll_handle: UniformListScrollHandle::new(),
             schema_search_selected: 0,
             schema_search_scroll_handle: UniformListScrollHandle::new(),
-            dark_theme: state.dark_theme,
+            dark_theme: theme.appearance == ThemeAppearance::Dark,
             show_frame_metrics: false,
             next_toast_id: 1,
             settings,
@@ -19220,14 +19225,34 @@ impl WorkspaceShell {
     /// Swap the process-wide theme and persist the preference. Views read the
     /// palette through `ActiveTheme`, so the refresh is automatic.
     fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        self.dark_theme = !self.dark_theme;
-        let theme = if self.dark_theme {
-            Theme::dark()
+        let theme_name = if self.dark_theme { "light" } else { "ayu-dark" };
+        let (settings, theme) = if let Some(store) = &self.settings_store {
+            let theme = match store.load_theme(theme_name) {
+                Ok(theme) => theme,
+                Err(error) => {
+                    self.show_toast(error, cx);
+                    return;
+                }
+            };
+            let settings = match store.save_theme(theme_name) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    self.show_toast(error, cx);
+                    return;
+                }
+            };
+            (settings, theme)
         } else {
-            Theme::light()
+            let mut settings = self.settings.clone();
+            settings.appearance.theme = theme_name.into();
+            (
+                settings,
+                Theme::builtin(theme_name).expect("built-in theme"),
+            )
         };
+        self.settings = settings;
+        self.dark_theme = theme.appearance == ThemeAppearance::Dark;
         sift_ui::set_theme(theme, cx);
-        self.persist(cx);
         cx.notify();
     }
 
@@ -20942,6 +20967,11 @@ impl WorkspaceShell {
                 };
                 match store.save_text(editor.read(cx).document().text()) {
                     Ok(settings) => {
+                        let theme = store
+                            .load_theme(&settings.appearance.theme)
+                            .expect("save_text validates the selected theme");
+                        self.dark_theme = theme.appearance == ThemeAppearance::Dark;
+                        sift_ui::set_theme(theme, cx);
                         self.settings = settings;
                         self.sync_editor_keymaps_to_profile(cx);
                         if let Some(pane) = self.panes.get(self.active_pane) {
@@ -32896,8 +32926,8 @@ impl WorkspaceShell {
                         ))
                         .child(toggle_row(
                             "settings-theme",
-                            "Dark theme",
-                            "Switch between the dark and light appearance.",
+                            "Dark appearance",
+                            "Switch between Sift Ayu Dark and the light theme.",
                             dark_theme,
                             Box::new(cx.listener(
                                 |shell: &mut WorkspaceShell, _, _, cx| shell.toggle_theme(cx),

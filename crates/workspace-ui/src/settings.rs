@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use sift_ui::{Theme, ThemeConfig};
 use toml_edit::{DocumentMut, Item, Value};
 
 const SETTINGS_VERSION: u32 = 1;
@@ -26,6 +27,21 @@ pub enum EditorMode {
 #[serde(default)]
 pub struct EditorSettings {
     pub default_mode: EditorMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceSettings {
+    /// Built-in theme id or the stem of a TOML file in `themes/`.
+    pub theme: String,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            theme: "ayu-dark".into(),
+        }
+    }
 }
 
 impl Default for EditorSettings {
@@ -232,6 +248,7 @@ pub struct UserSettings {
     #[serde(default = "settings_version")]
     pub version: u32,
     pub editor: EditorSettings,
+    pub appearance: AppearanceSettings,
     pub keyboard: KeyboardSettings,
     pub repository: RepositorySettings,
 }
@@ -241,6 +258,7 @@ impl Default for UserSettings {
         Self {
             version: SETTINGS_VERSION,
             editor: EditorSettings::default(),
+            appearance: AppearanceSettings::default(),
             keyboard: KeyboardSettings::default(),
             repository: RepositorySettings::default(),
         }
@@ -292,6 +310,35 @@ impl SettingsStore {
 
     pub fn query_bindings_path(&self) -> PathBuf {
         self.path.with_file_name("query-bindings.json")
+    }
+
+    pub fn themes_dir(&self) -> PathBuf {
+        self.path.with_file_name("themes")
+    }
+
+    pub fn theme_path(&self, name: &str) -> Result<PathBuf, String> {
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(
+                "theme id may contain only ASCII letters, numbers, hyphens, and underscores".into(),
+            );
+        }
+        Ok(self.themes_dir().join(format!("{name}.toml")))
+    }
+
+    pub fn load_theme(&self, name: &str) -> Result<Theme, String> {
+        if let Some(theme) = Theme::builtin(name) {
+            return Ok(theme);
+        }
+        let path = self.theme_path(name)?;
+        let source = std::fs::read_to_string(&path)
+            .map_err(|error| format!("reading theme {} failed: {error}", path.display()))?;
+        ThemeConfig::decode(&source)
+            .map(|config| config.theme())
+            .map_err(|error| format!("{}: {error}", path.display()))
     }
 
     pub fn load_query_bindings(&self) -> Result<BTreeMap<String, Vec<String>>, String> {
@@ -367,7 +414,9 @@ impl SettingsStore {
     pub fn load(&self) -> Result<UserSettings, String> {
         let source = std::fs::read_to_string(&self.path)
             .map_err(|error| format!("reading {} failed: {error}", self.path.display()))?;
-        UserSettings::decode(&source)
+        let settings = UserSettings::decode(&source)?;
+        self.load_theme(&settings.appearance.theme)?;
+        Ok(settings)
     }
 
     pub fn read_text(&self) -> Result<String, String> {
@@ -376,11 +425,13 @@ impl SettingsStore {
     }
 
     pub fn save(&self, settings: &UserSettings) -> Result<(), String> {
+        self.load_theme(&settings.appearance.theme)?;
         self.write_validated(&settings.encode()?)
     }
 
     pub fn save_text(&self, source: &str) -> Result<UserSettings, String> {
         let settings = UserSettings::decode(source)?;
+        self.load_theme(&settings.appearance.theme)?;
         self.write_validated(source)?;
         Ok(settings)
     }
@@ -433,6 +484,32 @@ impl SettingsStore {
             *profile_value.decor_mut() = decor;
         }
         document["keyboard"]["profile"] = Item::Value(profile_value);
+        let updated = document.to_string();
+        let settings = UserSettings::decode(&updated)?;
+        self.write_source(&updated)?;
+        Ok(settings)
+    }
+
+    /// Update the selected theme while preserving hand-written settings.
+    pub fn save_theme(&self, theme: &str) -> Result<UserSettings, String> {
+        self.load_theme(theme)?;
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "settings write lock poisoned".to_string())?;
+        let source = std::fs::read_to_string(&self.path)
+            .map_err(|error| format!("reading {} failed: {error}", self.path.display()))?;
+        let mut document = source
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("settings.toml is invalid: {error}"))?;
+        let decor = document["appearance"]["theme"]
+            .as_value()
+            .map(|value| value.decor().clone());
+        let mut theme_value = Value::from(theme);
+        if let Some(decor) = decor {
+            *theme_value.decor_mut() = decor;
+        }
+        document["appearance"]["theme"] = Item::Value(theme_value);
         let updated = document.to_string();
         let settings = UserSettings::decode(&updated)?;
         self.write_source(&updated)?;
@@ -496,6 +573,7 @@ mod tests {
         let source = settings.encode().unwrap();
         assert!(source.contains("default_mode = \"vim\""));
         assert!(source.contains("profile = \"vim\""));
+        assert!(source.contains("theme = \"ayu-dark\""));
         assert_eq!(UserSettings::decode(&source).unwrap(), settings);
     }
 
@@ -583,5 +661,33 @@ mod tests {
             SettingsStore::new(path).load_query_bindings().unwrap(),
             bindings
         );
+    }
+
+    #[test]
+    fn custom_theme_loads_from_the_themes_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.toml"));
+        std::fs::create_dir(store.themes_dir()).unwrap();
+        std::fs::write(
+            store.theme_path("personal").unwrap(),
+            "version = 1\nname = \"Personal\"\nappearance = \"dark\"\n[colors]\naccent = \"#ff0000\"\n",
+        )
+        .unwrap();
+
+        let theme = store.load_theme("personal").unwrap();
+        assert_eq!(theme.colors.accent, gpui::rgb(0xff0000).into());
+        assert!(store.load_theme("../escape").is_err());
+    }
+
+    #[test]
+    fn settings_reject_a_missing_theme_without_replacing_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.toml"));
+        store.save(&UserSettings::default()).unwrap();
+        let original = store.read_text().unwrap();
+        let invalid = original.replace("theme = \"ayu-dark\"", "theme = \"missing\"");
+
+        assert!(store.save_text(&invalid).is_err());
+        assert_eq!(store.read_text().unwrap(), original);
     }
 }

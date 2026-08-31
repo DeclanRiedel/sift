@@ -10,6 +10,9 @@ version = 1
 [editor]
 default_mode = "vim" # "standard" or "vim"
 
+[appearance]
+theme = "ayu-dark"
+
 [keyboard]
 profile = "vim" # "vim", "hybrid", or "standard"
 ```
@@ -48,6 +51,47 @@ Default locations:
 - Windows: `%LOCALAPPDATA%\Sift\settings.toml`
 
 `keymaps.json` uses the same directory on every platform.
+
+## Themes
+
+`ayu-dark` is Sift's default. It uses Ayu Dark's cool near-black surfaces and
+warm syntax colors, with a slightly darker editor background. `light` is also
+built in.
+
+Custom themes are TOML files in a `themes` directory beside `settings.toml`.
+Select one using its file name without `.toml`:
+
+```toml
+# themes/my-theme.toml
+version = 1
+name = "My Theme"
+appearance = "dark" # "dark" or "light"
+
+[colors]
+background = "#080b10"
+accent = "#e6b450"
+syntax_keyword = "#ff8f40"
+```
+
+```toml
+# settings.toml
+[appearance]
+theme = "my-theme"
+```
+
+Colors use `#rrggbb` or `#rrggbbaa`. Every color is optional: omitted values
+inherit from the built-in palette for the chosen appearance. Unknown color
+names and malformed values are rejected when settings are saved or the app
+starts using the theme.
+
+Available color names are `background`, `surface`, `panel`, `toolbar`,
+`elevated_surface`, `hovered_surface`, `selected_surface`, `active_surface`,
+`scrim`, `border`, `subtle_border`, `strong_border`, `text`, `muted_text`,
+`disabled_text`, `accent`, `accent_muted`, `accent_hover`,
+`drop_target_background`, `drop_target_border`, `on_accent`, `focus_ring`,
+`danger`, `danger_muted`, `warning`, `warning_muted`, `success`,
+`success_muted`, `editor_active_line`, `grid_stripe`, `syntax_keyword`,
+`syntax_string`, `syntax_number`, and `syntax_comment`.
 
 Ephemeral window and workspace layout remains in `presentation.json`. That file
 is an internal recovery snapshot, not a supported settings interface.
