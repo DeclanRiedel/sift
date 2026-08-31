@@ -1465,7 +1465,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Find Database Object…",
         "",
         "<leader> f s",
-        true,
+        false,
         AvailabilityRule::ConnectedDatabase,
     ),
     command(
@@ -1481,7 +1481,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Find Saved Query…",
         "",
         "<leader> f q",
-        true,
+        false,
         AvailabilityRule::Always,
     ),
     command(

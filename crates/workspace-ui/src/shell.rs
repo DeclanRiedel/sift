@@ -546,7 +546,6 @@ enum SavedQueryPanelEdit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SavedQueryMetadataOrigin {
-    SwitcherTags,
     PanelRename,
     PanelTags,
 }
@@ -1333,11 +1332,9 @@ actions!(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     CommandPalette,
-    SavedQuerySwitcher,
     // Kept only for compatibility with the shared modal renderer's exhaustive
     // shape; no command or interaction path opens history as a modal anymore.
     QueryHistorySwitcher,
-    SchemaSearch,
     DataSearch,
     DataResults(u64),
     QueryParameters,
@@ -7104,7 +7101,6 @@ pub struct WorkspaceShell {
     /// Legacy modal slot retained while result-edit review shares the modal
     /// renderer. JSON edits now live in the database item's JSON view.
     result_json_edit_editor: Option<Entity<QueryEditor>>,
-    schema_search_input: Entity<TextInput>,
     data_search_input: Entity<TextInput>,
     server_name_input: Entity<TextInput>,
     server_url_input: Entity<TextInput>,
@@ -7133,18 +7129,12 @@ pub struct WorkspaceShell {
     palette_recents: Vec<String>,
     command_projection_revision: u64,
     command_projection_cache: RefCell<Option<(CommandProjectionKey, Arc<Vec<CommandSpec>>)>>,
-    saved_query_switcher_input: Entity<TextInput>,
-    saved_query_tags_input: Entity<TextInput>,
-    saved_query_switcher_selected: usize,
-    saved_query_switcher_scroll_handle: UniformListScrollHandle,
     query_history_focus_handle: FocusHandle,
     query_history_input: Entity<TextInput>,
     query_history_filter_open: bool,
     query_history_status_filter: QueryHistoryStatusFilter,
     query_history_selected: usize,
     query_history_scroll_handle: UniformListScrollHandle,
-    schema_search_selected: usize,
-    schema_search_scroll_handle: UniformListScrollHandle,
     dark_theme: bool,
     show_frame_metrics: bool,
     settings: UserSettings,
@@ -7284,7 +7274,6 @@ pub struct WorkspaceShell {
     saved_query_panel_edit: Option<SavedQueryPanelEdit>,
     saved_query_panel_tags_input: Entity<TextInput>,
     pending_saved_query_renames: HashMap<u64, String>,
-    saved_query_tag_editing: Option<sift_api_types::SavedQueryId>,
     pending_saved_query_metadata_update: Option<PendingSavedQueryMetadataUpdate>,
     saved_query_delete_confirmation: Option<sift_api_types::SavedQueryId>,
     pending_saved_query_deletion: Option<(String, sift_api_types::SavedQueryId)>,
@@ -7548,10 +7537,6 @@ impl WorkspaceShell {
             })
             .collect();
         let query_input = cx.new(|cx| TextInput::new("", "Run a command or use / @ # ?", cx));
-        let saved_query_switcher_input =
-            cx.new(|cx| TextInput::new("", "Open saved query…", cx).aria_label("Open saved query"));
-        let saved_query_tags_input = cx
-            .new(|cx| TextInput::new("", "finance, reporting", cx).aria_label("Saved query tags"));
         let query_history_input = cx.new(|cx| {
             TextInput::new("", "Search query history…", cx).aria_label("Search query history")
         });
@@ -7607,9 +7592,6 @@ impl WorkspaceShell {
         });
         let query_outline_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter statements…", cx).aria_label("Filter query outline")
-        });
-        let schema_search_input = cx.new(|cx| {
-            TextInput::new("", "Search schema…", cx).aria_label("Search database schema")
         });
         let data_search_input = cx
             .new(|cx| TextInput::new("", "Search table rows…", cx).aria_label("Search table data"));
@@ -7747,36 +7729,6 @@ impl WorkspaceShell {
             cx.notify();
         })
         .detach();
-        cx.observe(&saved_query_switcher_input, |shell, _, cx| {
-            shell.saved_query_delete_confirmation = None;
-            shell.saved_query_tag_editing = None;
-            shell.saved_query_switcher_selected = 0;
-            shell
-                .saved_query_switcher_scroll_handle
-                .scroll_to_item(0, ScrollStrategy::Top);
-            cx.notify();
-        })
-        .detach();
-        cx.subscribe_in(
-            &saved_query_switcher_input,
-            window,
-            |shell, _, event: &TextInputEvent, window, cx| {
-                if *event == TextInputEvent::Submitted {
-                    shell.open_selected_saved_query(window, cx);
-                }
-            },
-        )
-        .detach();
-        cx.subscribe_in(
-            &saved_query_tags_input,
-            window,
-            |shell, _, event: &TextInputEvent, window, cx| {
-                if *event == TextInputEvent::Submitted {
-                    shell.confirm_saved_query_tag_edit(window, cx);
-                }
-            },
-        )
-        .detach();
         cx.observe(&connections_find_input, |shell, input, cx| {
             shell.connections_find_query = input.read(cx).text().trim().to_lowercase();
             shell.connection_nav_selected = 0;
@@ -7853,14 +7805,6 @@ impl WorkspaceShell {
                 }
             },
         )
-        .detach();
-        cx.observe(&schema_search_input, |shell, _, cx| {
-            shell.schema_search_selected = 0;
-            shell
-                .schema_search_scroll_handle
-                .scroll_to_item(0, ScrollStrategy::Top);
-            shell.request_schema_search(cx);
-        })
         .detach();
         cx.observe(&data_search_input, |shell, _, cx| {
             shell.request_data_search(cx);
@@ -7999,7 +7943,6 @@ impl WorkspaceShell {
             recent_repository_commit: None,
             repository_recovery_notice: None,
             result_json_edit_editor: None,
-            schema_search_input,
             data_search_input,
             server_name_input,
             server_url_input,
@@ -8028,18 +7971,12 @@ impl WorkspaceShell {
             palette_recents,
             command_projection_revision: 0,
             command_projection_cache: RefCell::new(None),
-            saved_query_switcher_input,
-            saved_query_tags_input,
-            saved_query_switcher_selected: 0,
-            saved_query_switcher_scroll_handle: UniformListScrollHandle::new(),
             query_history_focus_handle: cx.focus_handle(),
             query_history_input,
             query_history_filter_open: false,
             query_history_status_filter: QueryHistoryStatusFilter::All,
             query_history_selected: 0,
             query_history_scroll_handle: UniformListScrollHandle::new(),
-            schema_search_selected: 0,
-            schema_search_scroll_handle: UniformListScrollHandle::new(),
             dark_theme: theme.appearance == ThemeAppearance::Dark,
             show_frame_metrics: false,
             next_toast_id: 1,
@@ -8170,7 +8107,6 @@ impl WorkspaceShell {
             saved_query_panel_edit: None,
             saved_query_panel_tags_input,
             pending_saved_query_renames: HashMap::new(),
-            saved_query_tag_editing: None,
             pending_saved_query_metadata_update: None,
             saved_query_delete_confirmation: None,
             pending_saved_query_deletion: None,
@@ -9626,8 +9562,10 @@ impl WorkspaceShell {
                     snapshot,
                 };
                 self.invalidate_connection_projection();
-                if !self.schema_search_input.read(cx).text().trim().is_empty() {
-                    self.request_schema_search(cx);
+                let palette_input = self.query_input.read(cx).text();
+                let (mode, query) = CommandPaletteMode::parse(palette_input);
+                if mode == CommandPaletteMode::Schema && !query.trim().is_empty() {
+                    self.request_schema_search_for(query.trim().to_owned(), cx);
                 }
                 cx.notify();
             }
@@ -11073,9 +11011,6 @@ impl WorkspaceShell {
                         self.saved_queries_error = None;
                         if let Some(pending) = metadata_update {
                             match pending.origin {
-                                SavedQueryMetadataOrigin::SwitcherTags => {
-                                    self.saved_query_tag_editing = None;
-                                }
                                 SavedQueryMetadataOrigin::PanelRename
                                 | SavedQueryMetadataOrigin::PanelTags => {
                                     self.saved_query_panel_edit = None;
@@ -11087,8 +11022,7 @@ impl WorkspaceShell {
                             self.show_toast(
                                 match pending.origin {
                                     SavedQueryMetadataOrigin::PanelRename => "Renamed query",
-                                    SavedQueryMetadataOrigin::SwitcherTags
-                                    | SavedQueryMetadataOrigin::PanelTags => "Updated query tags",
+                                    SavedQueryMetadataOrigin::PanelTags => "Updated query tags",
                                 }
                                 .into(),
                                 cx,
@@ -11105,8 +11039,7 @@ impl WorkspaceShell {
                         if let Some(pending) = metadata_update {
                             let operation = match pending.origin {
                                 SavedQueryMetadataOrigin::PanelRename => "Rename query",
-                                SavedQueryMetadataOrigin::SwitcherTags
-                                | SavedQueryMetadataOrigin::PanelTags => "Update query tags",
+                                SavedQueryMetadataOrigin::PanelTags => "Update query tags",
                             };
                             self.record_runtime_error(item_id, operation, message, cx);
                         } else if let Some(item_id) = item_id {
@@ -12250,11 +12183,6 @@ impl WorkspaceShell {
         }
     }
 
-    fn request_schema_search(&mut self, cx: &mut Context<Self>) {
-        let query = self.schema_search_input.read(cx).text().trim().to_owned();
-        self.request_schema_search_for(query, cx);
-    }
-
     fn request_schema_search_for(&mut self, query: String, cx: &mut Context<Self>) {
         self.schema_search_generation = self.schema_search_generation.wrapping_add(1);
         let generation = self.schema_search_generation;
@@ -12290,21 +12218,6 @@ impl WorkspaceShell {
             SchemaSearchState::Failed("Database executor is unavailable".into())
         };
         cx.notify();
-    }
-
-    fn toggle_schema_search_filter(&mut self, group: ObjectGroupKind, cx: &mut Context<Self>) {
-        if self.schema_search_filters.contains(&group) {
-            if self.schema_search_filters.len() == 1 {
-                return;
-            }
-            self.schema_search_filters.remove(&group);
-        } else {
-            self.schema_search_filters.insert(group);
-        }
-        self.schema_search_selected = 0;
-        self.schema_search_scroll_handle
-            .scroll_to_item(0, ScrollStrategy::Top);
-        self.request_schema_search(cx);
     }
 
     fn searchable_tables(&self) -> Vec<sift_protocol::ObjectPath> {
@@ -18394,115 +18307,6 @@ impl WorkspaceShell {
         sent
     }
 
-    fn begin_selected_saved_query_delete(&mut self, cx: &mut Context<Self>) {
-        if self.saved_queries_loading || self.pending_saved_query_deletion.is_some() {
-            return;
-        }
-        let selected = self
-            .filtered_saved_queries(cx)
-            .get(self.saved_query_switcher_selected)
-            .map(|query| query.id);
-        if let Some(id) = selected {
-            self.saved_query_delete_confirmation = Some(id);
-            self.saved_queries_error = None;
-            cx.notify();
-        }
-    }
-
-    fn begin_selected_saved_query_tag_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saved_queries_loading || self.pending_saved_query_metadata_update.is_some() {
-            return;
-        }
-        let selected = self
-            .filtered_saved_queries(cx)
-            .get(self.saved_query_switcher_selected)
-            .cloned();
-        let Some(query) = selected else {
-            return;
-        };
-        self.saved_query_delete_confirmation = None;
-        self.saved_query_tag_editing = Some(query.id);
-        self.saved_queries_error = None;
-        self.saved_query_tags_input
-            .update(cx, |input, cx| input.set_text(query.tags.join(", "), cx));
-        self.saved_query_tags_input
-            .focus_handle(cx)
-            .focus(window, cx);
-        cx.notify();
-    }
-
-    fn cancel_saved_query_tag_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.saved_query_tag_editing = None;
-        self.saved_queries_error = None;
-        self.saved_query_switcher_input
-            .focus_handle(cx)
-            .focus(window, cx);
-        cx.notify();
-    }
-
-    fn confirm_saved_query_tag_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_saved_query_metadata_update.is_some() {
-            return;
-        }
-        let Some(id) = self.saved_query_tag_editing else {
-            return;
-        };
-        let Some(query) = self.saved_queries.iter().find(|query| query.id == id) else {
-            self.saved_query_tag_editing = None;
-            return;
-        };
-        let revision = query.revision;
-        let tags = normalize_saved_query_tags(self.saved_query_tags_input.read(cx).text());
-        if tags == query.tags {
-            self.cancel_saved_query_tag_edit(window, cx);
-            return;
-        }
-        let item_id = self.saved_query_item_id(id, cx);
-        let Some(sender) = &self.executor_sender else {
-            let message = "Saved-query executor is unavailable".to_owned();
-            self.saved_queries_error = Some(message.clone());
-            self.record_runtime_error(item_id, "Update query tags", message, cx);
-            return;
-        };
-        let sent = sender
-            .send(ExecutorCommand::UpdateSavedQuery {
-                item_id,
-                id,
-                request: sift_api_types::UpdateSavedQueryRequest {
-                    expected_revision: revision,
-                    tags: Some(tags),
-                    ..Default::default()
-                },
-            })
-            .is_ok();
-        if sent {
-            self.pending_saved_query_metadata_update = Some(PendingSavedQueryMetadataUpdate {
-                instance_id: self
-                    .selected_instance_id
-                    .clone()
-                    .unwrap_or_else(|| "local".into()),
-                id,
-                item_id,
-                origin: SavedQueryMetadataOrigin::SwitcherTags,
-            });
-            self.saved_queries_loading = true;
-            self.saved_queries_error = None;
-        } else {
-            let message = "Saved-query executor stopped".to_owned();
-            self.saved_queries_error = Some(message.clone());
-            self.record_runtime_error(item_id, "Update query tags", message, cx);
-        }
-        cx.notify();
-    }
-
-    fn cancel_saved_query_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.saved_query_delete_confirmation = None;
-        self.saved_query_switcher_input
-            .focus_handle(cx)
-            .focus(window, cx);
-        cx.notify();
-    }
-
     fn confirm_saved_query_delete(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.saved_query_delete_confirmation else {
             return;
@@ -21399,24 +21203,12 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn open_saved_query_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_saved_query_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_tenant_id().is_none() {
             self.show_toast("No tenant is available".into(), cx);
             return;
         }
-        self.modal = Some(Modal::SavedQuerySwitcher);
-        self.saved_query_delete_confirmation = None;
-        self.saved_query_tag_editing = None;
-        self.saved_query_switcher_selected = 0;
-        self.saved_query_switcher_scroll_handle
-            .scroll_to_item(0, ScrollStrategy::Top);
-        self.saved_query_switcher_input
-            .update(cx, |input, cx| input.set_text("", cx));
-        self.request_saved_queries(cx);
-        self.saved_query_switcher_input
-            .focus_handle(cx)
-            .focus(window, cx);
-        cx.notify();
+        self.open_command_palette_with_query("?", window, cx);
     }
 
     fn open_schema_search_action(
@@ -21425,7 +21217,6 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ide_input = None;
         self.open_schema_search(window, cx);
     }
 
@@ -21436,34 +21227,6 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.unparse();
-        if self.modal == Some(Modal::SavedQuerySwitcher) {
-            if self.saved_query_tag_editing.is_some() {
-                if key == "escape" {
-                    self.cancel_saved_query_tag_edit(window, cx);
-                    cx.stop_propagation();
-                }
-                return;
-            }
-            if self.saved_query_delete_confirmation.is_some() {
-                match key.as_str() {
-                    "y" => self.confirm_saved_query_delete(cx),
-                    "escape" | "n" => self.cancel_saved_query_delete(window, cx),
-                    _ => {}
-                }
-                cx.stop_propagation();
-                return;
-            }
-            if key == "ctrl-t" {
-                self.begin_selected_saved_query_tag_edit(window, cx);
-                cx.stop_propagation();
-                return;
-            }
-            if key == "ctrl-d" {
-                self.begin_selected_saved_query_delete(cx);
-                cx.stop_propagation();
-                return;
-            }
-        }
         if self.modal == Some(Modal::CommandPalette)
             && key == "enter"
             && !event.keystroke.modifiers.modified()
@@ -21973,14 +21736,7 @@ impl WorkspaceShell {
             );
             return;
         }
-        self.modal = Some(Modal::SchemaSearch);
-        self.schema_search_selected = 0;
-        self.schema_search_scroll_handle
-            .scroll_to_item(0, ScrollStrategy::Top);
-        self.schema_search_input
-            .update(cx, |input, cx| input.set_text("", cx));
-        self.schema_search_input.focus_handle(cx).focus(window, cx);
-        cx.notify();
+        self.open_command_palette_with_query("@", window, cx);
     }
 
     fn open_data_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -24018,27 +23774,6 @@ impl WorkspaceShell {
         }
     }
 
-    fn filtered_saved_queries(&self, cx: &App) -> Vec<sift_api_types::SavedQuery> {
-        let query = self
-            .saved_query_switcher_input
-            .read(cx)
-            .text()
-            .trim()
-            .to_lowercase();
-        self.saved_queries
-            .iter()
-            .filter(|saved| {
-                query.is_empty()
-                    || saved.name.to_lowercase().contains(&query)
-                    || saved
-                        .tags
-                        .iter()
-                        .any(|tag| tag.to_lowercase().contains(&query))
-            })
-            .cloned()
-            .collect()
-    }
-
     const fn query_outline_kind_label(kind: sift_protocol::StatementKind) -> &'static str {
         match kind {
             sift_protocol::StatementKind::Query => "QUERY",
@@ -24770,20 +24505,6 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn open_selected_saved_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.modal != Some(Modal::SavedQuerySwitcher) {
-            return;
-        }
-        let query = self
-            .filtered_saved_queries(cx)
-            .get(self.saved_query_switcher_selected)
-            .cloned();
-        if let Some(query) = query {
-            self.dismiss_modal(&DismissModal, window, cx);
-            self.open_saved_query(query, window, cx);
-        }
-    }
-
     fn schema_palette_hits(&self) -> Vec<sift_protocol::SearchHit> {
         match &self.schema_search_state {
             SchemaSearchState::Ready {
@@ -24854,17 +24575,6 @@ impl WorkspaceShell {
                 self.palette_scroll_handle
                     .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
             }
-            Some(Modal::SavedQuerySwitcher) => {
-                self.saved_query_switcher_selected =
-                    self.saved_query_switcher_selected.saturating_sub(1);
-                self.saved_query_switcher_scroll_handle
-                    .scroll_to_item(self.saved_query_switcher_selected, ScrollStrategy::Nearest);
-            }
-            Some(Modal::SchemaSearch) => {
-                self.schema_search_selected = self.schema_search_selected.saturating_sub(1);
-                self.schema_search_scroll_handle
-                    .scroll_to_item(self.schema_search_selected, ScrollStrategy::Nearest);
-            }
             _ => return,
         }
         cx.notify();
@@ -24878,19 +24588,6 @@ impl WorkspaceShell {
                 self.palette_scroll_handle
                     .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
             }
-            Some(Modal::SavedQuerySwitcher) => {
-                let last = self.filtered_saved_queries(cx).len().saturating_sub(1);
-                self.saved_query_switcher_selected =
-                    (self.saved_query_switcher_selected + 1).min(last);
-                self.saved_query_switcher_scroll_handle
-                    .scroll_to_item(self.saved_query_switcher_selected, ScrollStrategy::Nearest);
-            }
-            Some(Modal::SchemaSearch) => {
-                let last = self.schema_palette_hits().len().saturating_sub(1);
-                self.schema_search_selected = (self.schema_search_selected + 1).min(last);
-                self.schema_search_scroll_handle
-                    .scroll_to_item(self.schema_search_selected, ScrollStrategy::Nearest);
-            }
             _ => return,
         }
         cx.notify();
@@ -24900,17 +24597,6 @@ impl WorkspaceShell {
         match self.modal {
             Some(Modal::CommandPalette) => {
                 self.activate_command_palette_item(self.palette_selected, window, cx);
-            }
-            Some(Modal::SavedQuerySwitcher) => self.open_selected_saved_query(window, cx),
-            Some(Modal::SchemaSearch) => {
-                let hit = self
-                    .schema_palette_hits()
-                    .get(self.schema_search_selected)
-                    .cloned();
-                if let Some(target) = hit.as_ref().and_then(|hit| self.schema_search_target(hit)) {
-                    self.dismiss_modal(&DismissModal, window, cx);
-                    self.open_schema_search_target(target, window, cx);
-                }
             }
             Some(Modal::EditResultCell) => {
                 if self.result_edit_pending || self.result_edit_plan.is_none() {
@@ -24964,16 +24650,6 @@ impl WorkspaceShell {
                 });
             }
         }
-        if self.modal == Some(Modal::SchemaSearch) {
-            self.schema_search_input
-                .update(cx, |input, cx| input.set_text("", cx));
-        }
-        if self.modal == Some(Modal::SavedQuerySwitcher) {
-            self.saved_query_delete_confirmation = None;
-            self.saved_query_tag_editing = None;
-            self.saved_query_switcher_input
-                .update(cx, |input, cx| input.set_text("", cx));
-        }
         if self.modal == Some(Modal::DataSearch) {
             self.data_search_input
                 .update(cx, |input, cx| input.set_text("", cx));
@@ -25025,7 +24701,7 @@ impl WorkspaceShell {
             }
             CommandId::AddConnectionByUrl => self.open_connection_url(window, cx),
             CommandId::NewQuery => self.new_query(window, cx),
-            CommandId::OpenSavedQuery => self.open_saved_query_switcher(window, cx),
+            CommandId::OpenSavedQuery => self.open_saved_query_search(window, cx),
             CommandId::OpenQueryHistory => self.open_query_history_panel(window, cx),
             CommandId::RenameQuery => self.begin_active_query_rename(window, cx),
             CommandId::ExecuteStatement => {
@@ -25276,11 +24952,9 @@ impl WorkspaceShell {
                 self.open_command_palette(&OpenCommandPalette, window, cx)
             }
             CommandId::OpenFileSwitcher => self.open_command_palette_with_query("/", window, cx),
-            CommandId::OpenSchemaSwitcher => self.open_command_palette_with_query("@", window, cx),
+            CommandId::OpenSchemaSwitcher => self.open_schema_search(window, cx),
             CommandId::OpenTabSwitcher => self.open_command_palette_with_query("#", window, cx),
-            CommandId::OpenSavedQuerySwitcher => {
-                self.open_command_palette_with_query("?", window, cx)
-            }
+            CommandId::OpenSavedQuerySwitcher => self.open_saved_query_search(window, cx),
             CommandId::Quit => {
                 if self.transaction_state.transaction().is_some() {
                     self.pending_connection_change = Some(PendingConnectionChange::Quit);
@@ -30802,8 +30476,6 @@ impl WorkspaceShell {
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
-            let saved_query_switcher = matches!(modal, Modal::SavedQuerySwitcher);
-            let schema_search = matches!(modal, Modal::SchemaSearch);
             let data_search = matches!(modal, Modal::DataSearch);
             let data_results = matches!(modal, Modal::DataResults(_));
             let query_parameters = matches!(modal, Modal::QueryParameters);
@@ -30822,8 +30494,6 @@ impl WorkspaceShell {
                 || themes
                 || keymaps
                 || command_palette
-                || saved_query_switcher
-                || schema_search
                 || query_parameters
                 || result_cell_edit
                 || plan_captures
@@ -30857,17 +30527,24 @@ impl WorkspaceShell {
                     let item_count = items.len();
                     let palette_height =
                         item_count.min(PALETTE_VISIBLE_ROWS) as f32 * PALETTE_ROW_HEIGHT;
-                    let empty_message = match mode {
-                        CommandPaletteMode::Commands => "No matching commands",
+                    let empty_message: SharedString = match mode {
+                        CommandPaletteMode::Commands => "No matching commands".into(),
                         CommandPaletteMode::WorkspaceFiles if self.workspace_files.loading() => {
-                            "Loading workspace files…"
+                            "Loading workspace files…".into()
                         }
-                        CommandPaletteMode::WorkspaceFiles => "No matching workspace files",
-                        CommandPaletteMode::Schema if matches!(self.schema_search_state, SchemaSearchState::Loading) => "Searching schema…",
-                        CommandPaletteMode::Schema => "No matching database objects",
-                        CommandPaletteMode::OpenTabs => "No matching open tabs",
-                        CommandPaletteMode::SavedQueries if self.saved_queries_loading => "Loading saved queries…",
-                        CommandPaletteMode::SavedQueries => "No matching saved queries",
+                        CommandPaletteMode::WorkspaceFiles => {
+                            "No matching workspace files".into()
+                        }
+                        CommandPaletteMode::Schema => match &self.schema_search_state {
+                            SchemaSearchState::Loading => "Searching schema…".into(),
+                            SchemaSearchState::Failed(message) => message.clone().into(),
+                            _ => "No matching database objects".into(),
+                        },
+                        CommandPaletteMode::OpenTabs => "No matching open tabs".into(),
+                        CommandPaletteMode::SavedQueries if self.saved_queries_loading => {
+                            "Loading saved queries…".into()
+                        }
+                        CommandPaletteMode::SavedQueries => "No matching saved queries".into(),
                     };
                     div()
                         .flex()
@@ -31011,359 +30688,6 @@ impl WorkspaceShell {
                                 .track_scroll(&self.palette_scroll_handle),
                             )
                         })
-                        .into_any_element()
-                }
-                Modal::SavedQuerySwitcher => {
-                    let queries = self.filtered_saved_queries(cx);
-                    let query_count = queries.len();
-                    let list_height =
-                        query_count.min(PALETTE_VISIBLE_ROWS) as f32 * PALETTE_ROW_HEIGHT;
-                    let loading = self.saved_queries_loading;
-                    let error = self.saved_queries_error.clone();
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .h(px(42.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .border_b_1()
-                                .border_color(colors.subtle_border)
-                                .bg(colors.toolbar)
-                                .child(icon(IconName::Search, colors.muted_text, 15.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .child(self.saved_query_switcher_input.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .debug_selector(|| "close-saved-query-switcher".into())
-                                        .child(
-                                            IconButton::new(
-                                                "close-saved-query-switcher",
-                                                IconName::Close,
-                                                "Close saved query switcher",
-                                            )
-                                            .square(px(26.))
-                                            .icon_size(13.)
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.dismiss_modal(&DismissModal, window, cx)
-                                            })),
-                                        ),
-                                ),
-                        )
-                        .when(query_count > 0, |palette| {
-                            palette.child(
-                                uniform_list(
-                                    "saved-query-switcher-list",
-                                    query_count,
-                                    cx.processor(move |shell, range: Range<usize>, _, cx| {
-                                        let queries = shell.filtered_saved_queries(cx);
-                                        let selected = shell
-                                            .saved_query_switcher_selected
-                                            .min(queries.len().saturating_sub(1));
-                                        range
-                                            .filter_map(|index| {
-                                                queries
-                                                    .get(index)
-                                                    .cloned()
-                                                    .map(|query| (index, query))
-                                            })
-                                            .map(|(index, query)| {
-                                                if shell.saved_query_tag_editing == Some(query.id) {
-                                                    let saving = shell
-                                                        .pending_saved_query_metadata_update
-                                                        .as_ref()
-                                                        .is_some_and(|pending| {
-                                                            pending.id == query.id
-                                                        });
-                                                    return div()
-                                                        .id(("saved-query-tags-editor", index))
-                                                        .debug_selector(move || {
-                                                            format!(
-                                                                "saved-query-tags-editor-{index}"
-                                                            )
-                                                        })
-                                                        .w_full()
-                                                        .h(px(PALETTE_ROW_HEIGHT))
-                                                        .px_2()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_2()
-                                                        .bg(colors.active_surface)
-                                                        .child(
-                                                            div()
-                                                                .flex_none()
-                                                                .text_xs()
-                                                                .text_color(colors.muted_text)
-                                                                .child("Tags"),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .flex_1()
-                                                                .min_w_0()
-                                                                .overflow_hidden()
-                                                                .child(
-                                                                    shell
-                                                                        .saved_query_tags_input
-                                                                        .clone(),
-                                                                ),
-                                                        )
-                                                        .child(KeyBinding::new("Esc"))
-                                                        .child(
-                                                            Button::new(
-                                                                (
-                                                                    "cancel-switcher-tags",
-                                                                    query.id.0 as usize,
-                                                                ),
-                                                                "Cancel",
-                                                            )
-                                                            .tone(ButtonTone::Ghost)
-                                                            .disabled(saving)
-                                                            .on_click(cx.listener(
-                                                                |shell, _, window, cx| {
-                                                                    shell
-                                                                        .cancel_saved_query_tag_edit(
-                                                                            window, cx,
-                                                                        )
-                                                                },
-                                                            )),
-                                                        )
-                                                        .child(KeyBinding::new("Enter"))
-                                                        .child(
-                                                            Button::new(
-                                                                (
-                                                                    "save-switcher-tags",
-                                                                    query.id.0 as usize,
-                                                                ),
-                                                                if saving { "Saving…" } else { "Save" },
-                                                            )
-                                                            .tone(ButtonTone::Accent)
-                                                            .disabled(saving)
-                                                            .on_click(cx.listener(
-                                                                |shell, _, window, cx| {
-                                                                    shell
-                                                                        .confirm_saved_query_tag_edit(
-                                                                            window, cx,
-                                                                        )
-                                                                },
-                                                            )),
-                                                        )
-                                                        .into_any_element();
-                                                }
-                                                if shell.saved_query_delete_confirmation
-                                                    == Some(query.id)
-                                                {
-                                                    let cancel_id = query.id;
-                                                    return div()
-                                                        .id((
-                                                            "saved-query-delete-confirmation",
-                                                            index,
-                                                        ))
-                                                        .debug_selector(move || {
-                                                            format!(
-                                                                "saved-query-delete-confirmation-{index}"
-                                                            )
-                                                        })
-                                                        .w_full()
-                                                        .h(px(PALETTE_ROW_HEIGHT))
-                                                        .px_2()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_2()
-                                                        .bg(colors.warning_muted)
-                                                        .text_color(colors.warning)
-                                                        .child(icon(
-                                                            IconName::Warning,
-                                                            colors.warning,
-                                                            13.,
-                                                        ))
-                                                        .child(
-                                                            div()
-                                                                .flex_1()
-                                                                .min_w_0()
-                                                                .truncate()
-                                                                .child(format!(
-                                                                    "Delete {}?",
-                                                                    query.name
-                                                                )),
-                                                        )
-                                                        .child(KeyBinding::new("Esc"))
-                                                        .child(
-                                                            Button::new(
-                                                                (
-                                                                    "cancel-switcher-delete",
-                                                                    cancel_id.0 as usize,
-                                                                ),
-                                                                "Cancel",
-                                                            )
-                                                            .tone(ButtonTone::Ghost)
-                                                            .on_click(cx.listener(
-                                                                |shell, _, window, cx| {
-                                                                    shell.cancel_saved_query_delete(
-                                                                        window, cx,
-                                                                    )
-                                                                },
-                                                            )),
-                                                        )
-                                                        .child(KeyBinding::new("y"))
-                                                        .child(
-                                                            Button::new(
-                                                                (
-                                                                    "confirm-switcher-delete",
-                                                                    query.id.0 as usize,
-                                                                ),
-                                                                "Delete",
-                                                            )
-                                                            .tone(ButtonTone::DangerGhost)
-                                                            .on_click(cx.listener(
-                                                                |shell, _, _, cx| {
-                                                                    shell
-                                                                        .confirm_saved_query_delete(
-                                                                            cx,
-                                                                        )
-                                                                },
-                                                            )),
-                                                        )
-                                                        .into_any_element();
-                                                }
-                                                let open_query = query.clone();
-                                                let scope = if query.owner_principal_id.is_some() {
-                                                    "Personal"
-                                                } else {
-                                                    "Shared"
-                                                };
-                                                let detail = if query.tags.is_empty() {
-                                                    scope.to_owned()
-                                                } else {
-                                                    format!("{scope} · {}", query.tags.join(" · "))
-                                                };
-                                                div()
-                                                    .id(("saved-query-switcher-row", index))
-                                                    .debug_selector(move || {
-                                                        format!("saved-query-switcher-row-{index}")
-                                                    })
-                                                    .w_full()
-                                                    .h(px(PALETTE_ROW_HEIGHT))
-                                                    .px_2()
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .gap_3()
-                                                    .rounded_sm()
-                                                    .when(index == selected, |row| {
-                                                        row.bg(colors.active_surface)
-                                                    })
-                                                    .hover(|row| row.bg(colors.hovered_surface))
-                                                    .on_click(cx.listener(
-                                                        move |shell, _, window, cx| {
-                                                            shell.dismiss_modal(
-                                                                &DismissModal,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                            shell.open_saved_query(
-                                                                open_query.clone(),
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .truncate()
-                                                            .child(query.name),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex_none()
-                                                            .max_w(px(280.))
-                                                            .truncate()
-                                                            .text_xs()
-                                                            .text_color(colors.muted_text)
-                                                            .child(detail),
-                                                    )
-                                                    .into_any_element()
-                                            })
-                                            .collect()
-                                    }),
-                                )
-                                .h(px(list_height))
-                                .w_full()
-                                .track_scroll(&self.saved_query_switcher_scroll_handle),
-                            )
-                        })
-                        .when(query_count == 0, |palette| {
-                            let (message, color) = if loading {
-                                ("Loading saved queries…".to_owned(), colors.muted_text)
-                            } else if let Some(error) = error.clone() {
-                                (error, colors.danger)
-                            } else if self.saved_queries.is_empty() {
-                                ("No saved queries yet".to_owned(), colors.muted_text)
-                            } else {
-                                ("No matching saved queries".to_owned(), colors.muted_text)
-                            };
-                            palette.child(
-                                div()
-                                    .h(px(PALETTE_ROW_HEIGHT * 2.0))
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(color)
-                                .child(message),
-                            )
-                        })
-                        .when_some(
-                            error.filter(|_| query_count > 0),
-                            |palette, message| {
-                                palette.child(
-                                    div()
-                                        .debug_selector(|| "saved-query-switcher-error".into())
-                                        .px_3()
-                                        .py_2()
-                                        .border_t_1()
-                                        .border_color(colors.subtle_border)
-                                        .text_xs()
-                                        .text_color(colors.danger)
-                                        .child(message),
-                                )
-                            },
-                        )
-                        .child(
-                            div()
-                                .h(px(28.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .border_t_1()
-                                .border_color(colors.subtle_border)
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child(if self.saved_query_tag_editing.is_some() {
-                                    "Comma-separated tags"
-                                } else if self.saved_query_delete_confirmation.is_some() {
-                                    "y delete  ·  Esc cancel"
-                                } else {
-                                    "↑/↓ or Ctrl-J/K navigate  ·  Enter open"
-                                })
-                                .child(if self.saved_query_tag_editing.is_some() {
-                                    "Enter save  ·  Esc cancel"
-                                } else if self.saved_query_delete_confirmation.is_some() {
-                                    ""
-                                } else {
-                                    "Ctrl-T tags  ·  Ctrl-D delete  ·  Esc close"
-                                }),
-                        )
                         .into_any_element()
                 }
                 Modal::QueryHistorySwitcher => {
@@ -31574,230 +30898,6 @@ impl WorkspaceShell {
                                     "↑/↓ or Ctrl-J/K navigate"
                                 })
                                 .child("Enter open · Ctrl-R run · Ctrl-S save · Esc close"),
-                        )
-                        .into_any_element()
-                }
-                Modal::SchemaSearch => {
-                    let hits = self.schema_palette_hits();
-                    let hit_count = hits.len();
-                    let list_height = hit_count.min(12) as f32 * PALETTE_ROW_HEIGHT;
-                    let search_state = self.schema_search_state.clone();
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .h(px(42.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .border_b_1()
-                                .border_color(colors.subtle_border)
-                                .bg(colors.toolbar)
-                                .child(icon(IconName::Search, colors.muted_text, 15.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .child(self.schema_search_input.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .debug_selector(|| "close-schema-search".into())
-                                        .child(
-                                            IconButton::new(
-                                                "close-schema-search",
-                                                IconName::Close,
-                                                "Close schema search",
-                                            )
-                                            .square(px(26.))
-                                            .icon_size(13.)
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.dismiss_modal(&DismissModal, window, cx)
-                                            })),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .debug_selector(|| "schema-search-filters".into())
-                                .h(px(36.))
-                                .px_2()
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .border_b_1()
-                                .border_color(colors.subtle_border)
-                                .bg(colors.panel)
-                                .children(ObjectGroupKind::CANONICAL.into_iter().map(|group| {
-                                    let selected = self.schema_search_filters.contains(&group);
-                                    Button::new(
-                                        format!("schema-search-filter-{}", group.label().to_lowercase()),
-                                        group.label(),
-                                    )
-                                    .debug_selector(format!(
-                                        "schema-search-filter-{}",
-                                        group.label().to_lowercase()
-                                    ))
-                                    .tone(if selected {
-                                        ButtonTone::Neutral
-                                    } else {
-                                        ButtonTone::Ghost
-                                    })
-                                    .on_click(cx.listener(move |shell, _, _, cx| {
-                                        shell.toggle_schema_search_filter(group, cx)
-                                    }))
-                                })),
-                        )
-                        .when(hit_count > 0, |palette| {
-                            palette.child(
-                                uniform_list(
-                                    "schema-search-list",
-                                    hit_count,
-                                    cx.processor(move |shell, range: Range<usize>, _, cx| {
-                                        let hits = shell.schema_palette_hits();
-                                        let selected = shell
-                                            .schema_search_selected
-                                            .min(hits.len().saturating_sub(1));
-                                        range
-                                            .filter_map(|index| {
-                                                hits.get(index).cloned().map(|hit| (index, hit))
-                                            })
-                                            .map(|(index, hit)| {
-                                                let row_hit = hit.clone();
-                                                let object_kind = match hit.target {
-                                                    sift_protocol::SearchTarget::Object {
-                                                        object_kind,
-                                                    } => object_kind,
-                                                    sift_protocol::SearchTarget::Column => hit
-                                                        .path
-                                                        .kind
-                                                        .unwrap_or(
-                                                            sift_protocol::ObjectKind::Table,
-                                                        ),
-                                                };
-                                                let detail = hit
-                                                    .type_display
-                                                    .clone()
-                                                    .unwrap_or_else(|| {
-                                                        format!("{object_kind:?}")
-                                                            .replace('_', " ")
-                                                            .to_lowercase()
-                                                    });
-                                                div()
-                                                    .id(("schema-palette-hit", index))
-                                                    .debug_selector(move || {
-                                                        format!("schema-palette-hit-{index}")
-                                                    })
-                                                    .w_full()
-                                                    .h(px(PALETTE_ROW_HEIGHT))
-                                                    .px_2()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_2()
-                                                    .rounded_sm()
-                                                    .when(index == selected, |row| {
-                                                        row.bg(colors.active_surface)
-                                                    })
-                                                    .hover(|row| {
-                                                        row.bg(colors.hovered_surface)
-                                                    })
-                                                    .on_click(cx.listener(
-                                                        move |shell, _, window, cx| {
-                                                            if let Some(target) = shell
-                                                                .schema_search_target(&row_hit)
-                                                            {
-                                                                shell.dismiss_modal(
-                                                                    &DismissModal,
-                                                                    window,
-                                                                    cx,
-                                                                );
-                                                                shell.open_schema_search_target(
-                                                                    target, window, cx,
-                                                                );
-                                                            }
-                                                        },
-                                                    ))
-                                                    .child(icon(
-                                                        schema_object_kind_icon(object_kind),
-                                                        colors.muted_text,
-                                                        13.,
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap_2()
-                                                            .child(
-                                                                div()
-                                                                    .flex_1()
-                                                                    .min_w_0()
-                                                                    .truncate()
-                                                                    .child(hit.display),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .flex_none()
-                                                                    .max_w(px(240.))
-                                                                    .truncate()
-                                                                    .text_xs()
-                                                                    .text_color(
-                                                                        colors.muted_text,
-                                                                    )
-                                                                    .child(detail),
-                                                            ),
-                                                    )
-                                            })
-                                            .collect()
-                                    }),
-                                )
-                                .w_full()
-                                .h(px(list_height.max(PALETTE_ROW_HEIGHT)))
-                                .track_scroll(&self.schema_search_scroll_handle),
-                            )
-                        })
-                        .when(hit_count == 0, |palette| {
-                            let (message, color) = match search_state {
-                                SchemaSearchState::Idle => {
-                                    ("Type to search objects and columns".to_owned(), colors.muted_text)
-                                }
-                                SchemaSearchState::Loading => {
-                                    ("Searching schema…".to_owned(), colors.muted_text)
-                                }
-                                SchemaSearchState::Failed(message) => (message, colors.danger),
-                                SchemaSearchState::Ready { .. } => {
-                                    ("No matching schema objects".to_owned(), colors.muted_text)
-                                }
-                            };
-                            palette.child(
-                                div()
-                                    .h(px(PALETTE_ROW_HEIGHT * 2.0))
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(color)
-                                    .child(message),
-                            )
-                        })
-                        .child(
-                            div()
-                                .h(px(28.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .border_t_1()
-                                .border_color(colors.subtle_border)
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child("↑/↓ navigate  ·  Enter open")
-                                .child("Esc close"),
                         )
                         .into_any_element()
                 }
@@ -37418,8 +36518,6 @@ impl WorkspaceShell {
                     | Modal::Keymaps
                     | Modal::Account
                     | Modal::CommandPalette
-                    | Modal::SavedQuerySwitcher
-                    | Modal::SchemaSearch
                     | Modal::DataSearch
                     | Modal::DataResults(_)
                     | Modal::QueryParameters
@@ -37516,8 +36614,6 @@ impl WorkspaceShell {
                         .when(
                             !database_connection
                                 && !command_palette
-                                && !saved_query_switcher
-                                && !schema_search
                                 && !data_results
                                 && !account
                                 && !server_picker,
@@ -39037,9 +38133,7 @@ mod tests {
 
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
-            shell
-                .schema_search_input
-                .update(cx, |input, cx| input.set_text("people", cx));
+            shell.request_schema_search_for("people".into(), cx);
         });
         let mut latest = None;
         while let Ok(command) = receiver.try_recv() {
@@ -39097,15 +38191,13 @@ mod tests {
 
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
-            shell
-                .schema_search_input
-                .update(cx, |input, cx| input.set_text("people", cx));
+            shell.request_schema_search_for("people".into(), cx);
         });
         while receiver.try_recv().is_ok() {}
 
         workspace.update(&mut cx, |shell, cx| {
             shell.schema_search_filters = HashSet::from([ObjectGroupKind::Tables]);
-            shell.request_schema_search(cx);
+            shell.request_schema_search_for("people".into(), cx);
         });
         let request = loop {
             let command = receiver.try_recv().expect("filtered schema search command");
@@ -40375,7 +39467,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn schema_search_is_a_palette_instead_of_inline_dock_chrome(cx: &mut TestAppContext) {
+    fn schema_search_launcher_opens_the_unified_palette(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -40393,22 +39485,13 @@ mod tests {
         cx.simulate_click(search.center(), Modifiers::default());
         cx.run_until_parked();
 
-        workspace.read_with(&cx, |shell, _| {
-            assert_eq!(shell.modal, Some(Modal::SchemaSearch));
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.modal, Some(Modal::CommandPalette));
+            assert_eq!(shell.query_input.read(cx).text(), "@");
         });
         assert!(cx.debug_bounds("schema-search-list").is_none());
-        assert!(cx.debug_bounds("close-schema-search").is_some());
         assert!(cx.debug_bounds("open-schema-search").is_some());
-        assert!(cx.debug_bounds("schema-search-filters").is_some());
-        for selector in [
-            "schema-search-filter-tables",
-            "schema-search-filter-views",
-            "schema-search-filter-functions",
-            "schema-search-filter-sequences",
-            "schema-search-filter-other",
-        ] {
-            assert!(cx.debug_bounds(selector).is_some());
-        }
+        assert!(cx.debug_bounds("app-bar-command-palette").is_some());
 
         workspace.update(&mut cx, |shell, cx| {
             let generation = shell.schema_search_generation;
@@ -40436,12 +39519,16 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        let row = cx
-            .debug_bounds("schema-palette-hit-0")
-            .expect("schema search result row");
-        let card = cx.debug_bounds("modal-card").expect("schema search card");
-        assert!((f32::from(row.size.width) - f32::from(card.size.width)).abs() <= 2.0);
-        assert_eq!(row.size.height, px(PALETTE_ROW_HEIGHT));
+        workspace.read_with(&cx, |shell, cx| {
+            assert!(matches!(
+                shell.command_palette_items(cx).as_slice(),
+                [CommandPaletteMatch {
+                    item: CommandPaletteItem::Schema(hit),
+                    ..
+                }] if hit.display == "sifttest.lab.people.display_name"
+            ));
+        });
+        assert!(cx.debug_bounds("modal-card").is_some());
     }
 
     #[gpui::test]
@@ -41339,6 +40426,18 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, _| {
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Demo".into(),
+            };
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "demo".into(),
+                rooms: Vec::new(),
+                connections: Vec::new(),
+            }];
+        });
         for (command, expected_mode, expected_query) in [
             (
                 CommandId::OpenFileSwitcher,
@@ -45309,44 +44408,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn saved_query_switcher_filters_metadata_and_opens_without_duplication(
-        cx: &mut TestAppContext,
-    ) {
+    fn saved_query_command_uses_unified_search_and_reuses_open_tab(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
-
-        workspace.update_in(&mut cx, |shell, window, cx| {
-            shell.executor_sender = Some(sender);
-            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
-                id: sift_api_types::TenantId(1),
-                name: "demo".into(),
-                rooms: Vec::new(),
-                connections: Vec::new(),
-            }];
-            shell.run_command(CommandId::OpenSavedQuery, window, cx);
-            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
-        });
-        assert!(matches!(
-            commands.try_recv(),
-            Ok(ExecutorCommand::LoadSavedQueries { tenant_id: 1 })
-        ));
-
         let timestamp = "2026-08-28T10:00:00Z".parse().unwrap();
-        let personal = sift_api_types::SavedQuery {
-            id: sift_api_types::SavedQueryId(9),
-            tenant_id: sift_api_types::TenantId(1),
-            owner_principal_id: Some(sift_api_types::PrincipalId(7)),
-            name: "Recent orders".into(),
-            sql_text: "select * from orders".into(),
-            connection_profile_id: None,
-            tags: vec!["finance".into()],
-            created_at: timestamp,
-            updated_at: timestamp,
-            revision: 3,
-        };
-        let shared = sift_api_types::SavedQuery {
+        let saved = sift_api_types::SavedQuery {
             id: sift_api_types::SavedQueryId(10),
             tenant_id: sift_api_types::TenantId(1),
             owner_principal_id: None,
@@ -45358,45 +44426,50 @@ mod tests {
             updated_at: timestamp,
             revision: 5,
         };
-        workspace.update(&mut cx, |shell, cx| {
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "demo".into(),
+                rooms: Vec::new(),
+                connections: Vec::new(),
+            }];
+            shell.run_command(CommandId::OpenSavedQuery, window, cx);
+            assert_eq!(shell.modal, Some(Modal::CommandPalette));
+            assert_eq!(shell.query_input.read(cx).text(), "?");
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadSavedQueries { tenant_id: 1 })
+        ));
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
             shell.on_executor_event(
                 ExecutorEvent::SavedQueriesLoaded {
                     tenant_id: 1,
-                    result: Ok(vec![personal, shared.clone()]),
+                    result: Ok(vec![saved.clone()]),
                 },
                 cx,
             );
             shell
-                .saved_query_switcher_input
-                .update(cx, |input, cx| input.set_text("operations", cx));
-            assert_eq!(
-                shell
-                    .filtered_saved_queries(cx)
-                    .iter()
-                    .map(|query| query.id)
-                    .collect::<Vec<_>>(),
-                vec![shared.id]
-            );
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("saved-query-switcher-row-0").is_some());
-        assert!(cx.debug_bounds("close-saved-query-switcher").is_some());
-
-        workspace.update_in(&mut cx, |shell, window, cx| {
-            shell.open_selected_saved_query(window, cx);
-            assert!(shell.modal.is_none());
-            let pane = shell.panes[shell.active_pane].read(cx);
+                .query_input
+                .update(cx, |input, cx| input.set_text("? operations", cx));
             assert!(matches!(
-                pane.active_item().and_then(|item| item.source.as_ref()),
-                Some(ItemSource::SavedQuery(source)) if source.saved_query_id == shared.id.0
+                shell.command_palette_items(cx).as_slice(),
+                [CommandPaletteMatch {
+                    item: CommandPaletteItem::SavedQuery(query),
+                    ..
+                }] if query.id == saved.id
             ));
-            assert_eq!(pane.items.len(), 2);
+            shell.activate_command_palette_item(0, window, cx);
+            assert_eq!(shell.panes[shell.active_pane].read(cx).items.len(), 2);
 
-            shell.open_saved_query_switcher(window, cx);
+            shell.run_command(CommandId::OpenSavedQuery, window, cx);
             shell
-                .saved_query_switcher_input
-                .update(cx, |input, cx| input.set_text("Failed jobs", cx));
-            shell.open_selected_saved_query(window, cx);
+                .query_input
+                .update(cx, |input, cx| input.set_text("? Failed jobs", cx));
+            shell.activate_command_palette_item(0, window, cx);
             assert_eq!(shell.panes[shell.active_pane].read(cx).items.len(), 2);
         });
         assert_eq!(
@@ -45672,274 +44745,6 @@ mod tests {
             CommandRegistry::definition(CommandId::OpenQueryHistory).language,
             "<leader> q h"
         );
-    }
-
-    #[gpui::test]
-    fn saved_query_switcher_deletes_inline_and_detaches_open_tab(cx: &mut TestAppContext) {
-        let window = shell(cx);
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
-        let timestamp = "2026-08-28T10:00:00Z".parse().unwrap();
-        let saved = sift_api_types::SavedQuery {
-            id: sift_api_types::SavedQueryId(12),
-            tenant_id: sift_api_types::TenantId(1),
-            owner_principal_id: Some(sift_api_types::PrincipalId(7)),
-            name: "Temporary report".into(),
-            sql_text: "select * from temporary_report".into(),
-            connection_profile_id: None,
-            tags: vec!["cleanup".into()],
-            created_at: timestamp,
-            updated_at: timestamp,
-            revision: 6,
-        };
-
-        let item_id = workspace.update_in(&mut cx, |shell, window, cx| {
-            shell.executor_sender = Some(sender);
-            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
-                id: sift_api_types::TenantId(1),
-                name: "demo".into(),
-                rooms: Vec::new(),
-                connections: Vec::new(),
-            }];
-            shell.open_saved_query(saved.clone(), window, cx);
-            let item_id = shell.panes[shell.active_pane]
-                .read(cx)
-                .active_item()
-                .unwrap()
-                .id;
-            shell.open_saved_query_switcher(window, cx);
-            item_id
-        });
-        assert!(matches!(
-            commands.try_recv(),
-            Ok(ExecutorCommand::LoadSavedQueries { tenant_id: 1 })
-        ));
-        workspace.update(&mut cx, |shell, cx| {
-            shell.on_executor_event(
-                ExecutorEvent::SavedQueriesLoaded {
-                    tenant_id: 1,
-                    result: Ok(vec![saved.clone()]),
-                },
-                cx,
-            );
-        });
-
-        cx.simulate_keystrokes("ctrl-d");
-        cx.run_until_parked();
-        assert!(cx
-            .debug_bounds("saved-query-delete-confirmation-0")
-            .is_some());
-        workspace.read_with(&cx, |shell, _| {
-            assert_eq!(
-                shell.saved_query_delete_confirmation,
-                Some(sift_api_types::SavedQueryId(12))
-            );
-            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
-        });
-        cx.simulate_keystrokes("escape");
-        workspace.read_with(&cx, |shell, _| {
-            assert!(shell.saved_query_delete_confirmation.is_none());
-            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
-        });
-
-        cx.simulate_keystrokes("ctrl-d y");
-        assert!(matches!(
-            commands.try_recv(),
-            Ok(ExecutorCommand::DeleteSavedQuery {
-                id: sift_api_types::SavedQueryId(12),
-                expected_revision: 6,
-            })
-        ));
-        workspace.update(&mut cx, |shell, cx| {
-            shell.on_executor_event(
-                ExecutorEvent::SavedQueryDeleted {
-                    id: sift_api_types::SavedQueryId(12),
-                    result: Err("shared query requires owner role".into()),
-                },
-                cx,
-            );
-            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
-            assert_eq!(shell.saved_queries.len(), 1);
-            assert_eq!(
-                shell.saved_queries_error.as_deref(),
-                Some("shared query requires owner role")
-            );
-            assert!(shell.global_problems.last().is_some_and(|problem| {
-                problem.item_id == item_id && problem.title.starts_with("Delete saved query")
-            }));
-            let pane = shell.panes[shell.active_pane].read(cx);
-            assert!(matches!(
-                pane.active_item().and_then(|item| item.source.as_ref()),
-                Some(ItemSource::SavedQuery(source)) if source.saved_query_id == 12
-            ));
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("saved-query-switcher-error").is_some());
-
-        cx.simulate_keystrokes("ctrl-d y");
-        assert!(commands.try_recv().is_ok());
-        workspace.update(&mut cx, |shell, cx| {
-            shell.on_executor_event(
-                ExecutorEvent::SavedQueryDeleted {
-                    id: sift_api_types::SavedQueryId(12),
-                    result: Ok(()),
-                },
-                cx,
-            );
-            assert!(shell.saved_queries.is_empty());
-            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
-            let pane = shell.panes[shell.active_pane].read(cx);
-            let item = pane.active_item().unwrap();
-            assert_eq!(item.id, item_id);
-            assert!(item.source.is_none());
-            assert!(item.dirty);
-            assert!(!pane.clean_documents.contains_key(&item_id));
-            assert_eq!(
-                pane.editor(item_id).unwrap().read(cx).document().text(),
-                "select * from temporary_report"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn saved_query_switcher_edits_tags_and_preserves_dirty_sql(cx: &mut TestAppContext) {
-        let window = shell(cx);
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
-        let timestamp = "2026-08-28T10:00:00Z".parse().unwrap();
-        let saved = sift_api_types::SavedQuery {
-            id: sift_api_types::SavedQueryId(13),
-            tenant_id: sift_api_types::TenantId(1),
-            owner_principal_id: Some(sift_api_types::PrincipalId(7)),
-            name: "Revenue report".into(),
-            sql_text: "select revenue from reports".into(),
-            connection_profile_id: None,
-            tags: vec!["finance".into()],
-            created_at: timestamp,
-            updated_at: timestamp,
-            revision: 6,
-        };
-
-        let item_id = workspace.update_in(&mut cx, |shell, window, cx| {
-            shell.executor_sender = Some(sender);
-            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
-                id: sift_api_types::TenantId(1),
-                name: "demo".into(),
-                rooms: Vec::new(),
-                connections: Vec::new(),
-            }];
-            shell.open_saved_query(saved.clone(), window, cx);
-            let pane = shell.panes[shell.active_pane].clone();
-            let item_id = pane.read(cx).active_item().unwrap().id;
-            pane.update(cx, |pane, cx| {
-                pane.editor(item_id).unwrap().update(cx, |editor, cx| {
-                    editor.replace_text_from_owner("select unsaved_change from reports", cx)
-                });
-                pane.items
-                    .iter_mut()
-                    .find(|item| item.id == item_id)
-                    .unwrap()
-                    .dirty = true;
-            });
-            shell.open_saved_query_switcher(window, cx);
-            item_id
-        });
-        assert!(matches!(
-            commands.try_recv(),
-            Ok(ExecutorCommand::LoadSavedQueries { tenant_id: 1 })
-        ));
-        workspace.update(&mut cx, |shell, cx| {
-            shell.on_executor_event(
-                ExecutorEvent::SavedQueriesLoaded {
-                    tenant_id: 1,
-                    result: Ok(vec![saved.clone()]),
-                },
-                cx,
-            );
-        });
-
-        cx.simulate_keystrokes("ctrl-t");
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("saved-query-tags-editor-0").is_some());
-        workspace.read_with(&cx, |shell, cx| {
-            assert_eq!(shell.saved_query_tags_input.read(cx).text(), "finance");
-        });
-        cx.simulate_keystrokes("escape");
-        workspace.read_with(&cx, |shell, _| {
-            assert!(shell.saved_query_tag_editing.is_none());
-            assert_eq!(shell.modal, Some(Modal::SavedQuerySwitcher));
-        });
-
-        cx.simulate_keystrokes("ctrl-t");
-        workspace.update(&mut cx, |shell, cx| {
-            shell.saved_query_tags_input.update(cx, |input, cx| {
-                input.set_text(" finance, Ops, finance, , urgent ", cx)
-            });
-        });
-        cx.simulate_keystrokes("enter");
-        assert!(matches!(
-            commands.try_recv(),
-            Ok(ExecutorCommand::UpdateSavedQuery {
-                item_id: Some(command_item_id),
-                id: sift_api_types::SavedQueryId(13),
-                request,
-            }) if command_item_id == item_id
-                && request.expected_revision == 6
-                && request.tags == Some(vec!["finance".into(), "Ops".into(), "urgent".into()])
-                && request.sql_text.is_none()
-        ));
-
-        workspace.update(&mut cx, |shell, cx| {
-            shell.on_executor_event(
-                ExecutorEvent::SavedQuerySaved {
-                    item_id: Some(item_id),
-                    result: Err("revision conflict".into()),
-                },
-                cx,
-            );
-            assert_eq!(
-                shell.saved_query_tag_editing,
-                Some(sift_api_types::SavedQueryId(13))
-            );
-            assert!(shell.global_problems.last().is_some_and(|problem| {
-                problem.item_id == item_id && problem.title.starts_with("Update query tags")
-            }));
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("saved-query-switcher-error").is_some());
-
-        cx.simulate_keystrokes("enter");
-        assert!(commands.try_recv().is_ok());
-        let mut updated = saved;
-        updated.tags = vec!["finance".into(), "Ops".into(), "urgent".into()];
-        updated.revision = 7;
-        workspace.update(&mut cx, |shell, cx| {
-            shell.on_executor_event(
-                ExecutorEvent::SavedQuerySaved {
-                    item_id: Some(item_id),
-                    result: Ok(updated),
-                },
-                cx,
-            );
-            assert!(shell.saved_query_tag_editing.is_none());
-            assert_eq!(
-                shell.saved_queries[0].tags,
-                vec!["finance", "Ops", "urgent"]
-            );
-            let pane = shell.panes[shell.active_pane].read(cx);
-            let item = pane.active_item().unwrap();
-            assert!(item.dirty);
-            assert!(matches!(
-                item.source.as_ref(),
-                Some(ItemSource::SavedQuery(source)) if source.revision == 7
-            ));
-            assert_eq!(
-                pane.editor(item_id).unwrap().read(cx).document().text(),
-                "select unsaved_change from reports"
-            );
-        });
     }
 
     #[gpui::test]
