@@ -1368,6 +1368,7 @@ pub enum Modal {
     CatalogMigration,
     CatalogSnapshots,
     CsvImport,
+    TransferRecipes,
     RepositoryCommit,
     ConfirmRepositoryUncommit,
     ConfirmRepositoryDiscard(sift_protocol::WorkspacePath),
@@ -2703,6 +2704,37 @@ pub enum ExecutorCommand {
         configuration_id: sift_protocol::RunConfigurationId,
         occurrence_id: sift_protocol::ScheduleOccurrenceId,
     },
+    LoadTransferRecipes {
+        workspace_id: sift_protocol::WorkspaceId,
+    },
+    SaveTransferRecipe {
+        workspace_id: sift_protocol::WorkspaceId,
+        recipe_id: Option<sift_protocol::TransferRecipeId>,
+        expected_revision: Option<u64>,
+        request: sift_api_types::CreateTransferRecipeRequest,
+    },
+    DeleteTransferRecipe {
+        workspace_id: sift_protocol::WorkspaceId,
+        recipe_id: sift_protocol::TransferRecipeId,
+        expected_revision: u64,
+    },
+    ValidateTransferRecipe {
+        workspace_id: sift_protocol::WorkspaceId,
+        recipe_id: sift_protocol::TransferRecipeId,
+    },
+    ExecuteTransferRecipe {
+        generation: u64,
+        recipe_id: sift_protocol::TransferRecipeId,
+        sql: Option<String>,
+        data: Option<Vec<u8>>,
+        table: Option<sift_protocol::ObjectPath>,
+        sheet: Option<String>,
+        create_table: bool,
+        conflict_policy: sift_protocol::CsvConflictPolicy,
+    },
+    CancelTransferRecipe {
+        generation: u64,
+    },
     LoadCatalogDiagram,
     TerminateDatabaseProcess {
         process_id: i64,
@@ -3109,6 +3141,19 @@ pub enum ExecutorEvent {
         configuration_id: sift_protocol::RunConfigurationId,
         action: &'static str,
         result: Result<(), String>,
+    },
+    TransferRecipesLoaded {
+        workspace_id: sift_protocol::WorkspaceId,
+        result: Result<Vec<sift_protocol::TransferRecipe>, String>,
+    },
+    TransferRecipeMutationFinished {
+        workspace_id: sift_protocol::WorkspaceId,
+        action: &'static str,
+        result: Result<(), String>,
+    },
+    TransferRecipeExecutionFinished {
+        generation: u64,
+        result: Result<sift_protocol::TransferExecutionResult, String>,
     },
     CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
     DatabaseProcessTerminated {
@@ -7319,6 +7364,25 @@ pub struct WorkspaceShell {
     automation_details_loading: bool,
     automations_loading: bool,
     automations_error: Option<String>,
+    transfer_recipes: Vec<sift_protocol::TransferRecipe>,
+    transfer_recipe_selected: usize,
+    transfer_recipe_focus_handle: FocusHandle,
+    transfer_recipe_edit: Option<sift_protocol::TransferRecipeId>,
+    transfer_recipe_delete_confirmation: Option<sift_protocol::TransferRecipeId>,
+    transfer_recipe_name_input: Entity<TextInput>,
+    transfer_recipe_format_input: Entity<TextInput>,
+    transfer_recipe_version_input: Entity<TextInput>,
+    transfer_recipe_options_input: Entity<TextInput>,
+    transfer_recipe_table_input: Entity<TextInput>,
+    transfer_recipe_sheet_input: Entity<TextInput>,
+    transfer_recipe_direction: sift_protocol::TransferDirection,
+    transfer_import_create_table: bool,
+    transfer_import_conflict_policy: sift_protocol::CsvConflictPolicy,
+    transfer_recipes_loading: bool,
+    transfer_recipes_error: Option<String>,
+    transfer_execution_generation: u64,
+    transfer_execution_pending: bool,
+    transfer_execution_result: Option<sift_protocol::TransferExecutionResult>,
     _lifecycle_task: Option<Task<()>>,
     _presence_task: Option<Task<()>>,
     _room_document_task: Option<Task<()>>,
@@ -7691,6 +7755,22 @@ impl WorkspaceShell {
         let automation_schedule_timezone_input = cx.new(|cx| {
             TextInput::new("UTC", "Timezone", cx).aria_label("Automation schedule timezone")
         });
+        let transfer_recipe_name_input =
+            cx.new(|cx| TextInput::new("", "Recipe name", cx).aria_label("Transfer recipe name"));
+        let transfer_recipe_format_input = cx
+            .new(|cx| TextInput::new("csv", "Format identifier", cx).aria_label("Transfer format"));
+        let transfer_recipe_version_input = cx.new(|cx| {
+            TextInput::new("1", "Format version", cx).aria_label("Transfer format version")
+        });
+        let transfer_recipe_options_input = cx.new(|cx| {
+            TextInput::new("{\"header\":true}", "JSON options", cx)
+                .aria_label("Transfer recipe JSON options")
+        });
+        let transfer_recipe_table_input = cx.new(|cx| {
+            TextInput::new("", "schema.table", cx).aria_label("Import destination table")
+        });
+        let transfer_recipe_sheet_input =
+            cx.new(|cx| TextInput::new("Sheet1", "XLSX sheet", cx).aria_label("Import XLSX sheet"));
         let server_name_input = cx.new(|cx| TextInput::new("", "Display name", cx));
         let server_url_input = cx.new(|cx| TextInput::new("", "http://192.168.1.20:7474", cx));
         let server_token_input =
@@ -8196,6 +8276,25 @@ impl WorkspaceShell {
             automation_details_loading: false,
             automations_loading: false,
             automations_error: None,
+            transfer_recipes: Vec::new(),
+            transfer_recipe_selected: 0,
+            transfer_recipe_focus_handle: cx.focus_handle(),
+            transfer_recipe_edit: None,
+            transfer_recipe_delete_confirmation: None,
+            transfer_recipe_name_input,
+            transfer_recipe_format_input,
+            transfer_recipe_version_input,
+            transfer_recipe_options_input,
+            transfer_recipe_table_input,
+            transfer_recipe_sheet_input,
+            transfer_recipe_direction: sift_protocol::TransferDirection::Export,
+            transfer_import_create_table: false,
+            transfer_import_conflict_policy: sift_protocol::CsvConflictPolicy::Abort,
+            transfer_recipes_loading: false,
+            transfer_recipes_error: None,
+            transfer_execution_generation: 0,
+            transfer_execution_pending: false,
+            transfer_execution_result: None,
             _lifecycle_task: None,
             _presence_task: None,
             _room_document_task: None,
@@ -11075,6 +11174,74 @@ impl WorkspaceShell {
                         }
                     }
                     Err(message) => self.automations_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TransferRecipesLoaded {
+                workspace_id,
+                result,
+            } => {
+                if self.selected_workspace_id != Some(workspace_id.0) {
+                    return;
+                }
+                self.transfer_recipes_loading = false;
+                match result {
+                    Ok(recipes) => {
+                        self.transfer_recipes = recipes;
+                        self.transfer_recipe_selected = self
+                            .transfer_recipe_selected
+                            .min(self.transfer_recipes.len().saturating_sub(1));
+                        self.transfer_recipes_error = None;
+                    }
+                    Err(message) => self.transfer_recipes_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TransferRecipeMutationFinished {
+                workspace_id,
+                action,
+                result,
+            } => {
+                if self.selected_workspace_id != Some(workspace_id.0) {
+                    return;
+                }
+                self.transfer_recipes_loading = false;
+                match result {
+                    Ok(()) => {
+                        self.show_success_toast(action.into(), cx);
+                        if action != "Transfer recipe validated" {
+                            self.clear_transfer_recipe_editor(cx);
+                        }
+                        self.request_transfer_recipes(cx);
+                    }
+                    Err(message) => self.transfer_recipes_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TransferRecipeExecutionFinished { generation, result } => {
+                if generation != self.transfer_execution_generation {
+                    return;
+                }
+                self.transfer_execution_pending = false;
+                match result {
+                    Ok(result) => {
+                        let message = match &result {
+                            sift_protocol::TransferExecutionResult::Artifact { artifact } => {
+                                format!(
+                                    "Transfer created artifact {} · {} bytes",
+                                    artifact.id.0, artifact.byte_len
+                                )
+                            }
+                            sift_protocol::TransferExecutionResult::Import { result } => format!(
+                                "Transfer imported {} row(s) into {}",
+                                result.rows_inserted, result.table
+                            ),
+                        };
+                        self.transfer_execution_result = Some(result);
+                        self.transfer_recipes_error = None;
+                        self.show_success_toast(message, cx);
+                    }
+                    Err(message) => self.transfer_recipes_error = Some(message),
                 }
                 cx.notify();
             }
@@ -18936,6 +19103,448 @@ impl WorkspaceShell {
                 occurrence_id: occurrence.id,
             })
             .is_ok();
+        cx.notify();
+    }
+
+    fn open_transfer_recipes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::ReadTransferRecipe,
+            "Open transfer recipes",
+            cx,
+        ) {
+            return;
+        }
+        self.modal = Some(Modal::TransferRecipes);
+        self.request_transfer_recipes(cx);
+        self.transfer_recipe_name_input
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn handle_transfer_recipe_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified()
+            || [
+                &self.transfer_recipe_name_input,
+                &self.transfer_recipe_format_input,
+                &self.transfer_recipe_version_input,
+                &self.transfer_recipe_options_input,
+                &self.transfer_recipe_table_input,
+                &self.transfer_recipe_sheet_input,
+            ]
+            .iter()
+            .any(|input| input.focus_handle(cx).is_focused(window))
+        {
+            return;
+        }
+        let count = self.transfer_recipes.len();
+        match event.keystroke.key.as_str() {
+            "j" | "down" if count > 0 => {
+                self.edit_transfer_recipe((self.transfer_recipe_selected + 1).min(count - 1), cx)
+            }
+            "k" | "up" if count > 0 => {
+                self.edit_transfer_recipe(self.transfer_recipe_selected.saturating_sub(1), cx)
+            }
+            "g" if count > 0 => self.edit_transfer_recipe(0, cx),
+            "G" if count > 0 => self.edit_transfer_recipe(count - 1, cx),
+            "n" => self.clear_transfer_recipe_editor(cx),
+            "v" if self.transfer_recipe_edit.is_some() => self.validate_transfer_recipe(cx),
+            "x" if self.transfer_recipe_edit.is_some() => self.execute_selected_transfer_recipe(cx),
+            "R" => self.request_transfer_recipes(cx),
+            "escape" => self.dismiss_modal(&DismissModal, window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn request_transfer_recipes(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.selected_workspace_id.map(sift_protocol::WorkspaceId) else {
+            self.transfer_recipes_error = Some("Select a workspace to manage transfers".into());
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.transfer_recipes_error = Some("Transfer manager is unavailable".into());
+            return;
+        };
+        self.transfer_recipes_loading = sender
+            .send(ExecutorCommand::LoadTransferRecipes { workspace_id })
+            .is_ok();
+        if self.transfer_recipes_loading {
+            self.transfer_recipes_error = None;
+        }
+        cx.notify();
+    }
+
+    fn clear_transfer_recipe_editor(&mut self, cx: &mut Context<Self>) {
+        self.transfer_recipe_edit = None;
+        self.transfer_recipe_delete_confirmation = None;
+        self.transfer_recipe_direction = sift_protocol::TransferDirection::Export;
+        self.transfer_recipe_name_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.transfer_recipe_format_input
+            .update(cx, |input, cx| input.set_text("csv", cx));
+        self.transfer_recipe_version_input
+            .update(cx, |input, cx| input.set_text("1", cx));
+        self.transfer_recipe_options_input
+            .update(cx, |input, cx| input.set_text("{\"header\":true}", cx));
+        self.transfer_recipe_table_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.transfer_recipe_sheet_input
+            .update(cx, |input, cx| input.set_text("Sheet1", cx));
+        self.transfer_import_create_table = false;
+        self.transfer_import_conflict_policy = sift_protocol::CsvConflictPolicy::Abort;
+        self.transfer_execution_result = None;
+        self.transfer_recipes_error = None;
+    }
+
+    fn edit_transfer_recipe(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(recipe) = self.transfer_recipes.get(index).cloned() else {
+            return;
+        };
+        self.transfer_recipe_selected = index;
+        self.transfer_recipe_edit = Some(recipe.id);
+        self.transfer_recipe_delete_confirmation = None;
+        self.transfer_recipe_direction = recipe.direction;
+        self.transfer_recipe_name_input
+            .update(cx, |input, cx| input.set_text(recipe.name, cx));
+        self.transfer_recipe_format_input
+            .update(cx, |input, cx| input.set_text(recipe.format_id, cx));
+        self.transfer_recipe_version_input
+            .update(cx, |input, cx| input.set_text(recipe.format_version, cx));
+        self.transfer_recipe_options_input.update(cx, |input, cx| {
+            input.set_text(recipe.options.to_string(), cx)
+        });
+        self.transfer_execution_result = None;
+        self.transfer_recipes_error = None;
+        cx.notify();
+    }
+
+    fn toggle_transfer_recipe_direction(&mut self, cx: &mut Context<Self>) {
+        self.transfer_recipe_direction = match self.transfer_recipe_direction {
+            sift_protocol::TransferDirection::Export => sift_protocol::TransferDirection::Import,
+            sift_protocol::TransferDirection::Import => sift_protocol::TransferDirection::Export,
+        };
+        let format = match self.transfer_recipe_direction {
+            sift_protocol::TransferDirection::Export => "csv",
+            sift_protocol::TransferDirection::Import => "csv",
+        };
+        self.transfer_recipe_format_input
+            .update(cx, |input, cx| input.set_text(format, cx));
+        cx.notify();
+    }
+
+    fn save_transfer_recipe(&mut self, cx: &mut Context<Self>) {
+        if self.transfer_recipes_loading {
+            return;
+        }
+        if !self.require_operation(
+            sift_protocol::OperationKind::ManageTransferRecipe,
+            "Save transfer recipe",
+            cx,
+        ) {
+            return;
+        }
+        let Some(workspace_id) = self.selected_workspace_id.map(sift_protocol::WorkspaceId) else {
+            return;
+        };
+        let name = self
+            .transfer_recipe_name_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let format_id = self
+            .transfer_recipe_format_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let format_version = self
+            .transfer_recipe_version_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        if name.is_empty() || format_id.is_empty() || format_version.is_empty() {
+            self.transfer_recipes_error =
+                Some("Recipe name, format, and format version are required".into());
+            cx.notify();
+            return;
+        }
+        let options =
+            match serde_json::from_str(self.transfer_recipe_options_input.read(cx).text().trim()) {
+                Ok(serde_json::Value::Object(options)) => serde_json::Value::Object(options),
+                Ok(_) => {
+                    self.transfer_recipes_error =
+                        Some("Recipe options must be a JSON object".into());
+                    cx.notify();
+                    return;
+                }
+                Err(error) => {
+                    self.transfer_recipes_error =
+                        Some(format!("Recipe options are invalid: {error}"));
+                    cx.notify();
+                    return;
+                }
+            };
+        let (source, sink) = match self.transfer_recipe_direction {
+            sift_protocol::TransferDirection::Export => (
+                sift_protocol::TransferEndpoint::Query,
+                sift_protocol::TransferEndpoint::Artifact,
+            ),
+            sift_protocol::TransferDirection::Import => (
+                sift_protocol::TransferEndpoint::Upload,
+                sift_protocol::TransferEndpoint::Table,
+            ),
+        };
+        let expected_revision = self.transfer_recipe_edit.and_then(|recipe_id| {
+            self.transfer_recipes
+                .iter()
+                .find(|recipe| recipe.id == recipe_id)
+                .map(|recipe| recipe.revision)
+        });
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.transfer_recipes_loading = sender
+            .send(ExecutorCommand::SaveTransferRecipe {
+                workspace_id,
+                recipe_id: self.transfer_recipe_edit,
+                expected_revision,
+                request: sift_api_types::CreateTransferRecipeRequest {
+                    name,
+                    direction: self.transfer_recipe_direction,
+                    source,
+                    sink,
+                    format_id,
+                    format_version,
+                    options,
+                },
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn delete_transfer_recipe(&mut self, cx: &mut Context<Self>) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::ManageTransferRecipe,
+            "Delete transfer recipe",
+            cx,
+        ) {
+            return;
+        }
+        let Some(recipe) = self
+            .transfer_recipes
+            .get(self.transfer_recipe_selected)
+            .cloned()
+        else {
+            return;
+        };
+        if self.transfer_recipe_delete_confirmation != Some(recipe.id) {
+            self.transfer_recipe_delete_confirmation = Some(recipe.id);
+            self.transfer_recipes_error =
+                Some("Press Confirm delete to permanently remove this recipe".into());
+            cx.notify();
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.transfer_recipes_loading = sender
+            .send(ExecutorCommand::DeleteTransferRecipe {
+                workspace_id: recipe.workspace_id,
+                recipe_id: recipe.id,
+                expected_revision: recipe.revision,
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn validate_transfer_recipe(&mut self, cx: &mut Context<Self>) {
+        let Some(recipe) = self
+            .transfer_recipes
+            .get(self.transfer_recipe_selected)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.transfer_recipes_loading = sender
+            .send(ExecutorCommand::ValidateTransferRecipe {
+                workspace_id: recipe.workspace_id,
+                recipe_id: recipe.id,
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn parse_transfer_table(&self, cx: &App) -> Result<sift_protocol::ObjectPath, String> {
+        let raw = self.transfer_recipe_table_input.read(cx).text().trim();
+        if raw.is_empty() {
+            return Err("Choose an import destination table".into());
+        }
+        let mut parts = raw.rsplitn(2, '.');
+        let name = parts.next().unwrap_or_default().trim();
+        let schema = parts.next().map(str::trim).filter(|part| !part.is_empty());
+        if name.is_empty() {
+            return Err("Import destination table is invalid".into());
+        }
+        Ok(sift_protocol::ObjectPath {
+            catalog: None,
+            schema: schema.map(str::to_owned),
+            name: name.to_owned(),
+            kind: Some(sift_protocol::ObjectKind::Table),
+            routine_args: None,
+        })
+    }
+
+    fn toggle_transfer_create_table(&mut self, cx: &mut Context<Self>) {
+        self.transfer_import_create_table = !self.transfer_import_create_table;
+        cx.notify();
+    }
+
+    fn toggle_transfer_conflict_policy(&mut self, cx: &mut Context<Self>) {
+        self.transfer_import_conflict_policy = match self.transfer_import_conflict_policy {
+            sift_protocol::CsvConflictPolicy::Abort => sift_protocol::CsvConflictPolicy::Skip,
+            sift_protocol::CsvConflictPolicy::Skip => sift_protocol::CsvConflictPolicy::Abort,
+        };
+        cx.notify();
+    }
+
+    fn execute_selected_transfer_recipe(&mut self, cx: &mut Context<Self>) {
+        if self.transfer_execution_pending {
+            return;
+        }
+        if !self.require_operation(
+            sift_protocol::OperationKind::ExecuteTransferRecipe,
+            "Execute transfer recipe",
+            cx,
+        ) {
+            return;
+        }
+        let Some(recipe) = self
+            .transfer_recipes
+            .get(self.transfer_recipe_selected)
+            .cloned()
+        else {
+            return;
+        };
+        match recipe.direction {
+            sift_protocol::TransferDirection::Export => {
+                let Some(query) = self.active_query_snapshot(cx) else {
+                    self.transfer_recipes_error =
+                        Some("Focus a query tab before running an export recipe".into());
+                    cx.notify();
+                    return;
+                };
+                self.start_transfer_recipe(recipe.id, Some(query.sql_text), None, None, cx);
+            }
+            sift_protocol::TransferDirection::Import => {
+                let table = match self.parse_transfer_table(cx) {
+                    Ok(table) => table,
+                    Err(message) => {
+                        self.transfer_recipes_error = Some(message);
+                        cx.notify();
+                        return;
+                    }
+                };
+                let prompt = cx.prompt_for_paths(PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: Some("Choose data for this transfer recipe".into()),
+                });
+                let background = cx.background_executor().clone();
+                cx.spawn(async move |shell, cx| {
+                    let Ok(Ok(Some(paths))) = prompt.await else {
+                        return;
+                    };
+                    let Some(path) = paths.into_iter().next() else {
+                        return;
+                    };
+                    let read_path = path.clone();
+                    let data = background
+                        .spawn(async move { std::fs::read(read_path) })
+                        .await;
+                    let _ = shell.update(cx, |shell, cx| match data {
+                        Ok(data) if data.len() <= 64 * 1024 * 1024 => shell.start_transfer_recipe(
+                            recipe.id,
+                            None,
+                            Some(data),
+                            Some(table),
+                            cx,
+                        ),
+                        Ok(_) => shell.show_error_toast(
+                            "Transfer input exceeds the 64 MiB payload limit".into(),
+                            cx,
+                        ),
+                        Err(error) => shell.show_error_toast(
+                            format!("reading transfer input {}: {error}", path.display()),
+                            cx,
+                        ),
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn start_transfer_recipe(
+        &mut self,
+        recipe_id: sift_protocol::TransferRecipeId,
+        sql: Option<String>,
+        data: Option<Vec<u8>>,
+        table: Option<sift_protocol::ObjectPath>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        let sheet = self
+            .transfer_recipe_sheet_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        self.transfer_execution_generation = self.transfer_execution_generation.wrapping_add(1);
+        let generation = self.transfer_execution_generation;
+        self.transfer_execution_pending = sender
+            .send(ExecutorCommand::ExecuteTransferRecipe {
+                generation,
+                recipe_id,
+                sql,
+                data,
+                table,
+                sheet: (!sheet.is_empty()).then_some(sheet),
+                create_table: self.transfer_import_create_table,
+                conflict_policy: self.transfer_import_conflict_policy,
+            })
+            .is_ok();
+        self.transfer_execution_result = None;
+        self.transfer_recipes_error = None;
+        cx.notify();
+    }
+
+    fn cancel_transfer_recipe(&mut self, cx: &mut Context<Self>) {
+        if !self.transfer_execution_pending {
+            return;
+        }
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::CancelTransferRecipe {
+                generation: self.transfer_execution_generation,
+            });
+        }
+        self.transfer_execution_pending = false;
+        self.transfer_recipes_error =
+            Some("Transfer request cancelled locally; refresh artifacts before retrying".into());
         cx.notify();
     }
 
@@ -31278,6 +31887,7 @@ impl WorkspaceShell {
             let catalog_diagram = matches!(modal, Modal::CatalogDiagram);
             let catalog_snapshots = matches!(modal, Modal::CatalogSnapshots);
             let csv_import = matches!(modal, Modal::CsvImport);
+            let transfer_recipes = matches!(modal, Modal::TransferRecipes);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let repository_conflict = matches!(modal, Modal::RepositoryConflict);
             let change_ledger = matches!(modal, Modal::ChangeLedger);
@@ -31298,7 +31908,7 @@ impl WorkspaceShell {
                 720.0
             } else if catalog_diagram {
                 1040.0
-            } else if data_search || csv_import || repository_conflict {
+            } else if data_search || csv_import || transfer_recipes || repository_conflict {
                 900.0
             } else if server_picker || account {
                 360.0
@@ -37207,6 +37817,381 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::TransferRecipes => {
+                    let rows = self.transfer_recipes.iter().cloned().enumerate().map(
+                        |(index, recipe)| {
+                            let selected = index == self.transfer_recipe_selected;
+                            div()
+                                .id(("transfer-recipe", index))
+                                .debug_selector(move || format!("transfer-recipe-{index}"))
+                                .role(Role::Button)
+                                .h(px(44.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .when(selected, |row| row.bg(colors.active_surface))
+                                .hover(|row| row.bg(colors.hovered_surface))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |shell, _, window, cx| {
+                                        shell.edit_transfer_recipe(index, cx);
+                                        shell.transfer_recipe_focus_handle.focus(window, cx);
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_color(colors.text)
+                                                .child(recipe.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_xs()
+                                                .text_color(colors.disabled_text)
+                                                .child(format!(
+                                                    "{:?} · {} v{}",
+                                                    recipe.direction,
+                                                    recipe.format_id,
+                                                    recipe.format_version
+                                                )),
+                                        ),
+                                )
+                        },
+                    );
+                    let direction = format!("{:?}", self.transfer_recipe_direction);
+                    let editing = self.transfer_recipe_edit.is_some();
+                    let result = self.transfer_execution_result.as_ref().map(|result| match result {
+                        sift_protocol::TransferExecutionResult::Artifact { artifact } => format!(
+                            "Artifact {} · {} · {} bytes · SHA-256 {}",
+                            artifact.id.0,
+                            artifact.content_type,
+                            artifact.byte_len,
+                            artifact.digest
+                        ),
+                        sift_protocol::TransferExecutionResult::Import { result } => format!(
+                            "Imported {} row(s), skipped {} · {}",
+                            result.rows_inserted, result.rows_skipped, result.table
+                        ),
+                    });
+                    let field = |label: &'static str, input: Entity<TextInput>| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(SectionLabel::new(label))
+                            .child(input)
+                    };
+                    div()
+                        .track_focus(&self.transfer_recipe_focus_handle)
+                        .key_context("SiftTransferRecipes")
+                        .on_key_down(cx.listener(Self::handle_transfer_recipe_key))
+                        .h(px(560.))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .child("Transfer recipes"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child("Revisioned query exports and upload-to-table imports"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            Button::new("new-transfer-recipe", "New")
+                                                .tone(ButtonTone::Ghost)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.clear_transfer_recipe_editor(cx);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("refresh-transfer-recipes", "Refresh")
+                                                .tone(ButtonTone::Ghost)
+                                                .loading(self.transfer_recipes_loading)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.request_transfer_recipes(cx)
+                                                })),
+                                        ),
+                                ),
+                        )
+                        .children(
+                            self.transfer_recipes_error
+                                .clone()
+                                .map(ErrorBanner::new),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .flex()
+                                .border_1()
+                                .border_color(colors.subtle_border)
+                                .child(
+                                    div()
+                                        .id("transfer-recipe-list")
+                                        .w(px(230.))
+                                        .flex_none()
+                                        .overflow_y_scroll()
+                                        .when(self.transfer_recipes.is_empty(), |list| {
+                                            list.child(
+                                                div()
+                                                    .p_3()
+                                                    .text_xs()
+                                                    .whitespace_normal()
+                                                    .child("No transfer recipes yet."),
+                                            )
+                                        })
+                                        .children(rows),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .p_3()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_3()
+                                        .overflow_hidden()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .child(field(
+                                                            "NAME",
+                                                            self.transfer_recipe_name_input.clone(),
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .w(px(110.))
+                                                        .child(
+                                                            Button::new(
+                                                                "transfer-recipe-direction",
+                                                                direction,
+                                                            )
+                                                            .tone(ButtonTone::Neutral)
+                                                            .wide(true)
+                                                            .on_click(cx.listener(
+                                                                |shell, _, _, cx| {
+                                                                    shell.toggle_transfer_recipe_direction(cx)
+                                                                },
+                                                            )),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .child(field(
+                                                            "FORMAT",
+                                                            self.transfer_recipe_format_input.clone(),
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .w(px(120.))
+                                                        .child(field(
+                                                            "VERSION",
+                                                            self.transfer_recipe_version_input.clone(),
+                                                        )),
+                                                ),
+                                        )
+                                        .child(field(
+                                            "OPTIONS JSON",
+                                            self.transfer_recipe_options_input.clone(),
+                                        ))
+                                        .when(
+                                            self.transfer_recipe_direction
+                                                == sift_protocol::TransferDirection::Import,
+                                            |editor| {
+                                                editor
+                                                    .child(field(
+                                                        "DESTINATION TABLE",
+                                                        self.transfer_recipe_table_input.clone(),
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .items_end()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .w(px(180.))
+                                                                    .child(field(
+                                                                        "XLSX SHEET",
+                                                                        self.transfer_recipe_sheet_input.clone(),
+                                                                    )),
+                                                            )
+                                                            .child(
+                                                                Button::new(
+                                                                    "transfer-create-table",
+                                                                    if self.transfer_import_create_table {
+                                                                        "Create table: yes"
+                                                                    } else {
+                                                                        "Create table: no"
+                                                                    },
+                                                                )
+                                                                .tone(ButtonTone::Ghost)
+                                                                .on_click(cx.listener(
+                                                                    |shell, _, _, cx| {
+                                                                        shell.toggle_transfer_create_table(cx)
+                                                                    },
+                                                                )),
+                                                            )
+                                                            .child(
+                                                                Button::new(
+                                                                    "transfer-conflict-policy",
+                                                                    format!(
+                                                                        "Duplicates: {:?}",
+                                                                        self.transfer_import_conflict_policy
+                                                                    ),
+                                                                )
+                                                                .tone(ButtonTone::Ghost)
+                                                                .on_click(cx.listener(
+                                                                    |shell, _, _, cx| {
+                                                                        shell.toggle_transfer_conflict_policy(cx)
+                                                                    },
+                                                                )),
+                                                            ),
+                                                    )
+                                            },
+                                        )
+                                        .children(result.map(|message| {
+                                            div()
+                                                .p_2()
+                                                .rounded_sm()
+                                                .bg(colors.success_muted)
+                                                .text_xs()
+                                                .whitespace_normal()
+                                                .child(message)
+                                        }))
+                                        .child(div().flex_1())
+                                        .child(
+                                            div()
+                                                .pt_2()
+                                                .border_t_1()
+                                                .border_color(colors.subtle_border)
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    Button::new(
+                                                        "save-transfer-recipe",
+                                                        if editing { "Update" } else { "Create" },
+                                                    )
+                                                    .debug_selector("save-transfer-recipe")
+                                                    .tone(ButtonTone::Accent)
+                                                    .loading(self.transfer_recipes_loading)
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.save_transfer_recipe(cx)
+                                                    })),
+                                                )
+                                                .child(
+                                                    Button::new(
+                                                        "validate-transfer-recipe",
+                                                        "Validate",
+                                                    )
+                                                    .tone(ButtonTone::Neutral)
+                                                    .disabled(self.transfer_recipe_edit.is_none())
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.validate_transfer_recipe(cx)
+                                                    })),
+                                                )
+                                                .child(
+                                                    Button::new(
+                                                        "delete-transfer-recipe",
+                                                        if self.transfer_recipe_edit.is_some()
+                                                            && self.transfer_recipe_delete_confirmation
+                                                                == self.transfer_recipe_edit
+                                                        {
+                                                            "Confirm delete"
+                                                        } else {
+                                                            "Delete"
+                                                        },
+                                                    )
+                                                    .tone(ButtonTone::DangerGhost)
+                                                    .disabled(self.transfer_recipe_edit.is_none())
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.delete_transfer_recipe(cx)
+                                                    })),
+                                                )
+                                                .child(div().flex_1())
+                                                .when(self.transfer_execution_pending, |actions| {
+                                                    actions.child(
+                                                        Button::new(
+                                                            "cancel-transfer-recipe",
+                                                            "Cancel request",
+                                                        )
+                                                        .tone(ButtonTone::DangerGhost)
+                                                        .on_click(cx.listener(
+                                                            |shell, _, _, cx| {
+                                                                shell.cancel_transfer_recipe(cx)
+                                                            },
+                                                        )),
+                                                    )
+                                                })
+                                                .child(
+                                                    Button::new(
+                                                        "execute-transfer-recipe",
+                                                        if self.transfer_execution_pending {
+                                                            "Executing…"
+                                                        } else {
+                                                            "Execute"
+                                                        },
+                                                    )
+                                                    .debug_selector("execute-transfer-recipe")
+                                                    .tone(ButtonTone::Accent)
+                                                    .loading(self.transfer_execution_pending)
+                                                    .disabled(
+                                                        self.transfer_recipe_edit.is_none()
+                                                            || self.transfer_execution_pending,
+                                                    )
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.execute_selected_transfer_recipe(cx)
+                                                    })),
+                                                ),
+                                        ),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::SemanticRename => {
                     let (pending, edit_count, warnings) = self.pending_semantic_rename.as_ref().map_or((false, None, Vec::new()), |rename| (rename.pending, rename.edits.as_ref().map(Vec::len), rename.warnings.clone()));
                     let preview_rows = self.semantic_rename_preview_rows(cx);
@@ -38249,6 +39234,34 @@ mod tests {
             "created_at": "2026-01-01T00:00:00Z",
             "started_at": "2026-01-01T00:00:01Z",
             "finished_at": null
+        }))
+        .unwrap()
+    }
+
+    fn transfer_recipe(
+        id: i64,
+        direction: sift_protocol::TransferDirection,
+    ) -> sift_protocol::TransferRecipe {
+        let (source, sink) = match direction {
+            sift_protocol::TransferDirection::Export => ("query", "artifact"),
+            sift_protocol::TransferDirection::Import => ("upload", "table"),
+        };
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "workspace_id": 42,
+            "name": "Daily export",
+            "direction": match direction {
+                sift_protocol::TransferDirection::Export => "export",
+                sift_protocol::TransferDirection::Import => "import",
+            },
+            "source": { "kind": source },
+            "sink": { "kind": sink },
+            "format_id": "csv",
+            "format_version": "1",
+            "options": { "header": true },
+            "revision": 4,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
         }))
         .unwrap()
     }
@@ -45173,6 +46186,106 @@ mod tests {
                 occurrence_id: sift_protocol::ScheduleOccurrenceId(12),
             })
         ));
+    }
+
+    #[gpui::test]
+    fn transfer_recipe_editor_emits_revisioned_requests(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_workspace_id = Some(42);
+            shell
+                .transfer_recipe_name_input
+                .update(cx, |input, cx| input.set_text("Warehouse export", cx));
+            shell.save_transfer_recipe(cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::SaveTransferRecipe {
+                workspace_id: sift_protocol::WorkspaceId(42),
+                recipe_id: None,
+                expected_revision: None,
+                request: sift_api_types::CreateTransferRecipeRequest {
+                    direction: sift_protocol::TransferDirection::Export,
+                    source: sift_protocol::TransferEndpoint::Query,
+                    sink: sift_protocol::TransferEndpoint::Artifact,
+                    ..
+                },
+            })
+        ));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.transfer_recipes_loading = false;
+            shell.transfer_recipes =
+                vec![transfer_recipe(7, sift_protocol::TransferDirection::Export)];
+            shell.edit_transfer_recipe(0, cx);
+            shell.save_transfer_recipe(cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::SaveTransferRecipe {
+                recipe_id: Some(sift_protocol::TransferRecipeId(7)),
+                expected_revision: Some(4),
+                ..
+            })
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.transfer_recipes_loading = false;
+            shell.delete_transfer_recipe(cx);
+        });
+        assert!(commands.try_recv().is_err());
+        workspace.update(&mut cx, |shell, cx| shell.delete_transfer_recipe(cx));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::DeleteTransferRecipe {
+                recipe_id: sift_protocol::TransferRecipeId(7),
+                expected_revision: 4,
+                ..
+            })
+        ));
+    }
+
+    #[gpui::test]
+    fn transfer_recipe_execution_is_progress_visible_and_cancellable(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_workspace_id = Some(42);
+            shell.modal = Some(Modal::TransferRecipes);
+            shell.transfer_recipes =
+                vec![transfer_recipe(7, sift_protocol::TransferDirection::Export)];
+            shell.edit_transfer_recipe(0, cx);
+            shell.start_transfer_recipe(
+                sift_protocol::TransferRecipeId(7),
+                Some("select * from events".into()),
+                None,
+                None,
+                cx,
+            );
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::ExecuteTransferRecipe {
+                generation: 1,
+                recipe_id: sift_protocol::TransferRecipeId(7),
+                sql: Some(sql),
+                ..
+            }) if sql == "select * from events"
+        ));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("execute-transfer-recipe").is_some());
+        workspace.update(&mut cx, |shell, cx| shell.cancel_transfer_recipe(cx));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::CancelTransferRecipe { generation: 1 })
+        ));
+        assert!(!workspace.read_with(&cx, |shell, _| shell.transfer_execution_pending));
     }
 
     #[gpui::test]

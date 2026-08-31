@@ -555,6 +555,7 @@ async fn run_query_executor(
     let mut active_queries: HashMap<u64, (u64, tokio::sync::mpsc::UnboundedSender<QueryControl>)> =
         HashMap::new();
     let mut active_exports: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
+    let mut active_transfers: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
     let mut notification_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut repository_history_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut repository_diff_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -575,6 +576,7 @@ async fn run_query_executor(
                 }
                 cancel_active_queries(&mut active_queries);
                 active_exports.clear();
+                active_transfers.clear();
                 if let Some(task) = notification_task.take() {
                     task.abort();
                 }
@@ -620,6 +622,7 @@ async fn run_query_executor(
             } => {
                 cancel_active_queries(&mut active_queries);
                 active_exports.clear();
+                active_transfers.clear();
                 if let Some(task) = notification_task.take() {
                     task.abort();
                 }
@@ -664,6 +667,8 @@ async fn run_query_executor(
             }
             ExecutorCommand::Disconnect => {
                 cancel_active_queries(&mut active_queries);
+                active_exports.clear();
+                active_transfers.clear();
                 if let Some(task) = notification_task.take() {
                     task.abort();
                 }
@@ -3306,6 +3311,171 @@ async fn run_query_executor(
                 {
                     return;
                 }
+            }
+            ExecutorCommand::LoadTransferRecipes { workspace_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .transfer_recipes(workspace_id)
+                        .await
+                        .map_err(|error| format!("loading transfer recipes failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TransferRecipesLoaded {
+                        workspace_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SaveTransferRecipe {
+                workspace_id,
+                recipe_id,
+                expected_revision,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => match recipe_id {
+                        Some(recipe_id) => match expected_revision {
+                            Some(expected_revision) => client
+                                .update_transfer_recipe(
+                                    recipe_id,
+                                    sift_api_types::UpdateTransferRecipeRequest {
+                                        expected_revision,
+                                        recipe: request,
+                                    },
+                                )
+                                .await
+                                .map(|_| ()),
+                            None => Err(sift_client_sdk::Error::Protocol(
+                                "updating a transfer recipe requires a revision".into(),
+                            )),
+                        },
+                        None => client
+                            .create_transfer_recipe(workspace_id, request)
+                            .await
+                            .map(|_| ()),
+                    }
+                    .map_err(|error| format!("saving transfer recipe failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TransferRecipeMutationFinished {
+                        workspace_id,
+                        action: "Transfer recipe saved",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteTransferRecipe {
+                workspace_id,
+                recipe_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_transfer_recipe(
+                            recipe_id,
+                            sift_api_types::ExpectedTransferRecipeRevisionRequest {
+                                expected_revision,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("deleting transfer recipe failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TransferRecipeMutationFinished {
+                        workspace_id,
+                        action: "Transfer recipe deleted",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ValidateTransferRecipe {
+                workspace_id,
+                recipe_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .validate_transfer_recipe(recipe_id)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("validating transfer recipe failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TransferRecipeMutationFinished {
+                        workspace_id,
+                        action: "Transfer recipe validated",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ExecuteTransferRecipe {
+                generation,
+                recipe_id,
+                sql,
+                data,
+                table,
+                sheet,
+                create_table,
+                conflict_policy,
+            } => {
+                let Some(opened) = context.as_ref() else {
+                    let _ = events.send(ExecutorEvent::TransferRecipeExecutionFinished {
+                        generation,
+                        result: Err("Connect before executing a transfer recipe".into()),
+                    });
+                    continue;
+                };
+                active_transfers.clear();
+                let (cancel, cancelled) = tokio::sync::oneshot::channel();
+                active_transfers.insert(generation, cancel);
+                let client = opened.client.clone();
+                let session_id = opened.session;
+                let connection_id = opened.connection;
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let request = sift_api_types::ExecuteTransferRecipeRequest {
+                        session_id,
+                        connection_id,
+                        sql,
+                        params: Vec::new(),
+                        data,
+                        table,
+                        sheet,
+                        create_table,
+                        conflict_policy: Some(conflict_policy),
+                    };
+                    let result = tokio::select! {
+                        result = client.execute_transfer_recipe(recipe_id, request) => result
+                            .map_err(|error| format!("executing transfer recipe failed: {error}")),
+                        _ = cancelled => Err("Transfer request cancelled locally".into()),
+                    };
+                    let _ = events.send(ExecutorEvent::TransferRecipeExecutionFinished {
+                        generation,
+                        result,
+                    });
+                }));
+            }
+            ExecutorCommand::CancelTransferRecipe { generation } => {
+                active_transfers.remove(&generation);
             }
             ExecutorCommand::LoadCatalogDiagram => {
                 let result = match context.as_ref() {

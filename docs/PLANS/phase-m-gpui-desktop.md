@@ -510,7 +510,7 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       recovery to the automation surface.
 - [x] Implement import/export with progress, cancellation, artifact handling,
       and bounded previews.
-- [ ] Implement transfer-recipe creation, validation, execution, progress, and
+- [x] Implement transfer-recipe creation, validation, execution, progress, and
       cancellation in the desktop client.
 - [ ] Render Phase I declarative contributions through trusted actions, forms,
       tables, and read-only panels.
@@ -537,13 +537,12 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 The remaining work should proceed in this order. Product surfaces come first;
 graduation work follows once the interaction model has stopped changing.
 
-1. Transfer-recipe creation, validation, execution, progress, and cancellation.
-2. Phase I declarative contribution rendering through the trusted host UI.
-3. Numerical performance and memory graduation on the existing large fixtures.
-4. Crash, restart, offline, authentication-expiry, and outcome-unknown recovery
+1. Phase I declarative contribution rendering through the trusted host UI.
+2. Numerical performance and memory graduation on the existing large fixtures.
+3. Crash, restart, offline, authentication-expiry, and outcome-unknown recovery
    matrices.
-5. Keyboard/accessibility and Linux/macOS/Windows platform validation.
-6. Signed artifacts, update validation, and the final Phase M graduation matrix.
+4. Keyboard/accessibility and Linux/macOS/Windows platform validation.
+5. Signed artifacts, update validation, and the final Phase M graduation matrix.
 
 ## Commit and quality policy
 

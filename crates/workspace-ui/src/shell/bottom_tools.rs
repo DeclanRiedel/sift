@@ -70,6 +70,15 @@ pub(super) fn render_bottom_panel(
                             .items_center()
                             .gap_1()
                             .child(
+                                Button::new("open-transfer-recipes", "Transfers")
+                                    .debug_selector("open-transfer-recipes")
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(shell.selected_workspace_id.is_none())
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.open_transfer_recipes(window, cx)
+                                    })),
+                            )
+                            .child(
                                 Button::new("new-automation", "New")
                                     .debug_selector("new-automation")
                                     .tone(ButtonTone::Ghost)
