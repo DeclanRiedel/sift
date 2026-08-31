@@ -2,8 +2,6 @@ version = 1
 name = "Sift Soft Light"
 appearance = "light"
 
-# A restrained warm-grey palette. It avoids pure white surfaces while keeping
-# text and semantic states readable in bright environments.
 [colors]
 background = "#d8d6d1"
 surface = "#e2e0db"

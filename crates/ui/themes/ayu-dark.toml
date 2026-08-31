@@ -2,8 +2,6 @@ version = 1
 name = "Sift Ayu Dark"
 appearance = "dark"
 
-# Ayu Dark's warm syntax palette over darker, more neutral charcoal surfaces
-# for Sift's data-dense workspace.
 [colors]
 background = "#0a0b0d"
 surface = "#0d0f12"
