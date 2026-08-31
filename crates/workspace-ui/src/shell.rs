@@ -3219,7 +3219,6 @@ pub struct Pane {
     /// Dirty-close confirmation belongs to its tab and is rendered inline.
     pending_close_item: Option<u64>,
     tab_rename: Option<TabRenameState>,
-    tab_bar_hovered: bool,
     hovered_tab: Option<u64>,
     chrome_menu: Option<PaneChromeMenu>,
     maximized: bool,
@@ -3355,7 +3354,6 @@ impl Pane {
             tab_bar_drag_bounds: None,
             pending_close_item: None,
             tab_rename: None,
-            tab_bar_hovered: false,
             hovered_tab: None,
             chrome_menu: None,
             maximized: false,
@@ -5369,7 +5367,6 @@ impl gpui::Render for Pane {
         let can_go_forward = self.can_navigate_forward();
         let item_count = self.items.len();
         let pane_id = self.id;
-        let chrome_visible = self.tab_bar_hovered || self.chrome_menu.is_some();
         let tab_rename = self
             .tab_rename
             .as_ref()
@@ -5402,12 +5399,6 @@ impl gpui::Render for Pane {
                     .id(("pane-tab-bar", pane_id as usize))
                     .debug_selector(|| "pane-tab-bar".into())
                     .on_drag_move::<TabDrag>(cx.listener(Self::tab_bar_drag_hover))
-                    .on_hover(cx.listener(|pane, hovered: &bool, _, cx| {
-                        if pane.tab_bar_hovered != *hovered {
-                            pane.tab_bar_hovered = *hovered;
-                            cx.notify();
-                        }
-                    }))
                     .h(theme.metrics.tab_height)
                     .flex_none()
                     .flex()
@@ -5728,9 +5719,9 @@ impl gpui::Render for Pane {
                                     ),
                             ),
                     )
-                    .children(chrome_visible.then(|| {
+                    .child({
                         div()
-                            .debug_selector(|| "pane-hover-actions".into())
+                            .debug_selector(|| "pane-actions".into())
                             .h_full()
                             .flex_none()
                             .flex()
@@ -5739,7 +5730,7 @@ impl gpui::Render for Pane {
                             .px_1()
                             .border_l_1()
                             .border_color(colors.subtle_border)
-                            .bg(colors.toolbar)
+                            .bg(colors.background)
                             .child(
                                 div()
                                     .relative()
@@ -5866,7 +5857,7 @@ impl gpui::Render for Pane {
                                         })),
                                     )
                             })
-                    }))
+                    })
             }))
             .children(pending_close.map(|item| {
                 let item_id = item.id;
@@ -40064,7 +40055,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tab_and_pane_actions_only_mount_on_hover(cx: &mut TestAppContext) {
+    fn tab_close_overlays_on_hover_while_pane_actions_stay_mounted(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -40072,7 +40063,9 @@ mod tests {
         assert!(cx.debug_bounds("pane-close").is_none());
         assert!(cx.debug_bounds("pane-tab-bar").is_some());
         assert!(cx.debug_bounds("tab-close-1").is_none());
-        assert!(cx.debug_bounds("pane-hover-actions").is_none());
+        assert!(cx.debug_bounds("pane-actions").is_some());
+        assert!(cx.debug_bounds("pane-new-action").is_some());
+        assert!(cx.debug_bounds("pane-split-action").is_some());
 
         let tab = cx.debug_bounds("tab-1").expect("first tab");
         let resting_tab_width = tab.size.width;
@@ -40084,9 +40077,6 @@ mod tests {
             resting_tab_width,
             "close overlay must not resize its tab"
         );
-        assert!(cx.debug_bounds("pane-hover-actions").is_some());
-        assert!(cx.debug_bounds("pane-new-action").is_some());
-        assert!(cx.debug_bounds("pane-split-action").is_some());
 
         let tab_bar = cx.debug_bounds("pane-tab-bar").expect("tab bar");
         cx.simulate_mouse_move(
@@ -40096,7 +40086,7 @@ mod tests {
         );
         cx.run_until_parked();
         assert!(cx.debug_bounds("tab-close-1").is_none());
-        assert!(cx.debug_bounds("pane-hover-actions").is_none());
+        assert!(cx.debug_bounds("pane-actions").is_some());
 
         let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
         cx.update(|window, cx| focus.dispatch_action(&CloseActiveItem, window, cx));
