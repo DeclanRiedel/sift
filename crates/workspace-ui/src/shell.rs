@@ -45371,6 +45371,8 @@ mod tests {
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("footer-begin-transaction").is_none());
+        assert!(cx.debug_bounds("footer-commit-transaction").is_none());
+        assert!(cx.debug_bounds("footer-rollback-transaction").is_none());
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.run_command(CommandId::BeginTransaction, window, cx)
         });
@@ -45402,6 +45404,8 @@ mod tests {
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("footer-begin-transaction").is_none());
+        assert!(cx.debug_bounds("footer-commit-transaction").is_none());
+        assert!(cx.debug_bounds("footer-rollback-transaction").is_none());
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.run_command(CommandId::BeginTransaction, window, cx)
         });
