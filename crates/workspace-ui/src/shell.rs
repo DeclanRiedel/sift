@@ -28626,62 +28626,6 @@ impl WorkspaceShell {
                                         .gap_1()
                                         .child(
                                             IconButton::new(
-                                                "repository-remotes",
-                                                IconName::Server,
-                                                "Remotes and credentials",
-                                            )
-                                            .square(px(24.))
-                                            .icon_size(12.)
-                                            .tooltip("Remotes, credentials, fetch and push")
-                                            .disabled(self.repository.status().is_none())
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.open_repository_remotes(window, cx)
-                                            })),
-                                        )
-                                        .child(
-                                            IconButton::new(
-                                                "repository-hosting",
-                                                IconName::Github,
-                                                "Repository hosting",
-                                            )
-                                            .square(px(24.))
-                                            .icon_size(12.)
-                                            .tooltip("Hosting links, pull requests and checks")
-                                            .disabled(self.repository.status().is_none())
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.open_repository_hosting(window, cx)
-                                            })),
-                                        )
-                                        .child(
-                                            IconButton::new(
-                                                "repository-branches",
-                                                IconName::VersionControl,
-                                                "Branches",
-                                            )
-                                            .square(px(24.))
-                                            .icon_size(12.)
-                                            .tooltip("Search and manage branches")
-                                            .disabled(self.repository.status().is_none())
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.open_repository_branches(window, cx)
-                                            })),
-                                        )
-                                        .child(
-                                            IconButton::new(
-                                                "repository-history",
-                                                IconName::View,
-                                                "History",
-                                            )
-                                            .square(px(24.))
-                                            .icon_size(12.)
-                                            .tooltip("Repository history")
-                                            .disabled(self.repository.status().is_none())
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.open_repository_history(window, cx)
-                                            })),
-                                        )
-                                        .child(
-                                            IconButton::new(
                                                 "refresh-repository-status",
                                                 IconName::Refresh,
                                                 "Refresh source control",
@@ -28704,8 +28648,8 @@ impl WorkspaceShell {
                                             .icon_size(12.)
                                             .tooltip("More source-control actions")
                                             .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.open_command_palette(
-                                                    &OpenCommandPalette,
+                                                shell.open_command_palette_with_query(
+                                                    "repository ",
                                                     window,
                                                     cx,
                                                 )
@@ -28780,140 +28724,6 @@ impl WorkspaceShell {
                                         )
                                         .child(
                                             IconButton::new(
-                                                "create-workspace-folder",
-                                                IconName::Folder,
-                                                "New folder",
-                                            )
-                                            .square(px(22.))
-                                            .icon_size(11.)
-                                            .tooltip("New folder")
-                                            .disabled(self.workspace_files.mutation_pending())
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.open_workspace_create(true, window, cx)
-                                            })),
-                                        )
-                                        .child(
-                                            IconButton::new(
-                                                "move-workspace-node",
-                                                IconName::Edit,
-                                                "Move or rename selected",
-                                            )
-                                            .square(px(22.))
-                                            .icon_size(11.)
-                                            .tooltip("Move or rename selected")
-                                            .disabled(
-                                                self.workspace_files.selected_node().is_none()
-                                                    || self
-                                                        .workspace_files
-                                                        .mutation_pending(),
-                                            )
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                let path = shell
-                                                    .workspace_files
-                                                    .selected_node()
-                                                    .map(|node| node.path.0.clone())
-                                                    .unwrap_or_default();
-                                                shell.workspace_path_input.update(
-                                                    cx,
-                                                    |input, cx| input.set_text(path, cx),
-                                                );
-                                                shell.modal = Some(Modal::WorkspaceMove);
-                                                shell
-                                                    .workspace_path_input
-                                                    .read(cx)
-                                                    .focus_handle(cx)
-                                                    .focus(window, cx);
-                                                cx.notify();
-                                            })),
-                                        )
-                                        .child(
-                                            IconButton::new(
-                                                "delete-workspace-node",
-                                                IconName::Close,
-                                                "Delete selected",
-                                            )
-                                            .square(px(22.))
-                                            .icon_size(11.)
-                                            .tooltip("Delete selected")
-                                            .disabled(
-                                                self.workspace_files.selected_node().is_none()
-                                                    || self.workspace_files.mutation_pending(),
-                                            )
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.modal =
-                                                    Some(Modal::ConfirmWorkspaceDelete);
-                                                cx.notify();
-                                            })),
-                                        )
-                                        .child(
-                                            IconButton::new(
-                                                "create-workspace-checkpoint",
-                                                IconName::VersionControl,
-                                                "Create named checkpoint",
-                                            )
-                                            .square(px(22.))
-                                            .icon_size(11.)
-                                            .tooltip("Create named checkpoint")
-                                            .disabled(self.workspace_files.mutation_pending())
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.workspace_path_input.update(
-                                                    cx,
-                                                    |input, cx| input.set_text("", cx),
-                                                );
-                                                shell.modal = Some(Modal::WorkspaceCheckpoint);
-                                                shell
-                                                    .workspace_path_input
-                                                    .read(cx)
-                                                    .focus_handle(cx)
-                                                    .focus(window, cx);
-                                                cx.notify();
-                                            })),
-                                        )
-                                        .child(
-                                            IconButton::new(
-                                                "workspace-history",
-                                                IconName::View,
-                                                "Workspace checkpoint history",
-                                            )
-                                            .square(px(22.))
-                                            .icon_size(11.)
-                                            .tooltip("Workspace checkpoint history")
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.modal = Some(Modal::WorkspaceHistory);
-                                                cx.notify();
-                                            })),
-                                        )
-                                        .when(projection_dirty, |actions| {
-                                            actions.child(
-                                                IconButton::new(
-                                                    "reconcile-workspace-projection",
-                                                    IconName::Warning,
-                                                    "Reconcile workspace projection",
-                                                )
-                                                .square(px(22.))
-                                                .icon_size(11.)
-                                                .tooltip("Reconcile workspace projection")
-                                                .on_click(cx.listener(|shell, _, _, cx| {
-                                                    shell.open_workspace_reconcile(cx)
-                                                })),
-                                            )
-                                        })
-                                        .child(
-                                            IconButton::new(
-                                                "save-all-workspace-documents",
-                                                IconName::Check,
-                                                "Save all workspace documents",
-                                            )
-                                            .square(px(22.))
-                                            .icon_size(11.)
-                                            .tooltip("Save all workspace documents")
-                                            .disabled(editor_dirty == 0)
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.save_all_workspace_documents(cx)
-                                            })),
-                                        )
-                                        .child(
-                                            IconButton::new(
                                                 "refresh-workspace-files",
                                                 IconName::Refresh,
                                                 "Refresh workspace files",
@@ -28924,6 +28734,23 @@ impl WorkspaceShell {
                                             .disabled(self.workspace_files.loading())
                                             .on_click(cx.listener(|shell, _, _, cx| {
                                                 shell.request_workspace_files(cx)
+                                            })),
+                                        )
+                                        .child(
+                                            IconButton::new(
+                                                "workspace-files-overflow",
+                                                IconName::Menu,
+                                                "More workspace file actions",
+                                            )
+                                            .square(px(22.))
+                                            .icon_size(11.)
+                                            .tooltip("More workspace file actions")
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_command_palette_with_query(
+                                                    "workspace ",
+                                                    window,
+                                                    cx,
+                                                )
                                             })),
                                         ),
                                 ),
