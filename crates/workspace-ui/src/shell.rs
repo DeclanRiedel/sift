@@ -1351,6 +1351,7 @@ pub enum Modal {
     PlanCaptures,
     ConfirmTransactionDisconnect,
     ConfirmProductionExecution,
+    ConfirmOutcomeUnknownRerun(u64, String),
     ServerPicker,
     ServerConnection,
     InstanceSetup,
@@ -1851,6 +1852,10 @@ pub enum PaneEvent {
     ResultSelectionChanged,
     OpenResultRowJsonRequested {
         item_id: u64,
+    },
+    ReviewOutcomeUnknownRequested {
+        item_id: u64,
+        sql: String,
     },
     CapturePlanRequested {
         item_id: u64,
@@ -3537,6 +3542,12 @@ impl Pane {
             ResultsEvent::RowJsonViewerChanged => cx.emit(PaneEvent::ResultSelectionChanged),
             ResultsEvent::OpenSelectedRowJsonRequested => {
                 cx.emit(PaneEvent::OpenResultRowJsonRequested { item_id })
+            }
+            ResultsEvent::ReviewOutcomeUnknownRequested => {
+                cx.emit(PaneEvent::ReviewOutcomeUnknownRequested {
+                    item_id,
+                    sql: self.targeted_query_sql(item_id, cx),
+                })
             }
             ResultsEvent::ExplainRequested { analyze } => {
                 let sql = self.targeted_query_sql(item_id, cx);
@@ -11676,6 +11687,13 @@ impl WorkspaceShell {
         self.send_execution_now(pending.item_id, pending.sql, pending.params, None, cx);
     }
 
+    fn confirm_outcome_unknown_rerun(&mut self, cx: &mut Context<Self>) {
+        let Some(Modal::ConfirmOutcomeUnknownRerun(item_id, sql)) = self.modal.take() else {
+            return;
+        };
+        self.execute_database_item(item_id, sql, cx);
+    }
+
     fn send_execution_now(
         &mut self,
         item_id: u64,
@@ -19637,6 +19655,71 @@ impl WorkspaceShell {
 
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
+    pub fn apply_schema_snapshot_benchmark(
+        &mut self,
+        snapshot: sift_protocol::SchemaSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let profile_id = 1;
+        self.lifecycle.tenants = vec![crate::TenantNavEntry {
+            id: sift_api_types::TenantId(1),
+            name: "Benchmark".into(),
+            rooms: Vec::new(),
+            connections: vec![ConnectionNavEntry {
+                id: profile_id,
+                tenant_id: 1,
+                name: "Large schema".into(),
+                provider_id: sift_protocol::ProviderId::new("sift/postgres")
+                    .expect("built-in provider id"),
+            }],
+        }];
+        self.connection_status = ConnectionStatus::Connected {
+            profile_id,
+            name: "Large schema".into(),
+        };
+        self.expanded_tenants.insert(1);
+        self.expanded_connections.insert(profile_id);
+        for catalog in &snapshot.trees {
+            self.expanded_catalogs
+                .insert((profile_id, catalog.name.clone()));
+            for schema in &catalog.schemas {
+                self.expanded_schemas.insert((
+                    profile_id,
+                    catalog.name.clone(),
+                    schema.name.clone(),
+                ));
+                for group in ObjectGroupKind::CANONICAL {
+                    self.expanded_object_groups.insert((
+                        profile_id,
+                        catalog.name.clone(),
+                        schema.name.clone(),
+                        group,
+                    ));
+                }
+            }
+        }
+        self.connection_schema = ConnectionSchemaState::Ready {
+            profile_id,
+            snapshot: Box::new(snapshot),
+        };
+        self.active_left_panel = LeftPanel::Connections;
+        self.left_dock.presentation.open = true;
+        self.invalidate_connection_projection();
+        cx.notify();
+    }
+
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
+    pub fn set_schema_filter_benchmark(&mut self, query: &str, cx: &mut Context<Self>) {
+        self.connections_find_open = true;
+        self.connections_find_query = query.to_lowercase();
+        self.connection_nav_selected = 0;
+        self.invalidate_connection_projection();
+        cx.notify();
+    }
+
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
     pub fn seed_query_outline_benchmark(
         &mut self,
         statements: Vec<sift_protocol::SemanticStatement>,
@@ -20541,6 +20624,12 @@ impl WorkspaceShell {
             PaneEvent::ResultSelectionChanged => cx.notify(),
             PaneEvent::OpenResultRowJsonRequested { item_id } => {
                 self.show_result_row_json(*item_id, window, cx)
+            }
+            PaneEvent::ReviewOutcomeUnknownRequested { item_id, sql } => {
+                self.active_pane = index;
+                self.modal = Some(Modal::ConfirmOutcomeUnknownRerun(*item_id, sql.clone()));
+                self.focus_handle.focus(window, cx);
+                cx.notify();
             }
             PaneEvent::CapturePlanRequested { item_id, sql } => {
                 let params = match self.remembered_query_params(sql) {
@@ -34439,6 +34528,49 @@ impl WorkspaceShell {
                             ),
                     )
                     .into_any_element(),
+                Modal::ConfirmOutcomeUnknownRerun(_, _) => div()
+                    .debug_selector(|| "confirm-outcome-unknown-rerun".into())
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(icon(IconName::Warning, colors.danger, 16.))
+                            .child("Previous outcome is unknown"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.muted_text)
+                            .whitespace_normal()
+                            .child("The server may have completed the previous statement before the connection was lost. Check the database or query history first. Running again can duplicate a write."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("cancel-outcome-unknown-rerun", "Do not run")
+                                    .tone(ButtonTone::Neutral)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("confirm-outcome-unknown-rerun", "Run again")
+                                    .tone(ButtonTone::DangerMuted)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.confirm_outcome_unknown_rerun(cx)
+                                    })),
+                            ),
+                    )
+                    .into_any_element(),
                 Modal::ConfirmDeleteConnection(entry) => {
                     let entry = entry.clone();
                     let entry_for_delete = entry.clone();
@@ -36802,6 +36934,7 @@ impl WorkspaceShell {
                     | Modal::DatabaseConnection
                     | Modal::ConfirmTransactionDisconnect
                     | Modal::ConfirmProductionExecution
+                    | Modal::ConfirmOutcomeUnknownRerun(_, _)
                     | Modal::ConfirmDeleteConnection(_)
                     | Modal::ConfirmTerminateProcess(_)
                     | Modal::SemanticRename
@@ -40381,6 +40514,32 @@ mod tests {
         assert!(matches!(
             receiver.try_recv(),
             Ok(ExecutorCommand::Execute { item_id: 9, .. })
+        ));
+    }
+
+    #[gpui::test]
+    fn outcome_unknown_never_reruns_without_second_confirmation(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "development".into(),
+            };
+            shell.modal = Some(Modal::ConfirmOutcomeUnknownRerun(
+                9,
+                "update invoices set reviewed = true".into(),
+            ));
+            cx.notify();
+        });
+        assert!(receiver.try_recv().is_err());
+        workspace.update(cx, |shell, cx| shell.confirm_outcome_unknown_rerun(cx));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::Execute { item_id: 9, sql, .. })
+                if sql == "update invoices set reviewed = true"
         ));
     }
 

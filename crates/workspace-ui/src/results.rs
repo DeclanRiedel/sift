@@ -722,6 +722,7 @@ pub enum ResultsEvent {
     SelectionChanged,
     RowJsonViewerChanged,
     OpenSelectedRowJsonRequested,
+    ReviewOutcomeUnknownRequested,
     /// Explain the editor's targeted statement. Analyze is explicit because it
     /// executes the statement to collect runtime counters.
     ExplainRequested {
@@ -5094,6 +5095,14 @@ impl ResultsView {
                     .disabled(error_count == 0)
                     .on_click(cx.listener(|view, _, _, cx| view.copy_all_errors(cx))),
             )
+            .children(matches!(self.state, ResultState::OutcomeUnknown).then(|| {
+                Button::new("review-outcome-unknown", "Review before re-run")
+                    .debug_selector("review-outcome-unknown")
+                    .tone(ButtonTone::DangerMuted)
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(ResultsEvent::ReviewOutcomeUnknownRequested)
+                    }))
+            }))
             .child(div().flex_1())
             .child(
                 div()
@@ -7239,6 +7248,22 @@ mod tests {
         assert_eq!(
             ResultState::Unavailable("No connection".into()).status_label(),
             "No connection"
+        );
+    }
+
+    #[gpui::test]
+    fn outcome_unknown_requires_explicit_review_before_rerun(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        let window = cx.add_window(|_, _| ResultsHost(view.clone()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        view.update(&mut cx, |view, cx| {
+            view.set_state(ResultState::OutcomeUnknown, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("review-outcome-unknown").is_some());
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.active_tab()),
+            ResultTab::Messages
         );
     }
 }

@@ -18,6 +18,7 @@ const GIT_STATUS_ROWS: usize = 20_000;
 const OUTLINE_STATEMENTS: usize = 2_000;
 const OUTLINE_SYMBOLS: usize = 4_000;
 const CHANGE_LEDGER_ROWS: usize = 1_000;
+const SCHEMA_OBJECTS: usize = 100_000;
 
 fn large_sql() -> String {
     (0..LARGE_SQL_LINES)
@@ -80,6 +81,25 @@ fn repository_status() -> VcsStatus {
         observed_at: chrono::Utc::now(),
         validation: None,
     }
+}
+
+fn large_schema_snapshot() -> sift_protocol::SchemaSnapshot {
+    let mut snapshot = sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
+    snapshot.trees.push(sift_protocol::CatalogTree {
+        name: "warehouse".into(),
+        schemas: vec![sift_protocol::SchemaTree {
+            name: "public".into(),
+            objects: (0..SCHEMA_OBJECTS)
+                .map(|index| {
+                    sift_protocol::ObjectInfo::new(
+                        format!("relation_{index:06}"),
+                        sift_protocol::ObjectKind::Table,
+                    )
+                })
+                .collect(),
+        }],
+    });
+    snapshot
 }
 
 #[gpui::bench(fps = 120)]
@@ -267,6 +287,35 @@ fn command_palette_filter_typing(cx: &mut BenchAppContext) {
 }
 
 #[gpui::bench(fps = 120)]
+fn schema_tree_filter(cx: &mut BenchAppContext) {
+    let snapshot = large_schema_snapshot();
+    let mut window = cx.add_empty_window();
+    let shell = window
+        .replace_root_view(|window, cx| {
+            WorkspaceShell::new(
+                PresentationState::default(),
+                UserSettings::default(),
+                None,
+                None,
+                window,
+                cx,
+            )
+        })
+        .unwrap();
+    window.update(|_, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.apply_schema_snapshot_benchmark(snapshot, cx);
+        });
+    });
+    let queries = ["relation_9", "relation_99", "relation_999", "relation_9999"];
+    let mut index = 0usize;
+    cx.bench_renderer(shell, move |shell, _, cx| {
+        shell.set_schema_filter_benchmark(queries[index % queries.len()], cx);
+        index += 1;
+    });
+}
+
+#[gpui::bench(fps = 120)]
 fn query_outline_first_frame(cx: &mut BenchAppContext) {
     let statements = outline_statements();
     let symbols = outline_symbols();
@@ -448,6 +497,7 @@ gpui::bench_group!(
     command_palette_open,
     command_palette_arrow_navigation,
     command_palette_filter_typing,
+    schema_tree_filter,
     query_outline_first_frame,
     query_outline_navigation,
     change_ledger_first_frame

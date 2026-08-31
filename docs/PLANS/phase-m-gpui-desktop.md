@@ -479,6 +479,11 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       saved locally. Query text continues to restore through its room document.
 - [ ] Meet measured typing, first-result, scroll, and memory budgets on large
       fixtures.
+      **Partial:** the GPUI benchmark gate now covers large Vim documents,
+      first-result paint, a retained 10,000-row grid, a 100,000-object schema
+      filter, 20,000 Git status rows, query outlines, change-ledger rendering,
+      and command-switcher interaction. Numerical p50/p95 graduation and
+      platform memory ceilings remain M6 work.
 
 ### M4 — database navigation and editing
 
@@ -515,6 +520,10 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 - [ ] Complete keyboard-only and accessibility audits for all primary flows.
 - [ ] Complete crash/restart/offline/auth-expiry/outcome-unknown recovery
       matrices.
+      **Partial:** outcome-unknown results are never retried automatically and
+      now require a dedicated warning review plus a second explicit action
+      before the original statement can run again. Production mutation
+      confirmation still applies after that recovery confirmation.
 - [ ] Graduate measured performance and memory budgets on representative large
       schemas, documents, results, diagrams, histories, and logs.
 - [ ] Validate dark/light themes, scaling, IME, keyboard layouts, clipboard,
