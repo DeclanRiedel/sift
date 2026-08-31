@@ -7817,6 +7817,7 @@ dependencies = [
  "sha2 0.10.9",
  "sift-api-types",
  "sift-client-sdk",
+ "sift-completion",
  "sift-doc",
  "sift-protocol",
  "sift-ui",

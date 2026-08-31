@@ -694,6 +694,44 @@ enum CommandPaletteItem {
     SavedQuery(sift_api_types::SavedQuery),
 }
 
+#[derive(Clone)]
+struct CommandPaletteMatch {
+    item: CommandPaletteItem,
+    ranges: Vec<(u32, u32)>,
+}
+
+fn fuzzy_palette_match(
+    query: &str,
+    label: &str,
+    aliases: impl IntoIterator<Item = String>,
+) -> Option<(i32, Vec<(u32, u32)>)> {
+    if query.is_empty() {
+        return Some((0, Vec::new()));
+    }
+    let label_lower = label.to_lowercase();
+    let label_match = sift_completion::fuzzy_match(query, &label_lower);
+    let alias_score = aliases
+        .into_iter()
+        .filter_map(|alias| sift_completion::fuzzy_match(query, &alias.to_lowercase()))
+        .map(|matched| matched.score.saturating_sub(8))
+        .max();
+    match (label_match, alias_score) {
+        (Some(label_match), Some(alias_score)) if alias_score > label_match.score => {
+            Some((alias_score, Vec::new()))
+        }
+        (Some(label_match), _) => {
+            let ranges = if label_lower.len() == label.len() {
+                label_match.ranges
+            } else {
+                Vec::new()
+            };
+            Some((label_match.score, ranges))
+        }
+        (None, Some(alias_score)) => Some((alias_score, Vec::new())),
+        (None, None) => None,
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct OutlineProjectionKey {
     query: String,
@@ -23694,7 +23732,7 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    /// Commands matching the palette search text (case-insensitive substring).
+    /// Commands matching the palette search text, ranked by fuzzy relevance.
     fn invalidate_command_projection(&mut self) {
         self.command_projection_revision = self.command_projection_revision.wrapping_add(1);
         self.command_projection_cache.get_mut().take();
@@ -23714,38 +23752,37 @@ impl WorkspaceShell {
                 return commands.clone();
             }
         }
-        let compact_query = query
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect::<String>();
-        let commands: Arc<Vec<CommandSpec>> = Arc::new(
-            self.command_specs(cx)
-                .into_iter()
-                .filter(|command| {
-                    if query == "w" {
-                        return command.id == CommandId::SaveItem;
-                    }
-                    if query.is_empty() {
-                        return true;
-                    }
-                    let compact_language = command
-                        .language
-                        .to_lowercase()
-                        .replace("<leader>", "")
-                        .chars()
-                        .filter(|character| !character.is_whitespace())
-                        .collect::<String>();
-                    command.label.to_lowercase().contains(&query)
-                        || command.id.as_str().contains(&query)
-                        || (!compact_query.is_empty() && compact_language.contains(&compact_query))
-                })
-                .collect(),
-        );
+        let mut ranked = self
+            .command_specs(cx)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(original_index, command)| {
+                if query == "w" {
+                    return (command.id == CommandId::SaveItem).then_some((
+                        original_index,
+                        i32::MAX,
+                        command,
+                    ));
+                }
+                fuzzy_palette_match(
+                    &query,
+                    command.label,
+                    [
+                        command.id.as_str().to_owned(),
+                        command.language.replace("<leader>", ""),
+                    ],
+                )
+                .map(|(score, _)| (original_index, score, command))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        let commands: Arc<Vec<CommandSpec>> =
+            Arc::new(ranked.into_iter().map(|(_, _, command)| command).collect());
         *self.command_projection_cache.borrow_mut() = Some((key, commands.clone()));
         commands
     }
 
-    fn command_palette_items(&self, cx: &App) -> Vec<CommandPaletteItem> {
+    fn command_palette_items(&self, cx: &App) -> Vec<CommandPaletteMatch> {
         let input = self.query_input.read(cx).text();
         let (mode, query) = CommandPaletteMode::parse(input);
         let query = query.trim().to_lowercase();
@@ -23754,56 +23791,118 @@ impl WorkspaceShell {
                 .filtered_commands(cx)
                 .iter()
                 .cloned()
-                .map(CommandPaletteItem::Command)
+                .map(|command| {
+                    let ranges = fuzzy_palette_match(&query, command.label, std::iter::empty())
+                        .map(|(_, ranges)| ranges)
+                        .unwrap_or_default();
+                    CommandPaletteMatch {
+                        item: CommandPaletteItem::Command(command),
+                        ranges,
+                    }
+                })
                 .collect(),
-            CommandPaletteMode::WorkspaceFiles => self
-                .workspace_files
-                .snapshot()
-                .into_iter()
-                .flat_map(|snapshot| snapshot.tree.nodes.iter())
-                .filter(|node| node.kind == sift_protocol::WorkspaceNodeKind::SqlDocument)
-                .filter(|node| query.is_empty() || node.path.0.to_lowercase().contains(&query))
-                .map(|node| CommandPaletteItem::WorkspaceFile(node.id, node.path.0.clone()))
-                .collect(),
+            CommandPaletteMode::WorkspaceFiles => {
+                let mut matches = self
+                    .workspace_files
+                    .snapshot()
+                    .into_iter()
+                    .flat_map(|snapshot| snapshot.tree.nodes.iter())
+                    .filter(|node| node.kind == sift_protocol::WorkspaceNodeKind::SqlDocument)
+                    .enumerate()
+                    .filter_map(|(original_index, node)| {
+                        fuzzy_palette_match(&query, &node.path.0, std::iter::empty()).map(
+                            |(score, ranges)| {
+                                (
+                                    original_index,
+                                    score,
+                                    CommandPaletteMatch {
+                                        item: CommandPaletteItem::WorkspaceFile(
+                                            node.id,
+                                            node.path.0.clone(),
+                                        ),
+                                        ranges,
+                                    },
+                                )
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                matches
+                    .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+                matches.into_iter().map(|(_, _, item)| item).collect()
+            }
             CommandPaletteMode::Schema => self
                 .schema_palette_hits()
                 .into_iter()
-                .map(CommandPaletteItem::Schema)
-                .collect(),
-            CommandPaletteMode::OpenTabs => self
-                .panes
-                .iter()
-                .enumerate()
-                .flat_map(|(pane_index, pane)| {
-                    pane.read(cx)
-                        .items
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, item)| {
-                            query.is_empty() || item.title.to_lowercase().contains(&query)
-                        })
-                        .map(move |(item_index, item)| CommandPaletteItem::OpenTab {
-                            pane_index,
-                            item_index,
-                            title: item.title.clone(),
-                        })
-                        .collect::<Vec<_>>()
+                .map(|hit| CommandPaletteMatch {
+                    ranges: hit.match_ranges.clone(),
+                    item: CommandPaletteItem::Schema(hit),
                 })
                 .collect(),
-            CommandPaletteMode::SavedQueries => self
-                .saved_queries
-                .iter()
-                .filter(|saved| {
-                    query.is_empty()
-                        || saved.name.to_lowercase().contains(&query)
-                        || saved
-                            .tags
+            CommandPaletteMode::OpenTabs => {
+                let mut matches = self
+                    .panes
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(pane_index, pane)| {
+                        pane.read(cx)
+                            .items
                             .iter()
-                            .any(|tag| tag.to_lowercase().contains(&query))
-                })
-                .cloned()
-                .map(CommandPaletteItem::SavedQuery)
-                .collect(),
+                            .enumerate()
+                            .map(move |(item_index, item)| {
+                                (pane_index, item_index, item.title.clone())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .enumerate()
+                    .filter_map(|(original_index, (pane_index, item_index, title))| {
+                        fuzzy_palette_match(&query, &title, std::iter::empty()).map(
+                            |(score, ranges)| {
+                                (
+                                    original_index,
+                                    score,
+                                    CommandPaletteMatch {
+                                        item: CommandPaletteItem::OpenTab {
+                                            pane_index,
+                                            item_index,
+                                            title,
+                                        },
+                                        ranges,
+                                    },
+                                )
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                matches
+                    .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+                matches.into_iter().map(|(_, _, item)| item).collect()
+            }
+            CommandPaletteMode::SavedQueries => {
+                let mut matches = self
+                    .saved_queries
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .filter_map(|(original_index, saved)| {
+                        fuzzy_palette_match(&query, &saved.name, saved.tags.clone()).map(
+                            |(score, ranges)| {
+                                (
+                                    original_index,
+                                    score,
+                                    CommandPaletteMatch {
+                                        item: CommandPaletteItem::SavedQuery(saved),
+                                        ranges,
+                                    },
+                                )
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                matches
+                    .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+                matches.into_iter().map(|(_, _, item)| item).collect()
+            }
         }
     }
 
@@ -23813,7 +23912,11 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(item) = self.command_palette_items(cx).get(index).cloned() else {
+        let Some(item) = self
+            .command_palette_items(cx)
+            .get(index)
+            .map(|matched| matched.item.clone())
+        else {
             return;
         };
         match item {
@@ -30737,9 +30840,6 @@ impl WorkspaceShell {
                                     "command-list",
                                     item_count,
                                     cx.processor(move |shell, range: Range<usize>, _, cx| {
-                                        let input = shell.query_input.read(cx).text();
-                                        let (_, query) = CommandPaletteMode::parse(input);
-                                        let query = query.to_lowercase();
                                         let items = shell.command_palette_items(cx);
                                         let selected_idx = shell
                                             .palette_selected
@@ -30751,8 +30851,9 @@ impl WorkspaceShell {
                                                     .cloned()
                                                     .map(|item| (idx, item))
                                             })
-                                            .map(|(idx, item)| {
-                                                let (label, right, enabled, key_binding) = match item {
+                                            .map(|(idx, matched)| {
+                                                let ranges = matched.ranges;
+                                                let (label, right, enabled, key_binding) = match matched.item {
                                                     CommandPaletteItem::Command(command) => {
                                                         let right = command.disabled_reason.clone().unwrap_or_else(|| {
                                                             if command.language.is_empty() {
@@ -30797,9 +30898,9 @@ impl WorkspaceShell {
                                                     .when(!enabled, |row| {
                                                         row.text_color(colors.muted_text)
                                                     })
-                                                    .child(highlight_match(
+                                                    .child(highlight_fuzzy_ranges(
                                                         label,
-                                                        &query,
+                                                        &ranges,
                                                         colors.accent,
                                                     ))
                                                     .when_some(
@@ -38041,11 +38142,10 @@ impl gpui::Render for WorkspaceShell {
     }
 }
 
-/// Render `label` with the case-insensitive `query` substring emphasized in the
-/// accent color, like a fuzzy-finder match highlight.
-fn highlight_match(
+/// Render fuzzy-match byte ranges in the accent color.
+fn highlight_fuzzy_ranges(
     label: impl Into<SharedString>,
-    query: &str,
+    ranges: &[(u32, u32)],
     accent: gpui::Hsla,
 ) -> impl IntoElement {
     let label = label.into();
@@ -38055,27 +38155,44 @@ fn highlight_match(
         .min_w_0()
         .overflow_hidden()
         .whitespace_nowrap();
-    if query.is_empty() {
+    if ranges.is_empty() {
         return base.child(label);
     }
-    let lowercase = label.to_lowercase();
-    if lowercase.len() != label.len() {
+    let mut previous_end = 0;
+    let valid = ranges.iter().all(|(start, end)| {
+        let start = *start as usize;
+        let end = *end as usize;
+        let valid = previous_end <= start
+            && start <= end
+            && end <= label.len()
+            && label.is_char_boundary(start)
+            && label.is_char_boundary(end);
+        previous_end = end;
+        valid
+    });
+    if !valid {
         return base.child(label);
     }
-    match lowercase.find(query) {
-        Some(start) => {
-            let end = start + query.len();
-            base.child(SharedString::from(&label[..start]))
-                .child(
-                    div()
-                        .text_color(accent)
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(SharedString::from(&label[start..end])),
-                )
-                .child(SharedString::from(&label[end..]))
+    let mut output = base;
+    let mut cursor = 0;
+    for &(start, end) in ranges {
+        let start = start as usize;
+        let end = end as usize;
+        if cursor < start {
+            output = output.child(SharedString::from(&label[cursor..start]));
         }
-        None => base.child(label),
+        output = output.child(
+            div()
+                .text_color(accent)
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(SharedString::from(&label[start..end])),
+        );
+        cursor = end;
     }
+    if cursor < label.len() {
+        output = output.child(SharedString::from(&label[cursor..]));
+    }
+    output
 }
 
 #[cfg(test)]
@@ -38109,6 +38226,19 @@ mod tests {
             CommandPaletteMode::parse("? audit"),
             (CommandPaletteMode::SavedQueries, "audit")
         );
+    }
+
+    #[test]
+    fn command_palette_fuzzy_match_scores_and_highlights_subsequences() {
+        let (score, ranges) =
+            fuzzy_palette_match("rms", "reports/monthly.sql", std::iter::empty()).unwrap();
+        assert!(score > 0);
+        assert_eq!(ranges.len(), 3);
+        assert!(fuzzy_palette_match("zxy", "reports/monthly.sql", std::iter::empty()).is_none());
+
+        let (_, alias_ranges) =
+            fuzzy_palette_match("fin", "Quarterly report", ["finance".into()]).unwrap();
+        assert!(alias_ranges.is_empty());
     }
 
     fn automation_configuration(
