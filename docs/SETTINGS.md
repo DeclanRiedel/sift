@@ -93,5 +93,11 @@ Available color names are `background`, `surface`, `panel`, `toolbar`,
 `success_muted`, `editor_active_line`, `grid_stripe`, `syntax_keyword`,
 `syntax_string`, `syntax_number`, and `syntax_comment`.
 
+Open **Settings → Manage themes…** to choose a built-in theme, edit the current
+theme, or import/export a TOML file. Editing opens the theme in a normal Sift
+tab; saving validates the document and applies it immediately when it is the
+selected theme. Built-ins are copied to a new custom file before editing, and
+imports receive a unique file name rather than replacing an existing theme.
+
 Ephemeral window and workspace layout remains in `presentation.json`. That file
 is an internal recovery snapshot, not a supported settings interface.

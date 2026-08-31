@@ -1263,6 +1263,7 @@ pub enum Modal {
     ServerConnection,
     InstanceSetup,
     Settings,
+    Themes,
     Keymaps,
     Account,
     ConnectionUrl,
@@ -7062,6 +7063,9 @@ pub struct WorkspaceShell {
     settings: UserSettings,
     settings_store: Option<Arc<SettingsStore>>,
     settings_item: Option<u64>,
+    theme_items: HashMap<u64, String>,
+    custom_themes: Vec<String>,
+    theme_error: Option<String>,
     keymaps: KeymapSettings,
     keymap_inputs: HashMap<CommandId, Entity<TextInput>>,
     keymaps_item: Option<u64>,
@@ -7933,6 +7937,9 @@ impl WorkspaceShell {
             settings,
             settings_store,
             settings_item: None,
+            theme_items: HashMap::new(),
+            custom_themes: Vec::new(),
+            theme_error: None,
             keymaps,
             keymap_inputs,
             keymaps_item: None,
@@ -19226,34 +19233,206 @@ impl WorkspaceShell {
     /// palette through `ActiveTheme`, so the refresh is automatic.
     fn toggle_theme(&mut self, cx: &mut Context<Self>) {
         let theme_name = if self.dark_theme { "light" } else { "ayu-dark" };
+        if let Err(error) = self.apply_theme_name(theme_name, cx) {
+            self.show_toast(error, cx);
+        }
+    }
+
+    fn apply_theme_name(&mut self, theme_name: &str, cx: &mut Context<Self>) -> Result<(), String> {
         let (settings, theme) = if let Some(store) = &self.settings_store {
-            let theme = match store.load_theme(theme_name) {
-                Ok(theme) => theme,
-                Err(error) => {
-                    self.show_toast(error, cx);
-                    return;
-                }
-            };
-            let settings = match store.save_theme(theme_name) {
-                Ok(settings) => settings,
-                Err(error) => {
-                    self.show_toast(error, cx);
-                    return;
-                }
-            };
+            let theme = store.load_theme(theme_name)?;
+            let settings = store.save_theme(theme_name)?;
             (settings, theme)
         } else {
             let mut settings = self.settings.clone();
             settings.appearance.theme = theme_name.into();
             (
                 settings,
-                Theme::builtin(theme_name).expect("built-in theme"),
+                Theme::builtin(theme_name)
+                    .ok_or_else(|| "custom themes require a settings store".to_string())?,
             )
         };
         self.settings = settings;
         self.dark_theme = theme.appearance == ThemeAppearance::Dark;
         sift_ui::set_theme(theme, cx);
         cx.notify();
+        Ok(())
+    }
+
+    fn open_themes_modal(&mut self, cx: &mut Context<Self>) {
+        match self
+            .settings_store
+            .as_ref()
+            .map(|store| store.list_custom_themes())
+        {
+            Some(Ok(themes)) => {
+                self.custom_themes = themes;
+                self.theme_error = None;
+            }
+            Some(Err(error)) => self.theme_error = Some(error),
+            None => self.theme_error = Some("Themes are unavailable in this session".into()),
+        }
+        self.modal = Some(Modal::Themes);
+        cx.notify();
+    }
+
+    fn edit_current_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.settings_store.clone() else {
+            self.theme_error = Some("Themes are unavailable in this session".into());
+            cx.notify();
+            return;
+        };
+        let current = self.settings.appearance.theme.clone();
+        let theme_id = match store.make_theme_editable(&current) {
+            Ok(theme_id) => theme_id,
+            Err(error) => {
+                self.theme_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        if theme_id != current {
+            if let Err(error) = self.apply_theme_name(&theme_id, cx) {
+                self.theme_error = Some(error);
+                cx.notify();
+                return;
+            }
+        }
+        if !self.custom_themes.contains(&theme_id) {
+            self.custom_themes.push(theme_id.clone());
+            self.custom_themes.sort();
+        }
+        self.open_theme_file(&theme_id, window, cx);
+    }
+
+    fn open_theme_file(&mut self, theme_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.settings_store.clone() else {
+            self.show_toast("Themes are unavailable in this session".into(), cx);
+            return;
+        };
+        let source = match store.read_theme_text(theme_id) {
+            Ok(source) => source,
+            Err(error) => {
+                self.show_toast(error, cx);
+                return;
+            }
+        };
+        self.modal = None;
+        let title = format!("{theme_id}.toml");
+        if self.focus_open_item(ItemKind::Configuration, &title, window, cx) {
+            return;
+        }
+        let item_id = self.next_id;
+        self.next_id += 1;
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
+                .with_language(EditorLanguage::Toml)
+                .with_keymap(if self.vim_mode_default() {
+                    EditorKeymap::Vim
+                } else {
+                    EditorKeymap::Standard
+                })
+        });
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_configuration(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Configuration,
+                        title,
+                        dirty: false,
+                        source: None,
+                        last_result: None,
+                    },
+                    editor,
+                    cx,
+                )
+            });
+        }
+        self.theme_items.insert(item_id, theme_id.to_owned());
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
+    fn prompt_import_theme(&mut self, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import Sift theme".into()),
+        });
+        cx.spawn(async move |shell, cx| {
+            let Ok(Ok(Some(paths))) = prompt.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = shell.update(cx, |shell, cx| {
+                let result = shell
+                    .settings_store
+                    .clone()
+                    .ok_or_else(|| "Themes are unavailable in this session".to_string())
+                    .and_then(|store| store.import_theme_file(&path))
+                    .and_then(|theme_id| {
+                        shell.apply_theme_name(&theme_id, cx)?;
+                        Ok(theme_id)
+                    });
+                match result {
+                    Ok(theme_id) => {
+                        if !shell.custom_themes.contains(&theme_id) {
+                            shell.custom_themes.push(theme_id.clone());
+                            shell.custom_themes.sort();
+                        }
+                        shell.theme_error = None;
+                        shell.show_toast(format!("Imported and selected {theme_id}"), cx);
+                    }
+                    Err(error) => shell.theme_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn prompt_export_theme(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.settings_store.clone() else {
+            self.theme_error = Some("Themes are unavailable in this session".into());
+            cx.notify();
+            return;
+        };
+        if let Err(error) = std::fs::create_dir_all(store.themes_dir()) {
+            self.theme_error = Some(format!("creating themes directory failed: {error}"));
+            cx.notify();
+            return;
+        }
+        let theme_id = self.settings.appearance.theme.clone();
+        let suggested = format!("{theme_id}.toml");
+        let prompt = cx.prompt_for_new_path(&store.themes_dir(), Some(&suggested));
+        cx.spawn(async move |shell, cx| {
+            let result = prompt.await;
+            let _ = shell.update(cx, |shell, cx| match result {
+                Ok(Ok(Some(destination))) => {
+                    match store.export_theme_file(&theme_id, &destination) {
+                        Ok(()) => {
+                            shell.theme_error = None;
+                            shell.show_toast(
+                                format!("Exported theme to {}", destination.display()),
+                                cx,
+                            );
+                        }
+                        Err(error) => shell.theme_error = Some(error),
+                    }
+                    cx.notify();
+                }
+                Ok(Err(error)) => {
+                    shell.theme_error = Some(format!("opening export folder: {error}"));
+                    cx.notify();
+                }
+                Ok(Ok(None)) | Err(_) => {}
+            });
+        })
+        .detach();
     }
 
     fn toggle_vim_mode_default(&mut self, cx: &mut Context<Self>) {
@@ -20830,6 +21009,7 @@ impl WorkspaceShell {
         }
         if let Some(item_id) = removed_item_id {
             self.held_result_pages.remove(&item_id);
+            self.theme_items.remove(&item_id);
         }
         if let (Some(sender), Some(item_id)) = (&self.executor_sender, removed_item_id) {
             self.semantic_analyze_generation.remove(&item_id);
@@ -20931,6 +21111,29 @@ impl WorkspaceShell {
                 .and_then(|item| pane.editor(item.id).map(|editor| (item.id, editor)))
         });
         if let Some((item_id, editor)) = active_configuration {
+            if let Some(theme_id) = self.theme_items.get(&item_id).cloned() {
+                let Some(store) = self.settings_store.clone() else {
+                    self.show_toast("Themes are unavailable in this session".into(), cx);
+                    return;
+                };
+                let source = editor.read(cx).document().text().to_owned();
+                match store.save_theme_text(&theme_id, &source) {
+                    Ok(theme) => {
+                        if self.settings.appearance.theme == theme_id {
+                            self.dark_theme = theme.appearance == ThemeAppearance::Dark;
+                            sift_ui::set_theme(theme, cx);
+                        }
+                        if let Some(pane) = self.panes.get(self.active_pane) {
+                            pane.update(cx, |pane, cx| pane.mark_clean(item_id, cx));
+                        }
+                        self.show_toast(format!("Saved {theme_id}.toml"), cx);
+                    }
+                    Err(error) => self.show_toast(error, cx),
+                }
+                self.focus_active_pane(window, cx);
+                cx.notify();
+                return;
+            }
             if self.keymaps_item == Some(item_id) {
                 let Some(store) = self.settings_store.clone() else {
                     self.show_toast("keymaps.json is unavailable in this session".into(), cx);
@@ -30232,6 +30435,7 @@ impl WorkspaceShell {
             let server_picker = matches!(modal, Modal::ServerPicker);
             let account = matches!(modal, Modal::Account);
             let settings = matches!(modal, Modal::Settings);
+            let themes = matches!(modal, Modal::Themes);
             let keymaps = matches!(modal, Modal::Keymaps);
             let app_bar_modal = matches!(
                 modal,
@@ -30259,6 +30463,7 @@ impl WorkspaceShell {
             let card_width = if data_results {
                 0.0
             } else if settings
+                || themes
                 || keymaps
                 || command_palette
                 || saved_query_switcher
@@ -32958,6 +33163,42 @@ impl WorkspaceShell {
                                         .flex()
                                         .flex_col()
                                         .gap_1()
+                                        .child("Themes")
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child(format!(
+                                                    "Current: {}",
+                                                    self.settings.appearance.theme
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    Button::new("manage-themes", "Manage themes…")
+                                        .tone(ButtonTone::Neutral)
+                                        .debug_selector("manage-themes")
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.open_themes_modal(cx)
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .pt_3()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
                                         .child("Advanced settings")
                                         .child(
                                             div()
@@ -32982,6 +33223,184 @@ impl WorkspaceShell {
                                         .debug_selector("open-settings-file")
                                         .on_click(cx.listener(|shell, _, window, cx| {
                                             shell.open_user_settings(window, cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Modal::Themes => {
+                    let current = self.settings.appearance.theme.clone();
+                    let themes_path = self
+                        .settings_store
+                        .as_ref()
+                        .map(|store| store.themes_dir().display().to_string())
+                        .unwrap_or_else(|| "themes directory unavailable".into());
+                    let builtin_button = |id: &'static str,
+                                          label: &'static str,
+                                          theme_id: &'static str,
+                                          cx: &mut Context<Self>| {
+                        Button::new(id, label)
+                            .tone(if current == theme_id {
+                                ButtonTone::Accent
+                            } else {
+                                ButtonTone::Neutral
+                            })
+                            .debug_selector(id)
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                match shell.apply_theme_name(theme_id, cx) {
+                                    Ok(()) => shell.theme_error = None,
+                                    Err(error) => shell.theme_error = Some(error),
+                                }
+                                cx.notify();
+                            }))
+                    };
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Themes"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("Choose a base, edit TOML in a tab, or move themes between Sift installations."),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(builtin_button(
+                                    "theme-ayu-dark",
+                                    "Ayu Dark",
+                                    "ayu-dark",
+                                    cx,
+                                ))
+                                .child(builtin_button(
+                                    "theme-soft-light",
+                                    "Soft Light",
+                                    "light",
+                                    cx,
+                                )),
+                        )
+                        .children((!self.custom_themes.is_empty()).then(|| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(SectionLabel::new("Custom themes"))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .children(self.custom_themes.iter().cloned().enumerate().map(
+                                            |(index, theme_id)| {
+                                                let selected = current == theme_id;
+                                                let selected_id = theme_id.clone();
+                                                Button::new(
+                                                    ("custom-theme", index),
+                                                    theme_id.clone(),
+                                                )
+                                                .tone(if selected {
+                                                    ButtonTone::Accent
+                                                } else {
+                                                    ButtonTone::Neutral
+                                                })
+                                                .on_click(cx.listener(
+                                                    move |shell, _, _, cx| {
+                                                        match shell.apply_theme_name(
+                                                            &selected_id,
+                                                            cx,
+                                                        ) {
+                                                            Ok(()) => shell.theme_error = None,
+                                                            Err(error) => {
+                                                                shell.theme_error = Some(error)
+                                                            }
+                                                        }
+                                                        cx.notify();
+                                                    },
+                                                ))
+                                            },
+                                        )),
+                                )
+                        }))
+                        .child(
+                            div()
+                                .p_3()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.subtle_border)
+                                .bg(colors.surface)
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("SELECTED THEME"),
+                                )
+                                .child(
+                                    div()
+                                        .font_family("monospace")
+                                        .child(current.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(colors.disabled_text)
+                                        .child(themes_path),
+                                ),
+                        )
+                        .children(
+                            self.theme_error
+                                .clone()
+                                .map(|error| ErrorBanner::new(error).into_any_element()),
+                        )
+                        .child(
+                            div()
+                                .pt_2()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    Button::new("edit-current-theme", "Edit in tab")
+                                        .tone(ButtonTone::Accent)
+                                        .debug_selector("edit-current-theme")
+                                        .disabled(self.settings_store.is_none())
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.edit_current_theme(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("import-theme", "Import TOML…")
+                                        .tone(ButtonTone::Neutral)
+                                        .debug_selector("import-theme")
+                                        .disabled(self.settings_store.is_none())
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.prompt_import_theme(cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("export-theme", "Export TOML…")
+                                        .tone(ButtonTone::Neutral)
+                                        .debug_selector("export-theme")
+                                        .disabled(self.settings_store.is_none())
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.prompt_export_theme(cx)
                                         })),
                                 ),
                         )
@@ -36593,6 +37012,7 @@ impl WorkspaceShell {
                 modal,
                 Modal::ServerPicker
                     | Modal::Settings
+                    | Modal::Themes
                     | Modal::Keymaps
                     | Modal::Account
                     | Modal::CommandPalette
@@ -40838,6 +41258,95 @@ mod tests {
             ThemeAppearance::Dark
         );
         assert_eq!(settings_store.load().unwrap().appearance.theme, "ayu-dark");
+    }
+
+    #[gpui::test]
+    fn theme_manager_opens_an_editable_live_theme_tab(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_store = Arc::new(SettingsStore::new(directory.path().join("settings.toml")));
+        settings_store.save(&UserSettings::default()).unwrap();
+        let store_for_window = settings_store.clone();
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| {
+                    WorkspaceShell::new(
+                        PresentationState::default(),
+                        UserSettings::default(),
+                        None,
+                        Some(store_for_window),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.run_command(CommandId::OpenSettings, window, cx)
+        });
+        cx.run_until_parked();
+        let manage = cx.debug_bounds("manage-themes").expect("manage themes");
+        cx.simulate_click(manage.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("theme-ayu-dark").is_some());
+        assert!(cx.debug_bounds("theme-soft-light").is_some());
+        assert!(cx.debug_bounds("import-theme").is_some());
+        assert!(cx.debug_bounds("export-theme").is_some());
+
+        let edit = cx
+            .debug_bounds("edit-current-theme")
+            .expect("edit current theme");
+        cx.simulate_click(edit.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            settings_store.load().unwrap().appearance.theme,
+            "ayu-dark-custom"
+        );
+        let (item_id, editor) = workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.title, "ayu-dark-custom.toml");
+            (item.id, pane.editor(item.id).unwrap())
+        });
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.theme_items.get(&item_id).cloned()),
+            Some("ayu-dark-custom".into())
+        );
+
+        let edited = "version = 1\nname = \"Edited\"\nappearance = \"dark\"\n[colors]\naccent = \"#ff0000\"\n";
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.set_keymap(EditorKeymap::Standard, cx);
+            let end = editor.document().text().encode_utf16().count();
+            editor.replace_text_in_range(Some(0..end), edited, window, cx);
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert_eq!(pane.active_item().unwrap().id, item_id);
+            assert_eq!(pane.active_item().unwrap().kind, ItemKind::Configuration);
+            assert_eq!(
+                shell.theme_items.get(&item_id).map(String::as_str),
+                Some("ayu-dark-custom")
+            );
+            assert_eq!(shell.focused_surface, WorkspaceSurface::Editor);
+        });
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document().text().to_owned()),
+            edited
+        );
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.save_active_item(&SaveActiveItem, window, cx)
+        });
+        assert_eq!(
+            settings_store.read_theme_text("ayu-dark-custom").unwrap(),
+            edited
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |_, cx| cx.theme().colors.accent),
+            gpui::rgb(0xff0000).into()
+        );
     }
 
     #[gpui::test]

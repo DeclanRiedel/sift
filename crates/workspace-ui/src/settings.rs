@@ -341,6 +341,98 @@ impl SettingsStore {
             .map_err(|error| format!("{}: {error}", path.display()))
     }
 
+    pub fn read_theme_text(&self, name: &str) -> Result<String, String> {
+        if let Some(source) = Theme::builtin_source(name) {
+            return Ok(source.to_owned());
+        }
+        let path = self.theme_path(name)?;
+        std::fs::read_to_string(&path)
+            .map_err(|error| format!("reading theme {} failed: {error}", path.display()))
+    }
+
+    pub fn save_theme_text(&self, name: &str, source: &str) -> Result<Theme, String> {
+        if Theme::builtin(name).is_some() {
+            return Err("built-in themes must be copied before editing".into());
+        }
+        let theme = ThemeConfig::decode(source)?.theme();
+        let path = self.theme_path(name)?;
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "settings write lock poisoned".to_string())?;
+        write_atomic(&path, source, "toml")?;
+        Ok(theme)
+    }
+
+    /// Return an editable custom theme id, copying a built-in without
+    /// overwriting any existing user theme.
+    pub fn make_theme_editable(&self, name: &str) -> Result<String, String> {
+        if Theme::builtin(name).is_none() {
+            self.load_theme(name)?;
+            return Ok(name.to_owned());
+        }
+        let source = self.read_theme_text(name)?;
+        let base = format!("{name}-custom");
+        let id = self.unique_theme_id(&base)?;
+        self.save_theme_text(&id, &source)?;
+        Ok(id)
+    }
+
+    pub fn import_theme_file(&self, source_path: &Path) -> Result<String, String> {
+        let source = std::fs::read_to_string(source_path)
+            .map_err(|error| format!("reading theme {} failed: {error}", source_path.display()))?;
+        ThemeConfig::decode(&source)?;
+        let stem = source_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("imported-theme");
+        let base = normalize_theme_id(stem);
+        let id = self.unique_theme_id(&base)?;
+        self.save_theme_text(&id, &source)?;
+        Ok(id)
+    }
+
+    pub fn export_theme_file(&self, name: &str, destination: &Path) -> Result<(), String> {
+        let source = self.read_theme_text(name)?;
+        ThemeConfig::decode(&source)?;
+        write_atomic(destination, &source, "toml")
+    }
+
+    pub fn list_custom_themes(&self) -> Result<Vec<String>, String> {
+        let entries = match std::fs::read_dir(self.themes_dir()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(format!("reading themes directory failed: {error}")),
+        };
+        let mut themes = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|extension| extension.to_str()) == Some("toml"))
+                    .then(|| path.file_stem()?.to_str().map(str::to_owned))
+                    .flatten()
+            })
+            .filter(|name| self.theme_path(name).is_ok() && Theme::builtin(name).is_none())
+            .collect::<Vec<_>>();
+        themes.sort();
+        themes.dedup();
+        Ok(themes)
+    }
+
+    fn unique_theme_id(&self, base: &str) -> Result<String, String> {
+        for suffix in 1..=10_000 {
+            let candidate = if suffix == 1 {
+                base.to_owned()
+            } else {
+                format!("{base}-{suffix}")
+            };
+            if Theme::builtin(&candidate).is_none() && !self.theme_path(&candidate)?.exists() {
+                return Ok(candidate);
+            }
+        }
+        Err("could not allocate a unique theme id".into())
+    }
+
     pub fn load_query_bindings(&self) -> Result<BTreeMap<String, Vec<String>>, String> {
         let path = self.query_bindings_path();
         let source = match std::fs::read_to_string(&path) {
@@ -538,6 +630,28 @@ impl SettingsStore {
     }
 }
 
+fn normalize_theme_id(value: &str) -> String {
+    let mut normalized = String::new();
+    let mut separator = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            normalized.push(character.to_ascii_lowercase());
+            separator = false;
+        } else if !normalized.is_empty() && !separator {
+            normalized.push('-');
+            separator = true;
+        }
+    }
+    while normalized.ends_with('-') {
+        normalized.pop();
+    }
+    if normalized.is_empty() {
+        "imported-theme".into()
+    } else {
+        normalized
+    }
+}
+
 fn write_atomic(path: &Path, source: &str, extension: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -698,5 +812,37 @@ mod tests {
 
         assert!(store.save_text(&invalid).is_err());
         assert_eq!(store.read_text().unwrap(), original);
+    }
+
+    #[test]
+    fn themes_copy_import_and_export_without_overwriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.toml"));
+        store.save(&UserSettings::default()).unwrap();
+
+        let editable = store.make_theme_editable("ayu-dark").unwrap();
+        assert_eq!(editable, "ayu-dark-custom");
+        assert!(store.theme_path(&editable).unwrap().exists());
+        assert_eq!(
+            store.make_theme_editable("ayu-dark").unwrap(),
+            "ayu-dark-custom-2"
+        );
+
+        let exported = directory.path().join("Shared Theme.toml");
+        store.export_theme_file(&editable, &exported).unwrap();
+        let imported = store.import_theme_file(&exported).unwrap();
+        assert_eq!(imported, "shared-theme");
+        assert_eq!(
+            store.list_custom_themes().unwrap(),
+            vec![
+                "ayu-dark-custom".to_string(),
+                "ayu-dark-custom-2".to_string(),
+                "shared-theme".to_string(),
+            ]
+        );
+        assert_eq!(
+            store.load_theme(&imported).unwrap(),
+            store.load_theme(&editable).unwrap()
+        );
     }
 }

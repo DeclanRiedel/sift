@@ -215,6 +215,14 @@ impl Theme {
         }
     }
 
+    pub fn builtin_source(name: &str) -> Option<&'static str> {
+        match name {
+            "ayu-dark" | "dark" => Some(AYU_DARK_SOURCE),
+            "light" => Some(LIGHT_SOURCE),
+            _ => None,
+        }
+    }
+
     fn dark_base() -> Self {
         Self {
             appearance: ThemeAppearance::Dark,
