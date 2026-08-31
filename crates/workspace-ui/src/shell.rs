@@ -654,6 +654,7 @@ enum CommandPaletteMode {
     WorkspaceFiles,
     Schema,
     Data,
+    Checkpoints,
     OpenTabs,
     SavedQueries,
     QueryHistory,
@@ -667,6 +668,7 @@ impl CommandPaletteMode {
             Some('/') => (Self::WorkspaceFiles, input[1..].trim_start()),
             Some('@') => (Self::Schema, input[1..].trim_start()),
             Some('$') => (Self::Data, input[1..].trim_start()),
+            Some('^') => (Self::Checkpoints, input[1..].trim_start()),
             Some('#') => (Self::OpenTabs, input[1..].trim_start()),
             Some('?') => (Self::SavedQueries, input[1..].trim_start()),
             Some('!') => (Self::QueryHistory, input[1..].trim_start()),
@@ -680,6 +682,7 @@ impl CommandPaletteMode {
             Self::WorkspaceFiles => "FILE",
             Self::Schema => "SCHEMA",
             Self::Data => "DATA",
+            Self::Checkpoints => "CHECKPOINT",
             Self::OpenTabs => "TAB",
             Self::SavedQueries => "SAVED",
             Self::QueryHistory => "HISTORY",
@@ -693,6 +696,7 @@ enum CommandPaletteItem {
     WorkspaceFile(sift_protocol::WorkspaceNodeId, String),
     Schema(sift_protocol::SearchHit),
     Data(sift_protocol::DataSearchHit),
+    Checkpoint(sift_protocol::WorkspaceCheckpoint),
     OpenTab {
         pane_index: usize,
         item_index: usize,
@@ -7717,6 +7721,11 @@ impl WorkspaceShell {
             if shell.modal == Some(Modal::CommandPalette) {
                 match mode {
                     CommandPaletteMode::WorkspaceFiles
+                        if shell.workspace_files.snapshot().is_none() =>
+                    {
+                        shell.request_workspace_files(cx);
+                    }
+                    CommandPaletteMode::Checkpoints
                         if shell.workspace_files.snapshot().is_none() =>
                     {
                         shell.request_workspace_files(cx);
@@ -23913,6 +23922,42 @@ impl WorkspaceShell {
                     .collect(),
                 _ => Vec::new(),
             },
+            CommandPaletteMode::Checkpoints => {
+                let mut matches = self
+                    .workspace_files
+                    .snapshot()
+                    .into_iter()
+                    .flat_map(|snapshot| snapshot.checkpoints.iter())
+                    .cloned()
+                    .enumerate()
+                    .filter_map(|(original_index, checkpoint)| {
+                        let label = checkpoint
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| format!("{:?}", checkpoint.reason));
+                        let aliases = [
+                            format!("revision {}", checkpoint.workspace_revision.0),
+                            checkpoint
+                                .created_at
+                                .format("%Y-%m-%d %H:%M:%S")
+                                .to_string(),
+                        ];
+                        fuzzy_palette_match(&query, &label, aliases).map(|(score, ranges)| {
+                            (
+                                original_index,
+                                score,
+                                CommandPaletteMatch {
+                                    ranges,
+                                    item: CommandPaletteItem::Checkpoint(checkpoint),
+                                },
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                matches
+                    .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+                matches.into_iter().map(|(_, _, item)| item).collect()
+            }
             CommandPaletteMode::OpenTabs => {
                 let mut matches = self
                     .panes
@@ -24051,6 +24096,9 @@ impl WorkspaceShell {
                 hit.table.name,
                 hit.row.values
             ),
+            CommandPaletteItem::Checkpoint(checkpoint) => {
+                format!("checkpoint:{instance}:{}", checkpoint.id.0)
+            }
             CommandPaletteItem::OpenTab { item_id, .. } => {
                 format!("tab:{instance}:{item_id}")
             }
@@ -24119,6 +24167,10 @@ impl WorkspaceShell {
                 if let Some(target) = target {
                     self.open_schema_search_target(target, window, cx);
                 }
+            }
+            CommandPaletteItem::Checkpoint(_) => {
+                self.modal = Some(Modal::WorkspaceHistory);
+                cx.notify();
             }
             CommandPaletteItem::OpenTab {
                 pane_index,
@@ -25293,8 +25345,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             CommandId::OpenWorkspaceHistory => {
-                self.modal = Some(Modal::WorkspaceHistory);
-                cx.notify();
+                self.open_command_palette_with_query("^", window, cx);
             }
             CommandId::OpenChangeLedger => self.open_change_ledger(None, window, cx),
             CommandId::CompareWorkspaceDdl => self.prepare_workspace_ddl_migration(cx),
@@ -30872,6 +30923,12 @@ impl WorkspaceShell {
                             DataSearchState::Failed(message) => message.clone().into(),
                             _ => "No matching table rows".into(),
                         },
+                        CommandPaletteMode::Checkpoints if self.workspace_files.loading() => {
+                            "Loading workspace checkpoints…".into()
+                        }
+                        CommandPaletteMode::Checkpoints => {
+                            "No matching workspace checkpoints".into()
+                        }
                         CommandPaletteMode::OpenTabs => "No matching open tabs".into(),
                         CommandPaletteMode::SavedQueries if self.saved_queries_loading => {
                             "Loading saved queries…".into()
@@ -30915,6 +30972,7 @@ impl WorkspaceShell {
                                             .child("/ files")
                                             .child("@ schema")
                                             .child("$ data")
+                                            .child("^ checkpoints")
                                             .child("# tabs")
                                             .child("? saved")
                                             .child("! history"),
@@ -30989,6 +31047,17 @@ impl WorkspaceShell {
                                                             .collect::<Vec<_>>()
                                                             .join(" · ");
                                                         (label, table, true, false)
+                                                    }
+                                                    CommandPaletteItem::Checkpoint(checkpoint) => {
+                                                        let label = checkpoint.name.unwrap_or_else(|| {
+                                                            format!("{:?}", checkpoint.reason)
+                                                        });
+                                                        (
+                                                            label,
+                                                            format!("REV {}", checkpoint.workspace_revision.0),
+                                                            true,
+                                                            false,
+                                                        )
                                                     }
                                                     CommandPaletteItem::OpenTab { pane_index, title, .. } => {
                                                         (title, format!("PANE {}", pane_index + 1), true, false)
@@ -37592,6 +37661,10 @@ mod tests {
             (CommandPaletteMode::Data, "customer@example.com")
         );
         assert_eq!(
+            CommandPaletteMode::parse("^ before deploy"),
+            (CommandPaletteMode::Checkpoints, "before deploy")
+        );
+        assert_eq!(
             CommandPaletteMode::parse("# query-2"),
             (CommandPaletteMode::OpenTabs, "query-2")
         );
@@ -40804,6 +40877,11 @@ mod tests {
                 CommandId::OpenSavedQuerySwitcher,
                 CommandPaletteMode::SavedQueries,
                 "?",
+            ),
+            (
+                CommandId::OpenWorkspaceHistory,
+                CommandPaletteMode::Checkpoints,
+                "^",
             ),
         ] {
             workspace.update_in(&mut cx, |shell, window, cx| {
