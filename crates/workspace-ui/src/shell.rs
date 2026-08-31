@@ -28155,6 +28155,27 @@ impl WorkspaceShell {
         }
     }
 
+    fn dock_panel_state(
+        id: &'static str,
+        message: impl Into<SharedString>,
+        color: Hsla,
+    ) -> AnyElement {
+        div()
+            .debug_selector(move || id.into())
+            .min_h(px(64.))
+            .px_3()
+            .py_4()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_center()
+            .text_xs()
+            .text_color(color)
+            .child(message.into())
+            .into_any_element()
+    }
+
     fn render_dock(&self, dock: &Dock, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let colors = theme.colors;
@@ -28509,13 +28530,11 @@ impl WorkspaceShell {
                     && self.active_left_panel == LeftPanel::Connections
                     && self.lifecycle.tenants.is_empty(),
                 |dock_view| {
-                    dock_view.child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .text_color(colors.muted_text)
-                            .child(self.lifecycle.status_label()),
-                    )
+                    dock_view.child(Self::dock_panel_state(
+                        "connections-disconnected-state",
+                        self.lifecycle.status_label(),
+                        colors.muted_text,
+                    ))
                 },
             )
             .when(
@@ -29419,27 +29438,29 @@ impl WorkspaceShell {
                             )
                         })
                         .children(self.query_outline_error.as_ref().map(|message| {
-                            div().mx_2().mb_2().child(ErrorBanner::new(message.clone()))
-                        }))
-                        .when(active_item.is_none(), |panel| {
-                            panel.child(
-                                div()
-                                    .p_3()
-                                    .text_color(colors.muted_text)
-                                    .child("Open a query to see its statement outline."),
+                            Self::dock_panel_state(
+                                "query-outline-error-state",
+                                message.clone(),
+                                colors.danger,
                             )
+                        }))
+                        .when(active_item.is_none() && self.query_outline_error.is_none(), |panel| {
+                            panel.child(Self::dock_panel_state(
+                                "query-outline-disconnected-state",
+                                "Open a query to view its outline",
+                                colors.muted_text,
+                            ))
                         })
                         .when(
                             active_item.is_some()
                                 && self.query_outline_loading
                                 && self.query_outline_statements.is_empty(),
                             |panel| {
-                                panel.child(
-                                    div()
-                                        .p_3()
-                                        .text_color(colors.muted_text)
-                                        .child("Loading query outline…"),
-                                )
+                                panel.child(Self::dock_panel_state(
+                                    "query-outline-loading-state",
+                                    "Loading query outline…",
+                                    colors.muted_text,
+                                ))
                             },
                         )
                         .when(
@@ -29448,12 +29469,11 @@ impl WorkspaceShell {
                                 && self.query_outline_statements.is_empty()
                                 && self.query_outline_error.is_none(),
                             |panel| {
-                                panel.child(
-                                    div()
-                                        .p_3()
-                                        .text_color(colors.muted_text)
-                                        .child("No SQL statements found."),
-                                )
+                                panel.child(Self::dock_panel_state(
+                                    "query-outline-empty-state",
+                                    "No SQL statements found",
+                                    colors.muted_text,
+                                ))
                             },
                         )
                         .when(
@@ -29461,12 +29481,11 @@ impl WorkspaceShell {
                                 || !self.query_outline_symbols.is_empty())
                                 && outline_count == 0,
                             |panel| {
-                                panel.child(
-                                    div()
-                                        .p_3()
-                                        .text_color(colors.muted_text)
-                                        .child("No matching statements or symbols."),
-                                )
+                                panel.child(Self::dock_panel_state(
+                                    "query-outline-no-match-state",
+                                    "No matching statements or symbols",
+                                    colors.muted_text,
+                                ))
                             },
                         )
                         .child(
@@ -29752,36 +29771,39 @@ impl WorkspaceShell {
                             )
                         })
                         .children(self.saved_queries_error.as_ref().map(|message| {
-                            div()
-                                .mx_2()
-                                .mb_2()
-                                .child(ErrorBanner::new(message.clone()))
+                            Self::dock_panel_state(
+                                "saved-queries-error-state",
+                                message.clone(),
+                                colors.danger,
+                            )
                         }))
                         .when(self.saved_queries_loading && self.saved_queries.is_empty(), |panel| {
-                            panel.child(
-                                div()
-                                    .p_3()
-                                    .text_color(colors.muted_text)
-                                    .child("Loading saved queries…"),
-                            )
+                            panel.child(Self::dock_panel_state(
+                                "saved-queries-loading-state",
+                                "Loading saved queries…",
+                                colors.muted_text,
+                            ))
                         })
-                        .when(!self.saved_queries_loading && self.saved_queries.is_empty(), |panel| {
-                            panel.child(
-                                div()
-                                    .p_3()
-                                    .text_color(colors.muted_text)
-                                    .child("No saved queries yet."),
-                            )
-                        })
+                        .when(
+                            !self.saved_queries_loading
+                                && self.saved_queries.is_empty()
+                                && self.saved_queries_error.is_none(),
+                            |panel| {
+                                panel.child(Self::dock_panel_state(
+                                    "saved-queries-empty-state",
+                                    "No saved queries yet",
+                                    colors.muted_text,
+                                ))
+                            },
+                        )
                         .when(
                             !self.saved_queries.is_empty() && query_count == 0,
                             |panel| {
-                                panel.child(
-                                    div()
-                                        .p_3()
-                                        .text_color(colors.muted_text)
-                                        .child("No matching saved queries."),
-                                )
+                                panel.child(Self::dock_panel_state(
+                                    "saved-queries-no-match-state",
+                                    "No matching saved queries",
+                                    colors.muted_text,
+                                ))
                             },
                         )
                         .child(
@@ -30157,39 +30179,42 @@ impl WorkspaceShell {
                             )
                         })
                         .children(self.query_history_error.as_ref().map(|message| {
-                            div().mx_2().mb_2().child(ErrorBanner::new(message.clone()))
+                            Self::dock_panel_state(
+                                "query-history-error-state",
+                                message.clone(),
+                                colors.danger,
+                            )
                         }))
                         .when(
                             self.query_history_loading && self.query_history_rows.is_empty(),
                             |panel| {
-                                panel.child(
-                                    div()
-                                        .p_3()
-                                        .text_color(colors.muted_text)
-                                        .child("Loading query history…"),
-                                )
+                                panel.child(Self::dock_panel_state(
+                                    "query-history-loading-state",
+                                    "Loading query history…",
+                                    colors.muted_text,
+                                ))
                             },
                         )
                         .when(
-                            !self.query_history_loading && self.query_history_rows.is_empty(),
+                            !self.query_history_loading
+                                && self.query_history_rows.is_empty()
+                                && self.query_history_error.is_none(),
                             |panel| {
-                                panel.child(
-                                    div()
-                                        .p_3()
-                                        .text_color(colors.muted_text)
-                                        .child("No query history yet."),
-                                )
+                                panel.child(Self::dock_panel_state(
+                                    "query-history-empty-state",
+                                    "No query history yet",
+                                    colors.muted_text,
+                                ))
                             },
                         )
                         .when(
                             !self.query_history_rows.is_empty() && entry_count == 0,
                             |panel| {
-                                panel.child(
-                                    div()
-                                        .p_3()
-                                        .text_color(colors.muted_text)
-                                        .child("No matching history."),
-                                )
+                                panel.child(Self::dock_panel_state(
+                                    "query-history-no-match-state",
+                                    "No matching history",
+                                    colors.muted_text,
+                                ))
                             },
                         )
                         .child(
@@ -45505,6 +45530,42 @@ mod tests {
             assert!(actions.left() >= dock.left());
             assert!(actions.right() <= dock.right());
         }
+    }
+
+    #[gpui::test]
+    fn dock_panels_share_exclusive_empty_and_error_states(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.active_left_panel = LeftPanel::SavedQueries;
+            shell.saved_queries.clear();
+            shell.saved_queries_loading = false;
+            shell.saved_queries_error = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("saved-queries-empty-state").is_some());
+        assert!(cx.debug_bounds("saved-queries-error-state").is_none());
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.saved_queries_error = Some("Saved query service unavailable".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("saved-queries-empty-state").is_none());
+        assert!(cx.debug_bounds("saved-queries-error-state").is_some());
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.active_left_panel = LeftPanel::QueryHistory;
+            shell.query_history_rows.clear();
+            shell.query_history_loading = false;
+            shell.query_history_error = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("query-history-empty-state").is_some());
     }
 
     #[gpui::test]
