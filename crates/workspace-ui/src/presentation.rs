@@ -302,6 +302,10 @@ pub struct PresentationState {
     /// never repository contents or credentials.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub repository_workspaces: HashMap<i64, RepositoryWorkspacePresentation>,
+    /// Bounded opaque identities for recently activated switcher items. Search
+    /// text and product content are never persisted here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub palette_recents: Vec<String>,
 }
 
 impl Default for PresentationState {
@@ -355,6 +359,7 @@ impl Default for PresentationState {
             instance_workspaces: HashMap::new(),
             repository_commit_drafts: HashMap::new(),
             repository_workspaces: HashMap::new(),
+            palette_recents: Vec::new(),
         }
     }
 }
@@ -468,7 +473,10 @@ mod tests {
 
     #[test]
     fn presentation_round_trip_contains_references_not_product_data() {
-        let mut state = PresentationState::default();
+        let mut state = PresentationState {
+            palette_recents: vec!["command:local:item.save".into()],
+            ..PresentationState::default()
+        };
         let mut remote = state.workspace.clone();
         remote.instance_id = Some("hosted:team".into());
         remote.workspace_id = Some(42);
@@ -494,6 +502,7 @@ mod tests {
         for forbidden in ["password", "result_rows", "query_text", "credential"] {
             assert!(!json.contains(forbidden));
         }
+        assert!(json.contains("command:local:item.save"));
     }
 
     #[test]

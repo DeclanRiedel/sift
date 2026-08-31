@@ -73,6 +73,7 @@ pub use pane_layout::SplitDirection;
 
 const PALETTE_VISIBLE_ROWS: usize = 10;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
+const PALETTE_RECENT_LIMIT: usize = 32;
 const DOCK_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const PANE_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const PANE_MIN_WIDTH: f32 = 180.0;
@@ -689,6 +690,7 @@ enum CommandPaletteItem {
     OpenTab {
         pane_index: usize,
         item_index: usize,
+        item_id: u64,
         title: String,
     },
     SavedQuery(sift_api_types::SavedQuery),
@@ -7128,6 +7130,7 @@ pub struct WorkspaceShell {
     instance_configuration_editor: Entity<QueryEditor>,
     palette_selected: usize,
     palette_scroll_handle: UniformListScrollHandle,
+    palette_recents: Vec<String>,
     command_projection_revision: u64,
     command_projection_cache: RefCell<Option<(CommandProjectionKey, Arc<Vec<CommandSpec>>)>>,
     saved_query_switcher_input: Entity<TextInput>,
@@ -7461,6 +7464,7 @@ impl WorkspaceShell {
         let window_presentation = state.window.clone();
         let repository_commit_drafts = state.repository_commit_drafts.clone();
         let repository_workspaces = state.repository_workspaces.clone();
+        let palette_recents = state.palette_recents.clone();
         let vim_mode_default = settings.editor.default_mode == EditorMode::Vim;
         // Install the process-wide theme first so every child entity reads the
         // same palette through `ActiveTheme` during construction and render.
@@ -8021,6 +8025,7 @@ impl WorkspaceShell {
             instance_configuration_editor,
             palette_selected: 0,
             palette_scroll_handle: UniformListScrollHandle::new(),
+            palette_recents,
             command_projection_revision: 0,
             command_projection_cache: RefCell::new(None),
             saved_query_switcher_input,
@@ -19864,6 +19869,7 @@ impl WorkspaceShell {
             instance_workspaces,
             repository_commit_drafts: self.repository_commit_drafts.clone(),
             repository_workspaces,
+            palette_recents: self.palette_recents.clone(),
             ..PresentationState::default()
         }
     }
@@ -23786,7 +23792,7 @@ impl WorkspaceShell {
         let input = self.query_input.read(cx).text();
         let (mode, query) = CommandPaletteMode::parse(input);
         let query = query.trim().to_lowercase();
-        match mode {
+        let mut items: Vec<CommandPaletteMatch> = match mode {
             CommandPaletteMode::Commands => self
                 .filtered_commands(cx)
                 .iter()
@@ -23850,29 +23856,32 @@ impl WorkspaceShell {
                             .iter()
                             .enumerate()
                             .map(move |(item_index, item)| {
-                                (pane_index, item_index, item.title.clone())
+                                (pane_index, item_index, item.id, item.title.clone())
                             })
                             .collect::<Vec<_>>()
                     })
                     .enumerate()
-                    .filter_map(|(original_index, (pane_index, item_index, title))| {
-                        fuzzy_palette_match(&query, &title, std::iter::empty()).map(
-                            |(score, ranges)| {
-                                (
-                                    original_index,
-                                    score,
-                                    CommandPaletteMatch {
-                                        item: CommandPaletteItem::OpenTab {
-                                            pane_index,
-                                            item_index,
-                                            title,
+                    .filter_map(
+                        |(original_index, (pane_index, item_index, item_id, title))| {
+                            fuzzy_palette_match(&query, &title, std::iter::empty()).map(
+                                |(score, ranges)| {
+                                    (
+                                        original_index,
+                                        score,
+                                        CommandPaletteMatch {
+                                            item: CommandPaletteItem::OpenTab {
+                                                pane_index,
+                                                item_index,
+                                                item_id,
+                                                title,
+                                            },
+                                            ranges,
                                         },
-                                        ranges,
-                                    },
-                                )
-                            },
-                        )
-                    })
+                                    )
+                                },
+                            )
+                        },
+                    )
                     .collect::<Vec<_>>();
                 matches
                     .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
@@ -23903,7 +23912,48 @@ impl WorkspaceShell {
                     .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
                 matches.into_iter().map(|(_, _, item)| item).collect()
             }
+        };
+        if query.is_empty() {
+            items.sort_by_key(|matched| {
+                let key = self.command_palette_recent_key(&matched.item);
+                self.palette_recents
+                    .iter()
+                    .position(|recent| recent == &key)
+                    .unwrap_or(usize::MAX)
+            });
         }
+        items
+    }
+
+    fn command_palette_recent_key(&self, item: &CommandPaletteItem) -> String {
+        let instance = self.selected_instance_id.as_deref().unwrap_or("local");
+        match item {
+            CommandPaletteItem::Command(command) => {
+                format!("command:{instance}:{}", command.id.as_str())
+            }
+            CommandPaletteItem::WorkspaceFile(node_id, _) => format!(
+                "file:{instance}:{}:{}",
+                self.selected_workspace_id.unwrap_or_default(),
+                node_id.0
+            ),
+            CommandPaletteItem::Schema(hit) => {
+                format!("schema:{instance}:{}", hit.display)
+            }
+            CommandPaletteItem::OpenTab { item_id, .. } => {
+                format!("tab:{instance}:{item_id}")
+            }
+            CommandPaletteItem::SavedQuery(query) => {
+                format!("saved:{instance}:{}", query.id.0)
+            }
+        }
+    }
+
+    fn record_command_palette_recent(&mut self, item: &CommandPaletteItem, cx: &mut Context<Self>) {
+        let key = self.command_palette_recent_key(item);
+        self.palette_recents.retain(|recent| recent != &key);
+        self.palette_recents.insert(0, key);
+        self.palette_recents.truncate(PALETTE_RECENT_LIMIT);
+        self.persist(cx);
     }
 
     fn activate_command_palette_item(
@@ -23919,11 +23969,13 @@ impl WorkspaceShell {
         else {
             return;
         };
+        if matches!(&item, CommandPaletteItem::Command(command) if !command.enabled()) {
+            return;
+        }
+        self.record_command_palette_recent(&item, cx);
         match item {
             CommandPaletteItem::Command(command) => {
-                if command.enabled() {
-                    self.run_command(command.id, window, cx);
-                }
+                self.run_command(command.id, window, cx);
             }
             CommandPaletteItem::WorkspaceFile(node_id, _) => {
                 self.dismiss_modal(&DismissModal, window, cx);
@@ -38239,6 +38291,42 @@ mod tests {
         let (_, alias_ranges) =
             fuzzy_palette_match("fin", "Quarterly report", ["finance".into()]).unwrap();
         assert!(alias_ranges.is_empty());
+    }
+
+    #[gpui::test]
+    fn command_palette_places_recent_items_first_without_a_filter(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (recent_id, recent_key) = workspace.read_with(&cx, |shell, cx| {
+            let recent = shell
+                .command_palette_items(cx)
+                .into_iter()
+                .rev()
+                .find_map(|matched| match matched.item {
+                    CommandPaletteItem::Command(command) if command.enabled() => Some(command),
+                    _ => None,
+                })
+                .unwrap();
+            (
+                recent.id,
+                shell.command_palette_recent_key(&CommandPaletteItem::Command(recent)),
+            )
+        });
+        workspace.update(&mut cx, |shell, _| {
+            shell.palette_recents = vec![recent_key];
+        });
+        let first = workspace.read_with(&cx, |shell, cx| {
+            shell
+                .command_palette_items(cx)
+                .into_iter()
+                .find_map(|matched| match matched.item {
+                    CommandPaletteItem::Command(command) => Some(command.id),
+                    _ => None,
+                })
+                .unwrap()
+        });
+        assert_eq!(first, recent_id);
     }
 
     fn automation_configuration(
