@@ -28190,6 +28190,11 @@ impl WorkspaceShell {
                 | (DockId::Left, WorkspaceSurface::QueryOutline)
                 | (DockId::Inspector, WorkspaceSurface::Inspector)
         );
+        let has_embedded_header = dock.id == DockId::Left
+            && matches!(
+                self.active_left_panel,
+                LeftPanel::QueryOutline | LeftPanel::SavedQueries | LeftPanel::QueryHistory
+            );
         div()
             .id(title)
             .debug_selector(move || debug_selector.to_owned())
@@ -28255,50 +28260,55 @@ impl WorkspaceShell {
             .border_t_1()
             .bg(colors.panel)
             .text_sm()
-            .child(
-                div()
-                    .h(cx.theme().metrics.row_height)
-                    .px_3()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(SectionLabel::new(title.to_uppercase()))
-                    .children(inspector_target.map(|target| {
-                        div()
-                            .debug_selector(|| "inspector-target-title".into())
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .child(target)
-                    }))
-                    .children(inspector_full_ddl_item.map(|item_id| {
-                        div()
-                            .id("view-full-table-ddl-focus")
-                            .flex_none()
-                            .tab_index(0)
-                            .focus(|style| style.bg(colors.hovered_surface))
-                            .on_key_down(cx.listener(
-                                move |shell, event: &gpui::KeyDownEvent, _, cx| {
-                                    if !event.keystroke.modifiers.modified()
-                                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                                    {
-                                        shell.open_table_full_ddl(item_id, cx);
-                                        cx.stop_propagation();
-                                    }
-                                },
-                            ))
-                            .child(
-                                Button::new("view-full-table-ddl", "Full DDL")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(move |shell, _, _, cx| {
-                                        shell.open_table_full_ddl(item_id, cx)
-                                    })),
-                            )
-                    })),
-            )
+            .when(!has_embedded_header, |dock_view| {
+                dock_view.child(
+                    div()
+                        .h(cx.theme().metrics.row_height)
+                        .px_3()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(SectionLabel::new(title.to_uppercase()))
+                        .children(inspector_target.map(|target| {
+                            div()
+                                .debug_selector(|| "inspector-target-title".into())
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child(target)
+                        }))
+                        .children(inspector_full_ddl_item.map(|item_id| {
+                            div()
+                                .id("view-full-table-ddl-focus")
+                                .flex_none()
+                                .tab_index(0)
+                                .focus(|style| style.bg(colors.hovered_surface))
+                                .on_key_down(cx.listener(
+                                    move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                        if !event.keystroke.modifiers.modified()
+                                            && matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            )
+                                        {
+                                            shell.open_table_full_ddl(item_id, cx);
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                ))
+                                .child(
+                                    Button::new("view-full-table-ddl", "Full DDL")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.open_table_full_ddl(item_id, cx)
+                                        })),
+                                )
+                        })),
+                )
+            })
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
                 |dock_view| {
@@ -29466,8 +29476,8 @@ impl WorkspaceShell {
                     dock_view
                         .child(
                             div()
-                                .px_2()
-                                .h(px(32.))
+                                .h(cx.theme().metrics.row_height)
+                                .px_3()
                                 .flex()
                                 .items_center()
                                 .justify_between()
@@ -29794,8 +29804,8 @@ impl WorkspaceShell {
                     dock_view
                         .child(
                             div()
-                                .px_2()
-                                .h(px(32.))
+                                .h(cx.theme().metrics.row_height)
+                                .px_3()
                                 .flex()
                                 .items_center()
                                 .justify_between()
@@ -30160,8 +30170,8 @@ impl WorkspaceShell {
                     dock_view
                         .child(
                             div()
-                                .px_2()
-                                .h(px(32.))
+                                .h(cx.theme().metrics.row_height)
+                                .px_3()
                                 .flex()
                                 .items_center()
                                 .justify_between()
