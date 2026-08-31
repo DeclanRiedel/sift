@@ -655,6 +655,7 @@ enum CommandPaletteMode {
     Schema,
     OpenTabs,
     SavedQueries,
+    QueryHistory,
 }
 
 impl CommandPaletteMode {
@@ -666,6 +667,7 @@ impl CommandPaletteMode {
             Some('@') => (Self::Schema, input[1..].trim_start()),
             Some('#') => (Self::OpenTabs, input[1..].trim_start()),
             Some('?') => (Self::SavedQueries, input[1..].trim_start()),
+            Some('!') => (Self::QueryHistory, input[1..].trim_start()),
             _ => (Self::Commands, input),
         }
     }
@@ -677,6 +679,7 @@ impl CommandPaletteMode {
             Self::Schema => "SCHEMA",
             Self::OpenTabs => "TAB",
             Self::SavedQueries => "SAVED",
+            Self::QueryHistory => "HISTORY",
         }
     }
 }
@@ -693,6 +696,7 @@ enum CommandPaletteItem {
         title: String,
     },
     SavedQuery(sift_api_types::SavedQuery),
+    QueryHistory(sift_api_types::QueryHistory),
 }
 
 #[derive(Clone)]
@@ -7533,7 +7537,7 @@ impl WorkspaceShell {
                 (definition.id, input)
             })
             .collect();
-        let query_input = cx.new(|cx| TextInput::new("", "Run a command or use / @ # ?", cx));
+        let query_input = cx.new(|cx| TextInput::new("", "Run a command or use / @ # ? !", cx));
         let query_history_input = cx.new(|cx| {
             TextInput::new("", "Search query history…", cx).aria_label("Search query history")
         });
@@ -7706,6 +7710,15 @@ impl WorkspaceShell {
                         if shell.saved_queries_tenant != shell.selected_tenant_id() =>
                     {
                         shell.request_saved_queries(cx);
+                    }
+                    CommandPaletteMode::QueryHistory => {
+                        let instance = shell.selected_instance_id.as_deref().unwrap_or("local");
+                        if shell.query_history_instance.as_deref() != Some(instance)
+                            && !shell.query_history_loading
+                            && shell.query_history_error.is_none()
+                        {
+                            shell.refresh_query_history(cx);
+                        }
                     }
                     _ => {}
                 }
@@ -23674,6 +23687,44 @@ impl WorkspaceShell {
                     .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
                 matches.into_iter().map(|(_, _, item)| item).collect()
             }
+            CommandPaletteMode::QueryHistory => {
+                let mut matches = self
+                    .query_history_rows
+                    .iter()
+                    .filter(|entry| !entry.sql_text.starts_with("sqlfp:"))
+                    .cloned()
+                    .enumerate()
+                    .filter_map(|(original_index, entry)| {
+                        let label = entry.sql_text.replace(['\n', '\r'], " ");
+                        let status = match entry.status {
+                            sift_api_types::QueryStatus::Ok => "ok success",
+                            sift_api_types::QueryStatus::Error => "error failed",
+                            sift_api_types::QueryStatus::Canceled => "canceled cancelled",
+                        };
+                        let aliases = [
+                            self.query_history_connection_name(
+                                entry.connection_profile_id.map(|profile| profile.0),
+                            ),
+                            status.into(),
+                            entry.error_message.clone().unwrap_or_default(),
+                            entry.started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        ];
+                        fuzzy_palette_match(&query, &label, aliases).map(|(score, ranges)| {
+                            (
+                                original_index,
+                                score,
+                                CommandPaletteMatch {
+                                    item: CommandPaletteItem::QueryHistory(entry),
+                                    ranges,
+                                },
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                matches
+                    .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+                matches.into_iter().map(|(_, _, item)| item).collect()
+            }
         };
         if query.is_empty() {
             items.sort_by_key(|matched| {
@@ -23706,6 +23757,9 @@ impl WorkspaceShell {
             }
             CommandPaletteItem::SavedQuery(query) => {
                 format!("saved:{instance}:{}", query.id.0)
+            }
+            CommandPaletteItem::QueryHistory(entry) => {
+                format!("history:{instance}:{}", entry.id.0)
             }
         }
     }
@@ -23767,6 +23821,10 @@ impl WorkspaceShell {
             CommandPaletteItem::SavedQuery(query) => {
                 self.dismiss_modal(&DismissModal, window, cx);
                 self.open_saved_query(query, window, cx);
+            }
+            CommandPaletteItem::QueryHistory(entry) => {
+                self.dismiss_modal(&DismissModal, window, cx);
+                self.activate_query_history_entry(entry, QueryHistoryAction::Open, window, cx);
             }
         }
     }
@@ -24364,6 +24422,16 @@ impl WorkspaceShell {
         let Some(entry) = entry else {
             return;
         };
+        self.activate_query_history_entry(entry, action, window, cx);
+    }
+
+    fn activate_query_history_entry(
+        &mut self,
+        entry: sift_api_types::QueryHistory,
+        action: QueryHistoryAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if entry.sql_text.starts_with("sqlfp:") {
             self.show_toast(
                 "This history entry stores only a query fingerprint".into(),
@@ -30542,6 +30610,14 @@ impl WorkspaceShell {
                             "Loading saved queries…".into()
                         }
                         CommandPaletteMode::SavedQueries => "No matching saved queries".into(),
+                        CommandPaletteMode::QueryHistory if self.query_history_loading => {
+                            "Loading query history…".into()
+                        }
+                        CommandPaletteMode::QueryHistory => self
+                            .query_history_error
+                            .clone()
+                            .unwrap_or_else(|| "No matching query history".into())
+                            .into(),
                     };
                     div()
                         .flex()
@@ -30561,7 +30637,8 @@ impl WorkspaceShell {
                                 .child("/ files")
                                 .child("@ schema")
                                 .child("# tabs")
-                                .child("? saved"),
+                                .child("? saved")
+                                .child("! history"),
                         )
                         .when(items.is_empty(), |palette| {
                             palette.child(
@@ -30620,6 +30697,22 @@ impl WorkspaceShell {
                                                             saved.tags.join(", ")
                                                         };
                                                         (saved.name, right, true, false)
+                                                    }
+                                                    CommandPaletteItem::QueryHistory(entry) => {
+                                                        let status = match entry.status {
+                                                            sift_api_types::QueryStatus::Ok => "OK",
+                                                            sift_api_types::QueryStatus::Error => "ERROR",
+                                                            sift_api_types::QueryStatus::Canceled => "CANCELED",
+                                                        };
+                                                        let connection = shell.query_history_connection_name(
+                                                            entry.connection_profile_id.map(|profile| profile.0),
+                                                        );
+                                                        (
+                                                            entry.sql_text.replace(['\n', '\r'], " "),
+                                                            format!("{status} · {connection}"),
+                                                            true,
+                                                            false,
+                                                        )
                                                     }
                                                 };
                                                 let selected = idx == selected_idx;
@@ -37174,6 +37267,10 @@ mod tests {
         assert_eq!(
             CommandPaletteMode::parse("? audit"),
             (CommandPaletteMode::SavedQueries, "audit")
+        );
+        assert_eq!(
+            CommandPaletteMode::parse("! failed migration"),
+            (CommandPaletteMode::QueryHistory, "failed migration")
         );
     }
 
@@ -44262,6 +44359,69 @@ mod tests {
             CommandRegistry::definition(CommandId::OpenSavedQuery).language,
             "<leader> q o"
         );
+    }
+
+    #[gpui::test]
+    fn unified_query_history_search_loads_filters_and_opens(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let history = sift_api_types::QueryHistory {
+            id: sift_api_types::QueryHistoryId(41),
+            principal_id: sift_api_types::PrincipalId(7),
+            room_id: None,
+            connection_profile_id: None,
+            sql_text: "select * from failed_jobs".into(),
+            started_at: "2026-08-28T10:15:00Z".parse().unwrap(),
+            duration_ms: Some(24),
+            row_count: None,
+            status: sift_api_types::QueryStatus::Error,
+            error_code: Some("XX000".into()),
+            error_message: Some("worker failed".into()),
+        };
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.open_command_palette_with_query("!", window, cx);
+        });
+        let generation = match commands.try_recv().expect("history load") {
+            ExecutorCommand::LoadGlobalHistory { generation, .. } => generation,
+            _ => panic!("unexpected command"),
+        };
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::GlobalHistoryLoaded {
+                    instance_id: "local".into(),
+                    generation,
+                    append: false,
+                    page: Ok(sift_protocol::CursorPage {
+                        items: vec![history.clone()],
+                        next_cursor: None,
+                    }),
+                },
+                cx,
+            );
+            shell
+                .query_input
+                .update(cx, |input, cx| input.set_text("! worker failed", cx));
+            assert!(matches!(
+                shell.command_palette_items(cx).as_slice(),
+                [CommandPaletteMatch {
+                    item: CommandPaletteItem::QueryHistory(entry),
+                    ..
+                }] if entry.id == history.id
+            ));
+            shell.activate_command_palette_item(0, window, cx);
+            assert!(shell.modal.is_none());
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert!(item.dirty);
+            assert_eq!(
+                pane.editor(item.id).unwrap().read(cx).document().text(),
+                history.sql_text
+            );
+        });
     }
 
     #[gpui::test]
