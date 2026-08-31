@@ -1650,6 +1650,8 @@ pub enum PaneEvent {
     CommandRequested(CommandId),
     /// Create a sibling beside this pane in the requested direction.
     SplitRequested(SplitDirection),
+    /// Toggle this pane as the sole visible pane in the workspace pane region.
+    ToggleMaximizedRequested,
     /// The pane should be removed (its close control was used, or it emptied).
     CloseRequested,
     /// A tab-local close control was used; the workspace owns dirty handling.
@@ -3218,6 +3220,7 @@ pub struct Pane {
     tab_bar_hovered: bool,
     hovered_tab: Option<u64>,
     chrome_menu: Option<PaneChromeMenu>,
+    maximized: bool,
     /// The live result entity is mounted in the workspace modal while this is
     /// set, so it never renders twice with one scroll handle.
     expanded_result_item: Option<u64>,
@@ -3353,6 +3356,7 @@ impl Pane {
             tab_bar_hovered: false,
             hovered_tab: None,
             chrome_menu: None,
+            maximized: false,
             expanded_result_item: None,
             notification_filter: None,
         }
@@ -5336,10 +5340,6 @@ impl gpui::Render for Pane {
         let item_count = self.items.len();
         let pane_id = self.id;
         let chrome_visible = self.tab_bar_hovered || self.chrome_menu.is_some();
-        let active_result_item = active
-            .as_ref()
-            .filter(|item| self.results.contains_key(&item.id))
-            .map(|item| item.id);
         let tab_rename = self
             .tab_rename
             .as_ref()
@@ -5629,6 +5629,15 @@ impl gpui::Render for Pane {
                                                         .debug_selector(move || {
                                                             format!("tab-close-{item_id}")
                                                         })
+                                                        .absolute()
+                                                        .right(px(3.))
+                                                        .top(px(5.))
+                                                        .rounded_sm()
+                                                        .bg(if selected {
+                                                            colors.background
+                                                        } else {
+                                                            colors.toolbar
+                                                        })
                                                         .child(
                                                             IconButton::new(
                                                                 ("tab-close", item.id as usize),
@@ -5788,25 +5797,36 @@ impl gpui::Render for Pane {
                                         ),
                                     ),
                             )
-                            .children(active_result_item.map(|item_id| {
+                            .child({
                                 div()
-                                    .debug_selector(|| "pane-expand-results".into())
+                                    .debug_selector(|| "pane-maximize".into())
                                     .child(
                                         IconButton::new(
-                                            ("pane-expand-results", pane_id as usize),
-                                            IconName::Maximize,
-                                            "Open data in large view",
+                                            ("pane-maximize", pane_id as usize),
+                                            if self.maximized {
+                                                IconName::Minimize
+                                            } else {
+                                                IconName::Maximize
+                                            },
+                                            if self.maximized {
+                                                "Restore pane"
+                                            } else {
+                                                "Maximize pane"
+                                            },
                                         )
                                         .square(px(24.))
                                         .icon_size(12.)
-                                        .tooltip("Open data in large view")
-                                        .on_click(cx.listener(move |_, _, _, cx| {
-                                            cx.emit(PaneEvent::OpenDataResultsRequested {
-                                                item_id,
-                                            });
+                                        .tooltip(if self.maximized {
+                                            "Restore pane layout"
+                                        } else {
+                                            "Maximize pane"
+                                        })
+                                        .toggle_state(self.maximized)
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(PaneEvent::ToggleMaximizedRequested);
                                         })),
                                     )
-                            }))
+                            })
                     }))
             }))
             .children(pending_close.map(|item| {
@@ -7025,6 +7045,7 @@ pub struct WorkspaceShell {
     workspace_presentations: HashMap<String, WorkspacePresentation>,
     pane_layout: PaneLayoutPresentation,
     pane_layout_view: Entity<PaneLayoutView>,
+    maximized_pane_id: Option<u64>,
     workspace_resize_frame_pending: bool,
     presentation_persist_pending: bool,
     active_pane: usize,
@@ -7288,10 +7309,27 @@ impl WorkspaceSession {
 
 impl WorkspaceShell {
     fn sync_pane_layout_view(&mut self, cx: &mut Context<Self>) {
+        if self
+            .maximized_pane_id
+            .is_some_and(|id| !self.panes.iter().any(|pane| pane.read(cx).id == id))
+        {
+            self.maximized_pane_id = None;
+        }
+        for pane in &self.panes {
+            let maximized = self.maximized_pane_id == Some(pane.read(cx).id);
+            pane.update(cx, |pane, cx| {
+                if pane.maximized != maximized {
+                    pane.maximized = maximized;
+                    cx.notify();
+                }
+            });
+        }
         let panes = self.panes.clone();
         let layout = self.pane_layout.clone();
-        self.pane_layout_view
-            .update(cx, |view, cx| view.sync(panes, layout, cx));
+        let maximized_pane_id = self.maximized_pane_id;
+        self.pane_layout_view.update(cx, |view, cx| {
+            view.sync(panes, layout, maximized_pane_id, cx)
+        });
     }
 
     pub fn new(
@@ -7738,6 +7776,7 @@ impl WorkspaceShell {
             owner: shell.clone(),
             panes: panes.clone(),
             layout: pane_layout.clone(),
+            maximized_pane_id: None,
         });
         let shell_window = window.window_handle();
         let key_interceptor_subscription = cx.intercept_keystrokes(move |event, window, cx| {
@@ -7872,6 +7911,7 @@ impl WorkspaceShell {
             workspace_presentations,
             pane_layout,
             pane_layout_view,
+            maximized_pane_id: None,
             workspace_resize_frame_pending: false,
             presentation_persist_pending: false,
             active_pane,
@@ -19702,6 +19742,7 @@ impl WorkspaceShell {
         cx.subscribe_in(&pane, window, Self::on_pane_event).detach();
         self.panes.push(pane);
         pane_layout::split(&mut self.pane_layout, target_id, id, direction);
+        self.maximized_pane_id = None;
         self.sync_pane_layout_view(cx);
         self.active_pane = self.panes.len() - 1;
         self.focus_active_pane(window, cx);
@@ -20010,6 +20051,15 @@ impl WorkspaceShell {
             PaneEvent::SplitRequested(direction) => {
                 self.active_pane = index;
                 self.split_pane_in_direction(*direction, window, cx);
+            }
+            PaneEvent::ToggleMaximizedRequested => {
+                self.active_pane = index;
+                let pane_id = emitter.read(cx).id;
+                self.maximized_pane_id =
+                    (self.maximized_pane_id != Some(pane_id)).then_some(pane_id);
+                self.sync_pane_layout_view(cx);
+                self.focus_active_pane(window, cx);
+                cx.notify();
             }
             PaneEvent::CloseRequested => {
                 self.active_pane = index;
@@ -36884,6 +36934,7 @@ struct PaneLayoutView {
     owner: gpui::WeakEntity<WorkspaceShell>,
     panes: Vec<Entity<Pane>>,
     layout: PaneLayoutPresentation,
+    maximized_pane_id: Option<u64>,
 }
 
 impl PaneLayoutView {
@@ -36891,10 +36942,12 @@ impl PaneLayoutView {
         &mut self,
         panes: Vec<Entity<Pane>>,
         layout: PaneLayoutPresentation,
+        maximized_pane_id: Option<u64>,
         cx: &mut Context<Self>,
     ) {
         self.panes = panes;
         self.layout = layout;
+        self.maximized_pane_id = maximized_pane_id;
         cx.notify();
     }
 
@@ -36992,6 +37045,14 @@ impl PaneLayoutView {
 
 impl gpui::Render for PaneLayoutView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(pane_id) = self.maximized_pane_id {
+            return self.render_pane_layout(
+                &PaneLayoutPresentation::Pane { pane_id },
+                Vec::new(),
+                cx.theme().colors.subtle_border,
+                cx,
+            );
+        }
         let layout = self.layout.clone();
         self.render_pane_layout(&layout, Vec::new(), cx.theme().colors.subtle_border, cx)
     }
@@ -39989,9 +40050,15 @@ mod tests {
         assert!(cx.debug_bounds("pane-hover-actions").is_none());
 
         let tab = cx.debug_bounds("tab-1").expect("first tab");
+        let resting_tab_width = tab.size.width;
         cx.simulate_mouse_move(tab.center(), MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("tab-close-1").is_some());
+        assert_eq!(
+            cx.debug_bounds("tab-1").unwrap().size.width,
+            resting_tab_width,
+            "close overlay must not resize its tab"
+        );
         assert!(cx.debug_bounds("pane-hover-actions").is_some());
         assert!(cx.debug_bounds("pane-new-action").is_some());
         assert!(cx.debug_bounds("pane-split-action").is_some());
@@ -40081,6 +40148,44 @@ mod tests {
                 }
             ));
         });
+    }
+
+    #[gpui::test]
+    fn pane_maximize_is_independent_from_large_data_view(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let focus = workspace.read_with(&cx, |shell, cx| shell.focus_handle(cx));
+        cx.update(|window, cx| focus.dispatch_action(&SplitPane, window, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-slot-0").is_some());
+        assert!(cx.debug_bounds("pane-slot-1").is_some());
+
+        let second = workspace.read_with(&cx, |shell, _| shell.panes[1].clone());
+        second.update(&mut cx, |_, cx| {
+            cx.emit(PaneEvent::ToggleMaximizedRequested)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-slot-0").is_none());
+        assert!(cx.debug_bounds("pane-slot-1").is_some());
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.maximized_pane_id, Some(second.read(cx).id));
+            assert!(
+                shell.modal.is_none(),
+                "pane maximize must not open data modal"
+            );
+            assert!(shell
+                .panes
+                .iter()
+                .all(|pane| pane.read(cx).expanded_result_item.is_none()));
+        });
+
+        second.update(&mut cx, |_, cx| {
+            cx.emit(PaneEvent::ToggleMaximizedRequested)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-slot-0").is_some());
+        assert!(cx.debug_bounds("pane-slot-1").is_some());
     }
 
     #[gpui::test]
