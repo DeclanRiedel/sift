@@ -19986,8 +19986,8 @@ impl WorkspaceShell {
             return false;
         };
         let views = [
-            ResultInspectorView::Fields,
             ResultInspectorView::Value,
+            ResultInspectorView::Fields,
             ResultInspectorView::RowJson,
         ];
         let current = self
@@ -20036,6 +20036,75 @@ impl WorkspaceShell {
         results.update(cx, |results, cx| {
             results.set_column_included(field.source_column, !field.included, cx)
         });
+        true
+    }
+
+    fn set_all_inspector_fields(&mut self, included: bool, cx: &mut Context<Self>) -> bool {
+        let Some((_, results)) = self.focused_pane_results_item(cx) else {
+            return false;
+        };
+        results.update(cx, |results, cx| {
+            results.set_all_columns_included(included, cx)
+        });
+        true
+    }
+
+    fn toggle_inspector_row_json_fold(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((_, results)) = self.focused_pane_results_item(cx) else {
+            return false;
+        };
+        results.update(cx, |results, cx| results.toggle_row_json_folded(cx));
+        true
+    }
+
+    fn toggle_inspector_row_json_wrap(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((_, results)) = self.focused_pane_results_item(cx) else {
+            return false;
+        };
+        results.update(cx, |results, cx| results.toggle_row_json_wrapped(cx));
+        true
+    }
+
+    fn focus_inspector_row_json_filter(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((_, results)) = self.focused_pane_results_item(cx) else {
+            return false;
+        };
+        results
+            .read(cx)
+            .row_json_filter_input()
+            .focus_handle(cx)
+            .focus(window, cx);
+        true
+    }
+
+    fn copy_inspector_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((item_id, results)) = self.focused_pane_results_item(cx) else {
+            return false;
+        };
+        let view = self
+            .result_inspector_views
+            .get(&item_id)
+            .copied()
+            .unwrap_or_default();
+        let text = match view {
+            ResultInspectorView::Fields => return false,
+            ResultInspectorView::Value => results
+                .read(cx)
+                .selected_value()
+                .map(|selected| render_value(&selected.value).text),
+            ResultInspectorView::RowJson => results
+                .read(cx)
+                .selected_row_json()
+                .and_then(|selected| serde_json::to_string_pretty(&selected.value).ok()),
+        };
+        let Some(text) = text else {
+            return false;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         true
     }
 
@@ -21617,19 +21686,22 @@ impl WorkspaceShell {
                 }
             }
             if workspace && !modal && !text_input && has_context("SiftInspector") {
-                let fields_selected = self
+                let inspector_view = self
                     .focused_pane_results_item(cx)
                     .map(|(item_id, _)| {
                         self.result_inspector_views
                             .get(&item_id)
                             .copied()
                             .unwrap_or_default()
-                            == ResultInspectorView::Fields
                     })
-                    .unwrap_or(false);
+                    .unwrap_or_default();
+                let fields_selected = inspector_view == ResultInspectorView::Fields;
                 let handled = match key.as_str() {
                     "h" => self.move_result_inspector_view(-1, cx),
                     "l" => self.move_result_inspector_view(1, cx),
+                    "1" => self.select_result_inspector_view(ResultInspectorView::Fields, cx),
+                    "2" => self.select_result_inspector_view(ResultInspectorView::Value, cx),
+                    "3" => self.select_result_inspector_view(ResultInspectorView::RowJson, cx),
                     "j" if fields_selected => self.move_inspector_field_selection(1, cx),
                     "k" if fields_selected => self.move_inspector_field_selection(-1, cx),
                     "g" if fields_selected && self.inspector_g_pending => {
@@ -21646,7 +21718,23 @@ impl WorkspaceShell {
                     "shift-g" if fields_selected => {
                         self.move_inspector_field_selection(isize::MAX, cx)
                     }
-                    "enter" if fields_selected => self.toggle_selected_inspector_field(cx),
+                    "enter" | "space" if fields_selected => {
+                        self.toggle_selected_inspector_field(cx)
+                    }
+                    "a" if fields_selected => self.set_all_inspector_fields(true, cx),
+                    "n" if fields_selected => self.set_all_inspector_fields(false, cx),
+                    "f" if inspector_view == ResultInspectorView::RowJson => {
+                        self.toggle_inspector_row_json_fold(cx)
+                    }
+                    "w" if inspector_view == ResultInspectorView::RowJson => {
+                        self.toggle_inspector_row_json_wrap(cx)
+                    }
+                    "/" if inspector_view == ResultInspectorView::RowJson => {
+                        self.focus_inspector_row_json_filter(window, cx)
+                    }
+                    "y" if inspector_view != ResultInspectorView::Fields => {
+                        self.copy_inspector_selection(cx)
+                    }
                     "escape" => {
                         self.inspector_g_pending = false;
                         self.focus_active_pane(window, cx);
@@ -25961,6 +26049,15 @@ impl WorkspaceShell {
                                     && index == self.inspector_field_selected,
                                 |row| row.bg(colors.selected_surface).border_color(colors.accent),
                             )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |shell, _, window, cx| {
+                                    shell.inspector_field_selected = index;
+                                    shell.focused_surface = WorkspaceSurface::Inspector;
+                                    shell.inspector_focus_handle.focus(window, cx);
+                                    cx.notify();
+                                }),
+                            )
                             .child(
                                 div()
                                     .min_w_0()
@@ -26205,7 +26302,16 @@ impl WorkspaceShell {
                             ));
                         })),
                     )
-                    .on_key_down(cx.listener(|_, _, _, cx| cx.notify())),
+                    .on_key_down(
+                        cx.listener(|shell, event: &gpui::KeyDownEvent, window, cx| {
+                            if event.keystroke.key == "escape" {
+                                shell.focused_surface = WorkspaceSurface::Inspector;
+                                shell.inspector_focus_handle.focus(window, cx);
+                                cx.stop_propagation();
+                            }
+                            cx.notify();
+                        }),
+                    ),
             )
             .children(filter_error.map(|error| div().mx_2().mt_2().child(ErrorBanner::new(error))))
             .child(
@@ -26413,7 +26519,13 @@ impl WorkspaceShell {
         let fields_pane = self.panes[self.active_pane].clone();
         let value_pane = fields_pane.clone();
         let json_pane = fields_pane.clone();
+        let keyboard_help = match selected {
+            ResultInspectorView::Fields => "h/l views · j/k fields · Enter toggle · a/n all/none",
+            ResultInspectorView::Value => "h/l views · y copy · 1/2/3 select view",
+            ResultInspectorView::RowJson => "h/l views · / filter · f fold · w wrap · y copy",
+        };
         div()
+            .flex_1()
             .flex()
             .flex_col()
             .min_h_0()
@@ -26445,11 +26557,13 @@ impl WorkspaceShell {
                             .when(selected == ResultInspectorView::Value, |tab| {
                                 tab.border_b_1().border_color(colors.accent)
                             })
-                            .on_click(cx.listener(move |shell, _, _, cx| {
+                            .on_click(cx.listener(move |shell, _, window, cx| {
                                 if value_pane.read(cx).contains_item(item_id) {
                                     shell
                                         .result_inspector_views
                                         .insert(item_id, ResultInspectorView::Value);
+                                    shell.focused_surface = WorkspaceSurface::Inspector;
+                                    shell.inspector_focus_handle.focus(window, cx);
                                     cx.notify();
                                 }
                             }))
@@ -26473,11 +26587,13 @@ impl WorkspaceShell {
                             .when(selected == ResultInspectorView::Fields, |tab| {
                                 tab.border_b_1().border_color(colors.accent)
                             })
-                            .on_click(cx.listener(move |shell, _, _, cx| {
+                            .on_click(cx.listener(move |shell, _, window, cx| {
                                 if fields_pane.read(cx).contains_item(item_id) {
                                     shell
                                         .result_inspector_views
                                         .insert(item_id, ResultInspectorView::Fields);
+                                    shell.focused_surface = WorkspaceSurface::Inspector;
+                                    shell.inspector_focus_handle.focus(window, cx);
                                     cx.notify();
                                 }
                             }))
@@ -26501,11 +26617,13 @@ impl WorkspaceShell {
                             .when(selected == ResultInspectorView::RowJson, |tab| {
                                 tab.border_b_1().border_color(colors.accent)
                             })
-                            .on_click(cx.listener(move |shell, _, _, cx| {
+                            .on_click(cx.listener(move |shell, _, window, cx| {
                                 if json_pane.read(cx).contains_item(item_id) {
                                     shell
                                         .result_inspector_views
                                         .insert(item_id, ResultInspectorView::RowJson);
+                                    shell.focused_surface = WorkspaceSurface::Inspector;
+                                    shell.inspector_focus_handle.focus(window, cx);
                                     cx.notify();
                                 }
                             }))
@@ -26529,6 +26647,22 @@ impl WorkspaceShell {
                 ResultInspectorView::Value => self.render_result_value_inspector(results, cx),
                 ResultInspectorView::RowJson => self.render_result_row_json_inspector(results, cx),
             })
+            .child(
+                div()
+                    .debug_selector(|| "inspector-keyboard-help".into())
+                    .h(px(28.))
+                    .px_2()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_t_1()
+                    .border_color(colors.subtle_border)
+                    .truncate()
+                    .text_xs()
+                    .text_color(colors.muted_text)
+                    .child(keyboard_help),
+            )
             .into_any_element()
     }
 
@@ -28261,6 +28395,14 @@ impl WorkspaceShell {
             .when(dock.id == DockId::Inspector, |dock| {
                 dock.key_context("SiftInspector")
                     .track_focus(&self.inspector_focus_handle)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|shell, _, window, cx| {
+                            shell.focused_surface = WorkspaceSurface::Inspector;
+                            shell.inspector_focus_handle.focus(window, cx);
+                            cx.notify();
+                        }),
+                    )
             })
             .relative()
             .w(px(dock.presentation.size))
@@ -39490,16 +39632,22 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("l");
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(&cx, |shell, _| {
+            assert_ne!(shell.focused_surface, WorkspaceSurface::Inspector)
+        });
+        let value_tab = cx.debug_bounds("inspector-value-view").unwrap();
+        cx.simulate_click(value_tab.center(), Modifiers::default());
         workspace.read_with(&cx, |shell, cx| {
             let (item_id, _) = shell.focused_pane_results_item(cx).unwrap();
+            assert_eq!(shell.focused_surface, WorkspaceSurface::Inspector);
             assert_eq!(
                 shell.result_inspector_views.get(&item_id),
                 Some(&ResultInspectorView::Value)
             );
         });
         assert!(cx.debug_bounds("inspector-result-value").is_some());
-        cx.simulate_keystrokes("l");
+        cx.simulate_keystrokes("l l");
         workspace.read_with(&cx, |shell, cx| {
             let (item_id, _) = shell.focused_pane_results_item(cx).unwrap();
             assert_eq!(
@@ -39507,12 +39655,59 @@ mod tests {
                 Some(&ResultInspectorView::RowJson)
             );
         });
-        cx.simulate_keystrokes("h h j enter");
+        cx.simulate_keystrokes("1 j enter");
         workspace.read_with(&cx, |shell, cx| {
             assert_eq!(shell.inspector_field_selected, 1);
             let (_, results) = shell.focused_pane_results_item(cx).unwrap();
             assert!(!results.read(cx).inspector_fields()[1].included);
         });
+        cx.simulate_keystrokes("a n a");
+        workspace.read_with(&cx, |shell, cx| {
+            let (_, results) = shell.focused_pane_results_item(cx).unwrap();
+            assert!(results
+                .read(cx)
+                .inspector_fields()
+                .iter()
+                .all(|field| field.included));
+        });
+
+        cx.simulate_keystrokes("escape");
+        let first_field = cx.debug_bounds("inspector-result-field-0").unwrap();
+        cx.simulate_click(first_field.center(), Modifiers::default());
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.focused_surface, WorkspaceSurface::Inspector);
+            assert_eq!(shell.inspector_field_selected, 0);
+        });
+        cx.simulate_keystrokes("3 f w");
+        workspace.read_with(&cx, |shell, cx| {
+            let (_, results) = shell.focused_pane_results_item(cx).unwrap();
+            assert!(results.read(cx).row_json_folded());
+            assert!(results.read(cx).row_json_wrapped());
+        });
+        cx.simulate_keystrokes("/ escape f");
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.focused_surface, WorkspaceSurface::Inspector);
+            let (_, results) = shell.focused_pane_results_item(cx).unwrap();
+            assert!(!results.read(cx).row_json_folded());
+        });
+        workspace.update(&mut cx, |shell, cx| {
+            let (_, results) = shell.focused_pane_results_item(cx).unwrap();
+            results.update(cx, |results, cx| results.select_cell(0, 0, cx));
+        });
+        cx.simulate_keystrokes("2 y");
+        workspace.read_with(&cx, |shell, cx| {
+            let (item_id, results) = shell.focused_pane_results_item(cx).unwrap();
+            assert_eq!(
+                shell.result_inspector_views.get(&item_id),
+                Some(&ResultInspectorView::Value)
+            );
+            assert!(results.read(cx).selected_value().is_some());
+        });
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("1".into())
+        );
+        assert!(cx.debug_bounds("inspector-keyboard-help").is_some());
     }
 
     #[gpui::test]
