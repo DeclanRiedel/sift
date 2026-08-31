@@ -28,10 +28,10 @@ pub use settings::{
     UserSettings,
 };
 pub use shell::{
-    CancelExecution, CloseActiveItem, CloseActivePane, CommandDefinition, CommandId,
-    CommandRegistry, CommandSpec, ConnectionHealthFailure, ConnectionHealthReport,
-    ConnectionStatus, DismissModal, Dock, DockDefinition, DockId, DockPlacement, DockRegistry,
-    ExecutorCommand, ExecutorEvent, FocusNextPane, InstanceCommand,
+    AutomationDetailsSnapshot, CancelExecution, CloseActiveItem, CloseActivePane,
+    CommandDefinition, CommandId, CommandRegistry, CommandSpec, ConnectionHealthFailure,
+    ConnectionHealthReport, ConnectionStatus, DismissModal, Dock, DockDefinition, DockId,
+    DockPlacement, DockRegistry, ExecutorCommand, ExecutorEvent, FocusNextPane, InstanceCommand,
     InstanceConfigurationPresentation, InstanceCredentialKind, InstanceCredentialPresentation,
     InstanceManagerEvent, InstancePlanPresentation, ItemDefinition, ItemRegistry, ItemRuntimeKind,
     Modal, OpenCommandPalette, OpenSchemaSearch, OpenServerConnection, PaletteConfirm, PaletteDown,

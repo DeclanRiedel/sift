@@ -3109,6 +3109,204 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadAutomationDetails {
+                configuration_id,
+                run_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => async {
+                        let schedules = client.run_schedules(configuration_id).await?;
+                        let mut occurrences = Vec::new();
+                        for schedule in &schedules {
+                            occurrences.extend(
+                                client
+                                    .schedule_occurrences(
+                                        schedule.id,
+                                        sift_api_types::ScheduleOccurrenceQuery { limit: 100 },
+                                    )
+                                    .await?,
+                            );
+                        }
+                        occurrences
+                            .sort_by_key(|occurrence| std::cmp::Reverse(occurrence.scheduled_for));
+                        let detail_run_id = run_id.or_else(|| {
+                            occurrences.iter().find_map(|occurrence| occurrence.run_id)
+                        });
+                        let (run, steps, logs) = match detail_run_id {
+                            Some(run_id) => {
+                                let run = client.run(run_id).await?;
+                                let steps = client.run_steps(run_id).await?;
+                                let logs = client
+                                    .run_logs(
+                                        run_id,
+                                        sift_api_types::RunLogQuery {
+                                            after: 0,
+                                            limit: 200,
+                                        },
+                                    )
+                                    .await?;
+                                (Some(run), steps, logs)
+                            }
+                            None => (None, Vec::new(), Vec::new()),
+                        };
+                        Ok::<_, sift_client_sdk::Error>(
+                            sift_workspace_ui::AutomationDetailsSnapshot {
+                                schedules,
+                                occurrences,
+                                run,
+                                steps,
+                                logs,
+                            },
+                        )
+                    }
+                    .await
+                    .map_err(|error| format!("loading automation details failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::AutomationDetailsLoaded {
+                        configuration_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SaveAutomationSchedule {
+                configuration_id,
+                schedule_id,
+                expected_revision,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => match schedule_id {
+                        Some(schedule_id) => match expected_revision {
+                            Some(expected_revision) => client
+                                .update_run_schedule(
+                                    schedule_id,
+                                    sift_api_types::UpdateRunScheduleRequest {
+                                        expected_revision,
+                                        schedule: request,
+                                    },
+                                )
+                                .await
+                                .map(|_| ()),
+                            None => Err(sift_client_sdk::Error::Protocol(
+                                "updating a schedule requires a revision".into(),
+                            )),
+                        },
+                        None => client
+                            .create_run_schedule(configuration_id, request)
+                            .await
+                            .map(|_| ()),
+                    }
+                    .map_err(|error| format!("saving automation schedule failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::AutomationScheduleMutationFinished {
+                        configuration_id,
+                        action: "Automation schedule saved",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SetAutomationScheduleEnabled {
+                configuration_id,
+                schedule_id,
+                expected_revision,
+                enabled,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let request = sift_api_types::ExpectedRunConfigurationRevisionRequest {
+                            expected_revision,
+                        };
+                        if enabled {
+                            client.enable_run_schedule(schedule_id, request).await
+                        } else {
+                            client.disable_run_schedule(schedule_id, request).await
+                        }
+                        .map(|_| ())
+                        .map_err(|error| format!("updating automation schedule failed: {error}"))
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::AutomationScheduleMutationFinished {
+                        configuration_id,
+                        action: if enabled {
+                            "Automation schedule enabled"
+                        } else {
+                            "Automation schedule disabled"
+                        },
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteAutomationSchedule {
+                configuration_id,
+                schedule_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_run_schedule(
+                            schedule_id,
+                            sift_api_types::ExpectedRunConfigurationRevisionRequest {
+                                expected_revision,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("deleting automation schedule failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::AutomationScheduleMutationFinished {
+                        configuration_id,
+                        action: "Automation schedule deleted",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ResumeAutomationOccurrence {
+                configuration_id,
+                occurrence_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .resume_schedule_occurrence(occurrence_id)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("resuming scheduled automation failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::AutomationScheduleMutationFinished {
+                        configuration_id,
+                        action: "Scheduled automation resumed",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadCatalogDiagram => {
                 let result = match context.as_ref() {
                     Some(opened) => match opened

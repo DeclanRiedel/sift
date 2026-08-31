@@ -345,7 +345,7 @@ pub(super) fn render_bottom_panel(
                                 MouseButton::Left,
                                 cx.listener(
                                     move |shell, event: &gpui::MouseDownEvent, window, cx| {
-                                        shell.automation_selected = index;
+                                        shell.select_automation(index, cx);
                                         shell.automation_focus_handle.focus(window, cx);
                                         if event.click_count >= 2 {
                                             shell.open_run_configuration_editor(
@@ -411,6 +411,378 @@ pub(super) fn render_bottom_panel(
                                     }),
                             )
                     });
+            let schedules =
+                shell
+                    .automation_schedules
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(index, schedule)| {
+                        let edit_schedule = schedule.clone();
+                        let toggle_schedule = schedule.clone();
+                        let delete_schedule = schedule.clone();
+                        let next_fire = schedule.next_fire_at.map_or_else(
+                            || "No next run".into(),
+                            |time| time.format("%Y-%m-%d %H:%M UTC").to_string(),
+                        );
+                        div()
+                            .id(("automation-schedule", index))
+                            .debug_selector(move || format!("automation-schedule-{index}"))
+                            .min_h(px(38.))
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .font_family("monospace")
+                                            .text_color(colors.text)
+                                            .child(format!(
+                                                "{} · {}",
+                                                schedule.cron, schedule.timezone
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(colors.disabled_text)
+                                            .child(format!(
+                                                "{} · {:?} · {:?}",
+                                                next_fire,
+                                                schedule.misfire_policy,
+                                                schedule.concurrency_policy
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                Button::new(("edit-automation-schedule", index), "Edit")
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(shell.automation_details_loading)
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.edit_automation_schedule(edit_schedule.clone(), cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(
+                                    ("toggle-automation-schedule", index),
+                                    if schedule.enabled {
+                                        "Disable"
+                                    } else {
+                                        "Enable"
+                                    },
+                                )
+                                .tone(ButtonTone::Ghost)
+                                .disabled(shell.automation_details_loading)
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        shell.set_automation_schedule_enabled(
+                                            toggle_schedule.clone(),
+                                            cx,
+                                        )
+                                    },
+                                )),
+                            )
+                            .child(
+                                Button::new(("delete-automation-schedule", index), "Delete")
+                                    .tone(ButtonTone::DangerGhost)
+                                    .disabled(shell.automation_details_loading)
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell
+                                            .delete_automation_schedule(delete_schedule.clone(), cx)
+                                    })),
+                            )
+                    });
+            let occurrences = shell
+                .automation_occurrences
+                .iter()
+                .take(12)
+                .cloned()
+                .enumerate()
+                .map(|(index, occurrence)| {
+                    let resumable =
+                        occurrence.state == sift_protocol::ScheduleOccurrenceState::Blocked;
+                    let resume_occurrence = occurrence.clone();
+                    div()
+                        .id(("automation-occurrence", index))
+                        .min_h(px(30.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(colors.subtle_border)
+                        .child(
+                            div().w(px(132.)).text_xs().child(
+                                occurrence
+                                    .scheduled_for
+                                    .format("%Y-%m-%d %H:%M")
+                                    .to_string(),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .w(px(92.))
+                                .text_xs()
+                                .text_color(if resumable {
+                                    colors.warning
+                                } else {
+                                    colors.muted_text
+                                })
+                                .child(format!("{:?}", occurrence.state)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(colors.disabled_text)
+                                .child(occurrence.error_code.clone().unwrap_or_default()),
+                        )
+                        .when(resumable, |row| {
+                            row.child(
+                                Button::new(("resume-automation-occurrence", index), "Resume")
+                                    .debug_selector(format!("resume-automation-occurrence-{index}"))
+                                    .tone(ButtonTone::Accent)
+                                    .disabled(shell.automation_details_loading)
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.resume_automation_occurrence(
+                                            resume_occurrence.clone(),
+                                            cx,
+                                        )
+                                    })),
+                            )
+                        })
+                });
+            let steps = shell.automation_run_steps.iter().map(|step| {
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(36.))
+                            .text_xs()
+                            .child(format!("#{}", step.ordinal + 1)),
+                    )
+                    .child(
+                        div()
+                            .w(px(88.))
+                            .text_xs()
+                            .child(format!("{:?}", step.state)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(colors.disabled_text)
+                            .child(step.error_code.clone().unwrap_or_else(|| {
+                                step.row_count
+                                    .map_or_else(String::new, |rows| format!("{rows} rows"))
+                            })),
+                    )
+            });
+            let logs = shell.automation_run_logs.iter().map(|entry| {
+                div()
+                    .min_h(px(26.))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(52.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(colors.disabled_text)
+                            .child(entry.sequence.to_string()),
+                    )
+                    .child(
+                        div()
+                            .w(px(54.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(entry.level.clone()),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .font_family("monospace")
+                            .text_xs()
+                            .whitespace_normal()
+                            .text_color(colors.text)
+                            .child(entry.message.clone()),
+                    )
+            });
+            let editing_schedule = shell.automation_schedule_edit.is_some();
+            let misfire_label = format!("Misfire: {:?}", shell.automation_schedule_misfire);
+            let concurrency_label =
+                format!("Concurrency: {:?}", shell.automation_schedule_concurrency);
+            let run_heading = shell.automation_detail_run.as_ref().map_or_else(
+                || "LATEST RUN · NONE".into(),
+                |run| format!("LATEST RUN {} · {:?}", run.id.0, run.state),
+            );
+            let details = div()
+                .id("automation-details-scroll")
+                .debug_selector(|| "automation-details".into())
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .border_l_1()
+                .border_color(colors.subtle_border)
+                .overflow_y_scroll()
+                .child(
+                    div()
+                        .h(px(28.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(SectionLabel::new("SCHEDULES"))
+                        .child(
+                            Button::new("new-automation-schedule", "New schedule")
+                                .tone(ButtonTone::Ghost)
+                                .disabled(shell.automation_details_loading)
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.clear_automation_schedule_editor(cx);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .px_2()
+                        .pb_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(180.))
+                                .child(shell.automation_schedule_cron_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .w(px(130.))
+                                .child(shell.automation_schedule_timezone_input.clone()),
+                        )
+                        .child(
+                            Button::new("automation-misfire-policy", misfire_label)
+                                .tone(ButtonTone::Ghost)
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.cycle_automation_misfire_policy(cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("automation-concurrency-policy", concurrency_label)
+                                .tone(ButtonTone::Ghost)
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.cycle_automation_concurrency_policy(cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(
+                                "save-automation-schedule",
+                                if editing_schedule { "Update" } else { "Create" },
+                            )
+                            .debug_selector("save-automation-schedule")
+                            .tone(ButtonTone::Accent)
+                            .loading(shell.automation_details_loading)
+                            .disabled(
+                                shell.selected_automation_id().is_none()
+                                    || shell.automation_details_loading,
+                            )
+                            .on_click(
+                                cx.listener(|shell, _, _, cx| shell.save_automation_schedule(cx)),
+                            ),
+                        ),
+                )
+                .when(shell.automation_schedules.is_empty(), |panel| {
+                    panel.child(
+                        div()
+                            .px_2()
+                            .pb_2()
+                            .text_xs()
+                            .child("No schedules configured."),
+                    )
+                })
+                .children(schedules)
+                .child(
+                    div()
+                        .h(px(28.))
+                        .px_2()
+                        .mt_1()
+                        .flex()
+                        .items_center()
+                        .child(SectionLabel::new("RECENT OCCURRENCES")),
+                )
+                .when(shell.automation_occurrences.is_empty(), |panel| {
+                    panel.child(
+                        div()
+                            .px_2()
+                            .pb_2()
+                            .text_xs()
+                            .child("No scheduled occurrences yet."),
+                    )
+                })
+                .children(occurrences)
+                .child(
+                    div()
+                        .h(px(28.))
+                        .px_2()
+                        .mt_1()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(SectionLabel::new(run_heading))
+                        .child(
+                            Button::new("refresh-automation-details", "Refresh")
+                                .tone(ButtonTone::Ghost)
+                                .loading(shell.automation_details_loading)
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.request_automation_details(cx)
+                                })),
+                        ),
+                )
+                .children(steps)
+                .child(
+                    div()
+                        .h(px(28.))
+                        .px_2()
+                        .mt_1()
+                        .flex()
+                        .items_center()
+                        .child(SectionLabel::new("DURABLE LOG")),
+                )
+                .when(shell.automation_run_logs.is_empty(), |panel| {
+                    panel.child(
+                        div()
+                            .px_2()
+                            .pb_2()
+                            .text_xs()
+                            .child("No log entries for this run."),
+                    )
+                })
+                .children(logs);
             div()
                 .flex()
                 .flex_1()
@@ -458,11 +830,19 @@ pub(super) fn render_bottom_panel(
                 )
                 .child(
                     div()
-                        .id("automation-configuration-list")
                         .flex_1()
                         .min_h_0()
-                        .overflow_y_scroll()
-                        .children(rows),
+                        .flex()
+                        .child(
+                            div()
+                                .id("automation-configuration-list")
+                                .w(px(440.))
+                                .min_w(px(300.))
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .children(rows),
+                        )
+                        .child(details),
                 )
                 .into_any_element()
         } else {

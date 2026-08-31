@@ -2678,6 +2678,31 @@ pub enum ExecutorCommand {
     CancelAutomation {
         run_id: i64,
     },
+    LoadAutomationDetails {
+        configuration_id: sift_protocol::RunConfigurationId,
+        run_id: Option<sift_protocol::RunId>,
+    },
+    SaveAutomationSchedule {
+        configuration_id: sift_protocol::RunConfigurationId,
+        schedule_id: Option<sift_protocol::ScheduleId>,
+        expected_revision: Option<u64>,
+        request: sift_api_types::CreateRunScheduleRequest,
+    },
+    SetAutomationScheduleEnabled {
+        configuration_id: sift_protocol::RunConfigurationId,
+        schedule_id: sift_protocol::ScheduleId,
+        expected_revision: u64,
+        enabled: bool,
+    },
+    DeleteAutomationSchedule {
+        configuration_id: sift_protocol::RunConfigurationId,
+        schedule_id: sift_protocol::ScheduleId,
+        expected_revision: u64,
+    },
+    ResumeAutomationOccurrence {
+        configuration_id: sift_protocol::RunConfigurationId,
+        occurrence_id: sift_protocol::ScheduleOccurrenceId,
+    },
     LoadCatalogDiagram,
     TerminateDatabaseProcess {
         process_id: i64,
@@ -3076,6 +3101,15 @@ pub enum ExecutorEvent {
         result: Result<(), String>,
     },
     AutomationRunUpdated(Result<sift_protocol::Run, String>),
+    AutomationDetailsLoaded {
+        configuration_id: sift_protocol::RunConfigurationId,
+        result: Result<AutomationDetailsSnapshot, String>,
+    },
+    AutomationScheduleMutationFinished {
+        configuration_id: sift_protocol::RunConfigurationId,
+        action: &'static str,
+        result: Result<(), String>,
+    },
     CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
     DatabaseProcessTerminated {
         process_id: i64,
@@ -3213,6 +3247,15 @@ pub enum ExecutorEvent {
         text_revision: u64,
         outcome: Box<SemanticOutcome>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomationDetailsSnapshot {
+    pub schedules: Vec<sift_protocol::RunSchedule>,
+    pub occurrences: Vec<sift_protocol::ScheduleOccurrence>,
+    pub run: Option<sift_protocol::Run>,
+    pub steps: Vec<sift_protocol::RunStepResult>,
+    pub logs: Vec<sift_protocol::RunLogEntry>,
 }
 
 /// Shell → desktop room-document supervisor. The snapshot is only an initial
@@ -7262,6 +7305,18 @@ pub struct WorkspaceShell {
     automation_last_success_for_commit: Option<sift_protocol::Run>,
     automation_focus_handle: FocusHandle,
     automation_selected: usize,
+    automation_detail_configuration: Option<sift_protocol::RunConfigurationId>,
+    automation_schedules: Vec<sift_protocol::RunSchedule>,
+    automation_occurrences: Vec<sift_protocol::ScheduleOccurrence>,
+    automation_detail_run: Option<sift_protocol::Run>,
+    automation_run_steps: Vec<sift_protocol::RunStepResult>,
+    automation_run_logs: Vec<sift_protocol::RunLogEntry>,
+    automation_schedule_edit: Option<sift_protocol::ScheduleId>,
+    automation_schedule_cron_input: Entity<TextInput>,
+    automation_schedule_timezone_input: Entity<TextInput>,
+    automation_schedule_misfire: sift_protocol::ScheduleMisfirePolicy,
+    automation_schedule_concurrency: sift_protocol::ScheduleConcurrencyPolicy,
+    automation_details_loading: bool,
     automations_loading: bool,
     automations_error: Option<String>,
     _lifecycle_task: Option<Task<()>>,
@@ -7629,6 +7684,13 @@ impl WorkspaceShell {
         });
         let data_search_input = cx
             .new(|cx| TextInput::new("", "Search table rows…", cx).aria_label("Search table data"));
+        let automation_schedule_cron_input = cx.new(|cx| {
+            TextInput::new("0 9 * * 1-5", "Cron expression", cx)
+                .aria_label("Automation schedule cron expression")
+        });
+        let automation_schedule_timezone_input = cx.new(|cx| {
+            TextInput::new("UTC", "Timezone", cx).aria_label("Automation schedule timezone")
+        });
         let server_name_input = cx.new(|cx| TextInput::new("", "Display name", cx));
         let server_url_input = cx.new(|cx| TextInput::new("", "http://192.168.1.20:7474", cx));
         let server_token_input =
@@ -8120,6 +8182,18 @@ impl WorkspaceShell {
             automation_last_success_for_commit: None,
             automation_focus_handle: cx.focus_handle(),
             automation_selected: 0,
+            automation_detail_configuration: None,
+            automation_schedules: Vec::new(),
+            automation_occurrences: Vec::new(),
+            automation_detail_run: None,
+            automation_run_steps: Vec::new(),
+            automation_run_logs: Vec::new(),
+            automation_schedule_edit: None,
+            automation_schedule_cron_input,
+            automation_schedule_timezone_input,
+            automation_schedule_misfire: sift_protocol::ScheduleMisfirePolicy::Skip,
+            automation_schedule_concurrency: sift_protocol::ScheduleConcurrencyPolicy::Forbid,
+            automation_details_loading: false,
             automations_loading: false,
             automations_error: None,
             _lifecycle_task: None,
@@ -10856,6 +10930,7 @@ impl WorkspaceShell {
                     }
                     Err(_) => {}
                 }
+                self.request_automation_details(cx);
                 cx.notify();
             }
             ExecutorEvent::RunConfigurationSaved { item_id, result } => {
@@ -10957,6 +11032,47 @@ impl WorkspaceShell {
                     Ok(run) => {
                         self.automation_runs.insert(run.configuration_id, run);
                         self.automations_error = None;
+                        self.request_automation_details(cx);
+                    }
+                    Err(message) => self.automations_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AutomationDetailsLoaded {
+                configuration_id,
+                result,
+            } => {
+                if self.selected_automation_id() != Some(configuration_id) {
+                    return;
+                }
+                self.automation_details_loading = false;
+                match result {
+                    Ok(details) => {
+                        self.automation_detail_configuration = Some(configuration_id);
+                        self.automation_schedules = details.schedules;
+                        self.automation_occurrences = details.occurrences;
+                        self.automation_detail_run = details.run;
+                        self.automation_run_steps = details.steps;
+                        self.automation_run_logs = details.logs;
+                        self.automations_error = None;
+                    }
+                    Err(message) => self.automations_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::AutomationScheduleMutationFinished {
+                configuration_id,
+                action,
+                result,
+            } => {
+                self.automation_details_loading = false;
+                match result {
+                    Ok(()) => {
+                        self.show_success_toast(action.into(), cx);
+                        self.clear_automation_schedule_editor(cx);
+                        if self.selected_automation_id() == Some(configuration_id) {
+                            self.request_automation_details(cx);
+                        }
                     }
                     Err(message) => self.automations_error = Some(message),
                 }
@@ -18589,12 +18705,20 @@ impl WorkspaceShell {
         match event.keystroke.key.as_str() {
             "j" | "down" if count > 0 => {
                 self.automation_selected = (self.automation_selected + 1).min(count - 1);
+                self.request_automation_details(cx);
             }
             "k" | "up" if count > 0 => {
                 self.automation_selected = self.automation_selected.saturating_sub(1);
+                self.request_automation_details(cx);
             }
-            "g" if count > 0 => self.automation_selected = 0,
-            "G" if count > 0 => self.automation_selected = count - 1,
+            "g" if count > 0 => {
+                self.automation_selected = 0;
+                self.request_automation_details(cx);
+            }
+            "G" if count > 0 => {
+                self.automation_selected = count - 1;
+                self.request_automation_details(cx);
+            }
             "enter" | "e" if count > 0 => {
                 let configuration =
                     self.automation_configurations[self.automation_selected].clone();
@@ -18608,6 +18732,210 @@ impl WorkspaceShell {
             _ => return,
         }
         cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn selected_automation_id(&self) -> Option<sift_protocol::RunConfigurationId> {
+        self.automation_configurations
+            .get(self.automation_selected)
+            .map(|configuration| configuration.id)
+    }
+
+    fn select_automation(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.automation_configurations.len() {
+            return;
+        }
+        self.automation_selected = index;
+        self.clear_automation_schedule_editor(cx);
+        self.request_automation_details(cx);
+        cx.notify();
+    }
+
+    fn request_automation_details(&mut self, _cx: &mut Context<Self>) {
+        let Some(configuration_id) = self.selected_automation_id() else {
+            self.automation_detail_configuration = None;
+            self.automation_schedules.clear();
+            self.automation_occurrences.clear();
+            self.automation_detail_run = None;
+            self.automation_run_steps.clear();
+            self.automation_run_logs.clear();
+            self.automation_details_loading = false;
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.automations_error = Some("Automation manager is unavailable".into());
+            return;
+        };
+        let run_id = self
+            .automation_runs
+            .get(&configuration_id)
+            .map(|run| run.id);
+        self.automation_details_loading = sender
+            .send(ExecutorCommand::LoadAutomationDetails {
+                configuration_id,
+                run_id,
+            })
+            .is_ok();
+        if self.automation_details_loading {
+            self.automation_detail_configuration = Some(configuration_id);
+            self.automations_error = None;
+        }
+    }
+
+    fn clear_automation_schedule_editor(&mut self, cx: &mut Context<Self>) {
+        self.automation_schedule_edit = None;
+        self.automation_schedule_cron_input
+            .update(cx, |input, cx| input.set_text("0 9 * * 1-5", cx));
+        self.automation_schedule_timezone_input
+            .update(cx, |input, cx| input.set_text("UTC", cx));
+        self.automation_schedule_misfire = sift_protocol::ScheduleMisfirePolicy::Skip;
+        self.automation_schedule_concurrency = sift_protocol::ScheduleConcurrencyPolicy::Forbid;
+    }
+
+    fn edit_automation_schedule(
+        &mut self,
+        schedule: sift_protocol::RunSchedule,
+        cx: &mut Context<Self>,
+    ) {
+        self.automation_schedule_edit = Some(schedule.id);
+        self.automation_schedule_cron_input
+            .update(cx, |input, cx| input.set_text(schedule.cron, cx));
+        self.automation_schedule_timezone_input
+            .update(cx, |input, cx| input.set_text(schedule.timezone, cx));
+        self.automation_schedule_misfire = schedule.misfire_policy;
+        self.automation_schedule_concurrency = schedule.concurrency_policy;
+        cx.notify();
+    }
+
+    fn cycle_automation_misfire_policy(&mut self, cx: &mut Context<Self>) {
+        self.automation_schedule_misfire = match self.automation_schedule_misfire {
+            sift_protocol::ScheduleMisfirePolicy::Skip => {
+                sift_protocol::ScheduleMisfirePolicy::RunOnce
+            }
+            sift_protocol::ScheduleMisfirePolicy::RunOnce => {
+                sift_protocol::ScheduleMisfirePolicy::Skip
+            }
+        };
+        cx.notify();
+    }
+
+    fn cycle_automation_concurrency_policy(&mut self, cx: &mut Context<Self>) {
+        self.automation_schedule_concurrency = match self.automation_schedule_concurrency {
+            sift_protocol::ScheduleConcurrencyPolicy::Forbid => {
+                sift_protocol::ScheduleConcurrencyPolicy::QueueOne
+            }
+            sift_protocol::ScheduleConcurrencyPolicy::QueueOne
+            | sift_protocol::ScheduleConcurrencyPolicy::Parallel { .. } => {
+                sift_protocol::ScheduleConcurrencyPolicy::Forbid
+            }
+        };
+        cx.notify();
+    }
+
+    fn save_automation_schedule(&mut self, cx: &mut Context<Self>) {
+        if self.automation_details_loading {
+            return;
+        }
+        let Some(configuration_id) = self.selected_automation_id() else {
+            return;
+        };
+        let cron = self
+            .automation_schedule_cron_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let timezone = self
+            .automation_schedule_timezone_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        if cron.is_empty() || timezone.is_empty() {
+            self.automations_error = Some("Schedule cron and timezone are required".into());
+            cx.notify();
+            return;
+        }
+        let expected_revision = self.automation_schedule_edit.and_then(|schedule_id| {
+            self.automation_schedules
+                .iter()
+                .find(|schedule| schedule.id == schedule_id)
+                .map(|schedule| schedule.revision)
+        });
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.automation_details_loading = sender
+            .send(ExecutorCommand::SaveAutomationSchedule {
+                configuration_id,
+                schedule_id: self.automation_schedule_edit,
+                expected_revision,
+                request: sift_api_types::CreateRunScheduleRequest {
+                    cron,
+                    timezone,
+                    misfire_policy: self.automation_schedule_misfire,
+                    concurrency_policy: self.automation_schedule_concurrency.clone(),
+                    enabled: true,
+                },
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn set_automation_schedule_enabled(
+        &mut self,
+        schedule: sift_protocol::RunSchedule,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.automation_details_loading = sender
+            .send(ExecutorCommand::SetAutomationScheduleEnabled {
+                configuration_id: schedule.configuration_id,
+                schedule_id: schedule.id,
+                expected_revision: schedule.revision,
+                enabled: !schedule.enabled,
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn delete_automation_schedule(
+        &mut self,
+        schedule: sift_protocol::RunSchedule,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.automation_details_loading = sender
+            .send(ExecutorCommand::DeleteAutomationSchedule {
+                configuration_id: schedule.configuration_id,
+                schedule_id: schedule.id,
+                expected_revision: schedule.revision,
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn resume_automation_occurrence(
+        &mut self,
+        occurrence: sift_protocol::ScheduleOccurrence,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(configuration_id) = self.selected_automation_id() else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.automation_details_loading = sender
+            .send(ExecutorCommand::ResumeAutomationOccurrence {
+                configuration_id,
+                occurrence_id: occurrence.id,
+            })
+            .is_ok();
         cx.notify();
     }
 
@@ -44743,6 +45071,108 @@ mod tests {
                 .map(|toast| toast.message.clone())),
             Some("Open this automation to provide its required values".into())
         );
+    }
+
+    #[gpui::test]
+    fn automation_schedule_editor_emits_revisioned_create_and_update_requests(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.automation_configurations =
+                vec![automation_configuration(1, "Daily refresh", false)];
+            shell
+                .automation_schedule_cron_input
+                .update(cx, |input, cx| input.set_text("15 6 * * 1-5", cx));
+            shell.save_automation_schedule(cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::SaveAutomationSchedule {
+                configuration_id: sift_protocol::RunConfigurationId(1),
+                schedule_id: None,
+                expected_revision: None,
+                request: sift_api_types::CreateRunScheduleRequest { cron, .. },
+            }) if cron == "15 6 * * 1-5"
+        ));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.automation_details_loading = false;
+            let schedule = sift_protocol::RunSchedule {
+                id: sift_protocol::ScheduleId(8),
+                configuration_id: sift_protocol::RunConfigurationId(1),
+                owner_principal_id: 3,
+                cron: "0 7 * * *".into(),
+                timezone: "UTC".into(),
+                misfire_policy: sift_protocol::ScheduleMisfirePolicy::RunOnce,
+                concurrency_policy: sift_protocol::ScheduleConcurrencyPolicy::QueueOne,
+                enabled: true,
+                next_fire_at: None,
+                revision: 5,
+            };
+            shell.automation_schedules = vec![schedule.clone()];
+            shell.edit_automation_schedule(schedule, cx);
+            shell.save_automation_schedule(cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::SaveAutomationSchedule {
+                schedule_id: Some(sift_protocol::ScheduleId(8)),
+                expected_revision: Some(5),
+                ..
+            })
+        ));
+    }
+
+    #[gpui::test]
+    fn automation_details_render_durable_logs_and_resume_blocked_occurrences(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.active_bottom_tool = BottomTool::Automations;
+            shell.bottom_dock.presentation.open = true;
+            shell.automation_configurations =
+                vec![automation_configuration(1, "Daily refresh", false)];
+            shell.automation_occurrences = vec![sift_protocol::ScheduleOccurrence {
+                id: sift_protocol::ScheduleOccurrenceId(12),
+                schedule_id: sift_protocol::ScheduleId(8),
+                scheduled_for: chrono::Utc::now(),
+                state: sift_protocol::ScheduleOccurrenceState::Blocked,
+                run_id: None,
+                error_code: Some("authorization_expired".into()),
+                created_at: chrono::Utc::now(),
+                finished_at: None,
+            }];
+            shell.automation_run_logs = vec![sift_protocol::RunLogEntry {
+                sequence: 1,
+                level: "info".into(),
+                message: "manifest admitted".into(),
+                created_at: chrono::Utc::now(),
+            }];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("automation-details").is_some());
+        let resume = cx
+            .debug_bounds("resume-automation-occurrence-0")
+            .expect("resume action");
+        cx.simulate_click(resume.center(), Modifiers::default());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::ResumeAutomationOccurrence {
+                configuration_id: sift_protocol::RunConfigurationId(1),
+                occurrence_id: sift_protocol::ScheduleOccurrenceId(12),
+            })
+        ));
     }
 
     #[gpui::test]

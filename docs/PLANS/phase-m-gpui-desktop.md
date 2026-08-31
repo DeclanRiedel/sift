@@ -506,7 +506,7 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       status/diff/stage/commit/fetch/push, and conflict resolution.
 - [x] Implement run-configuration editing and live run start/cancel/status
       controls.
-- [ ] Add schedule management, durable run-log browsing, and interrupted-run
+- [x] Add schedule management, durable run-log browsing, and interrupted-run
       recovery to the automation surface.
 - [x] Implement import/export with progress, cancellation, artifact handling,
       and bounded previews.
@@ -537,14 +537,13 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 The remaining work should proceed in this order. Product surfaces come first;
 graduation work follows once the interaction model has stopped changing.
 
-1. Automation schedules, durable logs, and interrupted-run recovery.
-2. Transfer-recipe creation, validation, execution, progress, and cancellation.
-3. Phase I declarative contribution rendering through the trusted host UI.
-4. Numerical performance and memory graduation on the existing large fixtures.
-5. Crash, restart, offline, authentication-expiry, and outcome-unknown recovery
+1. Transfer-recipe creation, validation, execution, progress, and cancellation.
+2. Phase I declarative contribution rendering through the trusted host UI.
+3. Numerical performance and memory graduation on the existing large fixtures.
+4. Crash, restart, offline, authentication-expiry, and outcome-unknown recovery
    matrices.
-6. Keyboard/accessibility and Linux/macOS/Windows platform validation.
-7. Signed artifacts, update validation, and the final Phase M graduation matrix.
+5. Keyboard/accessibility and Linux/macOS/Windows platform validation.
+6. Signed artifacts, update validation, and the final Phase M graduation matrix.
 
 ## Commit and quality policy
 
