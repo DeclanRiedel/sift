@@ -1413,6 +1413,27 @@ struct ObjectBrowserState {
     selected: usize,
     connections: Vec<ConnectionNavEntry>,
     connection_picker_open: bool,
+    object_filter: Option<ObjectGroupKind>,
+    loading: bool,
+    load_error: Option<String>,
+}
+
+impl ObjectBrowserState {
+    fn visible_rows(&self) -> impl Iterator<Item = &ObjectBrowserRow> {
+        self.rows.iter().filter(|row| {
+            self.object_filter.is_none_or(|filter| {
+                ObjectGroupKind::from_object_kind(row.source.object_kind) == filter
+            })
+        })
+    }
+
+    fn visible_row_count(&self) -> usize {
+        self.visible_rows().count()
+    }
+
+    fn selected_row(&self) -> Option<&ObjectBrowserRow> {
+        self.visible_rows().nth(self.selected)
+    }
 }
 
 struct RunVariableEditor {
@@ -5126,8 +5147,7 @@ impl Pane {
         };
         let Some(source) = self.object_browsers.get(&item_id).and_then(|browser| {
             browser
-                .rows
-                .get(browser.selected)
+                .selected_row()
                 .map(|row| row.source.clone())
                 .or_else(|| (action == 'n').then(|| browser.context.clone()))
         }) else {
@@ -5159,9 +5179,10 @@ impl Pane {
         let Some(browser) = self.object_browsers.get_mut(&item_id) else {
             return;
         };
+        let visible_row_count = browser.visible_row_count();
         match event.keystroke.key.as_str() {
             "j" | "down" => {
-                browser.selected = (browser.selected + 1).min(browser.rows.len().saturating_sub(1));
+                browser.selected = (browser.selected + 1).min(visible_row_count.saturating_sub(1));
             }
             "k" | "up" => browser.selected = browser.selected.saturating_sub(1),
             "enter" => self.object_browser_action('o', cx),
@@ -5188,20 +5209,26 @@ impl Pane {
                 .child("Reconnect and reopen Objects to refresh this view")
                 .into_any_element();
         };
-        let selected_source = browser
-            .rows
-            .get(browser.selected)
-            .map(|row| row.source.clone());
+        let selected_source = browser.selected_row().map(|row| row.source.clone());
         let new_table_source = selected_source
             .clone()
             .unwrap_or_else(|| browser.context.clone());
         let table_selected = selected_source
             .as_ref()
             .is_some_and(|source| is_table_like_object(source.object_kind));
-        let row_count = browser.rows.len();
+        let row_count = browser.visible_row_count();
         let connection_picker_open = browser.connection_picker_open;
         let active_profile_id = browser.profile_id;
         let connection_name = browser.context.profile_name.clone();
+        let empty_message = if let Some(message) = &browser.load_error {
+            message.clone()
+        } else if browser.loading {
+            format!("Loading objects from {connection_name}…")
+        } else if let Some(filter) = browser.object_filter {
+            format!("No {} in this connection", filter.label().to_lowercase())
+        } else {
+            "No objects in this connection".into()
+        };
         let connections = browser.connections.clone();
         let connection_items = connections
             .into_iter()
@@ -5243,6 +5270,31 @@ impl Pane {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
+        let filter_buttons = std::iter::once((None, "All"))
+            .chain(
+                ObjectGroupKind::CANONICAL
+                    .into_iter()
+                    .map(|group| (Some(group), group.label())),
+            )
+            .enumerate()
+            .map(|(index, (filter, label))| {
+                let selected = browser.object_filter == filter;
+                Button::new(("object-browser-filter", index), label)
+                    .debug_selector(format!("object-browser-filter-{}", label.to_lowercase()))
+                    .tone(if selected {
+                        ButtonTone::Neutral
+                    } else {
+                        ButtonTone::Ghost
+                    })
+                    .on_click(cx.listener(move |pane, _, _, cx| {
+                        if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
+                            browser.object_filter = filter;
+                            browser.selected = 0;
+                        }
+                        cx.notify();
+                    }))
+            })
+            .collect::<Vec<_>>();
         let toolbar_action = |id: &'static str,
                               label: &'static str,
                               action: char,
@@ -5274,89 +5326,113 @@ impl Pane {
             .flex_col()
             .child(
                 div()
-                    .h(px(34.))
+                    .h(px(66.))
                     .flex_none()
-                    .px_2()
                     .flex()
-                    .items_center()
-                    .gap_1()
+                    .flex_col()
                     .border_b_1()
                     .border_color(colors.subtle_border)
                     .bg(colors.toolbar)
                     .child(
                         div()
-                            .relative()
-                            .flex_none()
+                            .h(px(33.))
+                            .w_full()
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .child(
-                                Button::new(
-                                    ("object-browser-connection-picker", item_id as usize),
-                                    connection_name,
-                                )
-                                .debug_selector("object-browser-connection-picker")
-                                .tone(ButtonTone::Neutral)
-                                .on_click(cx.listener(
-                                    move |pane, _, _, cx| {
-                                        if let Some(browser) =
-                                            pane.object_browsers.get_mut(&item_id)
-                                        {
-                                            browser.connection_picker_open =
-                                                !browser.connection_picker_open;
-                                        }
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .when(connection_picker_open, |trigger| {
-                                trigger.child(
-                                    div().absolute().top_full().left_0().child(
-                                        deferred(
-                                            anchored().anchor(Anchor::TopLeft).child(
-                                                div()
-                                                    .id("object-browser-connection-menu")
-                                                    .debug_selector(|| {
-                                                        "object-browser-connection-menu".into()
-                                                    })
-                                                    .w(px(220.))
-                                                    .p_1()
-                                                    .rounded_sm()
-                                                    .border_1()
-                                                    .border_color(colors.strong_border)
-                                                    .bg(colors.elevated_surface)
-                                                    .shadow_lg()
-                                                    .occlude()
-                                                    .role(Role::Menu)
-                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                        cx.stop_propagation()
-                                                    })
-                                                    .on_mouse_down_out(cx.listener(
-                                                        move |pane, _, _, cx| {
-                                                            if let Some(browser) = pane
-                                                                .object_browsers
-                                                                .get_mut(&item_id)
-                                                            {
-                                                                browser.connection_picker_open =
-                                                                    false;
-                                                            }
-                                                            cx.notify();
-                                                        },
-                                                    ))
-                                                    .children(connection_items),
+                                div()
+                                    .relative()
+                                    .flex_none()
+                                    .child(
+                                        Button::new(
+                                            (
+                                                "object-browser-connection-picker",
+                                                item_id as usize,
+                                            ),
+                                            connection_name,
+                                        )
+                                        .debug_selector("object-browser-connection-picker")
+                                        .tone(ButtonTone::Neutral)
+                                        .on_click(cx.listener(
+                                            move |pane, _, _, cx| {
+                                                if let Some(browser) =
+                                                    pane.object_browsers.get_mut(&item_id)
+                                                {
+                                                    browser.connection_picker_open =
+                                                        !browser.connection_picker_open;
+                                                }
+                                                cx.notify();
+                                            },
+                                        )),
+                                    )
+                                    .when(connection_picker_open, |trigger| {
+                                        trigger.child(
+                                            div().absolute().top_full().left_0().child(
+                                                deferred(
+                                                    anchored().anchor(Anchor::TopLeft).child(
+                                                        div()
+                                                            .id("object-browser-connection-menu")
+                                                            .debug_selector(|| {
+                                                                "object-browser-connection-menu"
+                                                                    .into()
+                                                            })
+                                                            .w(px(220.))
+                                                            .p_1()
+                                                            .rounded_sm()
+                                                            .border_1()
+                                                            .border_color(colors.strong_border)
+                                                            .bg(colors.elevated_surface)
+                                                            .shadow_lg()
+                                                            .occlude()
+                                                            .role(Role::Menu)
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                |_, _, cx| cx.stop_propagation(),
+                                                            )
+                                                            .on_mouse_down_out(cx.listener(
+                                                                move |pane, _, _, cx| {
+                                                                    if let Some(browser) = pane
+                                                                        .object_browsers
+                                                                        .get_mut(&item_id)
+                                                                    {
+                                                                        browser
+                                                                            .connection_picker_open =
+                                                                            false;
+                                                                    }
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                            .children(connection_items),
+                                                    ),
+                                                )
+                                                .with_priority(3),
                                             ),
                                         )
-                                        .with_priority(3),
-                                    ),
-                                )
-                            }),
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(1.))
+                                    .h(px(16.))
+                                    .mx_1()
+                                    .bg(colors.subtle_border),
+                            )
+                            .children(filter_buttons),
                     )
                     .child(
                         div()
-                            .flex_none()
-                            .w(px(1.))
-                            .h(px(16.))
-                            .mx_1()
-                            .bg(colors.subtle_border),
-                    )
-                    .child(toolbar_action(
+                            .h(px(33.))
+                            .w_full()
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .border_t_1()
+                            .border_color(colors.subtle_border)
+                            .child(toolbar_action(
                         "object-browser-open",
                         "Open",
                         'o',
@@ -5399,6 +5475,7 @@ impl Pane {
                         !table_selected,
                         selected_source,
                     )),
+                    ),
             )
             .child(
                 div()
@@ -5428,7 +5505,7 @@ impl Pane {
                         .items_center()
                         .justify_center()
                         .text_color(colors.muted_text)
-                        .child("No objects in the active connection"),
+                        .child(empty_message),
                 )
             })
             .when(row_count > 0, |view| {
@@ -5442,7 +5519,7 @@ impl Pane {
                         };
                         range
                             .filter_map(|index| {
-                                let row = browser.rows.get(index)?.clone();
+                                let row = browser.visible_rows().nth(index)?.clone();
                                 let selected = browser.selected == index;
                                 let name = format!("{}.{}", row.source.schema, row.source.object);
                                 Some(
@@ -11177,6 +11254,7 @@ impl WorkspaceShell {
                 profile_id,
                 message,
             } => {
+                self.fail_object_browser_load(profile_id, &message, cx);
                 self.connection_schema = ConnectionSchemaState::Failed {
                     profile_id,
                     message: message.clone(),
@@ -16891,39 +16969,6 @@ impl WorkspaceShell {
     }
 
     fn open_active_connection_objects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ConnectionStatus::Connected { profile_id, name } = &self.connection_status else {
-            self.show_toast("Connect to a database before opening Objects".into(), cx);
-            return;
-        };
-        let profile_id = *profile_id;
-        let profile_name = name.clone();
-        let Some(connection) = self
-            .lifecycle
-            .tenants
-            .iter()
-            .flat_map(|tenant| tenant.connections.iter())
-            .find(|connection| connection.id == profile_id)
-            .cloned()
-        else {
-            return;
-        };
-        let ConnectionSchemaState::Ready {
-            profile_id: ready,
-            snapshot,
-        } = &self.connection_schema
-        else {
-            self.show_toast("Schema metadata is still loading".into(), cx);
-            return;
-        };
-        if *ready != profile_id {
-            return;
-        }
-        let instance_id = self
-            .selected_instance_id
-            .clone()
-            .unwrap_or_else(|| "local".into());
-        let rows = build_object_browser_rows(snapshot, &connection, &instance_id);
-        let context = object_browser_context(snapshot, &connection, &instance_id, &rows);
         let mut connections = self
             .lifecycle
             .tenants
@@ -16936,6 +16981,50 @@ impl WorkspaceShell {
                 .cmp(&right.name.to_lowercase())
                 .then_with(|| left.id.cmp(&right.id))
         });
+        let Some(preferred_profile_id) = (match self.connection_status {
+            ConnectionStatus::Connected { profile_id, .. }
+            | ConnectionStatus::Connecting { profile_id } => Some(profile_id),
+            ConnectionStatus::Disconnected | ConnectionStatus::Failed { .. } => None,
+        })
+        .or_else(|| connections.first().map(|connection| connection.id)) else {
+            self.show_toast(
+                "Add a database connection before opening Objects".into(),
+                cx,
+            );
+            return;
+        };
+        let Some(connection) = connections
+            .iter()
+            .find(|connection| connection.id == preferred_profile_id)
+            .cloned()
+        else {
+            return;
+        };
+        let profile_id = connection.id;
+        let profile_name = connection.name.clone();
+        let instance_id = self
+            .selected_instance_id
+            .clone()
+            .unwrap_or_else(|| "local".into());
+        let snapshot = match &self.connection_schema {
+            ConnectionSchemaState::Ready {
+                profile_id: ready,
+                snapshot,
+            } if *ready == profile_id => Some(snapshot.as_ref()),
+            _ => None,
+        };
+        let rows = snapshot
+            .map(|snapshot| build_object_browser_rows(snapshot, &connection, &instance_id))
+            .unwrap_or_default();
+        let loading = snapshot.is_none();
+        let empty_snapshot =
+            sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
+        let context = object_browser_context(
+            snapshot.unwrap_or(&empty_snapshot),
+            &connection,
+            &instance_id,
+            &rows,
+        );
         let item_id = self.next_id;
         self.next_id += 1;
         if let Some(pane) = self.panes.get(self.active_pane) {
@@ -16956,12 +17045,25 @@ impl WorkspaceShell {
                         selected: 0,
                         connections,
                         connection_picker_open: false,
+                        object_filter: None,
+                        loading,
+                        load_error: None,
                     },
                     cx,
                 )
             });
         }
         self.focus_active_pane(window, cx);
+        if !matches!(
+            self.connection_status,
+            ConnectionStatus::Connected {
+                profile_id: active,
+                ..
+            } | ConnectionStatus::Connecting { profile_id: active }
+                if active == profile_id
+        ) {
+            self.connect(&connection, cx);
+        }
         self.persist(cx);
         cx.notify();
     }
@@ -17007,19 +17109,36 @@ impl WorkspaceShell {
                     .values_mut()
                     .filter(|browser| browser.profile_id == profile_id)
                 {
-                    let selected_source = browser
-                        .rows
-                        .get(browser.selected)
-                        .map(|row| row.source.clone());
+                    let selected_source = browser.selected_row().map(|row| row.source.clone());
                     browser.rows = rows.clone();
                     browser.context = context.clone();
                     browser.connections = connections.clone();
+                    browser.loading = false;
+                    browser.load_error = None;
                     browser.selected = selected_source
                         .and_then(|selected| {
-                            browser.rows.iter().position(|row| row.source == selected)
+                            browser
+                                .visible_rows()
+                                .position(|row| row.source == selected)
                         })
                         .unwrap_or(0)
-                        .min(browser.rows.len().saturating_sub(1));
+                        .min(browser.visible_row_count().saturating_sub(1));
+                }
+                cx.notify();
+            });
+        }
+    }
+
+    fn fail_object_browser_load(&mut self, profile_id: i64, message: &str, cx: &mut Context<Self>) {
+        for pane in &self.panes {
+            pane.update(cx, |pane, cx| {
+                for browser in pane
+                    .object_browsers
+                    .values_mut()
+                    .filter(|browser| browser.profile_id == profile_id)
+                {
+                    browser.loading = false;
+                    browser.load_error = Some(format!("Could not load objects: {message}"));
                 }
                 cx.notify();
             });
@@ -17062,6 +17181,7 @@ impl WorkspaceShell {
             .as_ref()
             .map(|snapshot| build_object_browser_rows(snapshot, &connection, &instance_id))
             .unwrap_or_default();
+        let loading = snapshot.is_none();
         let empty_snapshot =
             sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
         let context = object_browser_context(
@@ -17077,6 +17197,8 @@ impl WorkspaceShell {
                 browser.rows = rows;
                 browser.selected = 0;
                 browser.connection_picker_open = false;
+                browser.loading = loading;
+                browser.load_error = None;
             }
             if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
                 item.title = format!("Objects · {}", connection.name);
@@ -52196,6 +52318,21 @@ mod tests {
             assert_eq!(browser.rows[0].estimated_rows, Some(42));
             assert_eq!(browser.rows[0].comment.as_deref(), Some("Queued work"));
         });
+        let views = cx
+            .debug_bounds("object-browser-filter-views")
+            .expect("Views filter");
+        cx.simulate_click(views.center(), Modifiers::default());
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item_id = pane.active_item().unwrap().id;
+            let browser = &pane.object_browsers[&item_id];
+            assert_eq!(browser.visible_row_count(), 1);
+            assert_eq!(browser.selected_row().unwrap().source.object, "people");
+        });
+        let all = cx
+            .debug_bounds("object-browser-filter-all")
+            .expect("All filter");
+        cx.simulate_click(all.center(), Modifiers::default());
         cx.simulate_keystrokes("j");
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
@@ -52255,6 +52392,53 @@ mod tests {
             assert_eq!(browser.rows[0].source.object, "events");
             assert_eq!(browser.context.profile_name, "Analytics");
         });
+    }
+
+    #[gpui::test]
+    fn objects_tab_opens_and_loads_from_the_selected_server_without_schema(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: vec![ConnectionNavEntry {
+                    id: 7,
+                    tenant_id: 1,
+                    name: "Primary".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    tags: Vec::new(),
+                }],
+            }];
+            shell.connection_status = ConnectionStatus::Disconnected;
+            shell.connection_schema = ConnectionSchemaState::Unavailable;
+            shell.open_active_connection_objects(window, cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::Connect { profile_id: 7, .. })
+        ));
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().expect("Objects tab");
+            assert_eq!(item.title, "Objects · Primary");
+            let browser = &pane.object_browsers[&item.id];
+            assert!(browser.loading);
+            assert!(browser.rows.is_empty());
+            assert_eq!(browser.connections.len(), 1);
+        });
+        cx.run_until_parked();
+        assert!(cx
+            .debug_bounds("object-browser-connection-picker")
+            .is_some());
+        assert!(cx.debug_bounds("object-browser-filter-tables").is_some());
+        assert!(cx.debug_bounds("object-browser-filter-views").is_some());
     }
 
     #[gpui::test]
