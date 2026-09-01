@@ -181,9 +181,9 @@ impl ApiError {
                 | MetadataError::PrincipalKeyNotFound(_)
                 | MetadataError::GithubAllowlistNotFound(_)
                 | MetadataError::ExtensionNotFound(_)
-                | MetadataError::ExtensionStorageNamespaceNotFound => {
-                    (StatusCode::NOT_FOUND, "not_found")
-                }
+                | MetadataError::ExtensionStorageNamespaceNotFound
+                | MetadataError::VaultNotFound(_)
+                | MetadataError::VaultItemNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
                 MetadataError::InstanceCredentialSlotNotFound(_) => {
                     (StatusCode::NOT_FOUND, "instance_credential_not_found")
                 }
@@ -228,6 +228,9 @@ impl ApiError {
                 MetadataError::TransferRecipeRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "transfer_recipe_revision_conflict")
                 }
+                MetadataError::VaultRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "vault_revision_conflict")
+                }
                 MetadataError::InvalidRunTransition => {
                     (StatusCode::CONFLICT, "invalid_run_transition")
                 }
@@ -271,6 +274,7 @@ impl ApiError {
                 | MetadataError::InstanceAdminRequired
                 | MetadataError::TenantMembershipRequired { .. }
                 | MetadataError::RoomOwnerRequired { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+                MetadataError::VaultPermissionDenied => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::TenantMismatch(_, _) => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::MissingCredential(_, _)
                 | MetadataError::BrokerCredentialUnsupported(_)
@@ -305,7 +309,15 @@ impl ApiError {
                 | MetadataError::InvalidTransferRecipe
                 | MetadataError::InstanceConfig(_)
                 | MetadataError::InstanceCredentialInvalid { .. }
+                | MetadataError::InvalidVaultInput(_)
                 | MetadataError::Json(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+                MetadataError::VaultSecretMissing => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "vault_secret_missing")
+                }
+                MetadataError::VaultSecretNotRevealable => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "vault_secret_not_revealable",
+                ),
                 MetadataError::ExtensionStorageValueTooLarge { .. }
                 | MetadataError::CatalogSnapshotTooLarge { .. }
                 | MetadataError::PlanCaptureTooLarge { .. } => {

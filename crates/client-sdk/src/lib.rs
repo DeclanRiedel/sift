@@ -49,6 +49,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "createMetadataDocument",
     "createMetadataRoom",
     "createMetadataSavedQuery",
+    "createMetadataVault",
+    "createMetadataVaultItem",
     "createRoomWorkspace",
     "createCatalogSnapshot",
     "createDdlSource",
@@ -136,6 +138,10 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listMetadataRoomMembers",
     "listMetadataRooms",
     "listMetadataSavedQueries",
+    "listMetadataVaultGrants",
+    "listMetadataVaultItemVersions",
+    "listMetadataVaultItems",
+    "listMetadataVaults",
     "listCatalogSnapshots",
     "listMetadataTenants",
     "listOperationAudit",
@@ -278,10 +284,12 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listRepositoryRemotes",
     "markRepositoryConflictResolved",
     "repairRepositoryBinding",
+    "revealMetadataVaultItem",
     "addRepositoryRemote",
     "removeRepositoryRemote",
     "renameRepositoryRemote",
     "resolveRepositoryConflict",
+    "setMetadataVaultGrant",
     "testRepositoryCredential",
     "deleteHostingCredential",
     "updateRepositoryRemote",
@@ -295,15 +303,17 @@ pub use sift_api_types::{
     BindRoomConnectionRequest, BindWorkspaceProjectionRequest, CloneWorkspaceRepositoryRequest,
     CreateDdlSourceRequest, CreateDocumentRequest, CreateRoomRequest,
     CreateRunConfigurationRequest, CreateRunScheduleRequest, CreateSavedQueryRequest,
-    CreateTransferRecipeRequest, CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest,
-    CreateWorkspaceRequest, ExecuteTransferRecipeRequest, ExpectedDdlSourceRevisionRequest,
+    CreateTransferRecipeRequest, CreateVaultItemRequest, CreateVaultRequest,
+    CreateWorkspaceCheckpointRequest, CreateWorkspaceNodeRequest, CreateWorkspaceRequest,
+    ExecuteTransferRecipeRequest, ExpectedDdlSourceRevisionRequest,
     ExpectedProjectionRevisionRequest, ExpectedRepositoryRevisionRequest,
     ExpectedRunConfigurationRevisionRequest, ExpectedTransferRecipeRevisionRequest,
     ExpectedWorkspaceRevisionRequest, InstanceConfigurationDocument, IssueTokenRequest,
     IssueTokenResponse, MoveWorkspaceNodeRequest, OpenConnectionFromProfileRequest,
-    ProjectionResolutionRequest, RestoreWorkspaceCheckpointRequest, RunLogQuery,
-    ScheduleOccurrenceQuery, SetCredentialRequest, SetVcsCredentialRequest, StartRunRequest,
-    UpdateDdlSourceRequest, UpdateDocumentSnapshotRequest, UpdateInstanceConfigurationRequest,
+    ProjectionResolutionRequest, RestoreWorkspaceCheckpointRequest, RevealVaultSecretResponse,
+    RunLogQuery, ScheduleOccurrenceQuery, SetCredentialRequest, SetVaultGrantRequest,
+    SetVcsCredentialRequest, StartRunRequest, UpdateDdlSourceRequest,
+    UpdateDocumentSnapshotRequest, UpdateInstanceConfigurationRequest,
     UpdateRunConfigurationRequest, UpdateRunScheduleRequest, UpdateSavedQueryRequest,
     UpdateTransferRecipeRequest, UpdateWorkspaceRequest, UpsertConnectionProfileRequest,
     VcsBeginConflictResolutionRequest, VcsCommitRequest, VcsCompareQuery, VcsConflictQuery,
@@ -319,7 +329,7 @@ use sift_api_types::{
     ApiTokenId, ApiTokenRow, ConnectionProfile, ConnectionProfileId, Document, DocumentId,
     GithubAllowlistEntry, OperationAudit, PrincipalKey, QueryHistory, Room, RoomId, RoomMember,
     SavedQuery, SavedQueryId, SavedQueryScope, TenantId, TenantInvitation, TenantLimitOverride,
-    TenantMembership,
+    TenantMembership, Vault, VaultGrant, VaultId, VaultItem, VaultItemId, VaultItemVersion,
 };
 use sift_protocol::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
@@ -3844,6 +3854,57 @@ impl Client {
             id.0
         ))
         .await
+    }
+
+    pub async fn vaults(&self, tenant: TenantId) -> Result<Vec<Vault>> {
+        self.get(&format!("/v1/metadata/vaults?tenant={}", tenant.0))
+            .await
+    }
+
+    pub async fn create_vault(&self, request: CreateVaultRequest) -> Result<Vault> {
+        self.post("/v1/metadata/vaults", &request).await
+    }
+
+    pub async fn vault_items(&self, vault: VaultId) -> Result<Vec<VaultItem>> {
+        self.get(&format!("/v1/metadata/vaults/{}/items", vault.0))
+            .await
+    }
+
+    pub async fn create_vault_item(
+        &self,
+        vault: VaultId,
+        request: CreateVaultItemRequest,
+    ) -> Result<VaultItem> {
+        self.post(&format!("/v1/metadata/vaults/{}/items", vault.0), &request)
+            .await
+    }
+
+    pub async fn vault_grants(&self, vault: VaultId) -> Result<Vec<VaultGrant>> {
+        self.get(&format!("/v1/metadata/vaults/{}/grants", vault.0))
+            .await
+    }
+
+    pub async fn set_vault_grant(
+        &self,
+        vault: VaultId,
+        principal: sift_api_types::PrincipalId,
+        request: SetVaultGrantRequest,
+    ) -> Result<VaultGrant> {
+        self.put(
+            &format!("/v1/metadata/vaults/{}/grants/{}", vault.0, principal.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn vault_item_versions(&self, item: VaultItemId) -> Result<Vec<VaultItemVersion>> {
+        self.get(&format!("/v1/metadata/vault-items/{}/versions", item.0))
+            .await
+    }
+
+    pub async fn reveal_vault_item(&self, item: VaultItemId) -> Result<RevealVaultSecretResponse> {
+        self.post_empty(&format!("/v1/metadata/vault-items/{}/reveal", item.0))
+            .await
     }
 
     pub async fn auth_tokens(&self) -> Result<Vec<ApiTokenRow>> {

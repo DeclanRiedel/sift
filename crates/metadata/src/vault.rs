@@ -666,24 +666,26 @@ impl MetadataStore {
         id: VaultItemId,
         actor: PrincipalId,
     ) -> Result<serde_json::Value> {
-        let conn = self.conn()?;
-        let item = item_by_id_locked(&conn, id, actor)?;
-        if !item.kind.revealable() {
-            return Err(MetadataError::VaultSecretNotRevealable);
-        }
-        require_capability(&conn, item.vault_id, actor, |capabilities| {
-            capabilities.reveal
-        })?;
-        let handle = conn
-            .query_row(
-                "SELECT v.secret_handle FROM vault_item i
-                 JOIN vault_item_version v ON v.item_id = i.id AND v.version = i.head_version
-                 WHERE i.id = ?1",
-                params![id.0],
-                |row| row.get::<_, Option<String>>(0),
-            )?
-            .ok_or(MetadataError::VaultSecretMissing)?;
-        drop(conn);
+        let (vault_id, handle) = {
+            let conn = self.conn()?;
+            let item = item_by_id_locked(&conn, id, actor)?;
+            if !item.kind.revealable() {
+                return Err(MetadataError::VaultSecretNotRevealable);
+            }
+            require_capability(&conn, item.vault_id, actor, |capabilities| {
+                capabilities.reveal
+            })?;
+            let handle = conn
+                .query_row(
+                    "SELECT v.secret_handle FROM vault_item i
+                     JOIN vault_item_version v ON v.item_id = i.id AND v.version = i.head_version
+                     WHERE i.id = ?1",
+                    params![id.0],
+                    |row| row.get::<_, Option<String>>(0),
+                )?
+                .ok_or(MetadataError::VaultSecretMissing)?;
+            (item.vault_id, handle)
+        };
         let bytes = self
             .secrets
             .get(VAULT_SECRET_NAMESPACE, &handle)
@@ -692,9 +694,7 @@ impl MetadataStore {
         let value = serde_json::from_slice(&bytes)?;
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
-        require_capability(&tx, item.vault_id, actor, |capabilities| {
-            capabilities.reveal
-        })?;
+        require_capability(&tx, vault_id, actor, |capabilities| capabilities.reveal)?;
         insert_operation_audit_row(&tx, &audit(actor, "reveal", "vault_item", Some(id.0)))?;
         tx.commit()?;
         Ok(value)
