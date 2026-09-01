@@ -21323,13 +21323,27 @@ impl WorkspaceShell {
         let Some((item_id, _)) = self.focused_pane_results_item(cx) else {
             return false;
         };
-        if view == ResultInspectorView::RelationDefinition
-            && self.focused_database_item(cx).map(|(id, _)| id) != Some(item_id)
-        {
-            return false;
-        }
+        let definition_source = if view == ResultInspectorView::RelationDefinition {
+            let Some((definition_item_id, source)) = self.focused_database_item(cx) else {
+                return false;
+            };
+            if definition_item_id != item_id {
+                return false;
+            }
+            Some(source)
+        } else {
+            None
+        };
         self.result_inspector_views.insert(item_id, view);
         self.inspector_g_pending = false;
+        if let Some(source) = definition_source {
+            if !matches!(
+                self.table_definitions.get(&item_id),
+                Some(TableDefinitionState::Loading { .. } | TableDefinitionState::Ready { .. })
+            ) {
+                self.request_table_definition(item_id, source, cx);
+            }
+        }
         cx.notify();
         true
     }
@@ -21489,12 +21503,10 @@ impl WorkspaceShell {
     }
 
     fn show_active_relation_definition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((item_id, _)) = self.focused_database_item(cx) else {
+        if !self.select_result_inspector_view(ResultInspectorView::RelationDefinition, cx) {
             self.show_toast("Active tab has no relation definition".into(), cx);
             return;
-        };
-        self.result_inspector_views
-            .insert(item_id, ResultInspectorView::RelationDefinition);
+        }
         self.focus_inspector(window, cx);
     }
 
@@ -28306,9 +28318,10 @@ impl WorkspaceShell {
                             .text_color(colors.muted_text)
                             .on_click(cx.listener(move |shell, _, window, cx| {
                                 if definition_pane.read(cx).contains_item(item_id) {
-                                    shell
-                                        .result_inspector_views
-                                        .insert(item_id, ResultInspectorView::RelationDefinition);
+                                    shell.select_result_inspector_view(
+                                        ResultInspectorView::RelationDefinition,
+                                        cx,
+                                    );
                                     shell.focused_surface = WorkspaceSurface::Inspector;
                                     shell.inspector_focus_handle.focus(window, cx);
                                     cx.notify();
@@ -42030,6 +42043,28 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("table-definition-inspector").is_none());
         assert!(cx.debug_bounds("inspector-result-fields").is_some());
+
+        workspace.update(&mut cx, |shell, _| {
+            shell.table_definitions.remove(&item_id);
+        });
+        cx.simulate_keystrokes("4");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadTableDefinition {
+                item_id: requested_item_id,
+                ..
+            }) if requested_item_id == item_id
+        ));
+        workspace.read_with(&cx, |shell, _| {
+            assert!(matches!(
+                shell.table_definitions.get(&item_id),
+                Some(TableDefinitionState::Loading { .. })
+            ));
+            assert_eq!(
+                shell.result_inspector_views.get(&item_id),
+                Some(&ResultInspectorView::RelationDefinition)
+            );
+        });
     }
 
     #[gpui::test]
