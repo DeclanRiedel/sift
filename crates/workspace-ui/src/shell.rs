@@ -1806,6 +1806,9 @@ pub enum PaneEvent {
     RefreshDatabaseItemRequested {
         item_id: u64,
     },
+    OpenDatabaseDdlRequested {
+        item_id: u64,
+    },
     /// The retained row window is full and the user asked to continue past it.
     LoadNextRowWindowRequested {
         item_id: u64,
@@ -6323,12 +6326,11 @@ impl gpui::Render for Pane {
                                                 } else {
                                                     ButtonTone::Ghost
                                                 })
-                                                .on_click(cx.listener(move |pane, _, _, cx| {
-                                                    pane.show_database_item_view(
-                                                        item_id,
-                                                        DatabaseItemView::Ddl,
-                                                        None,
-                                                        cx,
+                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                    cx.emit(
+                                                        PaneEvent::OpenDatabaseDdlRequested {
+                                                            item_id,
+                                                        },
                                                     );
                                                 })),
                                             )
@@ -14673,12 +14675,51 @@ impl WorkspaceShell {
                 break;
             }
         }
+        if !self.pending_object_ddl.contains(&item_id) {
+            if let Some(sender) = &self.executor_sender {
+                if sender
+                    .send(ExecutorCommand::LoadObjectDdl {
+                        item_id,
+                        source: source.clone(),
+                    })
+                    .is_ok()
+                {
+                    self.pending_object_ddl.insert(item_id);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_database_item_ddl(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        if matches!(
+            self.table_definitions.get(&item_id),
+            Some(TableDefinitionState::Ready { .. })
+        ) {
+            self.open_table_full_ddl(item_id, cx);
+            return;
+        }
+        let Some(source) = self.database_source(item_id, cx) else {
+            return;
+        };
+        for pane in &self.panes {
+            if pane.update(cx, |pane, cx| {
+                pane.show_database_item_view(
+                    item_id,
+                    DatabaseItemView::Ddl,
+                    Some("-- Loading full object DDL…".into()),
+                    cx,
+                )
+            }) {
+                break;
+            }
+        }
+        if self.pending_object_ddl.contains(&item_id) {
+            return;
+        }
         if let Some(sender) = &self.executor_sender {
             if sender
-                .send(ExecutorCommand::LoadObjectDdl {
-                    item_id,
-                    source: source.clone(),
-                })
+                .send(ExecutorCommand::LoadObjectDdl { item_id, source })
                 .is_ok()
             {
                 self.pending_object_ddl.insert(item_id);
@@ -21677,6 +21718,10 @@ impl WorkspaceShell {
             }
             PaneEvent::RefreshDatabaseItemRequested { item_id } => {
                 self.refresh_database_item(*item_id, cx)
+            }
+            PaneEvent::OpenDatabaseDdlRequested { item_id } => {
+                self.active_pane = index;
+                self.open_database_item_ddl(*item_id, cx);
             }
             PaneEvent::LoadNextRowWindowRequested { item_id } => {
                 self.load_next_row_window(*item_id, cx)
@@ -41010,7 +41055,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn table_detail_ddl_reuses_the_relation_tab(cx: &mut TestAppContext) {
+    fn query_ddl_tab_loads_full_definition_after_json_view(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -41064,7 +41109,16 @@ mod tests {
             assert!(ddl.contains("\"name\" text"), "{ddl}");
         });
         workspace.update_in(&mut cx, |shell, _, cx| {
-            shell.open_table_full_ddl(item_id, cx);
+            shell.panes[shell.active_pane].update(cx, |pane, cx| {
+                pane.show_database_item_view(
+                    item_id,
+                    DatabaseItemView::Json,
+                    Some("{\n  \"id\": 1\n}".into()),
+                    cx,
+                );
+                pane.database_ddl_texts.remove(&item_id);
+            });
+            shell.open_database_item_ddl(item_id, cx);
         });
         assert!(matches!(
             receiver.try_recv(),
