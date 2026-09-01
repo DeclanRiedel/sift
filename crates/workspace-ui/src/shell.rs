@@ -1935,6 +1935,10 @@ pub enum PaneEvent {
     OpenDatabaseDdlRequested {
         item_id: u64,
     },
+    RevealDatabaseObjectRequested {
+        source: DatabaseObjectSource,
+        level: DatabaseBreadcrumbLevel,
+    },
     /// The retained row window is full and the user asked to continue past it.
     LoadNextRowWindowRequested {
         item_id: u64,
@@ -2019,6 +2023,14 @@ pub enum PaneEvent {
         revision: u64,
         request: SemanticRequestKind,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseBreadcrumbLevel {
+    Connection,
+    Catalog,
+    Schema,
+    Object,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5849,6 +5861,70 @@ fn pane_chrome_menu(
     }
 }
 
+fn database_breadcrumb(
+    item_id: u64,
+    source: &DatabaseObjectSource,
+    colors: sift_ui::ThemeColors,
+    cx: &mut Context<Pane>,
+) -> gpui::AnyElement {
+    let segments = [
+        (
+            DatabaseBreadcrumbLevel::Connection,
+            source.profile_name.clone(),
+        ),
+        (
+            DatabaseBreadcrumbLevel::Catalog,
+            source.catalog.clone().unwrap_or_else(|| "default".into()),
+        ),
+        (DatabaseBreadcrumbLevel::Schema, source.schema.clone()),
+        (DatabaseBreadcrumbLevel::Object, source.object.clone()),
+    ];
+    let mut row = div()
+        .id(("database-breadcrumb", item_id as usize))
+        .debug_selector(|| "database-breadcrumb".into())
+        .h(px(26.))
+        .flex_none()
+        .px_2()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .border_b_1()
+        .border_color(colors.subtle_border)
+        .bg(colors.background)
+        .text_xs();
+    for (index, (level, label)) in segments.into_iter().enumerate() {
+        if index > 0 {
+            row = row.child(icon(IconName::ChevronRight, colors.disabled_text, 9.));
+        }
+        let source = source.clone();
+        row = row.child(
+            div()
+                .id(format!("database-breadcrumb-segment-{item_id}-{index}"))
+                .min_w_0()
+                .max_w(px(150.))
+                .px_1()
+                .truncate()
+                .rounded_sm()
+                .text_color(if level == DatabaseBreadcrumbLevel::Object {
+                    colors.text
+                } else {
+                    colors.muted_text
+                })
+                .role(Role::Button)
+                .aria_label(format!("Reveal {label} in connections"))
+                .hover(|segment| segment.bg(colors.hovered_surface).text_color(colors.text))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(PaneEvent::RevealDatabaseObjectRequested {
+                        source: source.clone(),
+                        level,
+                    });
+                }))
+                .child(label),
+        );
+    }
+    row.into_any_element()
+}
+
 impl gpui::Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -6547,6 +6623,12 @@ impl gpui::Render for Pane {
                     {
                         match (self.editors.get(&item.id), self.results.get(&item.id)) {
                             (Some(editor), Some(result)) => {
+                                let database_breadcrumb = item.source.as_ref().and_then(|source| {
+                                    let ItemSource::DatabaseObject(source) = source else {
+                                        return None;
+                                    };
+                                    Some(database_breadcrumb(item.id, source, colors, cx))
+                                });
                                 let database_view = self
                                     .database_item_views
                                     .get(&item.id)
@@ -6786,6 +6868,7 @@ impl gpui::Render for Pane {
                                 body.when(database_view == DatabaseItemView::Json, |body| {
                                     body.key_context("SiftJsonResultEditor")
                                 })
+                                .children(database_breadcrumb)
                                 .children(database_view_switch)
                                 .child(split)
                             }
@@ -23121,6 +23204,106 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn reveal_database_object(
+        &mut self,
+        source: &DatabaseObjectSource,
+        level: DatabaseBreadcrumbLevel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(
+            self.connection_status,
+            ConnectionStatus::Connected { profile_id, .. } if profile_id == source.profile_id
+        ) {
+            self.show_toast(
+                format!("Connect to {} to reveal this object", source.profile_name),
+                cx,
+            );
+            return;
+        }
+        self.active_left_panel = LeftPanel::Connections;
+        self.left_dock.presentation.open = true;
+        self.expanded_tenants.insert(source.tenant_id);
+        self.expanded_connections.insert(source.profile_id);
+        if let Some(catalog) = &source.catalog {
+            if level != DatabaseBreadcrumbLevel::Connection {
+                self.expanded_catalogs
+                    .insert((source.profile_id, catalog.clone()));
+            }
+            if matches!(
+                level,
+                DatabaseBreadcrumbLevel::Schema | DatabaseBreadcrumbLevel::Object
+            ) {
+                self.expanded_schemas.insert((
+                    source.profile_id,
+                    catalog.clone(),
+                    source.schema.clone(),
+                ));
+            }
+            if level == DatabaseBreadcrumbLevel::Object {
+                let group = ObjectGroupKind::from_object_kind(source.object_kind);
+                self.schema_search_filters.insert(group);
+                self.expanded_object_groups.insert((
+                    source.profile_id,
+                    catalog.clone(),
+                    source.schema.clone(),
+                    group,
+                ));
+            }
+        }
+        self.invalidate_connection_projection();
+        let selected =
+            self.visible_connection_items()
+                .iter()
+                .position(|item| match (&item.action, level) {
+                    (
+                        ConnectionTreeAction::Connection(connection),
+                        DatabaseBreadcrumbLevel::Connection,
+                    ) => connection.id == source.profile_id,
+                    (
+                        ConnectionTreeAction::Catalog {
+                            profile_id,
+                            catalog,
+                        },
+                        DatabaseBreadcrumbLevel::Catalog,
+                    ) => {
+                        *profile_id == source.profile_id
+                            && source.catalog.as_deref() == Some(catalog.as_str())
+                    }
+                    (
+                        ConnectionTreeAction::Schema {
+                            profile_id,
+                            catalog,
+                            schema,
+                        },
+                        DatabaseBreadcrumbLevel::Schema,
+                    ) => {
+                        *profile_id == source.profile_id
+                            && source.catalog.as_deref() == Some(catalog.as_str())
+                            && schema == &source.schema
+                    }
+                    (
+                        ConnectionTreeAction::Object(target)
+                        | ConnectionTreeAction::FavoriteObject(target)
+                        | ConnectionTreeAction::RecentObject(target),
+                        DatabaseBreadcrumbLevel::Object,
+                    ) => {
+                        target.connection.id == source.profile_id
+                            && source.catalog.as_deref() == Some(target.catalog.as_str())
+                            && target.schema == source.schema
+                            && target.object == source.object
+                    }
+                    _ => false,
+                });
+        if let Some(selected) = selected {
+            self.connection_nav_selected = selected;
+        }
+        self.focused_surface = WorkspaceSurface::Connections;
+        self.connections_focus_handle.focus(window, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
     fn focus_active_left_panel_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (surface, focus_handle) = match self.active_left_panel {
             LeftPanel::Connections => (
@@ -23701,6 +23884,10 @@ impl WorkspaceShell {
             PaneEvent::OpenDatabaseDdlRequested { item_id } => {
                 self.active_pane = index;
                 self.open_database_item_ddl(*item_id, cx);
+            }
+            PaneEvent::RevealDatabaseObjectRequested { source, level } => {
+                self.active_pane = index;
+                self.reveal_database_object(source, *level, window, cx);
             }
             PaneEvent::LoadNextRowWindowRequested { item_id } => {
                 self.load_next_row_window(*item_id, cx)
@@ -44129,6 +44316,8 @@ mod tests {
             }) if definition_item == item_id && source.schema == "lab" && source.object == "people"
         ));
         assert_eq!(sql, "SELECT * FROM \"lab\".\"people\" LIMIT 100;");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("database-breadcrumb").is_some());
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             assert_eq!(pane.active_item().map(|item| item.id), Some(item_id));
