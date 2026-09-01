@@ -30552,6 +30552,24 @@ impl WorkspaceShell {
             .then(|| self.render_app_bar_menu_button(AppBarMenu::Terminal, "Terminal", false, cx));
         let help_menu = navigation_expanded
             .then(|| self.render_app_bar_menu_button(AppBarMenu::Help, "Help", false, cx));
+        let dev_wiki_link = cfg!(debug_assertions).then(|| {
+            div()
+                .id("toolbar-dev-wiki")
+                .debug_selector(|| "toolbar-dev-wiki".into())
+                .role(Role::Link)
+                .aria_label("Open local development wiki")
+                .h(px(26.))
+                .px_1()
+                .flex_none()
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .text_sm()
+                .text_color(colors.muted_text)
+                .hover(|link| link.bg(colors.hovered_surface).text_color(colors.text))
+                .on_click(|_, _, cx| cx.open_url(app_bar::DEV_WIKI_URL))
+                .child("Wiki")
+        });
         let center_content = if command_palette_active {
             div()
                 .id("app-bar-command-palette")
@@ -30742,6 +30760,7 @@ impl WorkspaceShell {
                     .children(run_menu)
                     .children(terminal_menu)
                     .children(help_menu)
+                    .children(dev_wiki_link)
                     .child(
                         div()
                             .id("toolbar-empty-drag-region")
@@ -48444,7 +48463,7 @@ mod tests {
             assert!(items.iter().all(|item| {
                 item.command.is_some()
                     || (item.label == "Wiki"
-                        && item.url == cfg!(debug_assertions).then_some("http://127.0.0.1:8787"))
+                        && item.url == cfg!(debug_assertions).then_some(app_bar::DEV_WIKI_URL))
                     || (item.label == "License"
                         && item.url == Some("https://github.com/declan/sift/blob/master/LICENSE"))
             }));
@@ -48454,6 +48473,17 @@ mod tests {
         assert_eq!(help[0].label, "Wiki");
         assert_eq!(help[1].label, "License");
         assert_eq!(help[1].shortcut, "AGPL-3.0-only");
+    }
+
+    #[gpui::test]
+    fn development_app_bar_exposes_the_local_wiki(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("toolbar-dev-wiki").is_some(),
+            cfg!(debug_assertions)
+        );
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 use super::{CommandId, CommandRegistry};
 
+pub(super) const DEV_WIKI_URL: &str = "http://127.0.0.1:8787";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AppBarMenu {
     Main,
@@ -43,7 +45,7 @@ impl AppBarMenuItem {
             label: "Wiki",
             shortcut: "",
             command: None,
-            url: cfg!(debug_assertions).then_some("http://127.0.0.1:8787"),
+            url: cfg!(debug_assertions).then_some(DEV_WIKI_URL),
         }
     }
 

@@ -72,6 +72,18 @@ nix develop
 sift-desktop-demo
 ```
 
+To launch the same demo with the keyboard wiki at
+`http://127.0.0.1:8787`:
+
+```sh
+nix run .#sift-desktop-demo-wiki
+```
+
+Development builds expose that address through the appbar **Wiki** link.
+Override the server with `SIFT_DESKTOP_DEMO_WIKI_BIND` and
+`SIFT_DESKTOP_DEMO_WIKI_PORT`; the appbar link intentionally targets the
+default loopback address.
+
 That command starts a throwaway Postgres cluster (default `/tmp/sift-demo-pg`,
 port 5433) seeded with a relational `lab` dataset, creates and applies a reproducible instance
 root (default `/tmp/sift-desktop-demo-instance-$UID`), imports a generated
