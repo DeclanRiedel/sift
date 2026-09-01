@@ -5325,6 +5325,7 @@ async fn create_connection_profile(
         tenant_id,
         name,
         provider_id: profile.provider_id,
+        tags: profile.tags,
     })
 }
 

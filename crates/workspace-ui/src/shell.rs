@@ -823,7 +823,7 @@ enum ConnectionDockRow {
         nav_index: usize,
         item: ConnectionTreeItem,
     },
-    Section(&'static str),
+    Section(String),
     SchemaStatus {
         depth: usize,
         message: String,
@@ -1506,6 +1506,25 @@ impl ConnectionEnvironment {
             Self::Development => "DEV",
         }
     }
+}
+
+const CONNECTION_FAVORITE_TAG: &str = "sift:favorite";
+const CONNECTION_FOLDER_PREFIX: &str = "sift:folder:";
+
+fn connection_is_favorite(tags: &[String]) -> bool {
+    tags.iter().any(|tag| tag == CONNECTION_FAVORITE_TAG)
+}
+
+fn connection_folder(tags: &[String]) -> Option<&str> {
+    tags.iter()
+        .find_map(|tag| tag.strip_prefix(CONNECTION_FOLDER_PREFIX))
+        .filter(|folder| !folder.is_empty())
+}
+
+fn connection_user_tags(tags: &[String]) -> impl Iterator<Item = &str> {
+    tags.iter()
+        .map(String::as_str)
+        .filter(|tag| *tag != CONNECTION_FAVORITE_TAG && !tag.starts_with(CONNECTION_FOLDER_PREFIX))
 }
 
 fn sql_may_mutate(sql: &str) -> bool {
@@ -7533,6 +7552,8 @@ pub struct WorkspaceShell {
     database_timeout_input: Entity<TextInput>,
     database_pool_min_input: Entity<TextInput>,
     database_pool_max_input: Entity<TextInput>,
+    database_folder_input: Entity<TextInput>,
+    database_tags_input: Entity<TextInput>,
     table_column_name_input: Entity<TextInput>,
     table_column_type_input: Entity<TextInput>,
     table_column_nullable_focus: FocusHandle,
@@ -7838,7 +7859,7 @@ pub struct WorkspaceShell {
     editing_connection_profile: Option<i64>,
     database_connection_vault_id: Option<i64>,
     editing_connection_credential_mode: sift_api_types::CredentialMode,
-    editing_connection_tags: Vec<String>,
+    editing_connection_favorite: bool,
     database_connection_tested: bool,
     database_connection_error: Option<String>,
     store: Option<Arc<PresentationStore>>,
@@ -8218,6 +8239,10 @@ impl WorkspaceShell {
             cx.new(|cx| TextInput::new("", "0", cx).aria_label("Minimum pool size"));
         let database_pool_max_input =
             cx.new(|cx| TextInput::new("", "Server default", cx).aria_label("Maximum pool size"));
+        let database_folder_input =
+            cx.new(|cx| TextInput::new("", "Optional folder", cx).aria_label("Connection folder"));
+        let database_tags_input = cx
+            .new(|cx| TextInput::new("", "Comma-separated tags", cx).aria_label("Connection tags"));
         let table_column_name_input =
             cx.new(|cx| TextInput::new("", "Column name", cx).aria_label("Column name"));
         let table_column_type_input = cx.new(|cx| {
@@ -8542,6 +8567,8 @@ impl WorkspaceShell {
             database_timeout_input,
             database_pool_min_input,
             database_pool_max_input,
+            database_folder_input,
+            database_tags_input,
             table_column_name_input,
             table_column_type_input,
             table_column_nullable_focus,
@@ -8837,7 +8864,7 @@ impl WorkspaceShell {
             editing_connection_profile: None,
             database_connection_vault_id: None,
             editing_connection_credential_mode: sift_api_types::CredentialMode::Shared,
-            editing_connection_tags: Vec::new(),
+            editing_connection_favorite: false,
             database_connection_tested: false,
             database_connection_error: None,
             store,
@@ -13467,6 +13494,7 @@ impl WorkspaceShell {
                             tenant_id: source.tenant_id,
                             name: source.profile_name,
                             provider_id: source.provider_id,
+                            tags: Vec::new(),
                         })
                 })
             });
@@ -13632,7 +13660,25 @@ impl WorkspaceShell {
             if !self.connections_find_open && !self.expanded_tenants.contains(&tenant_id) {
                 continue;
             }
-            for connection in &tenant.connections {
+            let mut connections = tenant.connections.iter().collect::<Vec<_>>();
+            connections.sort_by(|left, right| {
+                let left_favorite = connection_is_favorite(&left.tags);
+                let right_favorite = connection_is_favorite(&right.tags);
+                right_favorite
+                    .cmp(&left_favorite)
+                    .then_with(|| {
+                        connection_folder(&left.tags)
+                            .unwrap_or("\u{10ffff}")
+                            .to_lowercase()
+                            .cmp(
+                                &connection_folder(&right.tags)
+                                    .unwrap_or("\u{10ffff}")
+                                    .to_lowercase(),
+                            )
+                    })
+                    .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            });
+            for connection in connections {
                 items.push(ConnectionTreeItem {
                     depth: 1,
                     action: ConnectionTreeAction::Connection(connection.clone()),
@@ -13782,7 +13828,9 @@ impl WorkspaceShell {
                 .find(|tenant| tenant.id.0 == *tenant_id)
                 .map(|tenant| tenant.name.clone())
                 .unwrap_or_default(),
-            ConnectionTreeAction::Connection(connection) => connection.name.clone(),
+            ConnectionTreeAction::Connection(connection) => {
+                format!("{} {}", connection.name, connection.tags.join(" "))
+            }
             ConnectionTreeAction::Catalog { catalog, .. } => catalog.clone(),
             ConnectionTreeAction::Schema {
                 catalog, schema, ..
@@ -13827,6 +13875,7 @@ impl WorkspaceShell {
         }
         let mut rows = Vec::with_capacity(items.len() + self.lifecycle.tenants.len() * 2);
         let mut current_tenant = None;
+        let mut current_connection_section = None;
         let mut workspace_section_rendered = false;
 
         for (nav_index, item) in items.iter().cloned().enumerate() {
@@ -13834,20 +13883,22 @@ impl WorkspaceShell {
                 ConnectionTreeAction::Tenant(tenant_id) => {
                     let tenant_id = *tenant_id;
                     current_tenant = Some(tenant_id);
+                    current_connection_section = None;
                     workspace_section_rendered = false;
                     rows.push(ConnectionDockRow::Navigation { nav_index, item });
-                    if self.expanded_tenants.contains(&tenant_id)
-                        && self
-                            .lifecycle
-                            .tenants
-                            .iter()
-                            .find(|tenant| tenant.id.0 == tenant_id)
-                            .is_some_and(|tenant| !tenant.connections.is_empty())
-                    {
-                        rows.push(ConnectionDockRow::Section("DATABASES"));
-                    }
                 }
                 ConnectionTreeAction::Connection(connection) => {
+                    let section = if connection_is_favorite(&connection.tags) {
+                        "★ FAVORITES".to_owned()
+                    } else if let Some(folder) = connection_folder(&connection.tags) {
+                        folder.to_uppercase()
+                    } else {
+                        "CONNECTIONS".to_owned()
+                    };
+                    if current_connection_section.as_ref() != Some(&section) {
+                        current_connection_section = Some(section.clone());
+                        rows.push(ConnectionDockRow::Section(section));
+                    }
                     let connected = matches!(
                         self.connection_status,
                         ConnectionStatus::Connected { profile_id, .. }
@@ -13904,7 +13955,7 @@ impl WorkspaceShell {
                                 tenant.rooms.iter().any(|room| !room.workspaces.is_empty())
                             });
                         if show_section {
-                            rows.push(ConnectionDockRow::Section("WORKSPACES"));
+                            rows.push(ConnectionDockRow::Section("WORKSPACES".into()));
                         }
                         workspace_section_rendered = true;
                     }
@@ -14122,6 +14173,15 @@ impl WorkspaceShell {
                     )
                     .child(leading)
                     .child(logo)
+                    .when(connection_is_favorite(&connection.tags), |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(colors.accent)
+                                .child("★"),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -15965,7 +16025,18 @@ impl WorkspaceShell {
         self.selected_database_tenant = Some(profile.tenant_id.0);
         self.selected_database_provider = Some(profile.provider_id.as_str().to_owned());
         self.editing_connection_credential_mode = profile.credential_mode;
-        self.editing_connection_tags = profile.tags;
+        self.editing_connection_favorite = connection_is_favorite(&profile.tags);
+        self.database_folder_input.update(cx, |input, cx| {
+            input.set_text(connection_folder(&profile.tags).unwrap_or_default(), cx)
+        });
+        self.database_tags_input.update(cx, |input, cx| {
+            input.set_text(
+                connection_user_tags(&profile.tags)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                cx,
+            )
+        });
         self.database_wizard_step = DatabaseWizardStep::Details;
         for (input, value) in [
             (&self.database_name_input, profile.name),
@@ -16139,7 +16210,7 @@ impl WorkspaceShell {
         self.editing_connection_profile = None;
         self.database_connection_vault_id = None;
         self.editing_connection_credential_mode = sift_api_types::CredentialMode::Shared;
-        self.editing_connection_tags.clear();
+        self.editing_connection_favorite = false;
         self.database_connection_tested = false;
         self.selected_database_tenant = self.lifecycle.tenants.first().map(|tenant| tenant.id.0);
         self.selected_database_provider = None;
@@ -16162,6 +16233,8 @@ impl WorkspaceShell {
             &self.database_timeout_input,
             &self.database_pool_min_input,
             &self.database_pool_max_input,
+            &self.database_folder_input,
+            &self.database_tags_input,
         ] {
             input.update(cx, |input, cx| input.set_text("", cx));
         }
@@ -16227,6 +16300,8 @@ impl WorkspaceShell {
         if self.selected_database_provider.as_deref() == Some("sift/postgres") {
             fields.push(self.database_pool_max_input.clone());
         }
+        fields.push(self.database_folder_input.clone());
+        fields.push(self.database_tags_input.clone());
 
         let handles = fields
             .iter()
@@ -16489,6 +16564,26 @@ impl WorkspaceShell {
             }
         }
         let credentials = (!password.is_empty()).then(|| serde_json::json!({"password": password}));
+        let mut tags = self
+            .database_tags_input
+            .read(cx)
+            .text()
+            .split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .filter(|tag| *tag != CONNECTION_FAVORITE_TAG)
+            .filter(|tag| !tag.starts_with(CONNECTION_FOLDER_PREFIX))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        tags.sort_unstable();
+        tags.dedup();
+        let folder = self.database_folder_input.read(cx).text().trim().to_owned();
+        if !folder.is_empty() {
+            tags.push(format!("{CONNECTION_FOLDER_PREFIX}{folder}"));
+        }
+        if self.editing_connection_favorite {
+            tags.push(CONNECTION_FAVORITE_TAG.to_owned());
+        }
         let command = if test_only {
             ExecutorCommand::TestConnectionProfile {
                 tenant_id,
@@ -16505,7 +16600,7 @@ impl WorkspaceShell {
                 configuration: serde_json::Value::Object(configuration),
                 credentials,
                 credential_mode: self.editing_connection_credential_mode.clone(),
-                tags: self.editing_connection_tags.clone(),
+                tags,
             }
         };
         if sender.send(command).is_err() {
@@ -37625,6 +37720,30 @@ impl WorkspaceShell {
                                                     row.child(div().flex_1().min_w(px(180.)).child(field("MAXIMUM POOL SIZE", self.database_pool_max_input.clone())))
                                                 }),
                                         )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_wrap()
+                                                .gap_3()
+                                                .child(div().flex_1().min_w(px(220.)).child(field("FOLDER", self.database_folder_input.clone())))
+                                                .child(div().flex_1().min_w(px(220.)).child(field("TAGS", self.database_tags_input.clone()))),
+                                        )
+                                        .child(
+                                            Button::new(
+                                                "database-connection-favorite",
+                                                if self.editing_connection_favorite {
+                                                    "★ Favorite"
+                                                } else {
+                                                    "☆ Add to favorites"
+                                                },
+                                            )
+                                            .tone(ButtonTone::Neutral)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.editing_connection_favorite =
+                                                    !shell.editing_connection_favorite;
+                                                cx.notify();
+                                            })),
+                                        )
                                 })
                                 .when(step == DatabaseWizardStep::Review, |form| {
                                     form
@@ -37659,6 +37778,30 @@ impl WorkspaceShell {
                                         .child(review_row(
                                             "Transport security",
                                             selected_ssl_mode.clone().unwrap_or_else(|| "Provider default".into()).replace('_', " "),
+                                        ))
+                                        .child(review_row(
+                                            "Folder",
+                                            if self.database_folder_input.read(cx).text().trim().is_empty() {
+                                                "None".into()
+                                            } else {
+                                                self.database_folder_input.read(cx).text().trim().to_owned()
+                                            },
+                                        ))
+                                        .child(review_row(
+                                            "Tags",
+                                            if self.database_tags_input.read(cx).text().trim().is_empty() {
+                                                "None".into()
+                                            } else {
+                                                self.database_tags_input.read(cx).text().trim().to_owned()
+                                            },
+                                        ))
+                                        .child(review_row(
+                                            "Favorite",
+                                            if self.editing_connection_favorite {
+                                                "Yes".into()
+                                            } else {
+                                                "No".into()
+                                            },
                                         ))
                                 })
                                 .children(self.database_connection_error.as_ref().map(|message| {
@@ -43133,6 +43276,7 @@ mod tests {
                     tenant_id: 1,
                     name: "Demo".into(),
                     provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    tags: Vec::new(),
                 }],
             }];
             shell.run_command(CommandId::FocusConnections, window, cx);
@@ -43180,6 +43324,88 @@ mod tests {
     }
 
     #[gpui::test]
+    fn connections_group_favorites_and_folders_and_search_tags(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, _| {
+            let provider = sift_protocol::ProviderId::new("sift/postgres").unwrap();
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: vec![
+                    ConnectionNavEntry {
+                        id: 4,
+                        tenant_id: 1,
+                        name: "Unfiled".into(),
+                        provider_id: provider.clone(),
+                        tags: vec!["archive".into()],
+                    },
+                    ConnectionNavEntry {
+                        id: 3,
+                        tenant_id: 1,
+                        name: "Operations".into(),
+                        provider_id: provider.clone(),
+                        tags: vec!["sift:folder:Operations".into()],
+                    },
+                    ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "Analytics".into(),
+                        provider_id: provider.clone(),
+                        tags: vec!["sift:folder:Analytics".into(), "critical".into()],
+                    },
+                    ConnectionNavEntry {
+                        id: 1,
+                        tenant_id: 1,
+                        name: "Favorite".into(),
+                        provider_id: provider,
+                        tags: vec!["sift:favorite".into(), "sift:folder:Operations".into()],
+                    },
+                ],
+            }];
+            shell.expanded_tenants.insert(1);
+        });
+
+        workspace.read_with(&cx, |shell, _| {
+            let names = shell
+                .build_visible_connection_items()
+                .into_iter()
+                .filter_map(|item| match item.action {
+                    ConnectionTreeAction::Connection(connection) => Some(connection.name),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["Favorite", "Analytics", "Operations", "Unfiled"]);
+            let sections = shell
+                .connection_dock_rows()
+                .into_iter()
+                .filter_map(|row| match row {
+                    ConnectionDockRow::Section(label) => Some(label),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                sections,
+                ["★ FAVORITES", "ANALYTICS", "OPERATIONS", "CONNECTIONS"]
+            );
+        });
+
+        workspace.update(&mut cx, |shell, _| {
+            shell.connections_find_open = true;
+            shell.connections_find_query = "critical".into();
+        });
+        workspace.read_with(&cx, |shell, _| {
+            let matches = shell.build_visible_connection_items();
+            assert!(matches.iter().any(|item| matches!(
+                &item.action,
+                ConnectionTreeAction::Connection(connection) if connection.name == "Analytics"
+            )));
+        });
+    }
+
+    #[gpui::test]
     fn connections_ctrl_f_finds_collapsed_tree_content_and_escape_restores_focus(
         cx: &mut TestAppContext,
     ) {
@@ -43196,6 +43422,7 @@ mod tests {
                     tenant_id: 1,
                     name: "Warehouse Demo".into(),
                     provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    tags: Vec::new(),
                 }],
             }];
             shell.run_command(CommandId::FocusConnections, window, cx);
@@ -43249,6 +43476,7 @@ mod tests {
                     tenant_id: 1,
                     name: "Demo".into(),
                     provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    tags: Vec::new(),
                 }],
             }];
             shell.connection_status = ConnectionStatus::Connected {
@@ -43345,6 +43573,7 @@ mod tests {
                         tenant_id: 1,
                         name: "Demo".into(),
                         provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                        tags: Vec::new(),
                     },
                     catalog: "sifttest".into(),
                     schema: "lab".into(),
@@ -43389,6 +43618,7 @@ mod tests {
                         tenant_id: 1,
                         name: "Demo".into(),
                         provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                        tags: Vec::new(),
                     },
                     catalog: "sifttest".into(),
                     schema: "lab".into(),
@@ -43442,6 +43672,7 @@ mod tests {
                         tenant_id: 1,
                         name: "Demo".into(),
                         provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                        tags: Vec::new(),
                     },
                     catalog: "sifttest".into(),
                     schema: "lab".into(),
@@ -43490,6 +43721,7 @@ mod tests {
                         tenant_id: 1,
                         name: "Demo".into(),
                         provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                        tags: Vec::new(),
                     },
                     catalog: "sifttest".into(),
                     schema: "lab".into(),
@@ -43588,6 +43820,7 @@ mod tests {
                         tenant_id: 1,
                         name: "Demo".into(),
                         provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                        tags: Vec::new(),
                     },
                     catalog: "sifttest".into(),
                     schema: "lab".into(),
@@ -43725,6 +43958,7 @@ mod tests {
             tenant_id: 4,
             name: "Warehouse".into(),
             provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+            tags: Vec::new(),
         };
 
         workspace.update_in(&mut cx, |shell, window, cx| {
@@ -44004,6 +44238,7 @@ mod tests {
                         tenant_id: 1,
                         name: "demo/postgres".into(),
                         provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                        tags: Vec::new(),
                     },
                     catalog: "sifttest".into(),
                     schema: "lab".into(),
@@ -44520,6 +44755,7 @@ mod tests {
                         tenant_id: 1,
                         name: "Demo".into(),
                         provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                        tags: Vec::new(),
                     },
                     catalog: "sifttest".into(),
                     schema: "lab".into(),
@@ -49274,6 +49510,7 @@ mod tests {
                     tenant_id: 1,
                     name: "Warehouse".into(),
                     provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    tags: Vec::new(),
                 }],
             }];
             shell.connection_status = ConnectionStatus::Connected {
@@ -50155,6 +50392,7 @@ mod tests {
                     tenant_id: 1,
                     name: "Warehouse".into(),
                     provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    tags: Vec::new(),
                 }],
             }];
             shell.connection_status = ConnectionStatus::Connected {
@@ -51140,6 +51378,7 @@ mod tests {
                         tenant_id: 1,
                         name: "demo/postgres".into(),
                         provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                        tags: Vec::new(),
                     },
                     catalog: "sifttest".into(),
                     schema: "audit".into(),
@@ -52007,6 +52246,7 @@ mod tests {
                         tenant_id: 1,
                         name: "demo/postgres".into(),
                         provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                        tags: Vec::new(),
                     },
                     catalog: "sifttest".into(),
                     schema: "audit".into(),
@@ -52226,6 +52466,7 @@ mod tests {
                         tenant_id: 1,
                         name: "demo/postgres".into(),
                         provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                        tags: Vec::new(),
                     },
                     catalog: "sifttest".into(),
                     schema: "audit".into(),
