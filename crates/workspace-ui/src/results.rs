@@ -873,6 +873,7 @@ pub struct ResultsView {
     included_columns: Vec<bool>,
     tab: ResultTab,
     selected: Option<GridSelection>,
+    cell_drag_anchor: Option<(usize, usize)>,
     show_selection_aggregates: bool,
     visual_selection: bool,
     editing_cell: Option<(usize, usize)>,
@@ -976,6 +977,7 @@ impl ResultsView {
             included_columns: Vec::new(),
             tab: ResultTab::Data,
             selected: None,
+            cell_drag_anchor: None,
             show_selection_aggregates: false,
             visual_selection: false,
             editing_cell: None,
@@ -1631,6 +1633,7 @@ impl ResultsView {
         self.window_start = 0;
         self.window_held = false;
         self.selected = None;
+        self.cell_drag_anchor = None;
         self.inline_cell_edit = None;
         self.staged_cells.clear();
         self.staged_undo.clear();
@@ -1739,6 +1742,7 @@ impl ResultsView {
         self.window_start = 0;
         self.window_held = false;
         self.selected = None;
+        self.cell_drag_anchor = None;
         self.inline_cell_edit = None;
         self.staged_cells.clear();
         self.staged_undo.clear();
@@ -2844,6 +2848,20 @@ impl ResultsView {
         click_count: usize,
         cx: &mut Context<Self>,
     ) -> bool {
+        let drag_anchor = if shift {
+            match self.selected {
+                Some(GridSelection::Cell { row, column }) => (row, column),
+                Some(GridSelection::Range {
+                    anchor_row,
+                    anchor_column,
+                    ..
+                }) => (anchor_row, anchor_column),
+                _ => (row, column),
+            }
+        } else {
+            (row, column)
+        };
+        self.cell_drag_anchor = (click_count == 1).then_some(drag_anchor);
         if click_count >= 2 {
             self.set_selection(GridSelection::Cell { row, column }, cx);
             let inline_editor_open = self
@@ -2862,6 +2880,25 @@ impl ResultsView {
             self.set_selection(GridSelection::Cell { row, column }, cx);
         }
         false
+    }
+
+    fn drag_cell_selection(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
+        let Some((anchor_row, anchor_column)) = self.cell_drag_anchor else {
+            return;
+        };
+        self.set_selection(
+            GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                focus_row: row,
+                focus_column: column,
+            },
+            cx,
+        );
+    }
+
+    fn finish_cell_drag(&mut self) {
+        self.cell_drag_anchor = None;
     }
 
     fn open_cell_context_menu(
@@ -4609,25 +4646,40 @@ impl ResultsView {
                                         ),
                                     )
                                     .when(!is_inline_edit, |cell| {
-                                        cell.on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(
+                                        cell
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(
+                                                    move |view,
+                                                          event: &gpui::MouseDownEvent,
+                                                          window,
+                                                          cx| {
+                                                        view.focus_handle.focus(window, cx);
+                                                        view.select_cell_from_pointer(
+                                                            row_index,
+                                                            source_column,
+                                                            event.modifiers.shift,
+                                                            event.click_count,
+                                                            cx,
+                                                        );
+                                                        cx.stop_propagation();
+                                                    },
+                                                ),
+                                            )
+                                            .on_mouse_move(cx.listener(
                                                 move |view,
-                                                      event: &gpui::MouseDownEvent,
-                                                      window,
+                                                      event: &gpui::MouseMoveEvent,
+                                                      _,
                                                       cx| {
-                                                    view.focus_handle.focus(window, cx);
-                                                    view.select_cell_from_pointer(
-                                                        row_index,
-                                                        source_column,
-                                                        event.modifiers.shift,
-                                                        event.click_count,
-                                                        cx,
-                                                    );
-                                                    cx.stop_propagation();
+                                                    if event.dragging() {
+                                                        view.drag_cell_selection(
+                                                            row_index,
+                                                            source_column,
+                                                            cx,
+                                                        );
+                                                    }
                                                 },
-                                            ),
-                                        )
+                                            ))
                                     });
                                 if let Some((input, error)) = inline_edit {
                                     let input_focus = input.focus_handle(cx);
@@ -5431,6 +5483,14 @@ impl gpui::Render for ResultsView {
                     cx.notify();
                 }),
             )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|view, _, _, _| view.finish_cell_drag()),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|view, _, _, _| view.finish_cell_drag()),
+            )
             .on_action(cx.listener(Self::copy_selected_cell))
             .on_action(cx.listener(Self::copy_selected_with_headers))
             .on_action(cx.listener(Self::edit_selected_cell))
@@ -5707,6 +5767,59 @@ mod tests {
             assert!(
                 view.select_cell_from_pointer(0, 0, false, 2, cx),
                 "a stale editing outline must not block reopening the inline editor"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn pointer_drag_selects_a_rectangular_cell_range(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::Ready(ResultData {
+                    columns: vec![
+                        ResultColumn {
+                            name: "a".into(),
+                            type_label: "text".into(),
+                            nullable: false,
+                        },
+                        ResultColumn {
+                            name: "b".into(),
+                            type_label: "text".into(),
+                            nullable: false,
+                        },
+                    ],
+                    rows: vec![
+                        Row::new(vec![Value::Text("a1".into()), Value::Text("b1".into())]),
+                        Row::new(vec![Value::Text("a2".into()), Value::Text("b2".into())]),
+                    ],
+                    ..Default::default()
+                }),
+                cx,
+            );
+            view.select_cell_from_pointer(0, 0, false, 1, cx);
+            view.drag_cell_selection(1, 1, cx);
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Range {
+                    anchor_row: 0,
+                    anchor_column: 0,
+                    focus_row: 1,
+                    focus_column: 1,
+                })
+            );
+            assert_eq!(view.selected_text().as_deref(), Some("a1\tb1\na2\tb2"));
+            view.finish_cell_drag();
+            view.drag_cell_selection(0, 1, cx);
+            assert_eq!(
+                view.selected,
+                Some(GridSelection::Range {
+                    anchor_row: 0,
+                    anchor_column: 0,
+                    focus_row: 1,
+                    focus_column: 1,
+                }),
+                "selection stops changing after pointer release"
             );
         });
     }
