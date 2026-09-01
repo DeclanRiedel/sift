@@ -32,9 +32,7 @@ use crate::settings::{
     EditorMode, KeyboardProfile, KeymapSettings, RepositoryGrouping, RepositoryPrimaryAction,
     RepositorySort, RepositoryView, SettingsStore, UserSettings,
 };
-use crate::workspace::{
-    child_path, WorkspaceFileRow, WorkspaceFilesProjection, WorkspaceFilesSnapshot,
-};
+use crate::workspace::{child_path, WorkspaceFilesProjection, WorkspaceFilesSnapshot};
 
 use crate::presentation::{
     BottomTool, DatabaseObjectSource, ItemKind, ItemPresentation, ItemSource, LeftPanel, PaneAxis,
@@ -7366,7 +7364,6 @@ pub struct WorkspaceShell {
     workspace_files: WorkspaceFilesProjection,
     workspace_reconcile_resolutions:
         HashMap<sift_protocol::WorkspacePath, sift_protocol::ReconcileResolution>,
-    workspace_files_scroll_handle: UniformListScrollHandle,
     repository_scroll_handle: UniformListScrollHandle,
     repository_diff_items: HashMap<u64, RepositoryDiffItemState>,
     pending_repository_diff: Option<(sift_protocol::WorkspacePath, sift_protocol::VcsDiffSide)>,
@@ -8289,7 +8286,6 @@ impl WorkspaceShell {
             repository,
             workspace_files,
             workspace_reconcile_resolutions: HashMap::new(),
-            workspace_files_scroll_handle: UniformListScrollHandle::new(),
             repository_scroll_handle: UniformListScrollHandle::new(),
             repository_diff_items: HashMap::new(),
             pending_repository_diff,
@@ -29744,86 +29740,6 @@ impl WorkspaceShell {
         }
     }
 
-    fn render_workspace_file_row(
-        &self,
-        index: usize,
-        row: WorkspaceFileRow,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let colors = cx.theme().colors;
-        match row {
-            WorkspaceFileRow::Node {
-                node,
-                depth,
-                expanded,
-            } => {
-                let node_id = node.id;
-                let selected = self
-                    .workspace_files
-                    .selected_node()
-                    .is_some_and(|selected| selected.id == node_id);
-                let is_folder = node.kind == sift_protocol::WorkspaceNodeKind::Folder;
-                let label = node
-                    .path
-                    .0
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&node.path.0)
-                    .to_owned();
-                div()
-                    .id(("workspace-file", index))
-                    .mx_2()
-                    .h(cx.theme().metrics.row_height)
-                    .pl(px(6. + depth as f32 * 13.))
-                    .pr_2()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .rounded_sm()
-                    .when(selected, |row| row.bg(colors.active_surface))
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        shell.workspace_files.select_node(node_id);
-                        if is_folder {
-                            shell.workspace_files.toggle_folder(node_id);
-                        } else {
-                            shell.open_workspace_file(node_id, window, cx);
-                        }
-                        cx.notify();
-                    }))
-                    .child(if is_folder {
-                        icon(
-                            if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            },
-                            colors.muted_text,
-                            10.,
-                        )
-                    } else {
-                        div().w(px(10.)).into_any_element()
-                    })
-                    .child(icon(
-                        if is_folder {
-                            IconName::Folder
-                        } else {
-                            IconName::Terminal
-                        },
-                        colors.muted_text,
-                        11.,
-                    ))
-                    .child(div().min_w_0().flex_1().truncate().child(label))
-                    .children((node.revision > 1).then(|| {
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .child(format!("r{}", node.revision))
-                    }))
-                    .into_any_element()
-            }
-        }
-    }
-
     fn open_workspace_file(
         &mut self,
         node_id: sift_protocol::WorkspaceNodeId,
@@ -30268,33 +30184,9 @@ impl WorkspaceShell {
                 |dock_view| {
                     let rows = self.repository.rows();
                     let row_count = rows.len();
-                    let workspace_rows = self.workspace_files.rows();
-                    let workspace_row_count = workspace_rows.len();
-                    let workspace_list_height =
-                        (workspace_row_count.max(1) as f32 * f32::from(cx.theme().metrics.row_height))
-                            .min(190.);
-                    let workspace_tree_dirty = self.workspace_files.workspace_tree_dirty();
                     let projection_dirty = self.workspace_files.projection_dirty();
-                    let editor_dirty = self
-                        .panes
-                        .iter()
-                        .map(|pane| {
-                            pane.read(cx)
-                                .items
-                                .iter()
-                                .filter(|item| {
-                                    item.dirty
-                                        && matches!(item.source, Some(ItemSource::RoomDocument(_)))
-                                })
-                                .count()
-                        })
-                        .sum::<usize>();
-                    let (virtual_only, filesystem_only, both_changed, identical) =
+                    let (virtual_only, filesystem_only, both_changed, _) =
                         self.workspace_files.reconcile_summary();
-                    let workspace_name = self
-                        .selected_workspace()
-                        .map(|workspace| workspace.name.clone())
-                        .unwrap_or_else(|| "Source control".into());
                     let repository_detail = self.repository.status().map(|status| {
                         let branch = status.branch.as_deref().unwrap_or("Detached HEAD");
                         let remote = status.upstream.as_ref().map_or_else(String::new, |upstream| {
@@ -30343,7 +30235,7 @@ impl WorkspaceShell {
                     dock_view
                         .child(
                             div()
-                                .h(px(46.))
+                                .h(px(32.))
                                 .px_3()
                                 .flex()
                                 .items_center()
@@ -30352,19 +30244,11 @@ impl WorkspaceShell {
                                     div()
                                         .min_w_0()
                                         .flex_1()
-                                        .overflow_hidden()
-                                        .flex()
-                                        .flex_col()
-                                        .child(div().truncate().child(workspace_name))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(colors.muted_text)
-                                                .truncate()
-                                                .child(repository_detail.unwrap_or_else(|| {
-                                                    "No repository loaded".into()
-                                                })),
-                                        ),
+                                        .truncate()
+                                        .text_sm()
+                                        .child(repository_detail.unwrap_or_else(|| {
+                                            "No repository loaded".into()
+                                        })),
                                 )
                                 .child(
                                     div()
@@ -30373,20 +30257,6 @@ impl WorkspaceShell {
                                         .flex()
                                         .items_center()
                                         .gap_1()
-                                        .child(
-                                            IconButton::new(
-                                                "refresh-repository-status",
-                                                IconName::Refresh,
-                                                "Refresh source control",
-                                            )
-                                            .square(px(24.))
-                                            .icon_size(12.)
-                                            .tooltip("Refresh source control")
-                                            .disabled(self.repository.loading())
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.request_repository_status(cx)
-                                            })),
-                                        )
                                         .child(
                                             IconButton::new(
                                                 "repository-overflow",
@@ -30406,123 +30276,21 @@ impl WorkspaceShell {
                                         ),
                                 ),
                         )
-                        .child(
+                        .children(shared_repository_operation.map(|operation| {
                             div()
                                 .px_3()
                                 .py_2()
                                 .flex_none()
                                 .border_t_1()
                                 .border_color(colors.subtle_border)
+                                .bg(colors.active_surface)
                                 .text_xs()
-                                .text_color(colors.muted_text)
-                                .when_some(shared_repository_operation, |notice, operation| {
-                                    notice
-                                        .bg(colors.active_surface)
-                                        .text_color(colors.text)
-                                        .child(format!(
-                                            "Principal {} is running {}…",
-                                            operation.actor_principal_id,
-                                            vcs_action_label(operation.action)
-                                        ))
-                                })
-                                .when(shared_repository_operation.is_none(), |notice| {
-                                    notice.child(
-                                        "Shared branch, index, HEAD, and remotes · credentials are per user",
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .h(px(28.))
-                                .px_3()
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .border_t_1()
-                                .border_color(colors.subtle_border)
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(SectionLabel::new(format!(
-                                            "FILES ({workspace_row_count})"
-                                        ))),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .flex()
-                                        .items_center()
-                                        .justify_end()
-                                        .gap_1()
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .flex_1()
-                                                .truncate()
-                                                .children(
-                                                    (editor_dirty > 0).then(|| {
-                                                        format!("editor*{editor_dirty}")
-                                                    }),
-                                                )
-                                                .children(
-                                                    workspace_tree_dirty.then_some("virtual*"),
-                                                )
-                                                .children(
-                                                    projection_dirty.then_some("projection*"),
-                                                ),
-                                        )
-                                        .child(
-                                            IconButton::new(
-                                                "create-workspace-file",
-                                                IconName::Add,
-                                                "New SQL file",
-                                            )
-                                            .square(px(22.))
-                                            .icon_size(11.)
-                                            .tooltip("New SQL file")
-                                            .disabled(self.workspace_files.mutation_pending())
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.open_workspace_create(false, window, cx)
-                                            })),
-                                        )
-                                        .child(
-                                            IconButton::new(
-                                                "refresh-workspace-files",
-                                                IconName::Refresh,
-                                                "Refresh workspace files",
-                                            )
-                                            .square(px(22.))
-                                            .icon_size(11.)
-                                            .tooltip("Refresh workspace files and reconciliation")
-                                            .disabled(self.workspace_files.loading())
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.request_workspace_files(cx)
-                                            })),
-                                        )
-                                        .child(
-                                            IconButton::new(
-                                                "workspace-files-overflow",
-                                                IconName::Menu,
-                                                "More workspace file actions",
-                                            )
-                                            .square(px(22.))
-                                            .icon_size(11.)
-                                            .tooltip("More workspace file actions")
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.open_command_palette_with_query(
-                                                    "workspace ",
-                                                    window,
-                                                    cx,
-                                                )
-                                            })),
-                                        ),
-                                ),
-                        )
+                                .child(format!(
+                                    "Principal {} is running {}…",
+                                    operation.actor_principal_id,
+                                    vcs_action_label(operation.action)
+                                ))
+                        }))
                         .children(self.workspace_files.error().map(|message| {
                             div().mx_2().mb_1().child(ErrorBanner::new(message.to_owned()))
                         }))
@@ -30530,41 +30298,33 @@ impl WorkspaceShell {
                             panel.child(
                                 div()
                                     .px_3()
-                                    .pb_1()
+                                    .py_2()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .border_t_1()
+                                    .border_color(colors.subtle_border)
                                     .text_xs()
                                     .text_color(if both_changed > 0 {
                                         colors.warning
                                     } else {
                                         colors.muted_text
                                     })
-                                    .child(format!(
-                                        "Reconcile · {virtual_only} virtual-only · {filesystem_only} filesystem-only · {both_changed} conflicts · {identical} identical"
-                                    )),
+                                    .child(
+                                        div().min_w_0().truncate().child(format!(
+                                            "Workspace differs · {virtual_only} virtual · {filesystem_only} disk · {both_changed} conflicts"
+                                        )),
+                                    )
+                                    .child(
+                                        Button::new("reconcile-workspace-files", "Reconcile")
+                                            .tone(ButtonTone::Ghost)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.open_workspace_reconcile(cx)
+                                            })),
+                                    ),
                             )
                         })
-                        .child(
-                            uniform_list(
-                                "workspace-files-list",
-                                workspace_row_count,
-                                cx.processor(move |shell, range: Range<usize>, _, cx| {
-                                    range
-                                        .filter_map(|index| {
-                                            workspace_rows
-                                                .get(index)
-                                                .cloned()
-                                                .map(|row| (index, row))
-                                        })
-                                        .map(|(index, row)| {
-                                            shell.render_workspace_file_row(index, row, cx)
-                                        })
-                                        .collect()
-                                }),
-                            )
-                            .h(px(workspace_list_height))
-                            .flex_none()
-                            .w_full()
-                            .track_scroll(&self.workspace_files_scroll_handle),
-                        )
                         .child(
                             div()
                                 .h(px(28.))
