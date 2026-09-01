@@ -1178,6 +1178,7 @@ struct TabDrag {
     title: SharedString,
     selected: bool,
     dirty: bool,
+    staged: bool,
 }
 
 impl gpui::Render for TabDrag {
@@ -1185,6 +1186,7 @@ impl gpui::Render for TabDrag {
         PaneTab::new("dragged-tab")
             .selected(self.selected)
             .dirty(self.dirty)
+            .staged(self.staged)
             .child(div().min_w_0().px_2().truncate().child(self.title.clone()))
             .render(window, cx)
     }
@@ -3635,6 +3637,7 @@ impl Pane {
             ResultsEvent::ReviewStagedEditsRequested => {
                 cx.emit(PaneEvent::ReviewStagedResultEditsRequested { item_id })
             }
+            ResultsEvent::StagedChangesChanged => cx.notify(),
             ResultsEvent::SubmitCellEdit { text } => {
                 cx.emit(PaneEvent::SubmitResultCellEditRequested {
                     item_id,
@@ -5757,6 +5760,12 @@ impl gpui::Render for Pane {
                                     .children(self.items.iter().enumerate().map(|(index, item)| {
                                         let selected = index == self.active_item;
                                         let item_id = item.id;
+                                        let staged = self
+                                            .results
+                                            .get(&item_id)
+                                            .is_some_and(|results| {
+                                                results.read(cx).has_staged_changes()
+                                            });
                                         let tab_debug = format!("tab-{item_id}");
                                         let rename_input = tab_rename
                                             .as_ref()
@@ -5766,6 +5775,7 @@ impl gpui::Render for Pane {
                                             .debug_selector(move || tab_debug.clone())
                                             .selected(selected)
                                             .dirty(item.dirty)
+                                            .staged(staged)
                                             .on_hover(cx.listener(
                                                 move |pane, hovered: &bool, _, cx| {
                                                     let next = if *hovered {
@@ -5789,6 +5799,7 @@ impl gpui::Render for Pane {
                                                     title: item.title.clone().into(),
                                                     selected,
                                                     dirty: item.dirty,
+                                                    staged,
                                                 },
                                                 |tab, _, _, cx| cx.new(|_| tab.clone()),
                                             )
@@ -24399,6 +24410,11 @@ impl WorkspaceShell {
             .filter(|edit| edit.item_id == item_id)
             .cloned()
             .collect::<Vec<_>>();
+        let staged_row_deletions = self
+            .staged_result_deletes
+            .iter()
+            .filter(|delete| delete.item_id == item_id)
+            .count();
         for pane in &self.panes {
             let results = pane.read(cx).results.get(&item_id).cloned();
             let Some(results) = results else { continue };
@@ -24412,6 +24428,7 @@ impl WorkspaceShell {
                         cx,
                     );
                 }
+                results.set_staged_row_deletions(staged_row_deletions, cx);
             });
         }
     }
@@ -49097,6 +49114,7 @@ mod tests {
         );
         assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
         assert!(!cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
+        assert!(cx.debug_bounds("tab-staged-changes").is_some());
         let pane = workspace.read_with(&cx, |shell, _| shell.panes[shell.active_pane].clone());
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.open_result_cell_editor(&pane, item_id, window, cx)
@@ -49110,6 +49128,7 @@ mod tests {
             assert!(shell.staged_result_edits.is_empty());
             assert_eq!(results.read(cx).staged_cell_count(), 0);
         });
+        assert!(cx.debug_bounds("tab-staged-changes").is_none());
 
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.open_result_cell_editor(&pane, item_id, window, cx)
@@ -49123,6 +49142,7 @@ mod tests {
             assert_eq!(shell.staged_result_edits.len(), 1);
             assert_eq!(results.read(cx).staged_cell_count(), 1);
         });
+        assert!(cx.debug_bounds("tab-staged-changes").is_some());
         let review = cx
             .debug_bounds("review-staged-result-edits")
             .expect("staged edit review button");

@@ -727,6 +727,7 @@ pub enum ResultsEvent {
     RevertSelectedCellRequested,
     DeleteSelectedRowRequested,
     ReviewStagedEditsRequested,
+    StagedChangesChanged,
     SubmitCellEdit {
         text: String,
     },
@@ -891,6 +892,7 @@ pub struct ResultsView {
     editing_cell: Option<(usize, usize)>,
     inline_cell_edit: Option<InlineCellEdit>,
     staged_cells: HashMap<(usize, usize), Value>,
+    staged_row_deletions: usize,
     staged_undo: Vec<StagedEditHistory>,
     staged_redo: Vec<StagedEditHistory>,
     /// Bytes written by an active streamed export. `None` means idle.
@@ -997,6 +999,7 @@ impl ResultsView {
             editing_cell: None,
             inline_cell_edit: None,
             staged_cells: HashMap::new(),
+            staged_row_deletions: 0,
             staged_undo: Vec::new(),
             staged_redo: Vec::new(),
             export_bytes: None,
@@ -1127,6 +1130,19 @@ impl ResultsView {
     #[cfg(test)]
     pub(crate) fn staged_cell_count(&self) -> usize {
         self.staged_cells.len()
+    }
+
+    pub(crate) fn has_staged_changes(&self) -> bool {
+        !self.staged_cells.is_empty() || self.staged_row_deletions > 0
+    }
+
+    pub(crate) fn set_staged_row_deletions(&mut self, count: usize, cx: &mut Context<Self>) {
+        if self.staged_row_deletions == count {
+            return;
+        }
+        self.staged_row_deletions = count;
+        cx.emit(ResultsEvent::StagedChangesChanged);
+        cx.notify();
     }
 
     pub(crate) fn placement(&self) -> ResultPlacement {
@@ -1307,6 +1323,9 @@ impl ResultsView {
         }
         self.staged_undo.clear();
         self.staged_redo.clear();
+        if !resolved.is_empty() {
+            cx.emit(ResultsEvent::StagedChangesChanged);
+        }
         cx.notify();
         resolved.len()
     }
@@ -1358,6 +1377,7 @@ impl ResultsView {
         });
         self.staged_redo.clear();
         self.replace_rendered_cell(row_index, column_index, &value);
+        cx.emit(ResultsEvent::StagedChangesChanged);
         cx.notify();
         true
     }
@@ -1380,6 +1400,9 @@ impl ResultsView {
         });
         for (row, column, value) in originals.unwrap_or_default() {
             self.replace_rendered_cell(row, column, &value);
+        }
+        if !coordinates.is_empty() {
+            cx.emit(ResultsEvent::StagedChangesChanged);
         }
         cx.notify();
     }
@@ -3243,6 +3266,7 @@ impl ResultsView {
             }
         }
         self.staged_redo.push(change);
+        cx.emit(ResultsEvent::StagedChangesChanged);
         cx.notify();
     }
 
@@ -3258,6 +3282,7 @@ impl ResultsView {
             .insert((change.row, change.column), change.after.clone());
         self.replace_rendered_cell(change.row, change.column, &change.after);
         self.staged_undo.push(change);
+        cx.emit(ResultsEvent::StagedChangesChanged);
         cx.notify();
     }
 
@@ -4684,7 +4709,7 @@ impl ResultsView {
                                     .text_color(color)
                                     .when(is_selected, |el| el.bg(colors.selected_surface))
                                     .when(is_staged, |el| {
-                                        el.bg(colors.warning_muted).border_color(colors.warning)
+                                        el.bg(colors.staged_muted).border_color(colors.staged)
                                     })
                                     .when(is_editing && !is_inline_edit, |el| {
                                         el.border_1().border_color(colors.accent)

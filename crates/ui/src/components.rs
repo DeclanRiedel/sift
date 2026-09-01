@@ -34,6 +34,7 @@ pub struct PaneTab {
     div: Stateful<Div>,
     selected: bool,
     dirty: bool,
+    staged: bool,
     children: Vec<AnyElement>,
 }
 
@@ -43,6 +44,7 @@ impl PaneTab {
             div: div().id(id),
             selected: false,
             dirty: false,
+            staged: false,
             children: Vec::new(),
         }
     }
@@ -59,6 +61,11 @@ impl PaneTab {
 
     pub fn dirty(mut self, dirty: bool) -> Self {
         self.dirty = dirty;
+        self
+    }
+
+    pub fn staged(mut self, staged: bool) -> Self {
+        self.staged = staged;
         self
     }
 }
@@ -107,6 +114,16 @@ impl RenderOnce for PaneTab {
                     .flex_none()
                     .rounded_full()
                     .bg(colors.accent)
+            }))
+            .children(self.staged.then(|| {
+                div()
+                    .debug_selector(|| "tab-staged-changes".into())
+                    .ml_2()
+                    .size(px(7.))
+                    .flex_none()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(colors.staged)
             }))
             .children(self.children)
     }

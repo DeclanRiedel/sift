@@ -127,7 +127,7 @@ Available color names are `background`, `surface`, `panel`, `toolbar`,
 `disabled_text`, `accent`, `accent_muted`, `accent_hover`,
 `drop_target_background`, `drop_target_border`, `on_accent`, `focus_ring`,
 `danger`, `danger_muted`, `warning`, `warning_muted`, `success`,
-`success_muted`, `editor_active_line`, `grid_stripe`, `syntax_keyword`,
+`success_muted`, `staged`, `staged_muted`, `editor_active_line`, `grid_stripe`, `syntax_keyword`,
 `syntax_string`, `syntax_number`, and `syntax_comment`.
 
 Open **Settings → Manage themes…** to choose a built-in theme, edit the current
