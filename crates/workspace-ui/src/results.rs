@@ -909,6 +909,8 @@ pub struct ResultsView {
     placement: ResultPlacement,
     bottom_height: f32,
     right_width: f32,
+    bottom_extent_custom: bool,
+    right_extent_custom: bool,
     stream_result_seen: bool,
     /// Absolute index of the first retained row within the whole result, so
     /// row numbers keep describing the result rather than the window.
@@ -1012,6 +1014,8 @@ impl ResultsView {
             placement: ResultPlacement::Bottom,
             bottom_height: 240.0,
             right_width: 420.0,
+            bottom_extent_custom: false,
+            right_extent_custom: false,
             stream_result_seen: false,
             window_start: 0,
             window_held: false,
@@ -1568,10 +1572,23 @@ impl ResultsView {
         }
     }
 
+    pub(crate) fn uses_default_extent(&self) -> bool {
+        match self.placement {
+            ResultPlacement::Bottom => !self.bottom_extent_custom,
+            ResultPlacement::Right => !self.right_extent_custom,
+        }
+    }
+
     pub(crate) fn set_extent(&mut self, extent: f32, cx: &mut Context<Self>) {
         match self.placement {
-            ResultPlacement::Bottom => self.bottom_height = extent,
-            ResultPlacement::Right => self.right_width = extent,
+            ResultPlacement::Bottom => {
+                self.bottom_height = extent;
+                self.bottom_extent_custom = true;
+            }
+            ResultPlacement::Right => {
+                self.right_width = extent;
+                self.right_extent_custom = true;
+            }
         }
         cx.notify();
     }
@@ -7048,11 +7065,14 @@ mod tests {
             assert_eq!(visual_edits.len(), 4);
             assert!(visual_edits.iter().all(|edit| edit.text == "NULL"));
             assert_eq!(view.placement(), ResultPlacement::Bottom);
+            assert!(view.uses_default_extent());
             view.set_extent(300.0, cx);
             assert_eq!(view.extent(), 300.0);
+            assert!(!view.uses_default_extent());
             view.toggle_placement(cx);
             assert_eq!(view.placement(), ResultPlacement::Right);
             assert_eq!(view.extent(), 420.0);
+            assert!(view.uses_default_extent());
             view.set_extent(360.0, cx);
             view.toggle_placement(cx);
             assert_eq!(view.extent(), 300.0);

@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    actions, anchored, deferred, div, img, prelude::*, px, uniform_list, Anchor, AnyElement, App,
-    Bounds, Context, CursorStyle, DefiniteLength, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, Hsla, IntoElement, KeystrokeEvent, MouseButton, PathPromptOptions, Pixels,
-    ResizeEdge, Role, ScrollHandle, ScrollStrategy, SharedString, Subscription, Task,
+    actions, anchored, deferred, div, img, prelude::*, px, relative, uniform_list, Anchor,
+    AnyElement, App, Bounds, Context, CursorStyle, DefiniteLength, Div, Entity, EventEmitter,
+    FocusHandle, Focusable, Hsla, IntoElement, KeystrokeEvent, MouseButton, PathPromptOptions,
+    Pixels, ResizeEdge, Role, ScrollHandle, ScrollStrategy, SharedString, Subscription, Task,
     UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
 };
 use regex::{Regex, RegexBuilder};
@@ -4677,6 +4677,7 @@ impl Pane {
         let current = self.live_result_extents.get(&item_id).copied().or_else(|| {
             self.results
                 .get(&item_id)
+                .filter(|result| !result.read(cx).uses_default_extent())
                 .map(|result| result.read(cx).extent())
         });
         if current == Some(extent) {
@@ -6397,11 +6398,12 @@ impl gpui::Render for Pane {
                                             }))
                                     });
                                 let placement = result.read(cx).placement();
-                                let extent = self
-                                    .live_result_extents
-                                    .get(&item.id)
-                                    .copied()
+                                let live_extent =
+                                    self.live_result_extents.get(&item.id).copied();
+                                let extent = live_extent
                                     .unwrap_or_else(|| result.read(cx).extent());
+                                let use_default_extent = live_extent.is_none()
+                                    && result.read(cx).uses_default_extent();
                                 let item_id = item.id;
                                 let resize_hitbox = div()
                                     .id(("resize-query-results", item_id as usize))
@@ -6469,7 +6471,12 @@ impl gpui::Render for Pane {
                                             .child(handle)
                                             .child(
                                                 div()
-                                                    .h(px(extent))
+                                                    .when(use_default_extent, |results| {
+                                                        results.h(relative(0.6))
+                                                    })
+                                                    .when(!use_default_extent, |results| {
+                                                        results.h(px(extent))
+                                                    })
                                                     .flex_none()
                                                     .flex()
                                                     .min_h_0()
@@ -6484,7 +6491,12 @@ impl gpui::Render for Pane {
                                             .child(handle)
                                             .child(
                                                 div()
-                                                    .w(px(extent))
+                                                    .when(use_default_extent, |results| {
+                                                        results.w(relative(0.6))
+                                                    })
+                                                    .when(!use_default_extent, |results| {
+                                                        results.w(px(extent))
+                                                    })
                                                     .flex_none()
                                                     .flex()
                                                     .min_w_0()
