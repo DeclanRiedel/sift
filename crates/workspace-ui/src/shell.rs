@@ -16,7 +16,7 @@ use sift_api_types::RoomId;
 use sift_ui::{
     database_logo, icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable,
     ErrorBanner, Field, IconButton, IconName, KeyBinding, PaneTab, SectionLabel, TextInput,
-    TextInputEvent, Theme, ThemeAppearance, ThemeMetrics, Toggleable, Tone, Tooltip,
+    TextInputEvent, Theme, ThemeAppearance, ThemeColors, ThemeMetrics, Toggleable, Tone, Tooltip,
 };
 
 use crate::editor::{
@@ -891,6 +891,16 @@ impl ObjectGroupKind {
             Self::Functions => IconName::Function,
             Self::Sequences => IconName::Sequence,
             Self::Other => IconName::Folder,
+        }
+    }
+
+    fn color(self, colors: ThemeColors) -> Hsla {
+        match self {
+            Self::Tables => colors.staged,
+            Self::Views => colors.warning,
+            Self::Functions => colors.danger,
+            Self::Sequences => colors.syntax_keyword,
+            Self::Other => colors.muted_text,
         }
     }
 
@@ -14955,6 +14965,7 @@ impl WorkspaceShell {
                 .flex()
                 .items_center()
                 .gap(px(6.))
+                .text_sm()
                 .rounded_sm()
                 .border_1()
                 .border_color(if selected {
@@ -15057,7 +15068,7 @@ impl WorkspaceShell {
                         .when(!connected, |logo| logo.opacity(0.6))
                         .child(
                             img(database_logo(asset))
-                                .size(px(14.))
+                                .size(px(16.))
                                 .object_fit(gpui::ObjectFit::Contain),
                         )
                         .when_some(status_color, |logo, dot| {
@@ -15078,7 +15089,7 @@ impl WorkspaceShell {
                             )
                         })
                         .into_any_element(),
-                    None => icon(IconName::Database, connection_color, 12.),
+                    None => icon(IconName::Database, connection_color, 14.),
                 };
                 let entry_for_connect = connection.clone();
                 let entry_for_context_menu = connection.clone();
@@ -15213,7 +15224,7 @@ impl WorkspaceShell {
                         shell.toggle_catalog_schema(profile_id, toggle_catalog.clone(), cx)
                     }))
                     .child(tree_chevron_slot(open, colors.muted_text))
-                    .child(icon(IconName::Database, colors.muted_text, 12.))
+                    .child(icon(IconName::Database, colors.success, 14.))
                     .child(div().min_w_0().truncate().child(catalog))
                     .into_any_element()
             }
@@ -15253,7 +15264,7 @@ impl WorkspaceShell {
                         )
                     }))
                     .child(tree_chevron_slot(open, colors.muted_text))
-                    .child(icon(IconName::Folder, colors.muted_text, 12.))
+                    .child(icon(IconName::Folder, colors.syntax_keyword, 14.))
                     .child(div().min_w_0().truncate().child(schema))
                     .child(
                         div()
@@ -15313,7 +15324,7 @@ impl WorkspaceShell {
                         )
                     }))
                     .child(tree_chevron_slot(open, colors.muted_text))
-                    .child(icon(group.icon(), colors.muted_text, 12.))
+                    .child(icon(group.icon(), group.color(colors), 14.))
                     .child(group.label())
                     .child(
                         div()
@@ -15342,6 +15353,8 @@ impl WorkspaceShell {
                         | sift_protocol::ObjectKind::PartitionedTable
                 );
                 let icon_name = schema_object_kind_icon(target.object_kind);
+                let icon_color =
+                    ObjectGroupKind::from_object_kind(target.object_kind).color(colors);
                 let object_name = target.object.clone();
                 let open_target = target.clone();
                 let favorite_target = target.clone();
@@ -15369,7 +15382,7 @@ impl WorkspaceShell {
                             .items_center()
                             .gap(px(6.))
                             .truncate()
-                            .child(icon(icon_name, colors.muted_text, 12.))
+                            .child(icon(icon_name, icon_color, 14.))
                             .child(div().min_w_0().truncate().child(object_name)),
                     )
                     .when(selected, |row| {
@@ -44673,6 +44686,18 @@ mod tests {
         assert_eq!(
             table_preview_sql(&sql_server, "dbo", "people"),
             "SELECT TOP (100) * FROM \"dbo\".\"people\";"
+        );
+    }
+
+    #[test]
+    fn connection_object_groups_use_distinct_semantic_colors() {
+        let colors = Theme::dark().colors;
+        assert_eq!(ObjectGroupKind::Tables.color(colors), colors.staged);
+        assert_eq!(ObjectGroupKind::Views.color(colors), colors.warning);
+        assert_eq!(ObjectGroupKind::Functions.color(colors), colors.danger);
+        assert_eq!(
+            ObjectGroupKind::Sequences.color(colors),
+            colors.syntax_keyword
         );
     }
 
