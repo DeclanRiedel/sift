@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
-use rand_core::OsRng;
+use base64::Engine as _;
+use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use sift_metadata::{AuthenticatedSession, MetadataStore, PasswordIdentity, PrincipalId};
 use tokio::sync::Semaphore;
@@ -25,12 +26,16 @@ const ARGON2_ITERATIONS: u32 = 2;
 const ARGON2_PARALLELISM: u32 = 1;
 const ACCESS_CACHE_TTL: Duration = Duration::from_secs(30);
 const ACCESS_CACHE_MAX_ENTRIES: usize = 1024;
+const REVEAL_LEASE_TTL: Duration = Duration::from_secs(60);
+const MAX_REVEAL_LEASES_PER_MINUTE: u32 = 10;
 
 #[derive(Clone)]
 pub struct AuthRuntime {
     verifier_slots: Arc<Semaphore>,
     failures: Arc<Mutex<HashMap<String, FailureWindow>>>,
     access_cache: Arc<Mutex<HashMap<[u8; 32], CachedAccessSession>>>,
+    reveal_leases: Arc<Mutex<HashMap<[u8; 32], RevealLease>>>,
+    reveal_issues: Arc<Mutex<HashMap<PrincipalId, FailureWindow>>>,
 }
 
 #[derive(Clone)]
@@ -66,6 +71,8 @@ impl Default for AuthRuntime {
             verifier_slots: Arc::new(Semaphore::new(MAX_ARGON2_CONCURRENCY)),
             failures: Arc::new(Mutex::new(HashMap::new())),
             access_cache: Arc::new(Mutex::new(HashMap::new())),
+            reveal_leases: Arc::new(Mutex::new(HashMap::new())),
+            reveal_issues: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -74,6 +81,13 @@ impl Default for AuthRuntime {
 struct CachedAccessSession {
     session: AuthenticatedSession,
     cached_at: Instant,
+}
+
+struct RevealLease {
+    principal: PrincipalId,
+    session_id: String,
+    item_id: i64,
+    expires_at: Instant,
 }
 
 struct FailureWindow {
@@ -160,6 +174,10 @@ impl AuthRuntime {
             .lock()
             .unwrap()
             .retain(|_, entry| entry.session.session_id != session_id);
+        self.reveal_leases
+            .lock()
+            .unwrap()
+            .retain(|_, lease| lease.session_id != session_id);
     }
 
     pub fn invalidate_principal(&self, principal: PrincipalId) {
@@ -167,10 +185,71 @@ impl AuthRuntime {
             .lock()
             .unwrap()
             .retain(|_, entry| entry.session.principal.id != principal);
+        self.reveal_leases
+            .lock()
+            .unwrap()
+            .retain(|_, lease| lease.principal != principal);
+        self.reveal_issues.lock().unwrap().remove(&principal);
     }
 
     pub fn invalidate_all_access_tokens(&self) {
         self.access_cache.lock().unwrap().clear();
+        self.reveal_leases.lock().unwrap().clear();
+        self.reveal_issues.lock().unwrap().clear();
+    }
+
+    pub fn issue_reveal_lease(
+        &self,
+        principal: PrincipalId,
+        session_id: &str,
+        item_id: i64,
+    ) -> Option<String> {
+        let now = Instant::now();
+        {
+            let mut issues = self.reveal_issues.lock().unwrap();
+            issues.retain(|_, window| now.duration_since(window.started) < LOGIN_WINDOW);
+            let window = issues.entry(principal).or_insert(FailureWindow {
+                started: now,
+                count: 0,
+            });
+            if window.count >= MAX_REVEAL_LEASES_PER_MINUTE {
+                return None;
+            }
+            window.count += 1;
+        }
+        let mut token = [0_u8; 32];
+        OsRng.fill_bytes(&mut token);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token);
+        let digest: [u8; 32] = Sha256::digest(encoded.as_bytes()).into();
+        let mut leases = self.reveal_leases.lock().unwrap();
+        leases.retain(|_, lease| lease.expires_at > now);
+        leases.insert(
+            digest,
+            RevealLease {
+                principal,
+                session_id: session_id.to_owned(),
+                item_id,
+                expires_at: now + REVEAL_LEASE_TTL,
+            },
+        );
+        Some(encoded)
+    }
+
+    pub fn consume_reveal_lease(
+        &self,
+        lease: &str,
+        principal: PrincipalId,
+        session_id: &str,
+        item_id: i64,
+    ) -> bool {
+        let digest: [u8; 32] = Sha256::digest(lease.as_bytes()).into();
+        let Some(stored) = self.reveal_leases.lock().unwrap().remove(&digest) else {
+            return false;
+        };
+        stored.expires_at > Instant::now()
+            && stored.principal == principal
+            && stored.session_id == session_id
+            && stored.item_id == item_id
     }
 
     pub async fn authenticate_password(
@@ -589,6 +668,39 @@ mod tests {
             .resolve_access_token(&metadata, &tokens.access_token)
             .await
             .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn reveal_leases_are_bound_single_use_and_invalidated_with_sessions() {
+        let runtime = AuthRuntime::default();
+        let principal = PrincipalId(7);
+        let lease = runtime
+            .issue_reveal_lease(principal, "session-a", 11)
+            .unwrap();
+        assert!(!runtime.consume_reveal_lease(&lease, principal, "session-a", 12));
+        assert!(!runtime.consume_reveal_lease(&lease, principal, "session-a", 11));
+
+        let lease = runtime
+            .issue_reveal_lease(principal, "session-a", 11)
+            .unwrap();
+        assert!(runtime.consume_reveal_lease(&lease, principal, "session-a", 11));
+        assert!(!runtime.consume_reveal_lease(&lease, principal, "session-a", 11));
+
+        let lease = runtime
+            .issue_reveal_lease(principal, "session-a", 11)
+            .unwrap();
+        runtime.invalidate_auth_session("session-a");
+        assert!(!runtime.consume_reveal_lease(&lease, principal, "session-a", 11));
+
+        let limited = AuthRuntime::default();
+        for _ in 0..MAX_REVEAL_LEASES_PER_MINUTE {
+            assert!(limited
+                .issue_reveal_lease(principal, "session-b", 11)
+                .is_some());
+        }
+        assert!(limited
+            .issue_reveal_lease(principal, "session-b", 11)
             .is_none());
     }
 }

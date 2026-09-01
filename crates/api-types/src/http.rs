@@ -750,6 +750,51 @@ pub struct RevealVaultSecretResponse {
     pub expires_in_seconds: u32,
 }
 
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VaultRevealStepUpRequest {
+    pub password: String,
+}
+
+impl std::fmt::Debug for VaultRevealStepUpRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaultRevealStepUpRequest")
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VaultRevealStepUpResponse {
+    pub lease: String,
+    pub expires_in_seconds: u32,
+}
+
+impl std::fmt::Debug for VaultRevealStepUpResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaultRevealStepUpResponse")
+            .field("lease", &"[REDACTED]")
+            .field("expires_in_seconds", &self.expires_in_seconds)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct VaultRevealRequest {
+    #[serde(default)]
+    pub lease: Option<String>,
+}
+
+impl std::fmt::Debug for VaultRevealRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaultRevealRequest")
+            .field("lease", &self.lease.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for RevealVaultSecretResponse {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

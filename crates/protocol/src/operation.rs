@@ -1339,6 +1339,7 @@ single_word_audit_names!(crate::VaultAction {
     Revoke => "revoke",
     SetSecret => "set_secret",
     Reveal => "reveal",
+    StepUp => "step_up",
     Restore => "restore",
     Test => "test",
     Use => "use",

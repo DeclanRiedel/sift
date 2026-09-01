@@ -841,7 +841,11 @@ pub fn app(state: AppState) -> Router {
         )
         .api_route(
             "/v1/metadata/vault-items/:id/reveal",
-            post_with(reveal_metadata_vault_item, doc("revealMetadataVaultItem", "Reveal a non-connection secret on trusted local sessions")),
+            post_with(reveal_metadata_vault_item, doc("revealMetadataVaultItem", "Reveal a non-connection secret after local trust or a single-use step-up lease")),
+        )
+        .api_route(
+            "/v1/metadata/vault-items/:id/reveal-step-up",
+            post_with(step_up_metadata_vault_reveal, doc("stepUpMetadataVaultReveal", "Verify the interactive account password and issue a short single-use reveal lease")),
         )
         .api_route(
             "/v1/metadata/tenants/:tenant/catalog-snapshots",
@@ -14305,13 +14309,29 @@ async fn reveal_metadata_vault_item(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
+    body: Option<Json<sift_api_types::VaultRevealRequest>>,
 ) -> ApiResult<Response> {
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     if !auth.trusted_local {
-        return Err(ApiError::Forbidden(
-            "vault reveal requires a recent step-up authentication".into(),
-        ));
+        let session_id = auth.auth_session_id.as_deref().ok_or_else(|| {
+            ApiError::Forbidden("vault reveal requires an interactive session".into())
+        })?;
+        let lease = body
+            .as_ref()
+            .and_then(|Json(request)| request.lease.as_deref())
+            .ok_or_else(|| {
+                ApiError::Forbidden("vault reveal requires a recent step-up authentication".into())
+            })?;
+        if !state
+            .auth
+            .runtime
+            .consume_reveal_lease(lease, auth.principal_id, session_id, id)
+        {
+            return Err(ApiError::Forbidden(
+                "vault reveal step-up is invalid or expired".into(),
+            ));
+        }
     }
     let value = metadata
         .reveal_vault_secret(
@@ -14331,6 +14351,73 @@ async fn reveal_metadata_vault_item(
         item_id: id,
         value,
         expires_in_seconds: 30,
+    })
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    Ok(response)
+}
+
+async fn step_up_metadata_vault_reveal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<sift_api_types::VaultRevealStepUpRequest>,
+) -> ApiResult<Response> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers.clone()).await?;
+    let session_id = auth.auth_session_id.as_deref().ok_or_else(|| {
+        ApiError::Forbidden("vault reveal requires an interactive session".into())
+    })?;
+    let item = sift_api_types::VaultItemId(id);
+    let actor = api_principal(auth.principal_id);
+    metadata.list_vault_item_versions(item, actor)?;
+    let identity = metadata
+        .password_identity_for_principal(auth.principal_id)?
+        .ok_or_else(|| ApiError::Forbidden("password step-up is unavailable".into()))?;
+    let source = headers
+        .get(&PEER_ADDR_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown");
+    let outcome = state
+        .auth
+        .runtime
+        .authenticate_password(
+            metadata,
+            source,
+            &identity.identity.subject,
+            request.password.into_bytes(),
+        )
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    match outcome {
+        crate::identity::PasswordAuthOutcome::Authenticated(identity)
+            if identity.principal.id == auth.principal_id => {}
+        crate::identity::PasswordAuthOutcome::Throttled => {
+            return Err(ApiError::TooManyAuthAttempts);
+        }
+        _ => return Err(ApiError::Unauthorized),
+    }
+    let lease = state
+        .auth
+        .runtime
+        .issue_reveal_lease(auth.principal_id, session_id, id)
+        .ok_or(ApiError::TooManyAuthAttempts)?;
+    state.sessions.push_operation(
+        Operation::Vault {
+            action: sift_protocol::VaultAction::StepUp,
+            vault_id: None,
+            item_id: Some(id),
+        },
+        OperationStatus::Succeeded,
+    );
+    let mut response = Json(sift_api_types::VaultRevealStepUpResponse {
+        lease,
+        expires_in_seconds: 60,
     })
     .into_response();
     response

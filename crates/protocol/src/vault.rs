@@ -61,6 +61,7 @@ pub enum VaultAction {
     Revoke,
     SetSecret,
     Reveal,
+    StepUp,
     Restore,
     Test,
     Use,

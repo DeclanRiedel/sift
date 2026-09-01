@@ -3902,9 +3902,28 @@ impl Client {
             .await
     }
 
-    pub async fn reveal_vault_item(&self, item: VaultItemId) -> Result<RevealVaultSecretResponse> {
-        self.post_empty(&format!("/v1/metadata/vault-items/{}/reveal", item.0))
-            .await
+    pub async fn step_up_vault_reveal(
+        &self,
+        item: VaultItemId,
+        request: sift_api_types::VaultRevealStepUpRequest,
+    ) -> Result<sift_api_types::VaultRevealStepUpResponse> {
+        self.post(
+            &format!("/v1/metadata/vault-items/{}/reveal-step-up", item.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn reveal_vault_item(
+        &self,
+        item: VaultItemId,
+        lease: Option<String>,
+    ) -> Result<RevealVaultSecretResponse> {
+        self.post(
+            &format!("/v1/metadata/vault-items/{}/reveal", item.0),
+            &sift_api_types::VaultRevealRequest { lease },
+        )
+        .await
     }
 
     pub async fn auth_tokens(&self) -> Result<Vec<ApiTokenRow>> {

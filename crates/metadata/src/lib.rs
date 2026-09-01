@@ -1302,6 +1302,34 @@ impl MetadataStore {
         .map_err(Into::into)
     }
 
+    pub fn password_identity_for_principal(
+        &self,
+        principal: PrincipalId,
+    ) -> Result<Option<PasswordIdentity>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT ai.id, ai.principal_id, ai.method, ai.issuer, ai.subject,
+                    ai.provider_login, ai.credential_handle, ai.created_at,
+                    ai.updated_at, ai.last_used_at, ai.disabled_at,
+                    p.id, p.external_id, p.display_name, p.email, p.avatar_url,
+                    p.disabled_at, p.is_instance_admin, p.created_at, p.updated_at
+             FROM auth_identity ai
+             JOIN principal p ON p.id = ai.principal_id
+             WHERE ai.method = 'password' AND ai.issuer = 'sift'
+               AND ai.principal_id = ?1 AND ai.disabled_at IS NULL
+             ORDER BY ai.id LIMIT 1",
+            params![principal.0],
+            |row| {
+                Ok(PasswordIdentity {
+                    identity: auth_identity_from_row(row)?,
+                    principal: principal_from_row_offset(row, 11)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub async fn password_verifier(&self, identity: &AuthIdentity) -> Result<Option<Vec<u8>>> {
         let Some(handle) = identity.credential_handle.as_deref() else {
             return Ok(None);
