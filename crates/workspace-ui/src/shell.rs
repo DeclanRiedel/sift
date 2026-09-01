@@ -72,6 +72,7 @@ pub use pane_layout::SplitDirection;
 const PALETTE_VISIBLE_ROWS: usize = 10;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
 const PALETTE_RECENT_LIMIT: usize = 32;
+const RECENT_DATABASE_OBJECT_LIMIT: usize = 3;
 const DOCK_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const PANE_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const PANE_MIN_WIDTH: f32 = 180.0;
@@ -14607,7 +14608,8 @@ impl WorkspaceShell {
         self.recent_database_objects
             .retain(|candidate| candidate != &bookmark);
         self.recent_database_objects.insert(0, bookmark);
-        self.recent_database_objects.truncate(12);
+        self.recent_database_objects
+            .truncate(RECENT_DATABASE_OBJECT_LIMIT);
         self.invalidate_connection_projection();
         self.persist(cx);
     }
@@ -45739,6 +45741,37 @@ mod tests {
                 &item.action,
                 ConnectionTreeAction::Connection(connection) if connection.name == "Analytics"
             )));
+        });
+    }
+
+    #[gpui::test]
+    fn recent_database_objects_keep_only_the_latest_three(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            let connection = ConnectionNavEntry {
+                id: 2,
+                tenant_id: 1,
+                name: "Warehouse".into(),
+                provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                tags: Vec::new(),
+            };
+            for object in ["one", "two", "three", "four"] {
+                shell.record_recent_database_object(
+                    &DatabaseObjectTarget {
+                        connection: connection.clone(),
+                        catalog: "warehouse".into(),
+                        schema: "public".into(),
+                        object: object.into(),
+                        object_kind: sift_protocol::ObjectKind::Table,
+                    },
+                    cx,
+                );
+            }
+            assert_eq!(shell.recent_database_objects.len(), 3);
+            assert_eq!(shell.recent_database_objects[0].object, "four");
+            assert_eq!(shell.recent_database_objects[2].object, "two");
         });
     }
 
