@@ -1434,6 +1434,7 @@ pub enum Modal {
     WorkspaceReconcile,
     CreateVault,
     CreateVaultItem,
+    VaultItemDetails,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2383,6 +2384,13 @@ pub enum ExecutorCommand {
     LoadVaultItems {
         vault_id: i64,
     },
+    LoadVaultItemVersions {
+        item_id: i64,
+    },
+    RevealVaultItem {
+        item_id: i64,
+        password: Option<String>,
+    },
     CreateTeamVault {
         tenant_id: i64,
         name: String,
@@ -3009,6 +3017,14 @@ pub enum ExecutorEvent {
     VaultItemsLoaded {
         vault_id: i64,
         result: Result<Vec<sift_api_types::VaultItem>, String>,
+    },
+    VaultItemVersionsLoaded {
+        item_id: i64,
+        result: Result<Vec<sift_api_types::VaultItemVersion>, String>,
+    },
+    VaultItemRevealed {
+        item_id: i64,
+        result: Result<sift_api_types::RevealVaultSecretResponse, String>,
     },
     VaultCreated(Result<sift_api_types::Vault, String>),
     VaultItemCreated {
@@ -7463,6 +7479,11 @@ pub struct WorkspaceShell {
     vault_item_label_input: Entity<TextInput>,
     vault_item_detail_input: Entity<TextInput>,
     vault_item_secret_input: Entity<TextInput>,
+    vault_reveal_password_input: Entity<TextInput>,
+    vault_item_versions: Vec<sift_api_types::VaultItemVersion>,
+    vault_detail_item_id: Option<i64>,
+    vault_revealed_value: Option<String>,
+    vault_reveal_generation: u64,
     repository: RepositoryProjection,
     workspace_files: WorkspaceFilesProjection,
     workspace_reconcile_resolutions:
@@ -7857,6 +7878,11 @@ impl WorkspaceShell {
         let vault_item_secret_input = cx.new(|cx| {
             TextInput::new("", "Secret value", cx)
                 .aria_label("Vault secret value")
+                .masked()
+        });
+        let vault_reveal_password_input = cx.new(|cx| {
+            TextInput::new("", "Current account password", cx)
+                .aria_label("Vault reveal password")
                 .masked()
         });
         let result_cell_edit_input = cx.new(|cx| TextInput::new("", "New value…", cx));
@@ -8425,6 +8451,11 @@ impl WorkspaceShell {
             vault_item_label_input,
             vault_item_detail_input,
             vault_item_secret_input,
+            vault_reveal_password_input,
+            vault_item_versions: Vec::new(),
+            vault_detail_item_id: None,
+            vault_revealed_value: None,
+            vault_reveal_generation: 0,
             repository,
             workspace_files,
             workspace_reconcile_resolutions: HashMap::new(),
@@ -10720,6 +10751,54 @@ impl WorkspaceShell {
                             .vault_item_selected
                             .min(self.vault_items.len().saturating_sub(1));
                         self.vault_error = None;
+                    }
+                    Err(message) => self.vault_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::VaultItemVersionsLoaded { item_id, result } => {
+                if self.vault_detail_item_id != Some(item_id) {
+                    return;
+                }
+                self.vault_loading = false;
+                match result {
+                    Ok(versions) => {
+                        self.vault_item_versions = versions;
+                        self.vault_error = None;
+                    }
+                    Err(message) => self.vault_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::VaultItemRevealed { item_id, result } => {
+                if self.vault_detail_item_id != Some(item_id) {
+                    return;
+                }
+                self.vault_loading = false;
+                self.vault_reveal_password_input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                match result {
+                    Ok(response) => {
+                        let value = response.value.as_str().map_or_else(
+                            || serde_json::to_string_pretty(&response.value).unwrap_or_default(),
+                            ToOwned::to_owned,
+                        );
+                        self.vault_revealed_value = Some(value);
+                        self.vault_error = None;
+                        self.vault_reveal_generation = self.vault_reveal_generation.wrapping_add(1);
+                        let generation = self.vault_reveal_generation;
+                        cx.spawn(async move |shell, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(30))
+                                .await;
+                            let _ = shell.update(cx, |shell, cx| {
+                                if shell.vault_reveal_generation == generation {
+                                    shell.vault_revealed_value = None;
+                                    cx.notify();
+                                }
+                            });
+                        })
+                        .detach();
                     }
                     Err(message) => self.vault_error = Some(message),
                 }
@@ -16483,6 +16562,76 @@ impl WorkspaceShell {
             .focus_handle(cx)
             .focus(window, cx);
         cx.notify();
+    }
+
+    fn open_selected_vault_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item_id) = self
+            .vault_items
+            .get(self.vault_item_selected)
+            .map(|item| item.id.0)
+        else {
+            self.show_toast("Select a vault item first".into(), cx);
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.vault_error = Some("Vault is unavailable".into());
+            return;
+        };
+        self.vault_detail_item_id = Some(item_id);
+        self.vault_item_versions.clear();
+        self.vault_revealed_value = None;
+        self.vault_error = None;
+        self.vault_loading = sender
+            .send(ExecutorCommand::LoadVaultItemVersions { item_id })
+            .is_ok();
+        self.modal = Some(Modal::VaultItemDetails);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn reveal_selected_vault_item(&mut self, cx: &mut Context<Self>) {
+        if self.vault_loading {
+            return;
+        }
+        let Some(item_id) = self.vault_detail_item_id else {
+            return;
+        };
+        let password = self.vault_reveal_password_input.read(cx).text().to_owned();
+        let Some(sender) = &self.executor_sender else {
+            self.vault_error = Some("Vault is unavailable".into());
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::RevealVaultItem {
+                item_id,
+                password: (!password.is_empty()).then_some(password),
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn copy_revealed_vault_value(&mut self, cx: &mut Context<Self>) {
+        let Some(value) = self.vault_revealed_value.clone() else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.clone()));
+        self.show_success_toast("Copied; clipboard clears in 30 seconds".into(), cx);
+        cx.spawn(async move |shell, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(30))
+                .await;
+            let _ = shell.update(cx, |_, cx| {
+                if cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref()
+                    == Some(value.as_str())
+                {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+                }
+            });
+        })
+        .detach();
     }
 
     fn submit_create_vault_item(&mut self, cx: &mut Context<Self>) {
@@ -23483,6 +23632,10 @@ impl WorkspaceShell {
                         self.open_create_vault_item(window, cx);
                         true
                     }
+                    "enter" if self.collaboration_section == CollaborationSection::Vault => {
+                        self.open_selected_vault_item(window, cx);
+                        true
+                    }
                     "t" if self.collaboration_section == CollaborationSection::Vault => {
                         self.open_create_vault(window, cx);
                         true
@@ -26931,6 +27084,14 @@ impl WorkspaceShell {
         if self.modal == Some(Modal::ConnectionUrl) {
             self.connection_url_input
                 .update(cx, |input, cx| input.set_text("", cx));
+        }
+        if self.modal == Some(Modal::VaultItemDetails) {
+            self.vault_reveal_password_input
+                .update(cx, |input, cx| input.set_text("", cx));
+            self.vault_revealed_value = None;
+            self.vault_detail_item_id = None;
+            self.vault_item_versions.clear();
+            self.vault_reveal_generation = self.vault_reveal_generation.wrapping_add(1);
         }
         if matches!(self.modal, Some(Modal::DataResults(_))) {
             for pane in &self.panes {
@@ -31709,6 +31870,16 @@ impl WorkspaceShell {
                                                         .on_click(cx.listener(
                                                             |shell, _, _, cx| {
                                                                 shell.share_selected_vault_with_room(cx)
+                                                            },
+                                                        )),
+                                                )
+                                                .child(
+                                                    Button::new("open-vault-item", "Open")
+                                                        .tone(ButtonTone::Ghost)
+                                                        .disabled(self.vault_items.is_empty())
+                                                        .on_click(cx.listener(
+                                                            |shell, _, window, cx| {
+                                                                shell.open_selected_vault_item(window, cx)
                                                             },
                                                         )),
                                                 )
@@ -38352,6 +38523,126 @@ impl WorkspaceShell {
                                             shell.restore_workspace_checkpoint(checkpoint_id, cx)
                                         })),
                                 ),
+                        )
+                        .into_any_element()
+                }
+                Modal::VaultItemDetails => {
+                    let item = self
+                        .vault_detail_item_id
+                        .and_then(|id| self.vault_items.iter().find(|item| item.id.0 == id));
+                    let can_reveal = item.is_some_and(|item| {
+                        item.kind.revealable()
+                            && item.secret_status
+                                == sift_api_types::VaultSecretStatus::Configured
+                            && self
+                                .selected_vault()
+                                .is_some_and(|vault| vault.effective_capabilities.reveal)
+                    });
+                    let title = item
+                        .map(|item| item.label.clone())
+                        .unwrap_or_else(|| "Vault item".into());
+                    let metadata = item
+                        .and_then(|item| serde_json::to_string_pretty(&item.metadata).ok())
+                        .unwrap_or_default();
+                    let version_rows = self.vault_item_versions.iter().map(|version| {
+                        div()
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(format!("v{} · {}", version.version, version.change_summary))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(version.created_at.to_string()),
+                            )
+                    });
+                    div()
+                        .debug_selector(|| "vault-item-details".into())
+                        .w(px(620.))
+                        .max_h(px(620.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .p_2()
+                                .rounded_sm()
+                                .bg(colors.surface)
+                                .text_sm()
+                                .child(metadata),
+                        )
+                        .when(can_reveal, |details| {
+                            details
+                                .child(self.vault_reveal_password_input.clone())
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("Leave blank on trusted local sessions. Remote reveal requires your current password."),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("reveal-vault-item", "Reveal for 30s")
+                                                .tone(ButtonTone::Accent)
+                                                .disabled(self.vault_loading)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.reveal_selected_vault_item(cx)
+                                                })),
+                                        )
+                                        .when(self.vault_revealed_value.is_some(), |actions| {
+                                            actions.child(
+                                                Button::new("copy-vault-value", "Copy")
+                                                    .tone(ButtonTone::Neutral)
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.copy_revealed_vault_value(cx)
+                                                    })),
+                                            )
+                                        }),
+                                )
+                        })
+                        .when_some(self.vault_revealed_value.clone(), |details, value| {
+                            details.child(
+                                div()
+                                    .p_2()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(colors.accent)
+                                    .bg(colors.surface)
+                                    .child(value),
+                            )
+                        })
+                        .children(self.vault_error.as_ref().map(|message| {
+                            ErrorBanner::new(message.clone())
+                        }))
+                        .child(SectionLabel::new("VERSION HISTORY"))
+                        .child(
+                            div()
+                                .id("vault-version-history")
+                                .max_h(px(180.))
+                                .overflow_y_scroll()
+                                .border_1()
+                                .border_color(colors.subtle_border)
+                                .children(version_rows),
+                        )
+                        .child(
+                            div().flex().justify_end().child(
+                                Button::new("close-vault-details", "Close")
+                                    .tone(ButtonTone::Neutral)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
+                            ),
                         )
                         .into_any_element()
                 }
@@ -46119,6 +46410,65 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("collaboration-vault-view").is_some());
+    }
+
+    #[gpui::test]
+    fn vault_details_load_history_and_dispatch_password_reveal(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            let now = chrono::Utc::now();
+            shell.vaults = vec![sift_api_types::Vault {
+                id: sift_api_types::VaultId(9),
+                tenant_id: sift_api_types::TenantId(1),
+                scope: sift_protocol::VaultScope::Team,
+                owner_principal_id: None,
+                name: "Analytics".into(),
+                revision: 1,
+                effective_capabilities: sift_protocol::VaultCapabilities::OWNER,
+                created_at: now,
+                updated_at: now,
+            }];
+            shell.vault_items = vec![sift_api_types::VaultItem {
+                id: sift_api_types::VaultItemId(4),
+                vault_id: sift_api_types::VaultId(9),
+                kind: sift_protocol::VaultItemKind::Token,
+                label: "Deploy token".into(),
+                metadata: sift_api_types::VaultItemMetadata::Token {
+                    service: "deploy".into(),
+                    expires_at: None,
+                },
+                secret_status: sift_api_types::VaultSecretStatus::Configured,
+                head_version: 1,
+                revision: 1,
+                created_by: sift_api_types::PrincipalId(1),
+                created_at: now,
+                updated_at: now,
+            }];
+            shell.open_selected_vault_item(window, cx);
+        });
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            ExecutorCommand::LoadVaultItemVersions { item_id: 4 }
+        ));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .vault_reveal_password_input
+                .update(cx, |input, cx| input.set_text("correct horse", cx));
+            shell.vault_loading = false;
+            shell.reveal_selected_vault_item(cx);
+        });
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            ExecutorCommand::RevealVaultItem {
+                item_id: 4,
+                password: Some(password)
+            } if password == "correct horse"
+        ));
     }
 
     #[gpui::test]

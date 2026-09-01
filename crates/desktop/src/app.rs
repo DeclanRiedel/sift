@@ -1213,6 +1213,60 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadVaultItemVersions { item_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .vault_item_versions(sift_api_types::VaultItemId(item_id))
+                        .await
+                        .map_err(|error| format!("loading vault history failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultItemVersionsLoaded { item_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RevealVaultItem { item_id, password } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        let lease = if let Some(password) = password {
+                            match client
+                                .step_up_vault_reveal(
+                                    sift_api_types::VaultItemId(item_id),
+                                    sift_api_types::VaultRevealStepUpRequest { password },
+                                )
+                                .await
+                            {
+                                Ok(step_up) => Some(step_up.lease),
+                                Err(error) => {
+                                    let _ = events.send(ExecutorEvent::VaultItemRevealed {
+                                        item_id,
+                                        result: Err(format!("vault step-up failed: {error}")),
+                                    });
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        client
+                            .reveal_vault_item(sift_api_types::VaultItemId(item_id), lease)
+                            .await
+                            .map_err(|error| format!("revealing vault item failed: {error}"))
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultItemRevealed { item_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CreateTeamVault { tenant_id, name } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {

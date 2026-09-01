@@ -1,9 +1,9 @@
 # Collaborative Server Vaults
 
-Status: **Foundation and first Collaboration-panel slice implemented; connection
-integration and controlled remote reveal remain in progress.** ADR-052 is
-graduated. Each implementation milestone remains independently gated by the
-security and test exits below.
+Status: **Vault-backed connection use and controlled generic-secret reveal are
+implemented; the broader item editor, restore flows, and hardening matrix remain
+in progress.** ADR-052 is graduated. Each implementation milestone remains
+independently gated by the security and test exits below.
 
 ## Outcome
 
@@ -201,7 +201,8 @@ GET    /v1/metadata/vault-items/{item}             planned
 PUT    /v1/metadata/vault-items/{item}             planned
 DELETE /v1/metadata/vault-items/{item}             planned
 POST   /v1/metadata/vault-items/{item}/secret      planned
-POST   /v1/metadata/vault-items/{item}/reveal      local-only foundation
+POST   /v1/metadata/vault-items/{item}/reveal-step-up implemented
+POST   /v1/metadata/vault-items/{item}/reveal      implemented
 
 GET    /v1/metadata/vault-items/{item}/versions    implemented
 GET    /v1/metadata/vault-items/{item}/versions/{version} planned
@@ -264,7 +265,7 @@ history or access editor.
 
 - [x] Graduate ADR-052 covering item kinds, non-hierarchical capabilities, reveal,
   audit vocabulary, revocation, retention, and the host-admin boundary.
-- [ ] Specify the exact step-up proof and one-use reveal response lifecycle.
+- [x] Specify the exact step-up proof and one-use reveal response lifecycle.
 - [x] Add protocol/API redaction tests before any secret-bearing route exists.
 - [ ] Decide retention defaults, tenant quotas, maximum item/value sizes, and
   cleanup retry policy in instance configuration.
@@ -276,7 +277,7 @@ representation is credential-free.
 
 - [x] Add schema, lazy default personal-vault creation, immutable versions, and cleanup
   queue.
-- [ ] Route existing connection profile creation and credential rotation through
+- [x] Route existing connection profile creation and credential rotation through
   vault items while preserving the `Driver` trait and session APIs.
 - [~] Add the Collaboration `Vault` view, write-only connection form, masked
   history, test, and connection shortcuts.
@@ -290,7 +291,7 @@ without any reveal path.
 - [~] Add team-vault lifecycle, capability grants, admin recovery, and tenant
   membership invalidation.
 - [ ] Intersect vault authorization with room and connection policies.
-- [ ] Invalidate active descendants on credential rotation or grant revocation.
+- [x] Invalidate active descendants on credential rotation or grant revocation.
 - [~] Cover concurrent editors, stale revisions, cross-tenant ids, member removal,
   and rotation during active queries.
 
@@ -300,9 +301,9 @@ its credential bytes.
 ### V3 — controlled generic secret reveal
 
 - [x] Add login, token, and secure-note items plus bounded typed envelopes.
-- [ ] Implement interactive digest-bound step-up and single-use reveal.
-- [ ] Add the timed desktop reveal/copy surface and safe clipboard clearing.
-- [ ] Add per-principal reveal rate limits, immediate lease revocation, durable
+- [x] Implement interactive digest-bound step-up and single-use reveal.
+- [x] Add the timed desktop reveal/copy surface and safe clipboard clearing.
+- [~] Add per-principal reveal rate limits, immediate lease revocation, durable
   reveal audit, and negative cache/log/crash tests.
 
 Exit: an explicitly granted member can reveal one eligible item, while API
