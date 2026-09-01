@@ -1,8 +1,9 @@
 # Collaborative Server Vaults
 
-Status: **ADR-052 graduated; implementation in progress.** This plan supersedes
-the connection-only vault proposal. Each implementation milestone remains
-independently gated by the security and test exits below.
+Status: **Foundation and first Collaboration-panel slice implemented; connection
+integration and controlled remote reveal remain in progress.** ADR-052 is
+graduated. Each implementation milestone remains independently gated by the
+security and test exits below.
 
 ## Outcome
 
@@ -181,32 +182,32 @@ credential readiness to `sift-protocol`. Secret-bearing HTTP request/response
 types stay in `sift-api-types`; the pure wire contract must not gain I/O or
 secret-store behavior.
 
-Proposed additive routes:
+Implemented routes use the metadata namespace. Remaining routes stay planned:
 
 ```text
-GET    /v1/vaults
-POST   /v1/vaults
-GET    /v1/vaults/{vault}
-PATCH  /v1/vaults/{vault}
-DELETE /v1/vaults/{vault}
+GET    /v1/metadata/vaults                         implemented
+POST   /v1/metadata/vaults                         implemented
+GET    /v1/metadata/vaults/{vault}                 planned
+PATCH  /v1/metadata/vaults/{vault}                 planned
+DELETE /v1/metadata/vaults/{vault}                 planned
 
-GET    /v1/vaults/{vault}/grants
-PUT    /v1/vaults/{vault}/grants/{principal}
-DELETE /v1/vaults/{vault}/grants/{principal}
+GET    /v1/metadata/vaults/{vault}/grants          implemented
+PUT    /v1/metadata/vaults/{vault}/grants/{principal} implemented
+DELETE /v1/metadata/vaults/{vault}/grants/{principal} planned
 
-GET    /v1/vaults/{vault}/items
-POST   /v1/vaults/{vault}/items
-GET    /v1/vault-items/{item}
-PUT    /v1/vault-items/{item}
-DELETE /v1/vault-items/{item}
-POST   /v1/vault-items/{item}/secret
-POST   /v1/vault-items/{item}/reveal
+GET    /v1/metadata/vaults/{vault}/items           implemented
+POST   /v1/metadata/vaults/{vault}/items           implemented
+GET    /v1/metadata/vault-items/{item}             planned
+PUT    /v1/metadata/vault-items/{item}             planned
+DELETE /v1/metadata/vault-items/{item}             planned
+POST   /v1/metadata/vault-items/{item}/secret      planned
+POST   /v1/metadata/vault-items/{item}/reveal      local-only foundation
 
-GET    /v1/vault-items/{item}/versions
-GET    /v1/vault-items/{item}/versions/{version}
-GET    /v1/vault-items/{item}/diff?from=&to=
-POST   /v1/vault-items/{item}/restore
-POST   /v1/vault-items/{item}/test
+GET    /v1/metadata/vault-items/{item}/versions    implemented
+GET    /v1/metadata/vault-items/{item}/versions/{version} planned
+GET    /v1/metadata/vault-items/{item}/diff?from=&to= planned
+POST   /v1/metadata/vault-items/{item}/restore     planned
+POST   /v1/metadata/vault-items/{item}/test        planned
 ```
 
 Create/update requests separate non-secret `metadata` from an optional
@@ -263,9 +264,9 @@ history or access editor.
 
 - [x] Graduate ADR-052 covering item kinds, non-hierarchical capabilities, reveal,
   audit vocabulary, revocation, retention, and the host-admin boundary.
-- Specify the exact step-up proof and one-use reveal response lifecycle.
-- Add protocol/API redaction tests before any secret-bearing route exists.
-- Decide retention defaults, tenant quotas, maximum item/value sizes, and
+- [ ] Specify the exact step-up proof and one-use reveal response lifecycle.
+- [x] Add protocol/API redaction tests before any secret-bearing route exists.
+- [ ] Decide retention defaults, tenant quotas, maximum item/value sizes, and
   cleanup retry policy in instance configuration.
 
 Exit: reviewers can trace every path secret bytes may take and every persisted
@@ -273,24 +274,24 @@ representation is credential-free.
 
 ### V1 — personal vault and vault-backed connections
 
-- Add schema, default personal-vault backfill, immutable versions, and cleanup
+- [x] Add schema, lazy default personal-vault creation, immutable versions, and cleanup
   queue.
-- Route existing connection profile creation and credential rotation through
+- [ ] Route existing connection profile creation and credential rotation through
   vault items while preserving the `Driver` trait and session APIs.
-- Add the Collaboration `Vault` view, write-only connection form, masked
+- [~] Add the Collaboration `Vault` view, write-only connection form, masked
   history, test, and connection shortcuts.
-- Prove no connection credential reaches a client or non-secret store.
+- [ ] Prove no connection credential reaches a client or non-secret store.
 
 Exit: a user can create, rotate, test, restore, and use a personal connection
 without any reveal path.
 
 ### V2 — team vaults and use-without-reveal
 
-- Add team-vault lifecycle, capability grants, admin recovery, and tenant
+- [~] Add team-vault lifecycle, capability grants, admin recovery, and tenant
   membership invalidation.
-- Intersect vault authorization with room and connection policies.
-- Invalidate active descendants on credential rotation or grant revocation.
-- Cover concurrent editors, stale revisions, cross-tenant ids, member removal,
+- [ ] Intersect vault authorization with room and connection policies.
+- [ ] Invalidate active descendants on credential rotation or grant revocation.
+- [~] Cover concurrent editors, stale revisions, cross-tenant ids, member removal,
   and rotation during active queries.
 
 Exit: a member with `use` can query through a team connection but cannot obtain
@@ -298,10 +299,10 @@ its credential bytes.
 
 ### V3 — controlled generic secret reveal
 
-- Add login, token, and secure-note items plus bounded typed envelopes.
-- Implement interactive digest-bound step-up and single-use reveal.
-- Add the timed desktop reveal/copy surface and safe clipboard clearing.
-- Add per-principal reveal rate limits, immediate lease revocation, durable
+- [x] Add login, token, and secure-note items plus bounded typed envelopes.
+- [ ] Implement interactive digest-bound step-up and single-use reveal.
+- [ ] Add the timed desktop reveal/copy surface and safe clipboard clearing.
+- [ ] Add per-principal reveal rate limits, immediate lease revocation, durable
   reveal audit, and negative cache/log/crash tests.
 
 Exit: an explicitly granted member can reveal one eligible item, while API

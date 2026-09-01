@@ -208,7 +208,7 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Connection profiles & credentials — connection editor
 
-- [ ] Personal/team server vaults in Collaboration, including vault-backed
+- [~] Personal/team server vaults in Collaboration, including vault-backed
   connections, capability grants, masked version history, rotation, and
   controlled generic-secret reveal —
   [design](collaborative-connection-vaults.md)
