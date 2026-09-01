@@ -1216,6 +1216,7 @@ struct TabTransfer {
     database_query_text: Option<String>,
     database_ddl_text: Option<String>,
     database_json_text: Option<String>,
+    database_json_baseline: Option<String>,
 }
 
 struct RunVariableEditor {
@@ -3396,6 +3397,7 @@ pub struct Pane {
     database_query_texts: HashMap<u64, String>,
     database_ddl_texts: HashMap<u64, String>,
     database_json_texts: HashMap<u64, String>,
+    database_json_baselines: HashMap<u64, String>,
     /// Transient wrapper sizes while dragging. Keeping these on the pane avoids
     /// invalidating and repainting the result grid for every pointer event.
     live_result_extents: HashMap<u64, f32>,
@@ -3545,6 +3547,7 @@ impl Pane {
             database_query_texts: HashMap::new(),
             database_ddl_texts: HashMap::new(),
             database_json_texts: HashMap::new(),
+            database_json_baselines: HashMap::new(),
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
             tab_drop_target: None,
@@ -3953,6 +3956,7 @@ impl Pane {
                     self.database_ddl_texts.insert(item_id, text);
                 }
                 DatabaseItemView::Json => {
+                    self.database_json_baselines.insert(item_id, text.clone());
                     self.database_json_texts.insert(item_id, text);
                 }
             }
@@ -3978,6 +3982,13 @@ impl Pane {
         self.database_item_views.insert(item_id, view);
         cx.notify();
         true
+    }
+
+    fn database_json_dirty(&self, item_id: u64, cx: &App) -> bool {
+        self.database_json_baselines
+            .get(&item_id)
+            .zip(self.editors.get(&item_id))
+            .is_some_and(|(baseline, editor)| editor.read(cx).document().text() != baseline)
     }
 
     fn mark_database_item_refreshed(&mut self, item_id: u64) {
@@ -4090,6 +4101,7 @@ impl Pane {
         self.database_query_texts.remove(&item_id);
         self.database_ddl_texts.remove(&item_id);
         self.database_json_texts.remove(&item_id);
+        self.database_json_baselines.remove(&item_id);
         if self.pending_close_item == Some(item_id) {
             self.pending_close_item = None;
         }
@@ -4855,6 +4867,7 @@ impl Pane {
         let database_query_text = self.database_query_texts.remove(&item_id);
         let database_ddl_text = self.database_ddl_texts.remove(&item_id);
         let database_json_text = self.database_json_texts.remove(&item_id);
+        let database_json_baseline = self.database_json_baselines.remove(&item_id);
         self.forget_item(item_id);
         self.active_item = self.active_item.min(self.items.len().saturating_sub(1));
         Some(TabTransfer {
@@ -4867,6 +4880,7 @@ impl Pane {
             database_query_text,
             database_ddl_text,
             database_json_text,
+            database_json_baseline,
         })
     }
 
@@ -4907,6 +4921,9 @@ impl Pane {
         }
         if let Some(text) = transfer.database_json_text {
             self.database_json_texts.insert(item_id, text);
+        }
+        if let Some(text) = transfer.database_json_baseline {
+            self.database_json_baselines.insert(item_id, text);
         }
         if let Some(results) = transfer.results {
             self.attach_results(item_id, results, cx);
@@ -6263,6 +6280,8 @@ impl gpui::Render for Pane {
                                         let json_available =
                                             self.database_json_texts.contains_key(&item_id);
                                         let json_selected = database_view == DatabaseItemView::Json;
+                                        let json_dirty =
+                                            json_selected && self.database_json_dirty(item_id, cx);
                                         let preview_editor = editor.clone();
                                         let save_editor = editor.clone();
                                         div()
@@ -6333,11 +6352,12 @@ impl gpui::Render for Pane {
                                                 }))
                                             }))
                                             .child(div().flex_1())
-                                            .children(json_selected.then(|| {
+                                            .children(json_dirty.then(|| {
                                                 Button::new(
                                                     ("preview-json-result-edit", item_id as usize),
                                                     "Stage & review",
                                                 )
+                                                .debug_selector("preview-json-result-edit")
                                                 .tone(ButtonTone::Ghost)
                                                 .on_click(cx.listener(move |_, _, _, cx| {
                                                     cx.emit(
@@ -6353,11 +6373,12 @@ impl gpui::Render for Pane {
                                                     );
                                                 }))
                                             }))
-                                            .children(json_selected.then(|| {
+                                            .children(json_dirty.then(|| {
                                                 Button::new(
                                                     ("save-json-result-edit", item_id as usize),
                                                     "Save changes",
                                                 )
+                                                .debug_selector("save-json-result-edit")
                                                 .tone(ButtonTone::Accent)
                                                 .key_binding(":w")
                                                 .on_click(cx.listener(move |_, _, _, cx| {
@@ -9612,6 +9633,7 @@ impl WorkspaceShell {
                                             cx,
                                         );
                                         pane.database_json_texts.remove(&item_id);
+                                        pane.database_json_baselines.remove(&item_id);
                                     }
                                     pane.mark_clean(item_id, cx);
                                 }
@@ -49261,6 +49283,7 @@ mod tests {
                     .text(),
                 "{\n  \"event\": \"open\"\n}"
             );
+            assert!(!pane.read(cx).database_json_dirty(item_id, cx));
             assert_eq!(
                 pane.read(cx).execution_sql(item_id, "{\"event\":\"open\"}"),
                 table_preview_sql(
@@ -49278,8 +49301,13 @@ mod tests {
                 .update(cx, |editor, cx| {
                     editor.replace_text_from_owner("{\n  \"event\": \"close\"\n}", cx)
                 });
+            assert!(pane.read(cx).database_json_dirty(item_id, cx));
             shell.save_active_item(&SaveActiveItem, window, cx);
         });
+
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("preview-json-result-edit").is_some());
+        assert!(cx.debug_bounds("save-json-result-edit").is_some());
 
         let ExecutorCommand::ApplyResultEdits { edit_set, .. } = receiver.try_recv().unwrap()
         else {
