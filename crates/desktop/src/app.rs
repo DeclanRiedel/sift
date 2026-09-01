@@ -1300,6 +1300,51 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::UpdateVault { vault_id, request } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .update_vault(sift_api_types::VaultId(vault_id), request)
+                        .await
+                        .map(Some)
+                        .map_err(|error| format!("renaming vault failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultMutated {
+                        vault_id,
+                        action: "Renamed",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteVault {
+                vault_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_vault(sift_api_types::VaultId(vault_id), expected_revision)
+                        .await
+                        .map(|()| None)
+                        .map_err(|error| format!("deleting vault failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultMutated {
+                        vault_id,
+                        action: "Deleted",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CreateVaultItem { vault_id, request } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
