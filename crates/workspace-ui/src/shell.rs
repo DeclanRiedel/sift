@@ -30267,18 +30267,24 @@ impl WorkspaceShell {
                     let subject_limit = self.settings.repository.commit_subject_limit.max(1);
                     let (commit_author_name, commit_author_email) =
                         self.repository_commit_identity();
+                    let commit_identity_needs_configuration = self
+                        .settings
+                        .repository
+                        .commit_author_email
+                        .as_deref()
+                        .is_none_or(|email| email.trim().is_empty())
+                        && self
+                            .lifecycle
+                            .identity
+                            .as_ref()
+                            .and_then(|identity| identity.principal.email.as_deref())
+                            .is_none_or(|email| email.trim().is_empty());
+                    let show_subject_length =
+                        subject_length >= subject_limit.saturating_mul(4).div_ceil(5);
+                    let multiline_commit = commit_message.contains('\n');
                     let shared_repository_operation = self.repository.shared_operation();
                     let recent_commit = self.recent_repository_commit.clone();
                     let recovery_notice = self.repository_recovery_notice.clone();
-                    let commit_button_label = if self
-                        .repository
-                        .status()
-                        .is_some_and(|status| status.head_oid.is_none())
-                    {
-                        "Create initial commit"
-                    } else {
-                        "Commit staged SQL changes"
-                    };
                     let can_commit = self.repository.status().is_some_and(|status| {
                         !status.entries.is_empty()
                             && self.repository.has_staged_changes()
@@ -30639,75 +30645,90 @@ impl WorkspaceShell {
                                     .p_2()
                                     .flex()
                                     .flex_col()
-                                    .gap_2()
-                                    .child(self.repository_commit_input.clone())
+                                    .gap_1()
                                     .child(
                                         div()
                                             .flex()
                                             .items_center()
-                                            .justify_between()
-                                            .text_xs()
-                                            .text_color(if subject_length > subject_limit {
-                                                colors.warning
-                                            } else {
-                                                colors.muted_text
-                                            })
-                                            .child(format!(
-                                                "Subject {subject_length}/{subject_limit}"
-                                            ))
+                                            .gap_1()
                                             .child(
-                                                Button::new("expand-repository-commit", "Expand")
+                                                div()
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .child(self.repository_commit_input.clone()),
+                                            )
+                                            .child(
+                                                Button::new("commit-repository", "Commit")
+                                                    .tone(ButtonTone::Accent)
+                                                    .disabled(!can_commit)
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.commit_repository(false, cx)
+                                                    })),
+                                            ),
+                                    )
+                                    .when(show_subject_length || multiline_commit, |composer| {
+                                        composer.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .text_color(if subject_length > subject_limit {
+                                                    colors.warning
+                                                } else {
+                                                    colors.muted_text
+                                                })
+                                                .children(show_subject_length.then(|| {
+                                                    format!(
+                                                        "Subject {subject_length}/{subject_limit}"
+                                                    )
+                                                }))
+                                                .children(multiline_commit.then(|| {
+                                                    Button::new(
+                                                        "expand-repository-commit",
+                                                        "Edit message",
+                                                    )
                                                     .tone(ButtonTone::Ghost)
                                                     .on_click(cx.listener(
                                                         |shell, _, window, cx| {
                                                             shell.modal =
                                                                 Some(Modal::RepositoryCommit);
-                                                            shell.repository_commit_input
+                                                            shell
+                                                                .repository_commit_input
                                                                 .read(cx)
                                                                 .focus_handle(cx)
                                                                 .focus(window, cx);
                                                             cx.notify();
                                                         },
+                                                    ))
+                                                })),
+                                        )
+                                    })
+                                    .when(commit_identity_needs_configuration, |composer| {
+                                        composer.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child(format!(
+                                                    "Author: {commit_author_name} <{commit_author_email}>"
+                                                ))
+                                                .child(
+                                                    Button::new(
+                                                        "configure-repository-author",
+                                                        "Configure",
+                                                    )
+                                                    .tone(ButtonTone::Ghost)
+                                                    .on_click(cx.listener(
+                                                        |shell, _, window, cx| {
+                                                            shell.open_user_settings(window, cx)
+                                                        },
                                                     )),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .text_xs()
-                                            .text_color(colors.muted_text)
-                                            .child(format!(
-                                                "Author: {commit_author_name} <{commit_author_email}>"
-                                            ))
-                                            .child(
-                                                Button::new(
-                                                    "configure-repository-author",
-                                                    "Configure",
-                                                )
-                                                .tone(ButtonTone::Ghost)
-                                                .on_click(cx.listener(
-                                                    |shell, _, window, cx| {
-                                                        shell.open_user_settings(window, cx)
-                                                    },
-                                                )),
-                                            ),
-                                    )
-                                    .child(
-                                        Button::new("commit-repository", commit_button_label)
-                                            .tone(ButtonTone::Accent)
-                                            .disabled(!can_commit)
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.commit_repository(false, cx)
-                                            })),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(colors.muted_text)
-                                            .child("Creates a workspace checkpoint, then commits only the staged SQL changes."),
-                                    )
+                                                ),
+                                        )
+                                    })
                                     .children(recent_commit.map(|commit| {
                                         let short = commit.commit.chars().take(12).collect::<String>();
                                         div()
