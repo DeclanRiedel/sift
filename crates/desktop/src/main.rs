@@ -19,6 +19,8 @@ use sift_workspace_ui::{
     ToggleLeftDock, ToggleRightDock,
 };
 
+gpui::actions!(sift_desktop, [OpenNewWindow]);
+
 /// Keymap for document editors. Bound under the `SiftEditor` focus context so
 /// these never intercept workspace or text-field commands. Character and IME
 /// input arrive through the editor's input handler, not these bindings.
@@ -115,6 +117,8 @@ fn main() {
             cx.bind_keys(shell_key_bindings());
             cx.set_menus([
                 Menu::new("File").items([
+                    MenuItem::action("New Window", OpenNewWindow),
+                    MenuItem::separator(),
                     MenuItem::action("Save Item", SaveActiveItem),
                     MenuItem::action("Close Item", CloseActiveItem),
                     MenuItem::action("Close Pane", CloseActivePane),
@@ -177,6 +181,11 @@ fn main() {
                 gpui::KeyBinding::new("enter", Submit, text),
             ]);
             cx.bind_keys(editor_key_bindings());
+            cx.bind_keys([gpui::KeyBinding::new(
+                &format!("{primary}-shift-n"),
+                OpenNewWindow,
+                None,
+            )]);
 
             let app = SiftApp::new(config.clone());
             let state = app.restore(&display_rects(cx));

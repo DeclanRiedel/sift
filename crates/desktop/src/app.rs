@@ -13,7 +13,10 @@ fn system_epoch_millis() -> u64 {
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
-use gpui::{prelude::*, App, Context, Entity, IntoElement, Window};
+use gpui::{
+    div, prelude::*, px, App, Bounds, Context, Entity, IntoElement, Window, WindowBounds,
+    WindowOptions,
+};
 use sift_api_types::{
     ConnectionProfileId, CredentialMode, RoomId, StartRunRequest, TenantId,
     UpsertConnectionProfileRequest, VcsCommitRequest, VcsDiffQuery, VcsDiscardRequest,
@@ -215,7 +218,7 @@ pub struct SiftApp {
 
 #[derive(Clone)]
 pub struct WindowServices {
-    store: Arc<PresentationStore>,
+    store: Option<Arc<PresentationStore>>,
     settings_store: Arc<SettingsStore>,
     settings: UserSettings,
     runtime: Arc<tokio::runtime::Runtime>,
@@ -289,7 +292,7 @@ impl SiftApp {
             self.startup_remote,
         );
         WindowServices {
-            store: self.presentation_store.clone(),
+            store: Some(self.presentation_store.clone()),
             settings_store: self.settings_store.clone(),
             settings: self
                 .settings_store
@@ -308,6 +311,44 @@ impl SiftApp {
             local_target: self.local_target.clone(),
             restored_profile_id: restored_profile.map(|profile| profile.id),
         }
+    }
+}
+
+impl WindowServices {
+    fn for_secondary_window(&self, state: &PresentationState) -> Self {
+        let mut services = self.clone();
+        services.store = None;
+        services.restored_profile_id = None;
+        match state.workspace.instance_id.as_deref() {
+            Some(instance_id)
+                if instance_id.starts_with("hosted:") || instance_id.starts_with("ssh:") =>
+            {
+                if let Some(profile) =
+                    restored_server_profile(Some(instance_id), &services.saved_servers, false)
+                {
+                    if profile.kind != sift_workspace_ui::SavedServerKind::Ssh {
+                        services.server = DesktopServer::remote(profile.clone(), None);
+                    } else {
+                        services.server = services.local_target.clone();
+                    }
+                    services.restored_profile_id = Some(profile.id);
+                }
+            }
+            Some(instance_id) if instance_id.starts_with("config:") => {
+                let manifest_id = instance_id.trim_start_matches("config:");
+                if let Some(root) = services
+                    .instance_roots
+                    .iter()
+                    .find(|root| root.manifest_id == manifest_id)
+                {
+                    if let Ok(server) = DesktopServer::configured(root.root.clone()) {
+                        services.server = server;
+                    }
+                }
+            }
+            _ => services.server = services.local_target.clone(),
+        }
+        services
     }
 }
 
@@ -368,6 +409,7 @@ fn restored_server_profile(
 /// one virtual workspace without adding product state to `SiftApp`.
 pub struct SiftWindow {
     workspace: Entity<WorkspaceShell>,
+    services: WindowServices,
     // The spawned lifecycle, query, and instance-manager tasks are owned by
     // this runtime. Keeping it with the window prevents dropping the last
     // runtime handle immediately after application startup.
@@ -381,6 +423,7 @@ impl SiftWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let retained_services = services.clone();
         let WindowServices {
             store,
             settings_store,
@@ -397,14 +440,7 @@ impl SiftWindow {
         let state = prepare_state_for_instance(state, &server.instance());
         let restored_workspace_id = state.workspace.workspace_id;
         let workspace = cx.new(|cx| {
-            WorkspaceShell::new(
-                state,
-                settings,
-                Some(store),
-                Some(settings_store),
-                window,
-                cx,
-            )
+            WorkspaceShell::new(state, settings, store, Some(settings_store), window, cx)
         });
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let (presence_sender, presence_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -460,7 +496,39 @@ impl SiftWindow {
         )));
         Self {
             workspace,
+            services: retained_services,
             _runtime: runtime,
+        }
+    }
+
+    fn open_new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut state = self.workspace.read(cx).snapshot(cx);
+        let current = window.bounds();
+        let bounds = Bounds {
+            origin: gpui::point(current.origin.x + px(28.), current.origin.y + px(28.)),
+            size: current.size,
+        };
+        state.window.bounds = sift_workspace_ui::Rect {
+            x: bounds.origin.x.into(),
+            y: bounds.origin.y.into(),
+            width: bounds.size.width.into(),
+            height: bounds.size.height.into(),
+        };
+        state.window.maximized = false;
+        let services = self.services.for_secondary_window(&state);
+        let platform = format!("{:?}", crate::platform::current_platform());
+        if let Err(error) = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some(format!("Sift · {platform}").into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            |window, cx| cx.new(|cx| SiftWindow::new(state, services, window, cx)),
+        ) {
+            eprintln!("sift-desktop: opening a new window failed: {error}");
         }
     }
 }
@@ -6752,8 +6820,15 @@ fn reconnect_delay(attempt: u32) -> std::time::Duration {
 }
 
 impl gpui::Render for SiftWindow {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.workspace.clone()
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .on_action(
+                cx.listener(|window, _: &crate::OpenNewWindow, window_handle, cx| {
+                    window.open_new_window(window_handle, cx)
+                }),
+            )
+            .child(self.workspace.clone())
     }
 }
 
@@ -6894,6 +6969,36 @@ mod tests {
 
         assert_eq!(settings.editor.default_mode, EditorMode::Vim);
         assert_eq!(store.load().unwrap(), settings);
+    }
+
+    #[test]
+    fn secondary_windows_have_independent_non_persisting_presentation_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let local = DesktopServer::local(directory.path().join("runtime"));
+        let services = WindowServices {
+            store: Some(Arc::new(PresentationStore::new(
+                directory.path().join("presentation.json"),
+            ))),
+            settings_store: Arc::new(SettingsStore::new(
+                directory.path().join("settings.toml"),
+            )),
+            settings: UserSettings::default(),
+            runtime: Arc::new(tokio::runtime::Runtime::new().unwrap()),
+            server: local.clone(),
+            instance_store: InstanceStore::new(directory.path().join("instances.json")),
+            credentials: DesktopCredentialStore,
+            saved_servers: Vec::new(),
+            instance_roots: Vec::new(),
+            local_target: local,
+            restored_profile_id: None,
+        };
+        let state = PresentationState::default();
+
+        let secondary = services.for_secondary_window(&state);
+
+        assert!(services.store.is_some());
+        assert!(secondary.store.is_none());
+        assert_eq!(secondary.server.instance().id, "local");
     }
 
     fn job(item_id: u64, text_revision: u64, request: SemanticRequestKind) -> SemanticControl {
