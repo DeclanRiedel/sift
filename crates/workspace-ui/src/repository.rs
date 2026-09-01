@@ -161,6 +161,7 @@ pub(crate) struct RepositoryProjection {
     grouping: RepositoryGrouping,
     sort: RepositorySort,
     view: RepositoryView,
+    filter: String,
     diff_loading: bool,
     current_diff_request_id: Option<u64>,
     diffs: HashMap<(VcsDiffSide, Option<WorkspacePath>), Arc<VcsDiff>>,
@@ -219,6 +220,7 @@ impl RepositoryProjection {
         self.remotes = Arc::default();
         self.remote_result = None;
         self.shared_operation = None;
+        self.filter.clear();
     }
 
     pub(crate) fn branches(&self) -> Arc<[VcsBranch]> {
@@ -744,6 +746,15 @@ impl RepositoryProjection {
         self.visible_rows.clone()
     }
 
+    pub(crate) fn set_filter(&mut self, filter: impl Into<String>) {
+        let filter = filter.into().trim().to_lowercase();
+        if self.filter == filter {
+            return;
+        }
+        self.filter = filter;
+        self.rebuild_visible_rows();
+    }
+
     pub(crate) fn selected_path(&self) -> Option<&WorkspacePath> {
         self.selected_path.as_ref()
     }
@@ -950,6 +961,9 @@ impl RepositoryProjection {
             ]
         };
         for entry in &status.entries {
+            if !self.filter.is_empty() && !entry.path.0.to_lowercase().contains(&self.filter) {
+                continue;
+            }
             let index = if self.grouping == RepositoryGrouping::Staging {
                 if entry.stage == VcsStageState::Staged {
                     0
@@ -1024,6 +1038,16 @@ impl RepositoryProjection {
                         .map(|entry| RepositoryRow::Entry { entry, depth: 0 }),
                 );
             }
+        }
+        if self.selected_path.as_ref().is_none_or(|selected| {
+            !rows.iter().any(
+                |row| matches!(row, RepositoryRow::Entry { entry, .. } if &entry.path == selected),
+            )
+        }) {
+            self.selected_path = rows.iter().find_map(|row| match row {
+                RepositoryRow::Entry { entry, .. } => Some(entry.path.clone()),
+                RepositoryRow::Section { .. } | RepositoryRow::Folder { .. } => None,
+            });
         }
         self.visible_rows = rows.into();
     }
@@ -1116,6 +1140,44 @@ mod tests {
             &rows[3],
             RepositoryRow::Entry { entry, .. } if entry.path.0 == "conflict.sql"
         ));
+    }
+
+    #[test]
+    fn change_filter_keeps_navigation_inside_matching_paths() {
+        let mut projection = RepositoryProjection::new(Some(7));
+        let (_, request_id) = projection.begin_refresh().unwrap();
+        projection.apply_status_result(
+            7,
+            request_id,
+            Ok(Some(status(serde_json::json!([
+                entry("queries/accounts.sql", "modified", "unstaged"),
+                entry("queries/orders.sql", "modified", "unstaged")
+            ])))),
+        );
+
+        projection.set_filter("orders");
+
+        assert_eq!(
+            projection.selected_path(),
+            Some(&WorkspacePath::new("queries/orders.sql").unwrap())
+        );
+        assert_eq!(
+            projection
+                .rows()
+                .iter()
+                .filter(|row| matches!(row, RepositoryRow::Entry { .. }))
+                .count(),
+            1
+        );
+        projection.set_filter("");
+        assert_eq!(
+            projection
+                .rows()
+                .iter()
+                .filter(|row| matches!(row, RepositoryRow::Entry { .. }))
+                .count(),
+            2
+        );
     }
 
     #[test]

@@ -7224,6 +7224,8 @@ pub struct WorkspaceShell {
     connections_find_input: Entity<TextInput>,
     connections_find_open: bool,
     connections_find_query: String,
+    repository_filter_input: Entity<TextInput>,
+    repository_filter_open: bool,
     saved_queries_focus_handle: FocusHandle,
     saved_queries_filter_input: Entity<TextInput>,
     saved_queries_filter_open: bool,
@@ -7785,6 +7787,9 @@ impl WorkspaceShell {
         let connections_find_input = cx.new(|cx| {
             TextInput::new("", "Find in connections…", cx).aria_label("Find in connections")
         });
+        let repository_filter_input = cx.new(|cx| {
+            TextInput::new("", "Filter changes…", cx).aria_label("Filter repository changes")
+        });
         let saved_queries_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter saved queries…", cx).aria_label("Filter saved queries")
         });
@@ -7977,6 +7982,14 @@ impl WorkspaceShell {
             cx.notify();
         })
         .detach();
+        cx.observe(&repository_filter_input, |shell, input, cx| {
+            shell.repository.set_filter(input.read(cx).text());
+            shell
+                .repository_scroll_handle
+                .scroll_to_item(0, ScrollStrategy::Top);
+            cx.notify();
+        })
+        .detach();
         cx.subscribe_in(
             &connections_find_input,
             window,
@@ -8150,6 +8163,8 @@ impl WorkspaceShell {
             connections_find_input,
             connections_find_open: false,
             connections_find_query: String::new(),
+            repository_filter_input,
+            repository_filter_open: false,
             saved_queries_focus_handle: cx.focus_handle(),
             saved_queries_filter_input,
             saved_queries_filter_open: false,
@@ -17141,6 +17156,36 @@ impl WorkspaceShell {
         self.set_repository_paths_staged(vec![path], action, cx);
     }
 
+    fn toggle_selected_repository_path_staged(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.repository.selected_entry() else {
+            return;
+        };
+        if entry.stage == sift_protocol::VcsStageState::Conflict {
+            self.repository
+                .set_error("Resolve the conflict before staging this file");
+            cx.notify();
+            return;
+        }
+        let action = if entry.stage == sift_protocol::VcsStageState::Staged {
+            RepositoryIndexAction::Unstage
+        } else {
+            RepositoryIndexAction::Stage
+        };
+        self.set_selected_repository_path_staged(action, cx);
+    }
+
+    fn open_selected_repository_change(&mut self, cx: &mut Context<Self>) {
+        if self
+            .repository
+            .selected_entry()
+            .is_some_and(|entry| entry.stage == sift_protocol::VcsStageState::Conflict)
+        {
+            self.request_selected_repository_conflict(cx);
+        } else {
+            self.request_selected_repository_diff(cx);
+        }
+    }
+
     fn activate_repository_path(
         &mut self,
         path: sift_protocol::WorkspacePath,
@@ -21220,6 +21265,24 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_repository_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.repository_filter_open = true;
+        self.repository_filter_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_repository_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.repository_filter_open = false;
+        self.repository_filter_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.repository.set_filter("");
+        self.repository_focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
     fn focus_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.right_dock.presentation.open = true;
         self.fit_side_docks_to_width(window.window_bounds().get_bounds().size.width.into());
@@ -22963,9 +23026,23 @@ impl WorkspaceShell {
                     }
                     "enter" => {
                         self.repository_nav_g_pending = false;
-                        if let Some(path) = self.repository.selected_path().cloned() {
-                            self.activate_repository_path(path, window, cx);
-                        }
+                        self.open_selected_repository_change(cx);
+                        true
+                    }
+                    "space" => {
+                        self.toggle_selected_repository_path_staged(cx);
+                        true
+                    }
+                    "a" => {
+                        let paths = self.repository.stageable_paths();
+                        self.set_repository_paths_staged(paths, RepositoryIndexAction::Stage, cx);
+                        true
+                    }
+                    "c" => {
+                        self.repository_commit_input
+                            .read(cx)
+                            .focus_handle(cx)
+                            .focus(window, cx);
                         true
                     }
                     "o" => {
@@ -22999,7 +23076,7 @@ impl WorkspaceShell {
                         true
                     }
                     "/" => {
-                        self.open_command_palette(&OpenCommandPalette, window, cx);
+                        self.open_repository_filter(window, cx);
                         true
                     }
                     "escape" => {
@@ -30244,6 +30321,10 @@ impl WorkspaceShell {
                 |dock_view| {
                     let rows = self.repository.rows();
                     let row_count = rows.len();
+                    let visible_change_count = rows
+                        .iter()
+                        .filter(|row| matches!(row, RepositoryRow::Entry { .. }))
+                        .count();
                     let projection_dirty = self.workspace_files.projection_dirty();
                     let (virtual_only, filesystem_only, both_changed, _) =
                         self.workspace_files.reconcile_summary();
@@ -30340,6 +30421,71 @@ impl WorkspaceShell {
                                         ),
                                 ),
                         )
+                        .when(self.repository_filter_open, |panel| {
+                            panel.child(
+                                div()
+                                    .debug_selector(|| "repository-filter-bar".into())
+                                    .mx_2()
+                                    .h(px(34.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .border_t_1()
+                                    .border_b_1()
+                                    .border_color(colors.subtle_border)
+                                    .on_key_down(cx.listener(
+                                        |shell,
+                                         event: &gpui::KeyDownEvent,
+                                         window,
+                                         cx| {
+                                            match event.keystroke.key.as_str() {
+                                                "ctrl-j" => {
+                                                    shell.navigate_repository_file(1, cx)
+                                                }
+                                                "ctrl-k" => {
+                                                    shell.navigate_repository_file(-1, cx)
+                                                }
+                                                "enter" => {
+                                                    shell.open_selected_repository_change(cx)
+                                                }
+                                                "escape" => {
+                                                    shell.close_repository_filter(window, cx)
+                                                }
+                                                _ => return,
+                                            }
+                                            cx.stop_propagation();
+                                        },
+                                    ))
+                                    .child(icon(IconName::Search, colors.muted_text, 13.))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .overflow_hidden()
+                                            .child(self.repository_filter_input.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child(format!("{visible_change_count}")),
+                                    )
+                                    .child(
+                                        IconButton::new(
+                                            "close-repository-filter",
+                                            IconName::Close,
+                                            "Close change filter",
+                                        )
+                                        .square(px(24.))
+                                        .icon_size(12.)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.close_repository_filter(window, cx)
+                                        })),
+                                    ),
+                            )
+                        })
                         .children(shared_repository_operation.map(|operation| {
                             div()
                                 .px_3()
@@ -30389,17 +30535,6 @@ impl WorkspaceShell {
                                     ),
                             )
                         })
-                        .child(
-                            div()
-                                .h(px(28.))
-                                .px_3()
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .border_t_1()
-                                .border_color(colors.subtle_border)
-                                .child(SectionLabel::new(format!("CHANGES ({row_count})"))),
-                        )
                         .children(active_repository_operation.map(|operation| {
                             let continue_operation = operation.clone();
                             let abort_operation = operation.clone();
@@ -49445,6 +49580,15 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.repository.selected_path().cloned()),
             Some(sift_protocol::WorkspacePath::new("a.sql").unwrap())
         );
+        cx.simulate_keystrokes("/");
+        assert!(workspace.read_with(&cx, |shell, _| shell.repository_filter_open));
+        cx.simulate_keystrokes("b");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.repository.selected_path().cloned()),
+            Some(sift_protocol::WorkspacePath::new("b.sql").unwrap())
+        );
+        cx.simulate_keystrokes("escape");
+        assert!(!workspace.read_with(&cx, |shell, _| shell.repository_filter_open));
     }
 
     #[gpui::test]

@@ -131,14 +131,18 @@ ways:
 
 ### Git panel structure
 
-- [x] Split panel into header, change list, commit area, and operation footer.
-- [x] Show repository/workspace name and current branch in header.
+- [x] Keep the panel to a compact branch header, change list, and one-line
+      commit composer; render operation and reconciliation UI only when active.
+- [x] Show the current branch, ahead/behind state, and change count in one
+      header line; keep refresh and advanced actions in commands/overflow.
 - [x] Show ahead/behind counts and detached-HEAD state.
-- [x] Group by staging state: conflicts, staged, unstaged, untracked.
+- [x] Default to two groups, staged and changes, with conflicts sorted first in
+      changes.
 - [x] Support alternate grouping by file state.
 - [x] Support flat and folder-tree views.
 - [x] Sort by path or filename.
-- [x] Show file-state icon and staged/partial/conflict control.
+- [x] Show a file-state icon, filename/path, and optional diff statistics;
+      reveal file actions only on hover or selection.
 - [x] Show additions/deletions when diff stats are available.
 - [x] Show changed-file count badge on Git tab.
 - [x] Persist grouping, sorting, tree mode, and primary click behavior.
@@ -146,7 +150,9 @@ ways:
 - [x] Render long file lists with `uniform_list`.
 - [x] Preserve selection by stable path across refreshes.
 - [x] Add clear empty, loading, truncated, and error states.
-- [x] Add refresh and overflow icon buttons with tooltips.
+- [x] Add an overflow button and an inline `/` change filter.
+- [x] Support panel-local `j/k`, `gg/G`, Enter-to-diff, Space-to-stage,
+      `a`-to-stage-all, `c`-to-compose, `/`-to-filter, and Escape navigation.
 
 ### File-level actions
 
@@ -156,8 +162,8 @@ ways:
 - [x] Stage one path.
 - [x] Unstage one path.
 - [x] Stage all tracked changes.
-- [x] Stage all including untracked files with explicit labeling.
-- [x] Unstage all.
+- [x] Stage all changes, including untracked files, from the Changes header.
+- [x] Unstage all from the Staged header.
 - [x] Discard one worktree path with confirmation and checkpoint.
 - [x] Restore one deleted path with confirmation and checkpoint.
 - [x] Disable invalid actions for conflicts and in-flight operations.
