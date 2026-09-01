@@ -774,9 +774,6 @@ impl MetadataStore {
                     None => None,
                 };
                 let version_handle = db_secret.clone().or(inherited_handle);
-                if version_handle.is_none() {
-                    return Err(MetadataError::VaultSecretMissing);
-                }
                 tx.execute(
                     "INSERT INTO connection_profile
                      (tenant_id, name, engine, spec_json, credential_mode, shared_secret_handle,

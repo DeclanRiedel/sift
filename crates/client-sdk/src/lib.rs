@@ -222,6 +222,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "pushRepository",
     "listRepositoryBranches",
     "setTenantLimits",
+    "stepUpMetadataVaultReveal",
     "startComparison",
     "unbindMetadataRoomConnection",
     "uninstallExtension",

@@ -3624,8 +3624,7 @@ impl MetadataStore {
                     sift_api_types::PrincipalId(principal.0),
                     |capabilities| capabilities.use_secret,
                 )?;
-                let handle = handle.ok_or(MetadataError::MissingCredential(id, principal))?;
-                return Ok((profile, Some(handle), crate::vault::VAULT_SECRET_NAMESPACE));
+                return Ok((profile, handle, crate::vault::VAULT_SECRET_NAMESPACE));
             }
             let handle = match profile.credential_mode {
                 CredentialMode::Shared => profile.shared_secret_handle.clone(),
