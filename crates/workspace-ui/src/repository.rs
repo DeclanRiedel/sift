@@ -13,8 +13,7 @@ use crate::settings::{RepositoryGrouping, RepositorySort, RepositoryView};
 pub(crate) enum RepositorySection {
     Conflicts,
     Staged,
-    Unstaged,
-    Untracked,
+    Changes,
     Added,
     Modified,
     Deleted,
@@ -27,8 +26,7 @@ impl RepositorySection {
         match self {
             Self::Conflicts => "CONFLICTS",
             Self::Staged => "STAGED",
-            Self::Unstaged => "UNSTAGED",
-            Self::Untracked => "UNTRACKED",
+            Self::Changes => "CHANGES",
             Self::Added => "ADDED",
             Self::Modified => "MODIFIED",
             Self::Deleted => "DELETED",
@@ -918,13 +916,6 @@ impl RepositoryProjection {
             })
     }
 
-    pub(crate) fn has_stageable_changes(&self) -> bool {
-        self.status
-            .iter()
-            .flat_map(|status| &status.entries)
-            .any(|entry| !matches!(entry.stage, VcsStageState::Staged | VcsStageState::Conflict))
-    }
-
     fn next_request(&mut self) -> u64 {
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.next_request_id
@@ -945,10 +936,8 @@ impl RepositoryProjection {
         }
         let mut sections = if self.grouping == RepositoryGrouping::Staging {
             vec![
-                (RepositorySection::Conflicts, Vec::new()),
                 (RepositorySection::Staged, Vec::new()),
-                (RepositorySection::Unstaged, Vec::new()),
-                (RepositorySection::Untracked, Vec::new()),
+                (RepositorySection::Changes, Vec::new()),
             ]
         } else {
             vec![
@@ -962,14 +951,10 @@ impl RepositoryProjection {
         };
         for entry in &status.entries {
             let index = if self.grouping == RepositoryGrouping::Staging {
-                if entry.stage == VcsStageState::Conflict || entry.state == VcsFileState::Unmerged {
+                if entry.stage == VcsStageState::Staged {
                     0
-                } else if entry.state == VcsFileState::Untracked {
-                    3
-                } else if entry.stage == VcsStageState::Staged {
-                    1
                 } else {
-                    2
+                    1
                 }
             } else {
                 match entry.state {
@@ -988,11 +973,19 @@ impl RepositoryProjection {
             if entries.is_empty() {
                 continue;
             }
-            entries.sort_by(|left, right| match self.sort {
-                RepositorySort::Path => left.path.0.cmp(&right.path.0),
-                RepositorySort::FileName => file_name(&left.path.0)
-                    .cmp(file_name(&right.path.0))
-                    .then_with(|| left.path.0.cmp(&right.path.0)),
+            entries.sort_by(|left, right| {
+                let left_conflicted =
+                    left.stage == VcsStageState::Conflict || left.state == VcsFileState::Unmerged;
+                let right_conflicted =
+                    right.stage == VcsStageState::Conflict || right.state == VcsFileState::Unmerged;
+                right_conflicted
+                    .cmp(&left_conflicted)
+                    .then_with(|| match self.sort {
+                        RepositorySort::Path => left.path.0.cmp(&right.path.0),
+                        RepositorySort::FileName => file_name(&left.path.0)
+                            .cmp(file_name(&right.path.0))
+                            .then_with(|| left.path.0.cmp(&right.path.0)),
+                    })
             });
             rows.push(RepositoryRow::Section {
                 section,
@@ -1108,30 +1101,20 @@ mod tests {
         assert!(matches!(
             rows[0],
             RepositoryRow::Section {
-                section: RepositorySection::Conflicts,
+                section: RepositorySection::Staged,
                 count: 1
             }
         ));
         assert!(matches!(
             rows[2],
             RepositoryRow::Section {
-                section: RepositorySection::Staged,
-                count: 1
+                section: RepositorySection::Changes,
+                count: 3
             }
         ));
         assert!(matches!(
-            rows[4],
-            RepositoryRow::Section {
-                section: RepositorySection::Unstaged,
-                count: 1
-            }
-        ));
-        assert!(matches!(
-            rows[6],
-            RepositoryRow::Section {
-                section: RepositorySection::Untracked,
-                count: 1
-            }
+            &rows[3],
+            RepositoryRow::Entry { entry, .. } if entry.path.0 == "conflict.sql"
         ));
     }
 

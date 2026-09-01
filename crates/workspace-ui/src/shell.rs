@@ -29530,14 +29530,47 @@ impl WorkspaceShell {
     ) -> AnyElement {
         let colors = cx.theme().colors;
         match row {
-            RepositoryRow::Section { section, count } => div()
-                .id(("repository-section", index))
-                .h(px(26.))
-                .px_3()
-                .flex()
-                .items_center()
-                .child(SectionLabel::new(format!("{} ({count})", section.label())))
-                .into_any_element(),
+            RepositoryRow::Section { section, count } => {
+                let action = match section {
+                    crate::repository::RepositorySection::Staged => Some(
+                        Button::new(("unstage-repository-section", index), "Unstage all")
+                            .tone(ButtonTone::Ghost)
+                            .disabled(self.repository.loading())
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                let paths = shell.repository.unstageable_paths();
+                                shell.set_repository_paths_staged(
+                                    paths,
+                                    RepositoryIndexAction::Unstage,
+                                    cx,
+                                )
+                            })),
+                    ),
+                    crate::repository::RepositorySection::Changes => Some(
+                        Button::new(("stage-repository-section", index), "Stage all")
+                            .tone(ButtonTone::Ghost)
+                            .disabled(self.repository.loading())
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                let paths = shell.repository.stageable_paths();
+                                shell.set_repository_paths_staged(
+                                    paths,
+                                    RepositoryIndexAction::Stage,
+                                    cx,
+                                )
+                            })),
+                    ),
+                    _ => None,
+                };
+                div()
+                    .id(("repository-section", index))
+                    .h(px(28.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(SectionLabel::new(format!("{} ({count})", section.label())))
+                    .children(action)
+                    .into_any_element()
+            }
             RepositoryRow::Folder { path, depth } => div()
                 .id(("repository-folder", index))
                 .h(cx.theme().metrics.row_height)
@@ -29563,6 +29596,15 @@ impl WorkspaceShell {
                 let partial = entry.stage == sift_protocol::VcsStageState::PartiallyStaged;
                 let pending = self.repository.is_path_pending(&entry.path);
                 let diff_stats = self.repository.diff_stats(&entry.path);
+                let row_group = format!("repository-row-{index}");
+                let file_name = entry.path.0.rsplit('/').next().unwrap_or(&entry.path.0);
+                let parent_path = entry
+                    .path
+                    .0
+                    .strip_suffix(file_name)
+                    .map(|path| path.trim_end_matches('/'))
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_owned);
                 let state_icon =
                     match entry.state {
                         sift_protocol::VcsFileState::Added
@@ -29583,6 +29625,7 @@ impl WorkspaceShell {
                     .mx_2()
                     .h(cx.theme().metrics.row_height)
                     .px_2()
+                    .group(row_group.clone())
                     .flex()
                     .items_center()
                     .gap_2()
@@ -29610,27 +29653,30 @@ impl WorkspaceShell {
                         },
                         11.,
                     )))
-                    .child(div().flex_1().min_w_0().truncate().child(entry.path.0))
-                    .children((!entry.affected_objects.is_empty()).then(|| {
+                    .child(
                         div()
-                            .max_w(px(180.))
-                            .truncate()
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .child(entry.affected_objects.join(", "))
-                    }))
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .overflow_hidden()
+                            .child(div().flex_none().child(file_name.to_owned()))
+                            .children(parent_path.map(|path| {
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(path)
+                            })),
+                    )
                     .children((entry.validation_errors > 0).then(|| {
                         div()
                             .text_xs()
                             .text_color(colors.warning)
-                            .child(format!("{} validation error(s)", entry.validation_errors))
+                            .child(format!("!{}", entry.validation_errors))
                     }))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .child(format!("{:?}", entry.state)),
-                    )
                     .children(diff_stats.map(|(additions, deletions)| {
                         div()
                             .text_xs()
@@ -29638,103 +29684,117 @@ impl WorkspaceShell {
                             .child(format!("+{additions} −{deletions}"))
                     }))
                     .child(
-                        IconButton::new(
-                            ("open-repository-diff", index),
-                            if conflicted {
-                                IconName::Warning
-                            } else {
-                                IconName::View
-                            },
-                            if conflicted {
-                                "Resolve conflict"
-                            } else {
-                                "Open file diff"
-                            },
-                        )
-                        .square(px(22.))
-                        .icon_size(11.)
-                        .tooltip(if conflicted {
-                            "Resolve conflict"
-                        } else {
-                            "Open file diff"
-                        })
-                        .disabled(self.repository.diff_loading())
-                        .on_click(cx.listener(move |shell, _, _, cx| {
-                            shell.repository.select_path(diff_path.clone());
-                            if conflicted {
-                                shell.request_selected_repository_conflict(cx)
-                            } else {
-                                shell.request_selected_repository_diff(cx)
-                            }
-                        })),
-                    )
-                    .child(
-                        Button::new(
-                            ("toggle-repository-path", index),
-                            if pending {
-                                "Working…"
-                            } else if partial {
-                                "Stage rest"
-                            } else if staged {
-                                "Unstage"
-                            } else {
-                                "Stage"
-                            },
-                        )
-                        .tone(ButtonTone::Ghost)
-                        .disabled(self.repository.loading() || conflicted)
-                        .on_click(cx.listener(move |shell, _, _, cx| {
-                            let action = if staged {
-                                RepositoryIndexAction::Unstage
-                            } else {
-                                RepositoryIndexAction::Stage
-                            };
-                            shell.set_repository_paths_staged(vec![path.clone()], action, cx)
-                        })),
-                    )
-                    .when(selected, |row| {
-                        row.child(
-                            div()
-                                .relative()
-                                .flex_none()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .child(
-                                    IconButton::new(
-                                        ("repository-actions", index),
-                                        IconName::Menu,
-                                        "Changed-file actions",
-                                    )
-                                    .square(px(22.))
-                                    .icon_size(11.)
-                                    .tooltip("Changed-file actions")
-                                    .on_click(cx.listener(
-                                        move |shell, _, _, cx| {
-                                            cx.stop_propagation();
-                                            shell.repository_row_menu = if menu_open {
-                                                None
-                                            } else {
-                                                Some(menu_trigger_path.clone())
-                                            };
-                                            cx.notify();
-                                        },
-                                    )),
+                        div()
+                            .relative()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .when(!selected, |controls| {
+                                controls
+                                    .invisible()
+                                    .group_hover(row_group, |style| style.visible())
+                            })
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                IconButton::new(
+                                    ("open-repository-diff", index),
+                                    if conflicted {
+                                        IconName::Warning
+                                    } else {
+                                        IconName::View
+                                    },
+                                    if conflicted {
+                                        "Resolve conflict"
+                                    } else {
+                                        "Open file diff"
+                                    },
                                 )
-                                .when(menu_open, |trigger| {
-                                    trigger.child(
-                                        div().absolute().bottom_0().right_0().size_0().child(
-                                            deferred(anchored().anchor(Anchor::TopRight).child(
-                                                shell_repository_row_menu(
-                                                    menu_entry.clone(),
-                                                    colors,
-                                                    cx,
-                                                ),
-                                            ))
-                                            .with_priority(2),
-                                        ),
-                                    )
-                                }),
-                        )
-                    })
+                                .square(px(22.))
+                                .icon_size(11.)
+                                .tooltip(if conflicted {
+                                    "Resolve conflict"
+                                } else {
+                                    "Open file diff"
+                                })
+                                .disabled(self.repository.diff_loading())
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        shell.repository.select_path(diff_path.clone());
+                                        if conflicted {
+                                            shell.request_selected_repository_conflict(cx)
+                                        } else {
+                                            shell.request_selected_repository_diff(cx)
+                                        }
+                                    },
+                                )),
+                            )
+                            .child(
+                                Button::new(
+                                    ("toggle-repository-path", index),
+                                    if pending {
+                                        "Working…"
+                                    } else if partial {
+                                        "Stage rest"
+                                    } else if staged {
+                                        "Unstage"
+                                    } else {
+                                        "Stage"
+                                    },
+                                )
+                                .tone(ButtonTone::Ghost)
+                                .disabled(self.repository.loading() || conflicted)
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        let action = if staged {
+                                            RepositoryIndexAction::Unstage
+                                        } else {
+                                            RepositoryIndexAction::Stage
+                                        };
+                                        shell.set_repository_paths_staged(
+                                            vec![path.clone()],
+                                            action,
+                                            cx,
+                                        )
+                                    },
+                                )),
+                            )
+                            .child(
+                                IconButton::new(
+                                    ("repository-actions", index),
+                                    IconName::Menu,
+                                    "Changed-file actions",
+                                )
+                                .square(px(22.))
+                                .icon_size(11.)
+                                .tooltip("Changed-file actions")
+                                .on_click(cx.listener(
+                                    move |shell, _, _, cx| {
+                                        cx.stop_propagation();
+                                        shell.repository_row_menu = if menu_open {
+                                            None
+                                        } else {
+                                            Some(menu_trigger_path.clone())
+                                        };
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .when(menu_open, |trigger| {
+                                trigger.child(
+                                    div().absolute().bottom_0().right_0().size_0().child(
+                                        deferred(anchored().anchor(Anchor::TopRight).child(
+                                            shell_repository_row_menu(
+                                                menu_entry.clone(),
+                                                colors,
+                                                cx,
+                                            ),
+                                        ))
+                                        .with_priority(2),
+                                    ),
+                                )
+                            }),
+                    )
                     .into_any_element()
             }
         }
@@ -30202,8 +30262,6 @@ impl WorkspaceShell {
                             status.entries.len()
                         )
                     });
-                    let has_stageable = self.repository.has_stageable_changes();
-                    let has_unstageable = self.repository.has_staged_changes();
                     let commit_message = self.repository_commit_input.read(cx).text().to_owned();
                     let subject_length = commit_message.lines().next().unwrap_or("").chars().count();
                     let subject_limit = self.settings.repository.commit_subject_limit.max(1);
@@ -30663,51 +30721,6 @@ impl WorkspaceShell {
                                     .children(recovery_notice.map(|notice| {
                                         div().text_xs().text_color(colors.warning).child(notice)
                                     })),
-                            )
-                        })
-                        .when(self.repository.status().is_some(), |panel| {
-                            panel.child(
-                                div()
-                                    .border_t_1()
-                                    .border_color(colors.border)
-                                    .p_2()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        Button::new(
-                                            "stage-all-repository-paths",
-                                            "Stage all (incl. untracked)",
-                                        )
-                                        .tone(ButtonTone::Ghost)
-                                        .disabled(self.repository.loading() || !has_stageable)
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            let paths = shell.repository.stageable_paths();
-                                            shell.set_repository_paths_staged(
-                                                paths,
-                                                RepositoryIndexAction::Stage,
-                                                cx,
-                                            )
-                                        })),
-                                    )
-                                    .child(
-                                        Button::new(
-                                            "unstage-all-repository-paths",
-                                            "Unstage all",
-                                        )
-                                        .tone(ButtonTone::Ghost)
-                                        .disabled(
-                                            self.repository.loading() || !has_unstageable,
-                                        )
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            let paths = shell.repository.unstageable_paths();
-                                            shell.set_repository_paths_staged(
-                                                paths,
-                                                RepositoryIndexAction::Unstage,
-                                                cx,
-                                            )
-                                        })),
-                                    ),
                             )
                         })
                 },
