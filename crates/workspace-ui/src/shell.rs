@@ -52535,7 +52535,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn new_query_command_and_footer_open_numbered_blank_tabs(cx: &mut TestAppContext) {
+    fn new_query_command_opens_numbered_blank_tabs_without_footer_action(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -52554,21 +52554,7 @@ mod tests {
         });
 
         cx.run_until_parked();
-        let footer = cx
-            .debug_bounds("footer-new-query")
-            .expect("New Query footer");
-        cx.simulate_click(footer.center(), Modifiers::default());
-        workspace.read_with(&cx, |shell, cx| {
-            assert_eq!(
-                shell.panes[shell.active_pane]
-                    .read(cx)
-                    .active_item()
-                    .map(|item| item.title.as_str()),
-                Some("query-2.sql")
-            );
-            assert!(shell.modal.is_none());
-            assert!(!shell.bottom_dock.presentation.open);
-        });
+        assert!(cx.debug_bounds("footer-new-query").is_none());
         assert_eq!(
             CommandRegistry::definition(CommandId::NewQuery).language,
             "<leader> q n"

@@ -500,19 +500,6 @@ pub(super) fn render_status_bar(
                 })
                 .child(separator())
                 .child(
-                    div().debug_selector(|| "footer-new-query".into()).child(
-                        button(
-                            "footer-new-query",
-                            IconName::Add,
-                            "New query · <leader> q n".into(),
-                            false,
-                            None,
-                            false,
-                        )
-                        .on_click(cx.listener(|shell, _, window, cx| shell.new_query(window, cx))),
-                    ),
-                )
-                .child(
                     button(
                         "footer-monitor",
                         IconName::Activity,

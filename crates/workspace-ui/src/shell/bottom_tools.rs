@@ -11,9 +11,7 @@ pub(super) fn render_bottom_panel(
     let theme = cx.theme();
     let colors = theme.colors;
     let body = match shell.active_bottom_tool {
-        BottomTool::Console => Some(
-            "Use New Query in the footer or press <leader> q n to open a query tab.".to_owned(),
-        ),
+        BottomTool::Console => Some("Press <leader> q n to open a query tab.".to_owned()),
         BottomTool::Monitor => None,
         BottomTool::Automations => None,
     };
