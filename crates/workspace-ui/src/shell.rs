@@ -695,6 +695,7 @@ impl CommandPaletteMode {
 #[derive(Clone)]
 enum CommandPaletteItem {
     Command(CommandSpec),
+    Line(usize),
     WorkspaceFile(sift_protocol::WorkspaceNodeId, String),
     Schema(sift_protocol::SearchHit),
     Data(sift_protocol::DataSearchHit),
@@ -21376,6 +21377,37 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn go_to_context_line(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let origin = self.command_palette_origin;
+        self.dismiss_modal(&DismissModal, window, cx);
+        if origin == WorkspaceSurface::Results {
+            let Some(results) = self.focused_pane_results(cx) else {
+                self.show_toast("Active tab has no data rows".into(), cx);
+                return;
+            };
+            let found = results.update(cx, |results, cx| results.go_to_row_number(line, cx));
+            if found {
+                self.focused_surface = WorkspaceSurface::Results;
+                results.focus_handle(cx).focus(window, cx);
+            } else {
+                self.show_toast(format!("Result row {line} is not loaded or visible"), cx);
+            }
+            return;
+        }
+
+        let Some(editor) = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            pane.active_item().and_then(|item| pane.editor(item.id))
+        }) else {
+            self.show_toast("Active panel has no editor".into(), cx);
+            return;
+        };
+        if editor.update(cx, |editor, cx| editor.go_to_line(line, cx)) {
+            self.focused_surface = WorkspaceSurface::Editor;
+            editor.focus_handle(cx).focus(window, cx);
+        }
+    }
+
     /// Restore the user's selected pane surface after temporary UI takes
     /// focus. Results stay active until Focus Editor is requested explicitly.
     fn restore_active_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -25008,6 +25040,16 @@ impl WorkspaceShell {
         let input = self.query_input.read(cx).text();
         let (mode, query) = CommandPaletteMode::parse(input);
         let query = query.trim().to_lowercase();
+        if mode == CommandPaletteMode::Commands {
+            if let Ok(line) = query.parse::<usize>() {
+                if line > 0 {
+                    return vec![CommandPaletteMatch {
+                        item: CommandPaletteItem::Line(line),
+                        ranges: Vec::new(),
+                    }];
+                }
+            }
+        }
         let mut items: Vec<CommandPaletteMatch> = match mode {
             CommandPaletteMode::Commands => self
                 .filtered_commands(cx)
@@ -25233,6 +25275,7 @@ impl WorkspaceShell {
             CommandPaletteItem::Command(command) => {
                 format!("command:{instance}:{}", command.id.as_str())
             }
+            CommandPaletteItem::Line(line) => format!("line:{instance}:{line}"),
             CommandPaletteItem::WorkspaceFile(node_id, _) => format!(
                 "file:{instance}:{}:{}",
                 self.selected_workspace_id.unwrap_or_default(),
@@ -25286,11 +25329,14 @@ impl WorkspaceShell {
         if matches!(&item, CommandPaletteItem::Command(command) if !command.enabled()) {
             return;
         }
-        self.record_command_palette_recent(&item, cx);
+        if !matches!(item, CommandPaletteItem::Line(_)) {
+            self.record_command_palette_recent(&item, cx);
+        }
         match item {
             CommandPaletteItem::Command(command) => {
                 self.run_command(command.id, window, cx);
             }
+            CommandPaletteItem::Line(line) => self.go_to_context_line(line, window, cx),
             CommandPaletteItem::WorkspaceFile(node_id, _) => {
                 self.dismiss_modal(&DismissModal, window, cx);
                 self.open_workspace_file(node_id, window, cx);
@@ -32269,6 +32315,16 @@ impl WorkspaceShell {
                                                             }
                                                         });
                                                         (command.label.to_owned(), right, command.enabled(), true)
+                                                    }
+                                                    CommandPaletteItem::Line(line) => {
+                                                        let target = if shell.command_palette_origin
+                                                            == WorkspaceSurface::Results
+                                                        {
+                                                            "ROW"
+                                                        } else {
+                                                            "LINE"
+                                                        };
+                                                        (format!("Go to {} {line}", target.to_lowercase()), target.into(), true, false)
                                                     }
                                                     CommandPaletteItem::WorkspaceFile(_, path) => (path, "FILE".into(), true, false),
                                                     CommandPaletteItem::Schema(hit) => {
@@ -42978,6 +43034,68 @@ mod tests {
                 "the Vim :w spelling must resolve exactly to contextual save"
             );
         });
+    }
+
+    #[gpui::test]
+    fn numeric_palette_command_jumps_in_editor_and_data_contexts(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (editor, results) = workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            (
+                pane.editor(item.id).unwrap(),
+                pane.results.get(&item.id).unwrap().clone(),
+            )
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.replace_text_from_owner("one\ntwo\nthree", cx)
+            });
+            shell.focused_surface = WorkspaceSurface::Editor;
+            shell.open_command_palette_with_query("3", window, cx);
+            assert!(matches!(
+                shell.command_palette_items(cx).as_slice(),
+                [CommandPaletteMatch {
+                    item: CommandPaletteItem::Line(3),
+                    ..
+                }]
+            ));
+            shell.palette_confirm(&PaletteConfirm, window, cx);
+        });
+        assert_eq!(editor.read_with(&cx, |editor, _| editor.cursor_offset()), 8);
+
+        results.update(&mut cx, |results, cx| {
+            results.set_state(
+                ResultState::Ready(crate::results::ResultData {
+                    columns: vec![crate::results::ResultColumn {
+                        name: "id".into(),
+                        type_label: "int64".into(),
+                        nullable: false,
+                    }],
+                    rows: (1..=3)
+                        .map(|value| {
+                            sift_protocol::Row::new(vec![sift_protocol::Value::Int64(value)])
+                        })
+                        .collect(),
+                    ..Default::default()
+                }),
+                cx,
+            );
+        });
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.focus_results(window, cx);
+            shell.open_command_palette_with_query("2", window, cx);
+            shell.palette_confirm(&PaletteConfirm, window, cx);
+        });
+        assert_eq!(
+            results.read_with(&cx, |results, _| results.selected_cell()),
+            Some((1, 0))
+        );
+        assert!(workspace.read_with(&cx, |shell, _| shell.focused_surface
+            == WorkspaceSurface::Results));
     }
 
     #[gpui::test]

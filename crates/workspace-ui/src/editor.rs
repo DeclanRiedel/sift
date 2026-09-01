@@ -1200,6 +1200,18 @@ impl QueryEditor {
         self.selection_changed(cx);
     }
 
+    pub fn go_to_line(&mut self, line: usize, cx: &mut Context<Self>) -> bool {
+        if line == 0 {
+            return false;
+        }
+        let starts = self.document.line_starts();
+        let Some(offset) = starts.get(line.saturating_sub(1).min(starts.len() - 1)) else {
+            return false;
+        };
+        self.set_cursor_offset(*offset, cx);
+        true
+    }
+
     /// Monotonic identity of the current buffer contents. Every semantic
     /// request is tagged with it and every answer is checked against it, so a
     /// slow server reply can never be applied to text the user has since

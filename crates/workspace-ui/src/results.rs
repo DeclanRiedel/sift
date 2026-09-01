@@ -307,6 +307,18 @@ struct ColumnResizeDrag {
 }
 
 impl GridSelection {
+    fn focused_cell(self) -> Option<(usize, usize)> {
+        match self {
+            Self::Cell { row, column } => Some((row, column)),
+            Self::Range {
+                focus_row,
+                focus_column,
+                ..
+            } => Some((focus_row, focus_column)),
+            Self::Row(_) | Self::Column(_) | Self::All => None,
+        }
+    }
+
     fn highlights_row(self, row: usize) -> bool {
         matches!(
             self,
@@ -1030,6 +1042,39 @@ impl ResultsView {
 
     pub(crate) fn focus_data(&mut self, cx: &mut Context<Self>) {
         self.select_tab(ResultTab::Data, cx);
+    }
+
+    pub(crate) fn go_to_row_number(&mut self, row_number: usize, cx: &mut Context<Self>) -> bool {
+        let Some(source_row) = row_number
+            .checked_sub(1)
+            .and_then(|row| row.checked_sub(self.window_start))
+        else {
+            return false;
+        };
+        let Some(display_row) = self.display_position(source_row) else {
+            return false;
+        };
+        let visible_columns = self.visible_column_indices();
+        let Some(column) = self
+            .selected
+            .and_then(GridSelection::focused_cell)
+            .map(|(_, column)| column)
+            .filter(|column| visible_columns.contains(column))
+            .or_else(|| visible_columns.first().copied())
+        else {
+            return false;
+        };
+        self.tab = ResultTab::Data;
+        self.set_selection(
+            GridSelection::Cell {
+                row: source_row,
+                column,
+            },
+            cx,
+        );
+        self.row_scroll_handle
+            .scroll_to_item(display_row, ScrollStrategy::Center);
+        true
     }
 
     pub fn set_large_view(&mut self, active: bool, cx: &mut Context<Self>) {
