@@ -48738,6 +48738,10 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
 
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("footer-error-count").is_none());
+        assert!(cx.debug_bounds("footer-warning-count").is_none());
+
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.route_result(1, ResultState::Failed("bad column".into()), cx);
             assert_eq!(shell.global_problems.len(), 1);
@@ -48768,6 +48772,9 @@ mod tests {
                 "[ERROR] query.sql\nbad column"
             );
         });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("footer-error-count").is_some());
+        assert!(cx.debug_bounds("footer-warning-count").is_none());
 
         let problems_editor = workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
@@ -48814,6 +48821,9 @@ mod tests {
                 "No problems."
             );
         });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("footer-error-count").is_none());
+        assert!(cx.debug_bounds("footer-warning-count").is_none());
     }
 
     #[gpui::test]

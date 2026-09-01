@@ -310,18 +310,22 @@ pub(super) fn render_status_bar(
                             },
                             14.,
                         ))
-                        .child(
+                        .children((error_count > 0).then(|| {
                             div()
+                                .id("footer-error-count")
+                                .debug_selector(|| "footer-error-count".into())
                                 .font_family("monospace")
                                 .text_color(colors.danger)
-                                .child(error_count.to_string()),
-                        )
-                        .child(
+                                .child(error_count.to_string())
+                        }))
+                        .children((warning_count > 0).then(|| {
                             div()
+                                .id("footer-warning-count")
+                                .debug_selector(|| "footer-warning-count".into())
                                 .font_family("monospace")
                                 .text_color(colors.warning)
-                                .child(warning_count.to_string()),
-                        ),
+                                .child(warning_count.to_string())
+                        })),
                 )
                 .children((problem_count > 0).then(|| {
                     button(
