@@ -15544,12 +15544,21 @@ impl WorkspaceShell {
                     .contains(&self.database_object_bookmark(&target));
                 base(depth)
                     .id(("schema-object-row", row_index))
+                    .debug_selector(|| "database-object-row".into())
                     .text_color(if can_preview {
                         colors.text
                     } else {
                         colors.muted_text
                     })
                     .hover(|row| row.bg(colors.hovered_surface))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |shell, _, _, cx| {
+                            cx.stop_propagation();
+                            shell.set_connection_selection(nav_index, cx);
+                            shell.peek_selected_schema_object(cx);
+                        }),
+                    )
                     .on_click(cx.listener(move |shell, _, window, cx| {
                         shell.set_connection_selection(nav_index, cx);
                         shell.open_schema_search_target(open_target.clone(), window, cx)
@@ -15566,16 +15575,6 @@ impl WorkspaceShell {
                             .child(icon(icon_name, icon_color, 14.))
                             .child(div().min_w_0().truncate().child(object_name)),
                     )
-                    .when(selected, |row| {
-                        row.child(
-                            Button::new(("peek-database-object", row_index), "Peek")
-                                .tone(ButtonTone::Ghost)
-                                .on_click(cx.listener(move |shell, _, _, cx| {
-                                    cx.stop_propagation();
-                                    shell.peek_selected_schema_object(cx)
-                                })),
-                        )
-                    })
                     .child(
                         div()
                             .id(("favorite-database-object", row_index))
@@ -51822,7 +51821,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let item_count = workspace.update(&mut cx, |shell, cx| {
+        let item_count = workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.lifecycle.tenants = vec![crate::TenantNavEntry {
                 id: sift_api_types::TenantId(1),
@@ -51869,15 +51868,27 @@ mod tests {
                 ObjectGroupKind::Tables,
             ));
             shell.invalidate_connection_projection();
-            shell.connection_nav_selected = shell
+            let object_nav_index = shell
                 .visible_connection_items()
                 .iter()
                 .position(|item| matches!(item.action, ConnectionTreeAction::Object(_)))
                 .unwrap();
+            shell.connection_nav_selected = object_nav_index;
+            shell.run_command(CommandId::FocusConnections, window, cx);
             let item_count = shell.panes[shell.active_pane].read(cx).items.len();
-            shell.peek_selected_schema_object(cx);
             item_count
         });
+        cx.run_until_parked();
+        while receiver.try_recv().is_ok() {}
+        assert!(cx.debug_bounds("peek-database-object").is_none());
+        let object_row = cx
+            .debug_bounds("database-object-row")
+            .expect("database object row");
+        cx.simulate_mouse_down(
+            object_row.center(),
+            MouseButton::Right,
+            Modifiers::default(),
+        );
         let item_id = match receiver.try_recv().unwrap() {
             ExecutorCommand::LoadObjectDdl { item_id, source } => {
                 assert_eq!(source.object, "jobs");
