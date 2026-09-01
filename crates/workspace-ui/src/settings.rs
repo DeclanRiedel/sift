@@ -36,6 +36,12 @@ pub struct AppearanceSettings {
     pub theme: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DataSettings {
+    pub selection_aggregates: bool,
+}
+
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
@@ -250,6 +256,7 @@ pub struct UserSettings {
     pub editor: EditorSettings,
     pub appearance: AppearanceSettings,
     pub keyboard: KeyboardSettings,
+    pub data: DataSettings,
     pub repository: RepositorySettings,
 }
 
@@ -260,6 +267,7 @@ impl Default for UserSettings {
             editor: EditorSettings::default(),
             appearance: AppearanceSettings::default(),
             keyboard: KeyboardSettings::default(),
+            data: DataSettings::default(),
             repository: RepositorySettings::default(),
         }
     }
@@ -582,6 +590,31 @@ impl SettingsStore {
         Ok(settings)
     }
 
+    /// Update result selection aggregates while preserving hand-written settings.
+    pub fn save_selection_aggregates(&self, visible: bool) -> Result<UserSettings, String> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "settings write lock poisoned".to_string())?;
+        let source = std::fs::read_to_string(&self.path)
+            .map_err(|error| format!("reading {} failed: {error}", self.path.display()))?;
+        let mut document = source
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("settings.toml is invalid: {error}"))?;
+        let decor = document["data"]["selection_aggregates"]
+            .as_value()
+            .map(|value| value.decor().clone());
+        let mut visible_value = Value::from(visible);
+        if let Some(decor) = decor {
+            *visible_value.decor_mut() = decor;
+        }
+        document["data"]["selection_aggregates"] = Item::Value(visible_value);
+        let updated = document.to_string();
+        let settings = UserSettings::decode(&updated)?;
+        self.write_source(&updated)?;
+        Ok(settings)
+    }
+
     /// Update the selected theme while preserving hand-written settings.
     pub fn save_theme(&self, theme: &str) -> Result<UserSettings, String> {
         self.load_theme(theme)?;
@@ -697,6 +730,7 @@ mod tests {
         assert!(source.contains("default_mode = \"vim\""));
         assert!(source.contains("profile = \"vim\""));
         assert!(source.contains("theme = \"ayu-dark\""));
+        assert!(source.contains("selection_aggregates = false"));
         assert_eq!(UserSettings::decode(&source).unwrap(), settings);
     }
 
@@ -741,6 +775,22 @@ mod tests {
             let settings = store.save_keyboard_profile(profile).unwrap();
             assert_eq!(settings.keyboard.profile, profile);
         }
+    }
+
+    #[test]
+    fn selection_aggregate_update_preserves_unrelated_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.toml"));
+        store.save(&UserSettings::default()).unwrap();
+
+        let settings = store.save_selection_aggregates(true).unwrap();
+
+        assert!(settings.data.selection_aggregates);
+        assert_eq!(settings.appearance.theme, "ayu-dark");
+        assert!(store
+            .read_text()
+            .unwrap()
+            .contains("selection_aggregates = true"));
     }
 
     #[test]

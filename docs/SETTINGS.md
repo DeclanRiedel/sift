@@ -15,11 +15,48 @@ theme = "ayu-dark"
 
 [keyboard]
 profile = "vim" # "vim", "hybrid", or "standard"
+
+[data]
+selection_aggregates = false
+
+[repository]
+grouping = "staging"
+sort = "path"
+view = "flat"
+primary_action = "open_file"
+commit_subject_limit = 72
+commit_sign_off = false
+# commit_author_name = "Ada Lovelace"
+# commit_author_email = "ada@example.com"
 ```
 
 The keyboard profile controls IDE commands independently from the editor's
 default mode. Vim enables the leader language, Standard enables conventional
 IDE shortcuts, and Hybrid enables both. Vim is the default profile.
+
+## Complete settings reference
+
+These are all supported `settings.toml` keys. Omitted sections and keys use the
+listed defaults.
+
+| Key | Values | Default | Effect |
+| --- | --- | --- | --- |
+| `version` | `1` | `1` | Settings schema version. |
+| `editor.default_mode` | `vim`, `standard` | `standard` | Initial mode for new editable tabs. |
+| `appearance.theme` | `ayu-dark`, `light`, or a custom theme id | `ayu-dark` | Active color theme. |
+| `keyboard.profile` | `vim`, `hybrid`, `standard` | `vim` | Enabled IDE shortcut language. |
+| `data.selection_aggregates` | Boolean | `false` | Shows sum and average for numeric Data-tab selections. Cell count remains visible when off. |
+| `repository.grouping` | `staging`, `file_state` | `staging` | Groups source-control changes by staging state or file state. |
+| `repository.sort` | `path`, `file_name` | `path` | Sorts source-control paths by full path or file name. |
+| `repository.view` | `flat`, `tree` | `flat` | Displays repository changes as a flat list or folder tree. |
+| `repository.primary_action` | `open_file`, `open_diff` | `open_file` | Chooses the default action when activating a changed path. |
+| `repository.commit_subject_limit` | Positive integer | `72` | Subject-length guide; values below one behave as one. |
+| `repository.commit_author_name` | String; omit for none | omitted | Explicit commit author name. |
+| `repository.commit_author_email` | String; omit for none | omitted | Explicit commit author email. |
+| `repository.commit_sign_off` | Boolean | `false` | Adds a `Signed-off-by` trailer when absent. |
+
+The in-app Settings panel exposes the common Vim, appearance, and Data
+aggregate toggles. **Open settings.toml** exposes every option above.
 
 IDE leader bindings live beside it in `keymaps.json`:
 

@@ -7638,6 +7638,16 @@ impl WorkspaceShell {
             .into_iter()
             .map(|pane| cx.new(|cx| Pane::from_presentation(pane, vim_mode_default, cx)))
             .collect::<Vec<_>>();
+        let selection_aggregates = settings.data.selection_aggregates;
+        let restored_results = panes
+            .iter()
+            .flat_map(|pane| pane.read(cx).results.values().cloned().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        for results in restored_results {
+            results.update(cx, |results, cx| {
+                results.set_selection_aggregates_visible(selection_aggregates, cx)
+            });
+        }
         for pane in &panes {
             cx.subscribe_in(pane, window, Self::on_pane_event).detach();
         }
@@ -8770,7 +8780,13 @@ impl WorkspaceShell {
                     .remove(instance_id)
                     .unwrap_or_else(|| PresentationState::default().workspace);
                 presentation.instance_id = Some(instance_id.to_owned());
-                Self::session_from_presentation(presentation, self.vim_mode_default(), window, cx)
+                Self::session_from_presentation(
+                    presentation,
+                    self.vim_mode_default(),
+                    self.settings.data.selection_aggregates,
+                    window,
+                    cx,
+                )
             });
 
         let outgoing = WorkspaceSession {
@@ -8859,6 +8875,7 @@ impl WorkspaceShell {
                 + 1,
         );
         self.sync_notifications_editor(cx);
+        self.sync_selection_aggregate_setting(cx);
         self.sync_pane_layout_view(cx);
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.read(cx).active_focus_handle(cx).focus(window, cx);
@@ -8868,6 +8885,7 @@ impl WorkspaceShell {
     fn session_from_presentation(
         workspace: WorkspacePresentation,
         vim_mode_default: bool,
+        selection_aggregates: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> WorkspaceSession {
@@ -8881,6 +8899,15 @@ impl WorkspaceShell {
             .into_iter()
             .map(|pane| cx.new(|cx| Pane::from_presentation(pane, vim_mode_default, cx)))
             .collect::<Vec<_>>();
+        let restored_results = panes
+            .iter()
+            .flat_map(|pane| pane.read(cx).results.values().cloned().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        for results in restored_results {
+            results.update(cx, |results, cx| {
+                results.set_selection_aggregates_visible(selection_aggregates, cx)
+            });
+        }
         for pane in &panes {
             cx.subscribe_in(pane, window, Self::on_pane_event).detach();
         }
@@ -14666,7 +14693,7 @@ impl WorkspaceShell {
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&sql), cx).with_keymap(keymap)
         });
-        let results = cx.new(ResultsView::new);
+        let results = self.new_results_view(cx);
         results.update(cx, |results, cx| results.set_pending(cx));
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.update(cx, |pane, cx| {
@@ -14752,7 +14779,7 @@ impl WorkspaceShell {
             )
             .with_keymap(keymap)
         });
-        let results = cx.new(ResultsView::new);
+        let results = self.new_results_view(cx);
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.update(cx, |pane, cx| {
                 pane.open_query(
@@ -14833,7 +14860,7 @@ impl WorkspaceShell {
             EditorKeymap::Standard
         };
         let editor = cx.new(|cx| QueryEditor::new(query_document, cx).with_keymap(keymap));
-        let results = cx.new(ResultsView::new);
+        let results = self.new_results_view(cx);
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.update(cx, |pane, cx| {
                 pane.open_query(
@@ -18755,7 +18782,7 @@ impl WorkspaceShell {
             QueryEditor::new(QueryDocument::with_random_peer(&query.sql_text), cx)
                 .with_keymap(keymap)
         });
-        let results = cx.new(ResultsView::new);
+        let results = self.new_results_view(cx);
         let source = SavedQuerySource {
             instance_id: self
                 .selected_instance_id
@@ -18811,7 +18838,7 @@ impl WorkspaceShell {
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(""), cx).with_keymap(EditorKeymap::Vim)
         });
-        let results = cx.new(ResultsView::new);
+        let results = self.new_results_view(cx);
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.update(cx, |pane, cx| {
                 pane.open_query(
@@ -20425,6 +20452,36 @@ impl WorkspaceShell {
             };
         }
         self.settings = settings;
+        cx.notify();
+    }
+
+    fn toggle_selection_aggregates(&mut self, cx: &mut Context<Self>) {
+        let settings_is_open = self.settings_item.is_some_and(|item_id| {
+            self.panes
+                .iter()
+                .any(|pane| pane.read(cx).contains_item(item_id))
+        });
+        if settings_is_open {
+            self.show_toast(
+                "Save or close settings.toml before changing this preference here".into(),
+                cx,
+            );
+            return;
+        }
+        let visible = !self.settings.data.selection_aggregates;
+        let mut settings = self.settings.clone();
+        settings.data.selection_aggregates = visible;
+        if let Some(store) = &self.settings_store {
+            settings = match store.save_selection_aggregates(visible) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    self.show_toast(error, cx);
+                    return;
+                }
+            };
+        }
+        self.settings = settings;
+        self.sync_selection_aggregate_setting(cx);
         cx.notify();
     }
 
@@ -22297,6 +22354,7 @@ impl WorkspaceShell {
                         sift_ui::set_theme(theme, cx);
                         self.settings = settings;
                         self.sync_editor_keymaps_to_profile(cx);
+                        self.sync_selection_aggregate_setting(cx);
                         if let Some(pane) = self.panes.get(self.active_pane) {
                             pane.update(cx, |pane, cx| pane.mark_clean(item_id, cx));
                         }
@@ -28014,6 +28072,28 @@ impl WorkspaceShell {
         self.panes
             .get(self.active_pane)
             .and_then(|pane| pane.read(cx).active_results())
+    }
+
+    fn new_results_view(&self, cx: &mut Context<Self>) -> Entity<ResultsView> {
+        let view = cx.new(ResultsView::new);
+        view.update(cx, |view, cx| {
+            view.set_selection_aggregates_visible(self.settings.data.selection_aggregates, cx)
+        });
+        view
+    }
+
+    fn sync_selection_aggregate_setting(&self, cx: &mut Context<Self>) {
+        let visible = self.settings.data.selection_aggregates;
+        let results = self
+            .panes
+            .iter()
+            .flat_map(|pane| pane.read(cx).results.values().cloned().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        for result in results {
+            result.update(cx, |result, cx| {
+                result.set_selection_aggregates_visible(visible, cx)
+            });
+        }
     }
 
     fn focused_pane_results_item(&self, cx: &App) -> Option<(u64, Entity<ResultsView>)> {
@@ -34033,6 +34113,17 @@ impl WorkspaceShell {
                             dark_theme,
                             Box::new(cx.listener(
                                 |shell: &mut WorkspaceShell, _, _, cx| shell.toggle_theme(cx),
+                            )) as sift_ui::ClickHandler,
+                        ))
+                        .child(toggle_row(
+                            "settings-selection-aggregates",
+                            "Selection sum and average",
+                            "Show sum and average for numeric selections in Data tabs.",
+                            self.settings.data.selection_aggregates,
+                            Box::new(cx.listener(
+                                |shell: &mut WorkspaceShell, _, _, cx| {
+                                    shell.toggle_selection_aggregates(cx)
+                                },
                             )) as sift_ui::ClickHandler,
                         ))
                         .child(
@@ -42931,12 +43022,17 @@ mod tests {
             cx.debug_bounds("open-settings-file").is_some(),
             "centered settings modal must expose manual settings.toml editing"
         );
+        let aggregates = cx
+            .debug_bounds("settings-selection-aggregates")
+            .expect("settings modal must expose Data selection aggregates");
+        cx.simulate_click(aggregates.center(), Modifiers::default());
         workspace.update(&mut cx, |workspace, cx| {
             workspace.toggle_vim_mode_default(cx)
         });
         workspace.read_with(&cx, |workspace, cx| {
             assert_eq!(workspace.modal(), Some(&Modal::Settings));
             assert_eq!(workspace.settings.editor.default_mode, EditorMode::Standard);
+            assert!(workspace.settings.data.selection_aggregates);
             assert!(workspace.vim_mode_default());
             assert!(!workspace.snapshot(cx).legacy_vim_mode_default);
         });

@@ -24,8 +24,8 @@ pub use presentation::{
     RoomDocumentSource, WindowPresentation, WorkspacePresentation,
 };
 pub use settings::{
-    EditorMode, EditorSettings, KeyboardProfile, KeyboardSettings, KeymapSettings, SettingsStore,
-    UserSettings,
+    DataSettings, EditorMode, EditorSettings, KeyboardProfile, KeyboardSettings, KeymapSettings,
+    SettingsStore, UserSettings,
 };
 pub use shell::{
     AutomationDetailsSnapshot, CancelExecution, CloseActiveItem, CloseActivePane,

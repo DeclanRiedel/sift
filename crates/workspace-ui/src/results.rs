@@ -873,6 +873,7 @@ pub struct ResultsView {
     included_columns: Vec<bool>,
     tab: ResultTab,
     selected: Option<GridSelection>,
+    show_selection_aggregates: bool,
     visual_selection: bool,
     editing_cell: Option<(usize, usize)>,
     inline_cell_edit: Option<InlineCellEdit>,
@@ -975,6 +976,7 @@ impl ResultsView {
             included_columns: Vec::new(),
             tab: ResultTab::Data,
             selected: None,
+            show_selection_aggregates: false,
             visual_selection: false,
             editing_cell: None,
             inline_cell_edit: None,
@@ -1031,6 +1033,13 @@ impl ResultsView {
     pub fn set_large_view(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.large_view != active {
             self.large_view = active;
+            cx.notify();
+        }
+    }
+
+    pub fn set_selection_aggregates_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.show_selection_aggregates != visible {
+            self.show_selection_aggregates = visible;
             cx.notify();
         }
     }
@@ -2538,7 +2547,7 @@ impl ResultsView {
             .filter(|cell| cell.class == CellClass::Number)
             .filter_map(|cell| cell.text.parse::<f64>().ok())
             .collect::<Vec<_>>();
-        if numbers.is_empty() {
+        if numbers.is_empty() || !self.show_selection_aggregates {
             return Some(format!("{} cell(s)", cells.len()));
         }
         let sum = numbers.iter().sum::<f64>();
@@ -6129,6 +6138,8 @@ mod tests {
                 Some(GridSelection::Cell { row: 2, column: 0 })
             );
             view.set_selection(GridSelection::All, cx);
+            assert_eq!(view.selection_summary().as_deref(), Some("3 cell(s)"));
+            view.set_selection_aggregates_visible(true, cx);
             assert_eq!(
                 view.selection_summary().as_deref(),
                 Some("3 cell(s) · sum 42.0000 · avg 14.0000")
