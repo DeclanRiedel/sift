@@ -1494,6 +1494,7 @@ pub enum Modal {
     EditVault,
     CreateVaultItem,
     VaultItemDetails,
+    ObjectPeek,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2108,6 +2109,13 @@ struct DatabaseObjectTarget {
     schema: String,
     object: String,
     object_kind: sift_protocol::ObjectKind,
+}
+
+#[derive(Debug, Clone)]
+struct ObjectPeekState {
+    item_id: u64,
+    target: DatabaseObjectTarget,
+    ddl: Option<Result<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -7950,6 +7958,7 @@ pub struct WorkspaceShell {
     table_definitions: HashMap<u64, TableDefinitionState>,
     table_definition_sections: HashMap<u64, TableDefinitionSection>,
     pending_object_ddl: HashSet<u64>,
+    object_peek: Option<ObjectPeekState>,
     table_designer: Option<TableDesignerState>,
     expanded_tenants: HashSet<i64>,
     expanded_connections: HashSet<i64>,
@@ -8982,6 +8991,7 @@ impl WorkspaceShell {
             table_definitions: HashMap::new(),
             table_definition_sections: HashMap::new(),
             pending_object_ddl: HashSet::new(),
+            object_peek: None,
             table_designer: None,
             expanded_tenants: HashSet::new(),
             expanded_connections: HashSet::new(),
@@ -10711,6 +10721,15 @@ impl WorkspaceShell {
                 if !self.pending_object_ddl.remove(&item_id) {
                     return;
                 }
+                if let Some(peek) = self
+                    .object_peek
+                    .as_mut()
+                    .filter(|peek| peek.item_id == item_id)
+                {
+                    peek.ddl = Some(Ok(ddl));
+                    cx.notify();
+                    return;
+                }
                 for pane in &self.panes {
                     if pane.update(cx, |pane, cx| {
                         pane.show_database_item_view(
@@ -10963,6 +10982,15 @@ impl WorkspaceShell {
             }
             ExecutorEvent::ObjectDdlFailed { item_id, message } => {
                 if !self.pending_object_ddl.remove(&item_id) {
+                    return;
+                }
+                if let Some(peek) = self
+                    .object_peek
+                    .as_mut()
+                    .filter(|peek| peek.item_id == item_id)
+                {
+                    peek.ddl = Some(Err(message));
+                    cx.notify();
                     return;
                 }
                 self.show_error_toast(
@@ -14882,6 +14910,16 @@ impl WorkspaceShell {
                             .child(icon(icon_name, colors.muted_text, 12.))
                             .child(div().min_w_0().truncate().child(object_name)),
                     )
+                    .when(selected, |row| {
+                        row.child(
+                            Button::new(("peek-database-object", row_index), "Peek")
+                                .tone(ButtonTone::Ghost)
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    cx.stop_propagation();
+                                    shell.peek_selected_schema_object(cx)
+                                })),
+                        )
+                    })
                     .child(
                         div()
                             .id(("favorite-database-object", row_index))
@@ -15242,6 +15280,67 @@ impl WorkspaceShell {
         } else {
             self.show_toast("Data preview is available for tables and views".into(), cx);
         }
+    }
+
+    fn peek_selected_schema_object(&mut self, cx: &mut Context<Self>) {
+        let Some(ConnectionTreeItem {
+            action:
+                ConnectionTreeAction::Object(target)
+                | ConnectionTreeAction::FavoriteObject(target)
+                | ConnectionTreeAction::RecentObject(target),
+            ..
+        }) = self
+            .visible_connection_items()
+            .get(self.connection_nav_selected)
+            .cloned()
+        else {
+            self.show_toast("Select a database object to peek its definition".into(), cx);
+            return;
+        };
+        self.record_recent_database_object(&target, cx);
+        let source = DatabaseObjectSource {
+            instance_id: self
+                .selected_instance_id
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            tenant_id: target.connection.tenant_id,
+            profile_id: target.connection.id,
+            profile_name: target.connection.name.clone(),
+            provider_id: target.connection.provider_id.clone(),
+            catalog: Some(target.catalog.clone()),
+            schema: target.schema.clone(),
+            object: target.object.clone(),
+            object_kind: target.object_kind,
+            last_refreshed_at_ms: None,
+        };
+        let item_id = self.next_id;
+        self.next_id += 1;
+        self.object_peek = Some(ObjectPeekState {
+            item_id,
+            target,
+            ddl: None,
+        });
+        self.modal = Some(Modal::ObjectPeek);
+        let sent = self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::LoadObjectDdl { item_id, source })
+                .is_ok()
+        });
+        if sent {
+            self.pending_object_ddl.insert(item_id);
+        } else if let Some(peek) = &mut self.object_peek {
+            peek.ddl = Some(Err("Database executor is unavailable".into()));
+        }
+        cx.notify();
+    }
+
+    fn open_peeked_object_in_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(peek) = self.object_peek.take() else {
+            return;
+        };
+        self.pending_object_ddl.remove(&peek.item_id);
+        self.modal = None;
+        self.open_database_object_ddl(peek.target, window, cx);
     }
 
     fn request_table_definition(
@@ -25058,6 +25157,11 @@ impl WorkspaceShell {
                         self.preview_selected_schema_object(window, cx);
                         true
                     }
+                    "shift-p" => {
+                        self.connection_nav_g_pending = false;
+                        self.peek_selected_schema_object(cx);
+                        true
+                    }
                     "ctrl-f" => {
                         self.connection_nav_g_pending = false;
                         self.open_connections_find(window, cx);
@@ -28718,6 +28822,11 @@ impl WorkspaceShell {
         }
         if self.modal == Some(Modal::SemanticRename) {
             self.pending_semantic_rename = None;
+        }
+        if self.modal == Some(Modal::ObjectPeek) {
+            if let Some(peek) = self.object_peek.take() {
+                self.pending_object_ddl.remove(&peek.item_id);
+            }
         }
         if self.modal == Some(Modal::CatalogMigration) {
             self.catalog_diff = None;
@@ -41914,6 +42023,90 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::ObjectPeek => {
+                    let peek = self.object_peek.clone();
+                    let title = peek.as_ref().map_or_else(
+                        || "Object definition".into(),
+                        |peek| {
+                            format!(
+                                "{}.{}.{}",
+                                peek.target.catalog, peek.target.schema, peek.target.object
+                            )
+                        },
+                    );
+                    let definition = match peek.as_ref().and_then(|peek| peek.ddl.as_ref()) {
+                        None => div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(colors.muted_text)
+                            .child("Loading definition…")
+                            .into_any_element(),
+                        Some(Err(message)) => div()
+                            .flex_1()
+                            .p_3()
+                            .rounded_sm()
+                            .bg(colors.danger_muted)
+                            .text_color(colors.danger)
+                            .whitespace_normal()
+                            .child(message.clone())
+                            .into_any_element(),
+                        Some(Ok(ddl)) => div()
+                            .id("object-peek-definition")
+                            .debug_selector(|| "object-peek-definition".into())
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_3()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.subtle_border)
+                            .bg(colors.background)
+                            .font_family("monospace")
+                            .text_xs()
+                            .children(ddl.lines().map(|line| {
+                                div().min_h(px(18.)).whitespace_normal().child(line.to_owned())
+                            }))
+                            .into_any_element(),
+                    };
+                    div()
+                        .h(px(460.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .child(definition)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("close-object-peek", "Close")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("open-peeked-object", "Open DDL tab")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(peek.is_none())
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.open_peeked_object_in_tab(window, cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::SemanticRename => {
                     let (pending, edit_count, warnings) = self.pending_semantic_rename.as_ref().map_or((false, None, Vec::new()), |rename| (rename.pending, rename.edits.as_ref().map(Vec::len), rename.warnings.clone()));
                     let preview_rows = self.semantic_rename_preview_rows(cx);
@@ -41978,6 +42171,7 @@ impl WorkspaceShell {
                     | Modal::CatalogSnapshots
                     | Modal::CsvImport
                     | Modal::WorkspaceReconcile
+                    | Modal::ObjectPeek
             );
             div()
                 .id("modal-layer")
@@ -50303,6 +50497,93 @@ mod tests {
                 .query_outline_object_target(&symbol("archive.jobs"))
                 .is_some());
         });
+    }
+
+    #[gpui::test]
+    fn object_peek_loads_ddl_without_opening_a_tab(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let item_count = workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: vec![ConnectionNavEntry {
+                    id: 2,
+                    tenant_id: 1,
+                    name: "Warehouse".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    tags: Vec::new(),
+                }],
+            }];
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Warehouse".into(),
+            };
+            let mut snapshot =
+                sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
+            snapshot.trees.push(sift_protocol::CatalogTree {
+                name: "warehouse".into(),
+                schemas: vec![sift_protocol::SchemaTree {
+                    name: "public".into(),
+                    objects: vec![sift_protocol::ObjectInfo::new(
+                        "jobs",
+                        sift_protocol::ObjectKind::Table,
+                    )],
+                }],
+            });
+            shell.connection_schema = ConnectionSchemaState::Ready {
+                profile_id: 2,
+                snapshot: Box::new(snapshot),
+            };
+            shell.expanded_tenants.insert(1);
+            shell.expanded_connections.insert(2);
+            shell.expanded_catalogs.insert((2, "warehouse".into()));
+            shell
+                .expanded_schemas
+                .insert((2, "warehouse".into(), "public".into()));
+            shell.expanded_object_groups.insert((
+                2,
+                "warehouse".into(),
+                "public".into(),
+                ObjectGroupKind::Tables,
+            ));
+            shell.invalidate_connection_projection();
+            shell.connection_nav_selected = shell
+                .visible_connection_items()
+                .iter()
+                .position(|item| matches!(item.action, ConnectionTreeAction::Object(_)))
+                .unwrap();
+            let item_count = shell.panes[shell.active_pane].read(cx).items.len();
+            shell.peek_selected_schema_object(cx);
+            item_count
+        });
+        let item_id = match receiver.try_recv().unwrap() {
+            ExecutorCommand::LoadObjectDdl { item_id, source } => {
+                assert_eq!(source.object, "jobs");
+                item_id
+            }
+            _ => panic!("expected object DDL load"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::ObjectDdlLoaded {
+                    item_id,
+                    ddl: "CREATE TABLE public.jobs (id bigint);".into(),
+                },
+                cx,
+            );
+            assert_eq!(shell.modal, Some(Modal::ObjectPeek));
+            assert_eq!(
+                shell.panes[shell.active_pane].read(cx).items.len(),
+                item_count
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("object-peek-definition").is_some());
     }
 
     #[gpui::test]
