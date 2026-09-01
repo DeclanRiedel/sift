@@ -54030,11 +54030,11 @@ mod tests {
         let result_hitbox = cx
             .debug_bounds("resize-query-results-1")
             .expect("result resize hitbox");
-        assert_eq!(result_line.size.height, px(1.0));
-        assert_eq!(result_hitbox.size.height, px(RESULT_RESIZE_HANDLE_SIZE));
+        assert_eq!(result_line.size.width, px(1.0));
+        assert_eq!(result_hitbox.size.width, px(RESULT_RESIZE_HANDLE_SIZE));
         assert_eq!(
-            result_line.top() + result_line.size.height / 2.0,
-            result_hitbox.top() + result_hitbox.size.height / 2.0
+            result_line.left() + result_line.size.width / 2.0,
+            result_hitbox.left() + result_hitbox.size.width / 2.0
         );
 
         let titlebar = cx.debug_bounds("integrated-titlebar").expect("titlebar");

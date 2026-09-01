@@ -3713,6 +3713,7 @@ impl ResultsView {
                 let selected = tab == self.tab;
                 div()
                     .id(("result-tab-vertical", tab as usize))
+                    .debug_selector(move || format!("result-tab-{}", tab.label().to_lowercase()))
                     .relative()
                     .h(tab_height)
                     .px_2()
@@ -3763,24 +3764,30 @@ impl ResultsView {
                                     "review-staged-result-edits-vertical",
                                     format!("Review {} staged", self.staged_cells.len()),
                                 )
-                                .debug_selector("review-staged-result-edits-vertical")
+                                .debug_selector("review-staged-result-edits")
                                 .tone(ButtonTone::Neutral)
                                 .on_click(cx.listener(
                                     |_, _, _, cx| cx.emit(ResultsEvent::ReviewStagedEditsRequested),
                                 ))
                             }))
                             .children((!self.large_view).then(|| {
-                                IconButton::new(
-                                    "open-result-data-modal-vertical",
-                                    IconName::Maximize,
-                                    "Open Data in large view",
-                                )
-                                .icon_size(13.)
-                                .text("Expand")
-                                .tooltip("Open Data in large view")
-                                .on_click(cx.listener(
-                                    |_, _, _, cx| cx.emit(ResultsEvent::OpenDataModalRequested),
-                                ))
+                                div()
+                                    .debug_selector(|| "open-result-data-modal".into())
+                                    .child(
+                                        IconButton::new(
+                                            "open-result-data-modal-vertical",
+                                            IconName::Maximize,
+                                            "Open Data in large view",
+                                        )
+                                        .icon_size(13.)
+                                        .text("Expand")
+                                        .tooltip("Open Data in large view")
+                                        .on_click(
+                                            cx.listener(|_, _, _, cx| {
+                                                cx.emit(ResultsEvent::OpenDataModalRequested)
+                                            }),
+                                        ),
+                                    )
                             }))
                             .child(
                                 IconButton::new(
