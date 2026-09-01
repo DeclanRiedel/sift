@@ -47,3 +47,17 @@ Desktop preferences are stored in a local `settings.toml`. See
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — extensions
 - [`docs/keyboard-wiki/index.html`](docs/keyboard-wiki/index.html) — keyboard
   language defaults and rollout reference
+
+## License
+
+Copyright © 2026 Declan Riedel.
+
+Sift is licensed under the
+[GNU Affero General Public License, version 3 only](LICENSE)
+(`AGPL-3.0-only`). If you modify Sift and make the modified program available
+for users to interact with over a network, the license requires you to offer
+those users the corresponding source code.
+
+Third-party components retain their own compatible licenses and notices. In
+particular, the vendored Qlementine icons are MIT-licensed; their attribution
+and license are in [`crates/ui/assets/icons`](crates/ui/assets/icons/README.md).

@@ -45854,11 +45854,15 @@ mod tests {
                 item.command.is_some()
                     || (item.label == "Wiki"
                         && item.url == cfg!(debug_assertions).then_some("http://127.0.0.1:8787"))
+                    || (item.label == "License"
+                        && item.url == Some("https://github.com/declan/sift/blob/master/LICENSE"))
             }));
         }
 
         let help = app_bar::menu_items(AppBarMenu::Help);
         assert_eq!(help[0].label, "Wiki");
+        assert_eq!(help[1].label, "License");
+        assert_eq!(help[1].shortcut, "AGPL-3.0-only");
     }
 
     #[test]

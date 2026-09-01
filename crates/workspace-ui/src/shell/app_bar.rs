@@ -46,6 +46,15 @@ impl AppBarMenuItem {
             url: cfg!(debug_assertions).then_some("http://127.0.0.1:8787"),
         }
     }
+
+    fn license() -> Self {
+        Self {
+            label: "License",
+            shortcut: "AGPL-3.0-only",
+            command: None,
+            url: Some("https://github.com/declan/sift/blob/master/LICENSE"),
+        }
+    }
 }
 
 pub(super) fn menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
@@ -105,6 +114,7 @@ pub(super) fn menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
         ],
         AppBarMenu::Help => vec![
             Item::wiki(),
+            Item::license(),
             Item::available(CommandId::OpenCommandPalette),
             Item::available(CommandId::OpenKeymaps),
             Item::available(CommandId::OpenSettings),
