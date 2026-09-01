@@ -206,7 +206,7 @@ fn remote_lifecycle_output_is_stable_structured_and_redacted() {
     assert_eq!(migration["migration"]["to_version"], 43);
     assert_eq!(
         migration["migration"]["applied"].as_array().unwrap().len(),
-        42
+        43
     );
     for descriptor in migration["migration"]["applied"].as_array().unwrap() {
         assert_eq!(
