@@ -20,19 +20,26 @@ architecture and validation work.
 - [x] Ad-hoc connection editor
 - [x] Connection testing and health
 - [x] SSL/TLS configuration
-- [~] SSH remote connections
+- [x] SSH remote connections
 - [x] Read-only connections
 - [x] Secret-store integration
 - [x] Provider capability discovery
-- [ ] Connection folders, tags, and favorites
+- [x] Connection folders, tags, and favorites
 - [x] Environment labels and colors
 - [x] Production mutation confirmation
-- [ ] Startup SQL and session variables
+- [x] Startup SQL and session variables
 - [x] Persistent editor workspace
-- [~] Multiple windows
+- [x] Multiple windows
 - [x] Virtual workspaces
 - [x] Filesystem projection
 - [x] Git integration
+
+Connection organization is stored in profile tags and is searchable and
+editable. Provider-specific session variables and startup SQL are applied at
+the physical driver boundary. SSH profiles own bootstrap, NixOS runtime
+negotiation, short-lived access renewal, and forwarding. New desktop windows
+have independent workspace/runtime supervision; only the primary window owns
+the single presentation-state writer, avoiding cross-window overwrite races.
 
 ### Explorer and navigation
 

@@ -13,9 +13,14 @@ daily-driver spine first — **connections → navigation → query intelligence
 then writing/transactions, then collaboration/versioning, then advanced
 surfaces, then admin/platform. Within P0, the connection experience comes first.
 
+**P0 finalized 2026-09-01.** Every P0 SDK path below has a working desktop
+surface. The SSH lifecycle was exercised end to end from Linux to a NixOS host,
+including artifact install, migration, daemon readiness, capability exchange,
+and forwarded health/readiness probes.
+
 ## Priority at a glance
 
-- **P0 — Connect & run:** connection management UI, sign-in-to-connect, streaming execute + cancel. *The spine.*
+- **P0 — Connect & run (complete):** connection management UI, sign-in-to-connect, streaming execute + cancel. *The spine.*
 - **P1 — Navigate:** schema tree, object DDL, search, history/saved queries, capability gating, editor depth.
 - **P2 — SQL intelligence:** completion, diagnostics, formatting, quick-fixes, usages.
 - **P3 — Write & transact:** data editing, transactions, savepoints, process control.
@@ -25,7 +30,7 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ---
 
-## P0 — Connect & run (the spine) 🎯 start here
+## P0 — Connect & run (the spine) ✅ complete
 
 ### Connections & sessions — connection picker, connected indicator, disconnect
 

@@ -6979,9 +6979,7 @@ mod tests {
             store: Some(Arc::new(PresentationStore::new(
                 directory.path().join("presentation.json"),
             ))),
-            settings_store: Arc::new(SettingsStore::new(
-                directory.path().join("settings.toml"),
-            )),
+            settings_store: Arc::new(SettingsStore::new(directory.path().join("settings.toml"))),
             settings: UserSettings::default(),
             runtime: Arc::new(tokio::runtime::Runtime::new().unwrap()),
             server: local.clone(),
