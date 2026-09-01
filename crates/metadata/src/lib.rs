@@ -41,6 +41,7 @@ pub mod schema;
 pub mod secrets;
 mod transfer_recipe;
 mod vault;
+pub use vault::VaultPolicy;
 mod workspace;
 
 pub use approval::*;
@@ -298,6 +299,8 @@ pub enum MetadataError {
     TenantAdminRequired,
     #[error("tenant must retain at least one owner")]
     FinalTenantOwner,
+    #[error("vault quota exceeded: {0}")]
+    VaultQuotaExceeded(&'static str),
     #[error("tenant member access required")]
     TenantMemberRequired,
     #[error("instance administrator access required")]
@@ -578,6 +581,7 @@ pub struct MetadataStore {
     backend: Backend,
     secrets: Arc<dyn SecretStore>,
     plan_capture_retention: Arc<std::sync::RwLock<PlanCaptureRetention>>,
+    vault_policy: Arc<std::sync::RwLock<VaultPolicy>>,
 }
 
 impl MetadataStore {
@@ -589,6 +593,7 @@ impl MetadataStore {
             plan_capture_retention: Arc::new(std::sync::RwLock::new(
                 PlanCaptureRetention::default(),
             )),
+            vault_policy: Arc::new(std::sync::RwLock::new(VaultPolicy::default())),
         })
     }
 
@@ -602,7 +607,16 @@ impl MetadataStore {
             plan_capture_retention: Arc::new(std::sync::RwLock::new(
                 PlanCaptureRetention::default(),
             )),
+            vault_policy: Arc::new(std::sync::RwLock::new(VaultPolicy::default())),
         })
+    }
+
+    pub fn set_vault_policy(&self, policy: VaultPolicy) {
+        *self.vault_policy.write().unwrap() = policy;
+    }
+
+    pub fn vault_policy(&self) -> VaultPolicy {
+        *self.vault_policy.read().unwrap()
     }
 
     /// Borrow a connection for a single operation. See [`Backend::conn`].

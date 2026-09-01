@@ -77,6 +77,8 @@ pub struct Config {
     pub auth: AuthConfig,
     /// Local metadata store configuration.
     pub metadata: MetadataConfig,
+    /// Server vault admission, retention, and cleanup policy.
+    pub vault: VaultConfig,
     /// Audit/replay log configuration.
     pub audit: AuditConfig,
     /// Result-size limits for synchronous responses.
@@ -274,6 +276,36 @@ pub struct MetadataConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct VaultConfig {
+    pub max_label_bytes: usize,
+    pub max_metadata_bytes: usize,
+    pub max_secret_bytes: usize,
+    pub max_vaults_per_tenant: u64,
+    pub max_items_per_vault: u64,
+    pub max_versions_per_item: u64,
+    pub cleanup_batch_size: u32,
+    pub cleanup_interval_secs: u64,
+    pub cleanup_retry_initial_secs: u64,
+    pub cleanup_retry_max_secs: u64,
+}
+
+impl VaultConfig {
+    pub fn metadata_policy(&self) -> sift_metadata::VaultPolicy {
+        sift_metadata::VaultPolicy {
+            max_label_bytes: self.max_label_bytes,
+            max_metadata_bytes: self.max_metadata_bytes,
+            max_secret_bytes: self.max_secret_bytes,
+            max_vaults_per_tenant: self.max_vaults_per_tenant,
+            max_items_per_vault: self.max_items_per_vault,
+            max_versions_per_item: self.max_versions_per_item,
+            cleanup_retry_initial_secs: self.cleanup_retry_initial_secs,
+            cleanup_retry_max_secs: self.cleanup_retry_max_secs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LimitsConfig {
     /// Max rows a synchronous HTTP execute may return before `ResultTooLarge`.
     pub max_http_result_rows: usize,
@@ -360,6 +392,7 @@ impl Default for Config {
             timeouts: TimeoutConfig::default(),
             auth: AuthConfig::default(),
             metadata: MetadataConfig::default(),
+            vault: VaultConfig::default(),
             audit: AuditConfig::default(),
             limits: LimitsConfig::default(),
             rate_limits: RateLimitsConfig::default(),
@@ -446,6 +479,19 @@ impl Config {
                     bail!("{name} must use HTTPS");
                 }
             }
+        }
+        if self.vault.max_label_bytes == 0
+            || self.vault.max_metadata_bytes == 0
+            || self.vault.max_secret_bytes == 0
+            || self.vault.max_vaults_per_tenant == 0
+            || self.vault.max_items_per_vault == 0
+            || self.vault.max_versions_per_item == 0
+            || self.vault.cleanup_batch_size == 0
+            || self.vault.cleanup_interval_secs == 0
+            || self.vault.cleanup_retry_initial_secs == 0
+            || self.vault.cleanup_retry_max_secs < self.vault.cleanup_retry_initial_secs
+        {
+            bail!("vault limits, retention, cleanup interval, and retry delays must be positive; retry max must not be below retry initial");
         }
         if self.transport == Transport::SshProxy
             && (!self.metadata.enabled || self.metadata.secret_backend == "memory")
@@ -724,6 +770,23 @@ impl Default for MetadataConfig {
     }
 }
 
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            max_label_bytes: 160,
+            max_metadata_bytes: 32 * 1024,
+            max_secret_bytes: 64 * 1024,
+            max_vaults_per_tenant: 100,
+            max_items_per_vault: 1_000,
+            max_versions_per_item: 50,
+            cleanup_batch_size: 100,
+            cleanup_interval_secs: 30,
+            cleanup_retry_initial_secs: 30,
+            cleanup_retry_max_secs: 3_600,
+        }
+    }
+}
+
 /// Load config from `sift.toml` (if present) then `SIFT_*` env vars, falling
 /// back to defaults. Missing file is not an error.
 pub fn load() -> anyhow::Result<Config> {
@@ -764,6 +827,18 @@ mod tests {
         assert_eq!("daemon".parse(), Ok(RuntimeMode::Daemon));
         assert_eq!("container".parse(), Ok(RuntimeMode::Container));
         assert!("background".parse::<RuntimeMode>().is_err());
+    }
+
+    #[test]
+    fn vault_policy_rejects_zero_limits_and_inverted_retry_bounds() {
+        let mut config = Config::default();
+        config.vault.max_versions_per_item = 0;
+        assert!(config.validate().unwrap_err().to_string().contains("vault"));
+
+        let mut config = Config::default();
+        config.vault.cleanup_retry_initial_secs = 60;
+        config.vault.cleanup_retry_max_secs = 30;
+        assert!(config.validate().unwrap_err().to_string().contains("retry"));
     }
 
     #[test]

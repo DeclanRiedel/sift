@@ -190,6 +190,9 @@ impl ApiError {
                 MetadataError::ConnectionProfileLimitReached(_) => {
                     (StatusCode::CONFLICT, "tenant_resource_exhausted")
                 }
+                MetadataError::VaultQuotaExceeded(_) => {
+                    (StatusCode::CONFLICT, "vault_quota_exceeded")
+                }
                 MetadataError::CatalogSnapshotLimitReached
                 | MetadataError::PlanCaptureLimitReached => {
                     (StatusCode::CONFLICT, "tenant_resource_exhausted")

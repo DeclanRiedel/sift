@@ -22,9 +22,33 @@ fn metadata_principal(id: PrincipalId) -> crate::PrincipalId {
 }
 
 pub(crate) const VAULT_SECRET_NAMESPACE: &str = "sift.vault.v1";
-const MAX_LABEL_BYTES: usize = 160;
-const MAX_METADATA_BYTES: usize = 32 * 1024;
-const MAX_SECRET_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaultPolicy {
+    pub max_label_bytes: usize,
+    pub max_metadata_bytes: usize,
+    pub max_secret_bytes: usize,
+    pub max_vaults_per_tenant: u64,
+    pub max_items_per_vault: u64,
+    pub max_versions_per_item: u64,
+    pub cleanup_retry_initial_secs: u64,
+    pub cleanup_retry_max_secs: u64,
+}
+
+impl Default for VaultPolicy {
+    fn default() -> Self {
+        Self {
+            max_label_bytes: 160,
+            max_metadata_bytes: 32 * 1024,
+            max_secret_bytes: 64 * 1024,
+            max_vaults_per_tenant: 100,
+            max_items_per_vault: 1_000,
+            max_versions_per_item: 50,
+            cleanup_retry_initial_secs: 30,
+            cleanup_retry_max_secs: 3_600,
+        }
+    }
+}
 
 fn audit(
     actor: PrincipalId,
@@ -78,10 +102,10 @@ fn parse_kind(value: String) -> Result<VaultItemKind> {
     }
 }
 
-fn validate_label(label: &str) -> Result<()> {
+fn validate_label(label: &str, policy: VaultPolicy) -> Result<()> {
     let trimmed = label.trim();
     if trimmed.is_empty()
-        || trimmed.len() > MAX_LABEL_BYTES
+        || trimmed.len() > policy.max_label_bytes
         || trimmed.chars().any(char::is_control)
     {
         return Err(MetadataError::InvalidVaultInput("invalid label".into()));
@@ -103,7 +127,7 @@ fn contains_secret_shaped_key(value: &serde_json::Value) -> bool {
     }
 }
 
-fn validate_metadata(metadata: &VaultItemMetadata) -> Result<String> {
+fn validate_metadata(metadata: &VaultItemMetadata, policy: VaultPolicy) -> Result<String> {
     if let VaultItemMetadata::Connection { configuration, .. } = metadata {
         if !configuration.is_object() || contains_secret_shaped_key(configuration) {
             return Err(MetadataError::InvalidVaultInput(
@@ -113,7 +137,7 @@ fn validate_metadata(metadata: &VaultItemMetadata) -> Result<String> {
         }
     }
     let encoded = serde_json::to_string(metadata)?;
-    if encoded.len() > MAX_METADATA_BYTES {
+    if encoded.len() > policy.max_metadata_bytes {
         return Err(MetadataError::InvalidVaultInput(
             "item metadata is too large".into(),
         ));
@@ -121,14 +145,14 @@ fn validate_metadata(metadata: &VaultItemMetadata) -> Result<String> {
     Ok(encoded)
 }
 
-fn validate_secret(secret: &serde_json::Value) -> Result<Vec<u8>> {
+fn validate_secret(secret: &serde_json::Value, policy: VaultPolicy) -> Result<Vec<u8>> {
     if secret.is_null() {
         return Err(MetadataError::InvalidVaultInput(
             "secret must not be null".into(),
         ));
     }
     let encoded = serde_json::to_vec(secret)?;
-    if encoded.is_empty() || encoded.len() > MAX_SECRET_BYTES {
+    if encoded.is_empty() || encoded.len() > policy.max_secret_bytes {
         return Err(MetadataError::InvalidVaultInput(
             "secret is empty or too large".into(),
         ));
@@ -373,6 +397,7 @@ impl MetadataStore {
     }
 
     pub async fn process_vault_secret_cleanup(&self, limit: u32) -> Result<(u64, u64)> {
+        let policy = self.vault_policy();
         let limit = limit.clamp(1, 1_000);
         let pending = {
             let conn = self.conn()?;
@@ -400,9 +425,12 @@ impl MetadataStore {
                     deleted += 1;
                 }
                 Err(_) => {
-                    let delay = 30_i64.saturating_mul(1_i64 << attempts.min(7));
+                    let initial =
+                        i64::try_from(policy.cleanup_retry_initial_secs).unwrap_or(i64::MAX);
+                    let maximum = i64::try_from(policy.cleanup_retry_max_secs).unwrap_or(i64::MAX);
+                    let delay = initial.saturating_mul(1_i64 << attempts.min(20));
                     let not_before = (chrono::Utc::now()
-                        + chrono::Duration::seconds(delay.min(3_600)))
+                        + chrono::Duration::seconds(delay.min(maximum)))
                     .to_rfc3339();
                     self.conn()?.execute(
                         "UPDATE vault_secret_cleanup_queue
@@ -420,6 +448,58 @@ impl MetadataStore {
             }
         }
         Ok((deleted, failed))
+    }
+
+    pub fn prune_vault_item_versions(&self, limit: u32) -> Result<u64> {
+        let policy = self.vault_policy();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let candidates = {
+            let mut stmt = tx.prepare(
+                "SELECT item_id, version, secret_handle FROM (
+                    SELECT item_id, version, secret_handle,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY item_id ORDER BY version DESC
+                           ) AS retained_rank
+                    FROM vault_item_version
+                 ) WHERE retained_rank > ?1
+                 ORDER BY item_id, version
+                 LIMIT ?2",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![policy.max_versions_per_item, limit.clamp(1, 10_000)],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, u64>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (item, version, handle) in &candidates {
+            tx.execute(
+                "DELETE FROM vault_item_version WHERE item_id = ?1 AND version = ?2",
+                params![item, version],
+            )?;
+            if let Some(handle) = handle {
+                let still_referenced: bool = tx.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM vault_item_version WHERE secret_handle = ?1
+                     )",
+                    params![handle],
+                    |row| row.get(0),
+                )?;
+                if !still_referenced {
+                    enqueue_cleanup(&tx, handle, "vault_version_retention")?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(candidates.len() as u64)
     }
 
     pub fn vault_connection_binding(
@@ -471,6 +551,7 @@ impl MetadataStore {
     }
 
     pub fn ensure_personal_vault(&self, tenant: TenantId, actor: PrincipalId) -> Result<Vault> {
+        let policy = self.vault_policy();
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         ensure_principal_tenant_member_locked(
@@ -489,6 +570,14 @@ impl MetadataStore {
         let id = if let Some(id) = existing {
             id
         } else {
+            let count: u64 = tx.query_row(
+                "SELECT COUNT(*) FROM vault WHERE tenant_id = ?1",
+                params![tenant.0],
+                |row| row.get(0),
+            )?;
+            if count >= policy.max_vaults_per_tenant {
+                return Err(MetadataError::VaultQuotaExceeded("tenant vault count"));
+            }
             let now = now_text();
             tx.execute(
                 "INSERT INTO vault
@@ -510,10 +599,19 @@ impl MetadataStore {
         actor: PrincipalId,
         name: &str,
     ) -> Result<Vault> {
-        validate_label(name)?;
+        let policy = self.vault_policy();
+        validate_label(name, policy)?;
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         ensure_tenant_member_role_locked(&tx, metadata_tenant(tenant), metadata_principal(actor))?;
+        let count: u64 = tx.query_row(
+            "SELECT COUNT(*) FROM vault WHERE tenant_id = ?1",
+            params![tenant.0],
+            |row| row.get(0),
+        )?;
+        if count >= policy.max_vaults_per_tenant {
+            return Err(MetadataError::VaultQuotaExceeded("tenant vault count"));
+        }
         let now = now_text();
         tx.execute(
             "INSERT INTO vault
@@ -576,7 +674,7 @@ impl MetadataStore {
         expected_revision: u64,
         name: &str,
     ) -> Result<Vault> {
-        validate_label(name)?;
+        validate_label(name, self.vault_policy())?;
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         require_capability(&tx, id, actor, |capabilities| capabilities.manage)?;
@@ -851,11 +949,12 @@ impl MetadataStore {
         metadata: VaultItemMetadata,
         secret: Option<serde_json::Value>,
     ) -> Result<VaultItem> {
-        validate_label(&label)?;
-        let metadata_json = validate_metadata(&metadata)?;
+        let policy = self.vault_policy();
+        validate_label(&label, policy)?;
+        let metadata_json = validate_metadata(&metadata, policy)?;
         let kind = metadata.kind();
         let new_secret = if let Some(secret) = secret {
-            let encoded = validate_secret(&secret)?;
+            let encoded = validate_secret(&secret, policy)?;
             let handle = Uuid::new_v4().to_string();
             self.secrets
                 .put(VAULT_SECRET_NAMESPACE, &handle, &encoded)
@@ -870,6 +969,14 @@ impl MetadataStore {
             let mut conn = backend.conn()?;
             let tx = conn.transaction()?;
             require_capability(&tx, id, actor, |capabilities| capabilities.edit)?;
+            let count: u64 = tx.query_row(
+                "SELECT COUNT(*) FROM vault_item WHERE vault_id = ?1",
+                params![id.0],
+                |row| row.get(0),
+            )?;
+            if count >= policy.max_items_per_vault {
+                return Err(MetadataError::VaultQuotaExceeded("vault item count"));
+            }
             let now = now_text();
             tx.execute(
                 "INSERT INTO vault_item
@@ -927,15 +1034,16 @@ impl MetadataStore {
         metadata: VaultItemMetadata,
         secret: Option<serde_json::Value>,
     ) -> Result<(VaultItem, Option<ConnectionProfileId>)> {
-        validate_label(&label)?;
-        let metadata_json = validate_metadata(&metadata)?;
+        let policy = self.vault_policy();
+        validate_label(&label, policy)?;
+        let metadata_json = validate_metadata(&metadata, policy)?;
         if metadata.kind() == VaultItemKind::Connection {
             if let Some(secret) = secret.as_ref() {
                 validate_provider_credentials(secret)?;
             }
         }
         let new_handle = if let Some(secret) = secret.as_ref() {
-            let bytes = validate_secret(secret)?;
+            let bytes = validate_secret(secret, policy)?;
             let handle = Uuid::new_v4().to_string();
             self.secrets
                 .put(VAULT_SECRET_NAMESPACE, &handle, &bytes)
@@ -1271,16 +1379,17 @@ impl MetadataStore {
                 "vault-backed connections require shared credential mode".into(),
             ));
         }
-        validate_label(&input.name)?;
+        let policy = self.vault_policy();
+        validate_label(&input.name, policy)?;
         let item_metadata = VaultItemMetadata::Connection {
             provider_id: input.provider_id.clone(),
             configuration: input.configuration.clone(),
         };
-        let metadata_json = validate_metadata(&item_metadata)?;
+        let metadata_json = validate_metadata(&item_metadata, policy)?;
         let credentials = input.credentials.take();
         let new_secret = if let Some(credentials) = credentials.as_ref() {
             validate_provider_credentials(credentials)?;
-            let encoded = validate_secret(credentials)?;
+            let encoded = validate_secret(credentials, policy)?;
             let handle = Uuid::new_v4().to_string();
             self.secrets
                 .put(VAULT_SECRET_NAMESPACE, &handle, &encoded)
@@ -1448,6 +1557,14 @@ impl MetadataStore {
                     )?;
                     item_id
                 } else {
+                    let item_count: u64 = tx.query_row(
+                        "SELECT COUNT(*) FROM vault_item WHERE vault_id = ?1",
+                        params![vault_id.0],
+                        |row| row.get(0),
+                    )?;
+                    if item_count >= policy.max_items_per_vault {
+                        return Err(MetadataError::VaultQuotaExceeded("vault item count"));
+                    }
                     tx.execute(
                         "INSERT INTO vault_item
                          (vault_id, kind, label, metadata_json, created_by, created_at, updated_at)
@@ -2031,5 +2148,63 @@ mod tests {
             .unwrap()
             .iter()
             .all(|row| row.id != vault.id));
+    }
+
+    #[tokio::test]
+    async fn vault_policy_enforces_quotas_and_prunes_old_versions() {
+        let (store, tenant, owner, _) = store();
+        store.set_vault_policy(VaultPolicy {
+            max_vaults_per_tenant: 1,
+            max_items_per_vault: 1,
+            max_versions_per_item: 2,
+            ..VaultPolicy::default()
+        });
+        let vault = store.create_team_vault(tenant, owner, "Bounded").unwrap();
+        assert!(matches!(
+            store.create_team_vault(tenant, owner, "Too many"),
+            Err(MetadataError::VaultQuotaExceeded("tenant vault count"))
+        ));
+        let item = store
+            .create_vault_item(
+                vault.id,
+                owner,
+                "Token".into(),
+                VaultItemMetadata::Token {
+                    service: "deploy".into(),
+                    expires_at: None,
+                },
+                Some(serde_json::json!("one")),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .create_vault_item(
+                    vault.id,
+                    owner,
+                    "Second".into(),
+                    VaultItemMetadata::SecureNote,
+                    None,
+                )
+                .await,
+            Err(MetadataError::VaultQuotaExceeded("vault item count"))
+        ));
+        let (item, _) = store
+            .set_vault_secret(item.id, owner, item.revision, serde_json::json!("two"))
+            .await
+            .unwrap();
+        store
+            .set_vault_secret(item.id, owner, item.revision, serde_json::json!("three"))
+            .await
+            .unwrap();
+        assert_eq!(store.prune_vault_item_versions(100).unwrap(), 1);
+        let versions = store.list_vault_item_versions(item.id, owner).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].version, 3);
+        assert_eq!(versions[1].version, 2);
+        assert_eq!(
+            store.process_vault_secret_cleanup(100).await.unwrap(),
+            (1, 0)
+        );
     }
 }

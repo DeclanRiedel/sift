@@ -234,6 +234,33 @@ async fn main() -> anyhow::Result<()> {
         });
     }
     let metadata = build_metadata_store(&cfg)?;
+    if let Some(store) = &metadata {
+        store.set_vault_policy(cfg.vault.metadata_policy());
+        let store = store.clone();
+        let interval_secs = cfg.vault.cleanup_interval_secs;
+        let batch_size = cfg.vault.cleanup_batch_size;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                match store.prune_vault_item_versions(batch_size) {
+                    Ok(pruned) if pruned > 0 => {
+                        tracing::debug!(pruned, "pruned retained vault versions")
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "vault version retention failed"),
+                }
+                match store.process_vault_secret_cleanup(batch_size).await {
+                    Ok((deleted, failed)) if deleted > 0 || failed > 0 => {
+                        tracing::debug!(deleted, failed, "processed vault secret cleanup")
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "vault secret cleanup failed"),
+                }
+            }
+        });
+    }
     if let Some((manifest, lock, generation)) = &instance_selection {
         let store = metadata
             .as_ref()
