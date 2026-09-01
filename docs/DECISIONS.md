@@ -1917,3 +1917,63 @@ generic HTTP or shell escape hatch.
 Users can inspect and create review artifacts without widening Git credential
 scope. New providers can implement the typed boundary without changing the
 repository adapter or exposing arbitrary network requests.
+
+---
+
+## ADR-052 — Tenant-Scoped Server Vaults Separate Secret Use From Reveal
+
+**Context.** Teams need one place to store database connections, passwords,
+tokens, and sensitive notes. Existing connection profiles already keep secret
+bytes behind `SecretStore`, but they do not provide personal/team grouping,
+explicit sharing, immutable history, or a safe way to model secrets a human
+must read. Treating every vault permission as an ascending role would also let
+someone who may rotate a credential learn its previous value, while treating a
+database connection like a shared password would unnecessarily deliver driver
+credentials to clients.
+
+**Decision.** A vault belongs to one tenant and is either the unique personal
+vault of one principal or an explicitly granted team vault. Vault grants store
+independent `inspect`, `use`, `reveal`, `edit`, and `manage` capabilities;
+`edit` does not imply `reveal`. Tenant administration may recover `manage` but
+does not implicitly gain `use` or `reveal`. Authorization intersects current
+tenant membership, the vault grant, item kind, connection policy, and room role
+where applicable. Revocation and cross-tenant identifiers fail closed.
+
+Vault items are typed as connection, login, token, or secure note. SQLite
+contains redacted metadata, immutable version records, and random opaque secret
+handles only. Secret bytes remain in `SecretStore` under a distinct namespace.
+Every write creates a new handle before committing metadata; retired and
+orphaned handles are processed by a durable retryable cleanup queue. Restore is
+append-only and copies retained secret bytes to a new server-generated handle.
+No client can submit or receive a handle.
+
+Connection credentials have only a **use** path: the server resolves them into
+the existing connection-profile/session/driver flow and never returns them.
+Login, token, and secure-note items may have a separate **reveal** path. Reveal
+is an item-specific, rate-limited, non-cacheable `POST` requiring explicit
+capability plus recent interactive digest-bound step-up; API tokens,
+refresh-token-only sessions, background jobs, WebSockets, and connection items
+cannot reveal. Normal list/detail/history/diff responses are always redacted.
+The desktop holds a revealed value only in a focused temporary surface, masks
+it on focus loss or after 30 seconds, and never persists it.
+
+Every vault, grant, item, secret, test, restore, use, and reveal action has a
+typed `Operation` variant and a transactionally durable sanitized audit record.
+Audit contains ids, kind, revision, actor, and outcome, never metadata capable
+of carrying secrets, secret bytes, or handles. Secret-bearing types have
+redacted `Debug`, strict body limits, TLS outside trusted loopback,
+`Cache-Control: no-store`, and sentinel coverage across logs, errors, protocol
+examples, backups, crash recovery, Git, CRDT state, and desktop presentation.
+
+The canonical management UI is a keyboard-navigable Vault view in the
+Collaboration dock with My Vault and Team Vaults roots. Connections may show
+shortcuts to vault-backed connection items but do not duplicate access or
+history management. The full delivery order and graduation tests live in
+`docs/PLANS/collaborative-connection-vaults.md`.
+
+**Consequences.** A team member can use a shared database credential without
+learning it, an editor can replace a secret without reading the prior value,
+and explicitly authorized people can share human-readable secrets through a
+narrow audited reveal surface. The server and its secret backend remain inside
+the confidentiality boundary; end-to-end encryption and external secret
+brokers require separate designs.

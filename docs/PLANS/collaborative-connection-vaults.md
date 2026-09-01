@@ -1,9 +1,8 @@
 # Collaborative Server Vaults
 
-Status: **design plan; implementation has not started.** This plan supersedes
-the connection-only vault proposal. The first implementation milestone must
-graduate its protocol and security decisions before server or desktop code is
-added.
+Status: **ADR-052 graduated; implementation in progress.** This plan supersedes
+the connection-only vault proposal. Each implementation milestone remains
+independently gated by the security and test exits below.
 
 ## Outcome
 
@@ -262,7 +261,7 @@ history or access editor.
 
 ### V0 — contract and threat-model graduation
 
-- Graduate an ADR covering item kinds, non-hierarchical capabilities, reveal,
+- [x] Graduate ADR-052 covering item kinds, non-hierarchical capabilities, reveal,
   audit vocabulary, revocation, retention, and the host-admin boundary.
 - Specify the exact step-up proof and one-use reveal response lifecycle.
 - Add protocol/API redaction tests before any secret-bearing route exists.
