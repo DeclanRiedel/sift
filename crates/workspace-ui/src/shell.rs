@@ -498,6 +498,7 @@ enum ObjectGroupKind {
 enum WorkspaceSurface {
     Editor,
     Connections,
+    Collaboration,
     Git,
     SavedQueries,
     QueryHistory,
@@ -7196,6 +7197,7 @@ struct ActiveQuerySnapshot {
 pub struct WorkspaceShell {
     focus_handle: FocusHandle,
     connections_focus_handle: FocusHandle,
+    collaboration_focus_handle: FocusHandle,
     repository_focus_handle: FocusHandle,
     connections_find_input: Entity<TextInput>,
     connections_find_open: bool,
@@ -8122,6 +8124,7 @@ impl WorkspaceShell {
         Self {
             focus_handle: cx.focus_handle(),
             connections_focus_handle: cx.focus_handle(),
+            collaboration_focus_handle: cx.focus_handle(),
             repository_focus_handle: cx.focus_handle(),
             connections_find_input,
             connections_find_open: false,
@@ -16010,6 +16013,9 @@ impl WorkspaceShell {
         } else {
             self._repository_refresh_task = None;
         }
+        if self.left_dock.presentation.open {
+            self.focus_active_left_panel_surface(window, cx);
+        }
         self.fit_side_docks_to_width(self.window_presentation.bounds.width);
         self.persist(cx);
         cx.notify();
@@ -21099,6 +21105,35 @@ impl WorkspaceShell {
         self.normalize_connection_selection();
         self.connections_focus_handle.focus(window, cx);
         self.persist(cx);
+        cx.notify();
+    }
+
+    fn focus_active_left_panel_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (surface, focus_handle) = match self.active_left_panel {
+            LeftPanel::Connections => (
+                WorkspaceSurface::Connections,
+                self.connections_focus_handle.clone(),
+            ),
+            LeftPanel::Collaboration => (
+                WorkspaceSurface::Collaboration,
+                self.collaboration_focus_handle.clone(),
+            ),
+            LeftPanel::Git => (WorkspaceSurface::Git, self.repository_focus_handle.clone()),
+            LeftPanel::SavedQueries => (
+                WorkspaceSurface::SavedQueries,
+                self.saved_queries_focus_handle.clone(),
+            ),
+            LeftPanel::QueryHistory => (
+                WorkspaceSurface::QueryHistory,
+                self.query_history_focus_handle.clone(),
+            ),
+            LeftPanel::QueryOutline => (
+                WorkspaceSurface::QueryOutline,
+                self.query_outline_focus_handle.clone(),
+            ),
+        };
+        self.focused_surface = surface;
+        focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -29762,6 +29797,7 @@ impl WorkspaceShell {
         let keyboard_focused = matches!(
             (dock.id, self.focused_surface),
             (DockId::Left, WorkspaceSurface::Connections)
+                | (DockId::Left, WorkspaceSurface::Collaboration)
                 | (DockId::Left, WorkspaceSurface::Git)
                 | (DockId::Left, WorkspaceSurface::SavedQueries)
                 | (DockId::Left, WorkspaceSurface::QueryHistory)
@@ -29777,12 +29813,24 @@ impl WorkspaceShell {
             .id(title)
             .debug_selector(move || debug_selector.to_owned())
             .key_context("SiftDock")
+            .when(dock.id == DockId::Left, |dock| {
+                dock.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|shell, _, window, cx| {
+                        shell.focus_active_left_panel_surface(window, cx)
+                    }),
+                )
+            })
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
                 |dock| {
                     dock.key_context("SiftConnections")
                         .track_focus(&self.connections_focus_handle)
                 },
+            )
+            .when(
+                dock.id == DockId::Left && self.active_left_panel == LeftPanel::Collaboration,
+                |dock| dock.track_focus(&self.collaboration_focus_handle),
             )
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Git,
@@ -45933,6 +45981,37 @@ mod tests {
             assert!(!snapshot.workspace.bottom_dock.open);
             assert!(!snapshot.workspace.right_dock.open);
         });
+    }
+
+    #[gpui::test]
+    fn clicking_left_dock_focuses_every_panel_surface(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let panels = [
+            (LeftPanel::Collaboration, WorkspaceSurface::Collaboration),
+            (LeftPanel::SavedQueries, WorkspaceSurface::SavedQueries),
+            (LeftPanel::QueryHistory, WorkspaceSurface::QueryHistory),
+            (LeftPanel::Git, WorkspaceSurface::Git),
+            (LeftPanel::QueryOutline, WorkspaceSurface::QueryOutline),
+        ];
+
+        for (panel, surface) in panels {
+            workspace.update_in(&mut cx, |shell, window, cx| {
+                shell.active_left_panel = panel;
+                shell.left_dock.presentation.open = true;
+                shell.focus_active_pane(window, cx);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let dock = cx.debug_bounds("left-dock").expect("open left dock");
+            cx.simulate_click(dock.center(), Modifiers::default());
+            cx.run_until_parked();
+            assert_eq!(
+                workspace.read_with(&cx, |shell, _| shell.focused_surface),
+                surface
+            );
+        }
     }
 
     #[gpui::test]
