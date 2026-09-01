@@ -27934,18 +27934,7 @@ impl WorkspaceShell {
                             }))
                             .child("Row JSON"),
                     )
-                    .child(div().flex_1())
-                    .child(
-                        IconButton::new(
-                            "result-change-ledger",
-                            IconName::Activity,
-                            "Database change ledger",
-                        )
-                        .tooltip("Database change ledger")
-                        .on_click(cx.listener(|shell, _, window, cx| {
-                            shell.open_change_ledger(None, window, cx)
-                        })),
-                    ),
+                    .child(div().flex_1()),
             )
             .child(match selected {
                 ResultInspectorView::Fields => self.render_result_fields_inspector(results, cx),
@@ -28406,18 +28395,6 @@ impl WorkspaceShell {
                 });
                 let mut left_actions = Vec::new();
                 let mut right_actions = Vec::new();
-                right_actions.push(
-                    IconButton::new(
-                        "table-change-ledger",
-                        IconName::Activity,
-                        "Database change ledger",
-                    )
-                    .tooltip("Database change ledger")
-                    .on_click(cx.listener(|shell, _, window, cx| {
-                        shell.open_change_ledger(None, window, cx)
-                    }))
-                    .into_any_element(),
-                );
                 if editing {
                     let ddl_pending = designer.is_some_and(|designer| designer.pending);
                     left_actions.push(
