@@ -13693,23 +13693,48 @@ async fn upsert_metadata_connection(
             "provider configuration is invalid: {error}"
         )));
     }
-    let profile = metadata
-        .upsert_connection_profile_with_limit(
-            tenant,
-            auth.principal_id,
-            NewConnectionProfile {
-                name: req.name,
-                provider_id: req.provider_id,
-                configuration: req.configuration,
-                semantic_engine,
-                credentials: req.credentials,
-                credential_mode: metadata_credential_mode(req.credential_mode),
-                tags: req.tags,
-            },
-            profile_limit,
-            metadata_audit_record(auth.principal_id, "upsert", "connection_profile", None),
-        )
-        .await?;
+    let credential_mode = metadata_credential_mode(req.credential_mode);
+    let vault_backed = credential_mode == sift_metadata::CredentialMode::Shared;
+    let temporary_test = req
+        .tags
+        .iter()
+        .any(|tag| tag == "sift:temporary-connection-test");
+    let input = NewConnectionProfile {
+        name: req.name,
+        provider_id: req.provider_id,
+        configuration: req.configuration,
+        semantic_engine,
+        credentials: req.credentials,
+        credential_mode,
+        tags: req.tags,
+    };
+    let (profile, vault_item) = if vault_backed && !temporary_test {
+        let (profile, item) = metadata
+            .upsert_vault_connection_profile(
+                sift_api_types::TenantId(tenant.0),
+                api_principal(auth.principal_id),
+                req.vault_id.map(sift_api_types::VaultId),
+                input,
+                profile_limit,
+            )
+            .await?;
+        (profile, Some(item))
+    } else {
+        let profile = metadata
+            .upsert_connection_profile_with_limit(
+                tenant,
+                auth.principal_id,
+                input,
+                profile_limit,
+                metadata_audit_record(auth.principal_id, "upsert", "connection_profile", None),
+            )
+            .await?;
+        (profile, None)
+    };
+    state
+        .sessions
+        .disconnect_managed_profile(tenant, profile.id)
+        .await;
     push_metadata_operation_local(
         &state,
         auth.principal_id,
@@ -13717,6 +13742,16 @@ async fn upsert_metadata_connection(
         "connection_profile",
         Some(profile.id.0),
     );
+    if let Some(item) = vault_item {
+        state.sessions.push_operation(
+            Operation::Vault {
+                action: sift_protocol::VaultAction::Update,
+                vault_id: req.vault_id,
+                item_id: Some(item.0),
+            },
+            OperationStatus::Succeeded,
+        );
+    }
     Ok(Json(profile))
 }
 
@@ -14219,6 +14254,24 @@ async fn set_metadata_vault_grant(
             .map_err(Into::into)
     })
     .await?;
+    if !grant.capabilities.use_secret {
+        let lookup = metadata_store_cloned(&state)?;
+        let profiles = metadata_blocking(move || {
+            lookup
+                .vault_connection_profiles(sift_api_types::VaultId(id))
+                .map_err(Into::into)
+        })
+        .await?;
+        for profile in profiles {
+            state
+                .sessions
+                .disconnect_managed_profile_principal(
+                    profile,
+                    sift_metadata::PrincipalId(principal),
+                )
+                .await;
+        }
+    }
     state.sessions.push_operation(
         Operation::Vault {
             action: sift_protocol::VaultAction::Grant,
@@ -14931,6 +14984,7 @@ async fn open_connection_from_profile(
     let (configuration, credentials) = metadata
         .resolve_provider_connection(tenant, auth.principal_id, profile_id)
         .await?;
+    let vault_binding = metadata.vault_connection_binding(profile_id)?;
     let info = state
         .sessions
         .open_managed_connection(
@@ -14952,6 +15006,16 @@ async fn open_connection_from_profile(
         "connection_profile",
         Some(profile_id.0),
     );
+    if let Some((vault, item)) = vault_binding {
+        state.sessions.push_operation(
+            Operation::Vault {
+                action: sift_protocol::VaultAction::Use,
+                vault_id: Some(vault.0),
+                item_id: Some(item.0),
+            },
+            OperationStatus::Succeeded,
+        );
+    }
     Ok(Json(info))
 }
 

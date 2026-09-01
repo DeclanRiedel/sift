@@ -70,8 +70,15 @@
     "current_binary": "migration_required"
   },
   {
-    "name": "current-v42",
+    "name": "pre-connection-vault-v42",
     "schema_version": 42,
+    "minimum_compatible_version": 19,
+    "automatic_migration": "allowed",
+    "current_binary": "migration_required"
+  },
+  {
+    "name": "current-v43",
+    "schema_version": 43,
     "minimum_compatible_version": 19,
     "automatic_migration": "allowed",
     "current_binary": "accepted"

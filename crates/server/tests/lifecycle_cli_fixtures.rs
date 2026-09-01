@@ -203,7 +203,7 @@ fn remote_lifecycle_output_is_stable_structured_and_redacted() {
         vec!["applied", "backup", "from_version", "to_version"]
     );
     assert_eq!(migration["migration"]["from_version"], 0);
-    assert_eq!(migration["migration"]["to_version"], 42);
+    assert_eq!(migration["migration"]["to_version"], 43);
     assert_eq!(
         migration["migration"]["applied"].as_array().unwrap().len(),
         42
@@ -227,8 +227,8 @@ fn remote_lifecycle_output_is_stable_structured_and_redacted() {
             .output()
             .unwrap(),
     );
-    assert_eq!(second["migration"]["from_version"], 42);
-    assert_eq!(second["migration"]["to_version"], 42);
+    assert_eq!(second["migration"]["from_version"], 43);
+    assert_eq!(second["migration"]["to_version"], 43);
     assert_eq!(second["migration"]["applied"], json!([]));
     let second_text = serde_json::to_string(&second).unwrap();
     assert!(!second_text.contains(secret_key.trim()));

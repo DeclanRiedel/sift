@@ -2347,6 +2347,7 @@ pub enum ExecutorCommand {
     },
     CreateConnectionProfile {
         tenant_id: i64,
+        vault_id: Option<i64>,
         name: String,
         provider_id: sift_protocol::ProviderId,
         configuration: serde_json::Value,
@@ -7652,6 +7653,7 @@ pub struct WorkspaceShell {
     database_wizard_step: DatabaseWizardStep,
     database_connection_pending: bool,
     editing_connection_profile: Option<i64>,
+    database_connection_vault_id: Option<i64>,
     editing_connection_credential_mode: sift_api_types::CredentialMode,
     editing_connection_tags: Vec<String>,
     database_connection_tested: bool,
@@ -8604,6 +8606,7 @@ impl WorkspaceShell {
             database_wizard_step: DatabaseWizardStep::Provider,
             database_connection_pending: false,
             editing_connection_profile: None,
+            database_connection_vault_id: None,
             editing_connection_credential_mode: sift_api_types::CredentialMode::Shared,
             editing_connection_tags: Vec::new(),
             database_connection_tested: false,
@@ -10589,6 +10592,7 @@ impl WorkspaceShell {
                         .sort_by(|left, right| left.name.cmp(&right.name));
                 }
                 self.database_connection_pending = false;
+                let vault_changed = self.database_connection_vault_id.take().is_some();
                 let edited = self.editing_connection_profile.take().is_some();
                 self.database_connection_error = None;
                 self.modal = None;
@@ -10613,6 +10617,9 @@ impl WorkspaceShell {
                             cx,
                         );
                     }
+                }
+                if vault_changed {
+                    self.request_selected_vault_items(cx);
                 }
             }
             ExecutorEvent::ProfileCreationFailed(message) => {
@@ -15597,6 +15604,7 @@ impl WorkspaceShell {
 
     fn open_connection_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing_connection_profile = None;
+        self.database_connection_vault_id = None;
         self.selected_database_tenant = self.lifecycle.tenants.first().map(|tenant| tenant.id.0);
         self.database_connection_error = None;
         self.database_connection_pending = false;
@@ -15634,6 +15642,7 @@ impl WorkspaceShell {
         if sender
             .send(ExecutorCommand::CreateConnectionProfile {
                 tenant_id,
+                vault_id: None,
                 name: parsed.name,
                 provider_id: parsed.provider_id,
                 configuration: parsed.configuration,
@@ -15655,6 +15664,7 @@ impl WorkspaceShell {
 
     fn open_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing_connection_profile = None;
+        self.database_connection_vault_id = None;
         self.editing_connection_credential_mode = sift_api_types::CredentialMode::Shared;
         self.editing_connection_tags.clear();
         self.database_connection_tested = false;
@@ -15688,6 +15698,22 @@ impl WorkspaceShell {
         self.modal = Some(Modal::DatabaseConnection);
         self.focus_handle.focus(window, cx);
         cx.notify();
+    }
+
+    fn open_database_connection_in_selected_vault(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(vault_id) = self
+            .selected_vault()
+            .and_then(|vault| vault.effective_capabilities.edit.then_some(vault.id.0))
+        else {
+            self.show_toast("Select an editable vault first".into(), cx);
+            return;
+        };
+        self.open_database_connection(window, cx);
+        self.database_connection_vault_id = Some(vault_id);
     }
 
     fn select_database_provider(&mut self, provider_id: String, cx: &mut Context<Self>) {
@@ -16000,6 +16026,7 @@ impl WorkspaceShell {
         } else {
             ExecutorCommand::CreateConnectionProfile {
                 tenant_id,
+                vault_id: self.database_connection_vault_id,
                 name,
                 provider_id,
                 configuration: serde_json::Value::Object(configuration),
@@ -31686,6 +31713,16 @@ impl WorkspaceShell {
                                                         )),
                                                 )
                                                 .child(
+                                                    Button::new("create-vault-connection", "+ Connection")
+                                                        .tone(ButtonTone::Ghost)
+                                                        .disabled(!can_add_item)
+                                                        .on_click(cx.listener(
+                                                            |shell, _, window, cx| {
+                                                                shell.open_database_connection_in_selected_vault(window, cx)
+                                                            },
+                                                        )),
+                                                )
+                                                .child(
                                                     Button::new("create-vault-item", "+ Item")
                                                         .tone(ButtonTone::Ghost)
                                                         .disabled(!can_add_item)
@@ -46208,6 +46245,7 @@ mod tests {
         match receiver.try_recv().unwrap() {
             ExecutorCommand::CreateConnectionProfile {
                 tenant_id,
+                vault_id,
                 name,
                 provider_id,
                 configuration,
@@ -46216,6 +46254,7 @@ mod tests {
                 tags,
             } => {
                 assert_eq!(tenant_id, 7);
+                assert_eq!(vault_id, None);
                 assert_eq!(name, "Reporting");
                 assert_eq!(provider_id.as_str(), "sift/postgres");
                 assert_eq!(configuration["port"], 5432);

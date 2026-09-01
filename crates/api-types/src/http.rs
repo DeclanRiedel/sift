@@ -629,7 +629,7 @@ pub struct UpdateDocumentSnapshotRequest {
     pub crdt_state: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct UpsertConnectionProfileRequest {
     pub tenant_id: i64,
     pub name: String,
@@ -637,9 +637,30 @@ pub struct UpsertConnectionProfileRequest {
     pub configuration: serde_json::Value,
     #[serde(default)]
     pub credentials: Option<serde_json::Value>,
+    #[serde(default)]
+    pub vault_id: Option<i64>,
     pub credential_mode: CredentialMode,
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+impl std::fmt::Debug for UpsertConnectionProfileRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpsertConnectionProfileRequest")
+            .field("tenant_id", &self.tenant_id)
+            .field("name", &self.name)
+            .field("provider_id", &self.provider_id)
+            .field("configuration", &self.configuration)
+            .field(
+                "credentials",
+                &self.credentials.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("vault_id", &self.vault_id)
+            .field("credential_mode", &self.credential_mode)
+            .field("tags", &self.tags)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

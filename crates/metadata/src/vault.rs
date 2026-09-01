@@ -7,9 +7,10 @@ use sift_protocol::{VaultCapabilities, VaultItemKind, VaultScope};
 use uuid::Uuid;
 
 use crate::{
-    ensure_principal_tenant_member_locked, ensure_tenant_member_role_locked,
-    insert_operation_audit_row, now_text, parse_time, sqlite_blocking, MetadataError,
-    MetadataStore, NewOperationAudit, Result,
+    connection_profile_by_id_locked, ensure_principal_tenant_member_locked,
+    ensure_tenant_member_role_locked, insert_operation_audit_row, now_text, parse_time,
+    sqlite_blocking, validate_provider_credentials, ConnectionProfile, ConnectionProfileId,
+    CredentialMode, MetadataError, MetadataStore, NewConnectionProfile, NewOperationAudit, Result,
 };
 
 fn metadata_tenant(id: TenantId) -> crate::TenantId {
@@ -20,7 +21,7 @@ fn metadata_principal(id: PrincipalId) -> crate::PrincipalId {
     crate::PrincipalId(id.0)
 }
 
-const VAULT_SECRET_NAMESPACE: &str = "sift.vault.v1";
+pub(crate) const VAULT_SECRET_NAMESPACE: &str = "sift.vault.v1";
 const MAX_LABEL_BYTES: usize = 160;
 const MAX_METADATA_BYTES: usize = 32 * 1024;
 const MAX_SECRET_BYTES: usize = 64 * 1024;
@@ -198,7 +199,7 @@ fn vault_capabilities_locked(
     Ok((tenant, scope, capabilities.normalized()))
 }
 
-fn require_capability(
+pub(crate) fn require_capability(
     conn: &Connection,
     vault_id: VaultId,
     actor: PrincipalId,
@@ -315,6 +316,38 @@ fn enqueue_cleanup(tx: &Transaction<'_>, handle: &str, reason: &str) -> Result<(
 }
 
 impl MetadataStore {
+    pub fn vault_connection_binding(
+        &self,
+        profile: ConnectionProfileId,
+    ) -> Result<Option<(VaultId, VaultItemId)>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT i.vault_id, i.id
+             FROM vault_connection_binding b
+             JOIN vault_item i ON i.id = b.item_id
+             WHERE b.connection_profile_id = ?1",
+            params![profile.0],
+            |row| Ok((VaultId(row.get(0)?), VaultItemId(row.get(1)?))),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn vault_connection_profiles(&self, vault: VaultId) -> Result<Vec<ConnectionProfileId>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT b.connection_profile_id
+             FROM vault_connection_binding b
+             JOIN vault_item i ON i.id = b.item_id
+             WHERE i.vault_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![vault.0], |row| {
+            row.get::<_, i64>(0).map(ConnectionProfileId)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn ensure_personal_vault(&self, tenant: TenantId, actor: PrincipalId) -> Result<Vault> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
@@ -613,6 +646,264 @@ impl MetadataStore {
         result
     }
 
+    pub async fn upsert_vault_connection_profile(
+        &self,
+        tenant: TenantId,
+        actor: PrincipalId,
+        requested_vault: Option<VaultId>,
+        mut input: NewConnectionProfile,
+        max_profiles: Option<u64>,
+    ) -> Result<(ConnectionProfile, VaultItemId)> {
+        if input.credential_mode != CredentialMode::Shared {
+            return Err(MetadataError::InvalidVaultInput(
+                "vault-backed connections require shared credential mode".into(),
+            ));
+        }
+        validate_label(&input.name)?;
+        let item_metadata = VaultItemMetadata::Connection {
+            provider_id: input.provider_id.clone(),
+            configuration: input.configuration.clone(),
+        };
+        let metadata_json = validate_metadata(&item_metadata)?;
+        let credentials = input.credentials.take();
+        let new_secret = if let Some(credentials) = credentials.as_ref() {
+            validate_provider_credentials(credentials)?;
+            let encoded = validate_secret(credentials)?;
+            let handle = Uuid::new_v4().to_string();
+            self.secrets
+                .put(VAULT_SECRET_NAMESPACE, &handle, &encoded)
+                .await?;
+            Some(handle)
+        } else {
+            None
+        };
+        let vault_id = if let Some(vault) = requested_vault {
+            vault
+        } else {
+            let existing = {
+                let conn = self.conn()?;
+                conn.query_row(
+                    "SELECT i.vault_id FROM connection_profile p
+                     JOIN vault_connection_binding b ON b.connection_profile_id = p.id
+                     JOIN vault_item i ON i.id = b.item_id
+                     WHERE p.tenant_id = ?1 AND p.name = ?2",
+                    params![tenant.0, input.name],
+                    |row| row.get::<_, i64>(0).map(VaultId),
+                )
+                .optional()?
+            };
+            match existing {
+                Some(vault) => vault,
+                None => self.ensure_personal_vault(tenant, actor)?.id,
+            }
+        };
+        let now = now_text();
+        let configuration_json = serde_json::to_string(&input.configuration)?;
+        let tags_json = serde_json::to_string(&input.tags)?;
+        let backend = self.backend.clone();
+        let db_secret = new_secret.clone();
+        let result: Result<(ConnectionProfile, VaultItemId, Option<String>)> =
+            sqlite_blocking(move || {
+                let mut conn = backend.conn()?;
+                let tx = conn.transaction()?;
+                let (vault_tenant, _, capabilities) =
+                    vault_capabilities_locked(&tx, vault_id, actor)?;
+                if vault_tenant != tenant || !capabilities.edit {
+                    return Err(MetadataError::VaultPermissionDenied);
+                }
+                let existing_profile = tx
+                    .query_row(
+                        "SELECT id, shared_secret_handle FROM connection_profile
+                         WHERE tenant_id = ?1 AND name = ?2",
+                        params![tenant.0, input.name],
+                        |row| {
+                            Ok((
+                                ConnectionProfileId(row.get(0)?),
+                                row.get::<_, Option<String>>(1)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                if existing_profile.is_none() {
+                    if let Some(limit) = max_profiles {
+                        let count: u64 = tx.query_row(
+                            "SELECT COUNT(*) FROM connection_profile WHERE tenant_id = ?1",
+                            params![tenant.0],
+                            |row| row.get(0),
+                        )?;
+                        if count >= limit {
+                            return Err(MetadataError::ConnectionProfileLimitReached(
+                                metadata_tenant(tenant),
+                            ));
+                        }
+                    }
+                }
+                let existing_item = existing_profile
+                    .as_ref()
+                    .map(|(profile, _)| {
+                        tx.query_row(
+                            "SELECT b.item_id, i.vault_id, i.head_version
+                             FROM vault_connection_binding b
+                             JOIN vault_item i ON i.id = b.item_id
+                             WHERE b.connection_profile_id = ?1",
+                            params![profile.0],
+                            |row| {
+                                Ok((
+                                    VaultItemId(row.get(0)?),
+                                    VaultId(row.get(1)?),
+                                    row.get::<_, u64>(2)?,
+                                ))
+                            },
+                        )
+                        .optional()
+                    })
+                    .transpose()?
+                    .flatten();
+                if existing_item.is_some_and(|(_, bound_vault, _)| bound_vault != vault_id) {
+                    return Err(MetadataError::InvalidVaultInput(
+                        "connection is already bound to another vault".into(),
+                    ));
+                }
+                let inherited_handle = match existing_item {
+                    Some((item, _, head)) => tx.query_row(
+                        "SELECT secret_handle FROM vault_item_version
+                         WHERE item_id = ?1 AND version = ?2",
+                        params![item.0, head],
+                        |row| row.get::<_, Option<String>>(0),
+                    )?,
+                    None => None,
+                };
+                let version_handle = db_secret.clone().or(inherited_handle);
+                if version_handle.is_none() {
+                    return Err(MetadataError::VaultSecretMissing);
+                }
+                tx.execute(
+                    "INSERT INTO connection_profile
+                     (tenant_id, name, engine, spec_json, credential_mode, shared_secret_handle,
+                      tags_json, created_by, created_at, updated_at, provider_id,
+                      configuration_json, semantic_engine)
+                     VALUES (?1, ?2, ?3, ?4, 'shared', NULL, ?5, ?6, ?7, ?7, ?8, ?4, ?9)
+                     ON CONFLICT(tenant_id, name) DO UPDATE SET
+                        engine = excluded.engine, spec_json = excluded.spec_json,
+                        provider_id = excluded.provider_id,
+                        configuration_json = excluded.configuration_json,
+                        semantic_engine = excluded.semantic_engine,
+                        credential_mode = 'shared', shared_secret_handle = NULL,
+                        tags_json = excluded.tags_json, updated_at = excluded.updated_at",
+                    params![
+                        tenant.0,
+                        input.name,
+                        input
+                            .semantic_engine
+                            .map_or("postgres", sift_protocol::Engine::as_str),
+                        configuration_json,
+                        tags_json,
+                        actor.0,
+                        now,
+                        input.provider_id.as_str(),
+                        input.semantic_engine.map(sift_protocol::Engine::as_str),
+                    ],
+                )?;
+                let profile_id = ConnectionProfileId(tx.query_row(
+                    "SELECT id FROM connection_profile WHERE tenant_id = ?1 AND name = ?2",
+                    params![tenant.0, input.name],
+                    |row| row.get(0),
+                )?);
+                let item_id = if let Some((item_id, _, head)) = existing_item {
+                    let next = head + 1;
+                    tx.execute(
+                        "UPDATE vault_item SET label = ?2, metadata_json = ?3,
+                         head_version = ?4, revision = revision + 1, updated_at = ?5
+                         WHERE id = ?1",
+                        params![item_id.0, input.name, metadata_json, next, now],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO vault_item_version
+                         (item_id, version, parent_version, metadata_json, secret_handle,
+                          change_summary, created_by, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            item_id.0,
+                            next,
+                            head,
+                            metadata_json,
+                            version_handle,
+                            if db_secret.is_some() {
+                                "Connection updated; credential rotated"
+                            } else {
+                                "Connection metadata updated"
+                            },
+                            actor.0,
+                            now,
+                        ],
+                    )?;
+                    item_id
+                } else {
+                    tx.execute(
+                        "INSERT INTO vault_item
+                         (vault_id, kind, label, metadata_json, created_by, created_at, updated_at)
+                         VALUES (?1, 'connection', ?2, ?3, ?4, ?5, ?5)",
+                        params![vault_id.0, input.name, metadata_json, actor.0, now],
+                    )?;
+                    let item_id = VaultItemId(tx.last_insert_rowid());
+                    tx.execute(
+                        "INSERT INTO vault_item_version
+                         (item_id, version, parent_version, metadata_json, secret_handle,
+                          change_summary, created_by, created_at)
+                         VALUES (?1, 1, NULL, ?2, ?3, 'Connection created', ?4, ?5)",
+                        params![item_id.0, metadata_json, version_handle, actor.0, now],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO vault_connection_binding
+                         (item_id, connection_profile_id, created_at) VALUES (?1, ?2, ?3)",
+                        params![item_id.0, profile_id.0, now],
+                    )?;
+                    item_id
+                };
+                insert_operation_audit_row(
+                    &tx,
+                    &audit(actor, "update", "vault_item", Some(item_id.0)),
+                )?;
+                insert_operation_audit_row(
+                    &tx,
+                    &audit(actor, "upsert", "connection_profile", Some(profile_id.0)),
+                )?;
+                let legacy_handle = existing_profile.and_then(|(_, handle)| handle);
+                tx.commit()?;
+                Ok((
+                    connection_profile_by_id_locked(&conn, profile_id)?,
+                    item_id,
+                    legacy_handle,
+                ))
+            })
+            .await;
+        match result {
+            Ok((profile, item, legacy_handle)) => {
+                if let Some(handle) = legacy_handle {
+                    self.delete_secret_best_effort(&handle, "migrate_connection_profile_to_vault")
+                        .await;
+                }
+                Ok((profile, item))
+            }
+            Err(error) => {
+                if let Some(handle) = new_secret {
+                    if self
+                        .secrets
+                        .delete(VAULT_SECRET_NAMESPACE, &handle)
+                        .await
+                        .is_err()
+                    {
+                        let mut conn = self.conn()?;
+                        let tx = conn.transaction()?;
+                        enqueue_cleanup(&tx, &handle, "connection_upsert_rollback")?;
+                        tx.commit()?;
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub fn list_vault_item_versions(
         &self,
         id: VaultItemId,
@@ -793,6 +1084,87 @@ mod tests {
         assert!(matches!(
             store.reveal_vault_secret(item.id, owner).await,
             Err(MetadataError::VaultSecretNotRevealable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn vault_connection_use_tracks_grants_and_rotates_credentials() {
+        let (store, tenant, owner, member) = store();
+        let vault = store
+            .create_team_vault(tenant, owner, "Shared data")
+            .unwrap();
+        store
+            .set_vault_grant(
+                vault.id,
+                owner,
+                member,
+                None,
+                VaultCapabilities {
+                    use_secret: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let input = |password: &str| NewConnectionProfile {
+            name: "Warehouse".into(),
+            provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+            configuration: serde_json::json!({"host": "db.internal"}),
+            semantic_engine: Some(sift_protocol::Engine::Postgres),
+            credentials: Some(serde_json::json!({"password": password})),
+            credential_mode: CredentialMode::Shared,
+            tags: Vec::new(),
+        };
+        let (profile, item) = store
+            .upsert_vault_connection_profile(tenant, owner, Some(vault.id), input("first"), None)
+            .await
+            .unwrap();
+        let (_, credentials) = store
+            .resolve_provider_connection(
+                metadata_tenant(tenant),
+                metadata_principal(member),
+                profile.id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(credentials["password"], b"first");
+
+        let (_, rotated_item) = store
+            .upsert_vault_connection_profile(tenant, owner, None, input("second"), None)
+            .await
+            .unwrap();
+        assert_eq!(rotated_item, item);
+        assert_eq!(
+            store.list_vault_item_versions(item, owner).unwrap().len(),
+            2
+        );
+        let (_, credentials) = store
+            .resolve_provider_connection(
+                metadata_tenant(tenant),
+                metadata_principal(member),
+                profile.id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(credentials["password"], b"second");
+
+        store
+            .set_vault_grant(
+                vault.id,
+                owner,
+                member,
+                Some(1),
+                VaultCapabilities::default(),
+            )
+            .unwrap();
+        assert!(matches!(
+            store
+                .resolve_provider_connection(
+                    metadata_tenant(tenant),
+                    metadata_principal(member),
+                    profile.id,
+                )
+                .await,
+            Err(MetadataError::VaultPermissionDenied)
         ));
     }
 }

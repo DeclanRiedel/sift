@@ -977,6 +977,7 @@ async fn run_query_executor(
             }
             ExecutorCommand::CreateConnectionProfile {
                 tenant_id,
+                vault_id,
                 name,
                 provider_id,
                 configuration,
@@ -995,6 +996,7 @@ async fn run_query_executor(
                     &server,
                     UpsertConnectionProfileRequest {
                         tenant_id,
+                        vault_id,
                         name,
                         provider_id,
                         configuration,
@@ -4835,6 +4837,7 @@ async fn test_connection_profile(
     let profile = client
         .upsert_connection_profile(UpsertConnectionProfileRequest {
             tenant_id,
+            vault_id: None,
             name,
             provider_id,
             configuration,
