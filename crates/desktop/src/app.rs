@@ -1179,6 +1179,122 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadVaults { tenant_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .vaults(sift_api_types::TenantId(tenant_id))
+                        .await
+                        .map_err(|error| format!("loading vaults failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultsLoaded { tenant_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadVaultItems { vault_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .vault_items(sift_api_types::VaultId(vault_id))
+                        .await
+                        .map_err(|error| format!("loading vault items failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultItemsLoaded { vault_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateTeamVault { tenant_id, name } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .create_vault(sift_api_types::CreateVaultRequest {
+                            tenant_id,
+                            scope: sift_protocol::VaultScope::Team,
+                            name,
+                        })
+                        .await
+                        .map_err(|error| format!("creating team vault failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events.send(ExecutorEvent::VaultCreated(result)).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateVaultItem { vault_id, request } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .create_vault_item(sift_api_types::VaultId(vault_id), request)
+                        .await
+                        .map_err(|error| format!("storing vault item failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultItemCreated { vault_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ShareVault {
+                vault_id,
+                principal_ids,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        match client.vault_grants(sift_api_types::VaultId(vault_id)).await {
+                            Ok(grants) => {
+                                let mut shared = 0usize;
+                                let mut failure = None;
+                                for principal_id in principal_ids {
+                                    let existing = grants
+                                        .iter()
+                                        .find(|grant| grant.principal_id.0 == principal_id);
+                                    let mut capabilities = existing
+                                        .map(|grant| grant.capabilities)
+                                        .unwrap_or_default();
+                                    capabilities.inspect = true;
+                                    capabilities.use_secret = true;
+                                    let request = sift_api_types::SetVaultGrantRequest {
+                                        expected_revision: existing.map(|grant| grant.revision),
+                                        capabilities,
+                                    };
+                                    if let Err(error) = client
+                                        .set_vault_grant(
+                                            sift_api_types::VaultId(vault_id),
+                                            sift_api_types::PrincipalId(principal_id),
+                                            request,
+                                        )
+                                        .await
+                                    {
+                                        failure = Some(format!("sharing vault failed: {error}"));
+                                        break;
+                                    }
+                                    shared += 1;
+                                }
+                                failure.map_or(Ok(shared), Err)
+                            }
+                            Err(error) => Err(format!("loading vault grants failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultShared { vault_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadRepositoryStatus {
                 workspace_id,
                 request_id,

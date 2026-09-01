@@ -549,6 +549,33 @@ enum SavedQueryMetadataOrigin {
     PanelTags,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum CollaborationSection {
+    #[default]
+    People,
+    Vault,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum VaultItemDraftKind {
+    #[default]
+    Login,
+    Token,
+    SecureNote,
+}
+
+impl VaultItemDraftKind {
+    const ALL: [Self; 3] = [Self::Login, Self::Token, Self::SecureNote];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Login => "Login",
+            Self::Token => "Token",
+            Self::SecureNote => "Secure note",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PendingSavedQueryMetadataUpdate {
     instance_id: String,
@@ -1405,6 +1432,8 @@ pub enum Modal {
     ChangeLedger,
     ConfirmWorkspaceRestore(sift_protocol::WorkspaceCheckpointId),
     WorkspaceReconcile,
+    CreateVault,
+    CreateVaultItem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2347,6 +2376,24 @@ pub enum ExecutorCommand {
         room_id: i64,
         principal_id: i64,
     },
+    LoadVaults {
+        tenant_id: i64,
+    },
+    LoadVaultItems {
+        vault_id: i64,
+    },
+    CreateTeamVault {
+        tenant_id: i64,
+        name: String,
+    },
+    CreateVaultItem {
+        vault_id: i64,
+        request: sift_api_types::CreateVaultItemRequest,
+    },
+    ShareVault {
+        vault_id: i64,
+        principal_ids: Vec<i64>,
+    },
     LoadRepositoryStatus {
         workspace_id: i64,
         request_id: u64,
@@ -2953,6 +3000,23 @@ pub enum ExecutorEvent {
         room_id: i64,
         principal_id: i64,
         result: Result<(), String>,
+    },
+    VaultsLoaded {
+        tenant_id: i64,
+        result: Result<Vec<sift_api_types::Vault>, String>,
+    },
+    VaultItemsLoaded {
+        vault_id: i64,
+        result: Result<Vec<sift_api_types::VaultItem>, String>,
+    },
+    VaultCreated(Result<sift_api_types::Vault, String>),
+    VaultItemCreated {
+        vault_id: i64,
+        result: Result<sift_api_types::VaultItem, String>,
+    },
+    VaultShared {
+        vault_id: i64,
+        result: Result<usize, String>,
     },
     RepositoryStatusLoaded {
         workspace_id: i64,
@@ -7385,6 +7449,19 @@ pub struct WorkspaceShell {
     room_members: Vec<sift_api_types::RoomMember>,
     room_members_loading: bool,
     room_members_error: Option<String>,
+    collaboration_section: CollaborationSection,
+    vaults: Vec<sift_api_types::Vault>,
+    vault_items: Vec<sift_api_types::VaultItem>,
+    vault_selected: usize,
+    vault_item_selected: usize,
+    collaboration_g_pending: bool,
+    vault_loading: bool,
+    vault_error: Option<String>,
+    vault_item_draft_kind: VaultItemDraftKind,
+    vault_name_input: Entity<TextInput>,
+    vault_item_label_input: Entity<TextInput>,
+    vault_item_detail_input: Entity<TextInput>,
+    vault_item_secret_input: Entity<TextInput>,
     repository: RepositoryProjection,
     workspace_files: WorkspaceFilesProjection,
     workspace_reconcile_resolutions:
@@ -7767,6 +7844,18 @@ impl WorkspaceShell {
         let saved_query_name_input = cx.new(|cx| TextInput::new("", "Saved query name…", cx));
         let saved_query_panel_tags_input = cx.new(|cx| {
             TextInput::new("", "finance, reporting", cx).aria_label("Saved query panel tags")
+        });
+        let vault_name_input =
+            cx.new(|cx| TextInput::new("", "Team vault name", cx).aria_label("Team vault name"));
+        let vault_item_label_input =
+            cx.new(|cx| TextInput::new("", "Item name", cx).aria_label("Vault item name"));
+        let vault_item_detail_input = cx.new(|cx| {
+            TextInput::new("", "Username or service", cx).aria_label("Vault item detail")
+        });
+        let vault_item_secret_input = cx.new(|cx| {
+            TextInput::new("", "Secret value", cx)
+                .aria_label("Vault secret value")
+                .masked()
         });
         let result_cell_edit_input = cx.new(|cx| TextInput::new("", "New value…", cx));
         let repository_commit_draft = selected_workspace_id
@@ -8321,6 +8410,19 @@ impl WorkspaceShell {
             room_members: Vec::new(),
             room_members_loading: false,
             room_members_error: None,
+            collaboration_section: CollaborationSection::default(),
+            vaults: Vec::new(),
+            vault_items: Vec::new(),
+            vault_selected: 0,
+            vault_item_selected: 0,
+            collaboration_g_pending: false,
+            vault_loading: false,
+            vault_error: None,
+            vault_item_draft_kind: VaultItemDraftKind::default(),
+            vault_name_input,
+            vault_item_label_input,
+            vault_item_detail_input,
+            vault_item_secret_input,
             repository,
             workspace_files,
             workspace_reconcile_resolutions: HashMap::new(),
@@ -10581,6 +10683,92 @@ impl WorkspaceShell {
                 if self.selected_workspace().map(|workspace| workspace.room_id) == Some(room_id) {
                     cx.notify();
                 }
+            }
+            ExecutorEvent::VaultsLoaded { tenant_id, result } => {
+                if self.selected_tenant_id() != Some(tenant_id) {
+                    return;
+                }
+                self.vault_loading = false;
+                match result {
+                    Ok(vaults) => {
+                        self.vaults = vaults;
+                        self.vault_selected =
+                            self.vault_selected.min(self.vaults.len().saturating_sub(1));
+                        self.vault_error = None;
+                        self.request_selected_vault_items(cx);
+                    }
+                    Err(message) => self.vault_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::VaultItemsLoaded { vault_id, result } => {
+                if self.selected_vault().map(|vault| vault.id.0) != Some(vault_id) {
+                    return;
+                }
+                self.vault_loading = false;
+                match result {
+                    Ok(items) => {
+                        self.vault_items = items;
+                        self.vault_item_selected = self
+                            .vault_item_selected
+                            .min(self.vault_items.len().saturating_sub(1));
+                        self.vault_error = None;
+                    }
+                    Err(message) => self.vault_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::VaultCreated(result) => {
+                self.vault_loading = false;
+                match result {
+                    Ok(vault) => {
+                        self.modal = None;
+                        self.vault_name_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                        self.show_success_toast(format!("Created {}", vault.name), cx);
+                        self.request_vaults(cx);
+                    }
+                    Err(message) => self.vault_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::VaultItemCreated { vault_id, result } => {
+                self.vault_loading = false;
+                match result {
+                    Ok(item) => {
+                        self.modal = None;
+                        for input in [
+                            &self.vault_item_label_input,
+                            &self.vault_item_detail_input,
+                            &self.vault_item_secret_input,
+                        ] {
+                            input.update(cx, |input, cx| input.set_text("", cx));
+                        }
+                        self.show_success_toast(format!("Stored {}", item.label), cx);
+                        if self.selected_vault().map(|vault| vault.id.0) == Some(vault_id) {
+                            self.request_selected_vault_items(cx);
+                        }
+                    }
+                    Err(message) => self.vault_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::VaultShared { vault_id, result } => {
+                if self.selected_vault().map(|vault| vault.id.0) != Some(vault_id) {
+                    return;
+                }
+                self.vault_loading = false;
+                match result {
+                    Ok(count) => {
+                        self.vault_error = None;
+                        self.show_success_toast(
+                            format!("Shared use-only access with {count} room member(s)"),
+                            cx,
+                        );
+                    }
+                    Err(message) => self.vault_error = Some(message),
+                }
+                cx.notify();
             }
             ExecutorEvent::WorkspaceFilesLoaded {
                 workspace_id,
@@ -16103,6 +16291,7 @@ impl WorkspaceShell {
         }
         if panel == LeftPanel::Collaboration && self.left_dock.presentation.open {
             self.request_room_members(cx);
+            self.request_vaults(cx);
         }
         if panel == LeftPanel::Git && self.left_dock.presentation.open {
             self.request_workspace_files(cx);
@@ -16166,6 +16355,186 @@ impl WorkspaceShell {
             .send(ExecutorCommand::RemoveRoomMember {
                 room_id,
                 principal_id,
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn selected_vault(&self) -> Option<&sift_api_types::Vault> {
+        self.vaults.get(self.vault_selected)
+    }
+
+    fn request_vaults(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            self.vault_error = Some("No tenant is available".into());
+            cx.notify();
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.vault_error = Some("Vault is unavailable".into());
+            cx.notify();
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::LoadVaults { tenant_id })
+            .is_ok();
+        if self.vault_loading {
+            self.vault_error = None;
+        }
+        cx.notify();
+    }
+
+    fn request_selected_vault_items(&mut self, cx: &mut Context<Self>) {
+        let Some(vault_id) = self.selected_vault().map(|vault| vault.id.0) else {
+            self.vault_items.clear();
+            cx.notify();
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.vault_error = Some("Vault is unavailable".into());
+            cx.notify();
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::LoadVaultItems { vault_id })
+            .is_ok();
+        if self.vault_loading {
+            self.vault_error = None;
+        }
+        cx.notify();
+    }
+
+    fn select_vault(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.vaults.is_empty() {
+            return;
+        }
+        self.vault_selected = index.min(self.vaults.len() - 1);
+        self.vault_item_selected = 0;
+        self.request_selected_vault_items(cx);
+    }
+
+    fn open_create_vault(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.vault_error = None;
+        self.modal = Some(Modal::CreateVault);
+        self.vault_name_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn submit_create_vault(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            self.vault_error = Some("No tenant is available".into());
+            return;
+        };
+        let name = self.vault_name_input.read(cx).text().trim().to_owned();
+        if name.is_empty() {
+            self.vault_error = Some("Enter a vault name".into());
+            cx.notify();
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.vault_error = Some("Vault is unavailable".into());
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::CreateTeamVault { tenant_id, name })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn open_create_vault_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_vault().is_none() {
+            self.show_toast("Select a vault first".into(), cx);
+            return;
+        }
+        self.vault_error = None;
+        self.modal = Some(Modal::CreateVaultItem);
+        self.vault_item_label_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn submit_create_vault_item(&mut self, cx: &mut Context<Self>) {
+        let Some(vault_id) = self.selected_vault().map(|vault| vault.id.0) else {
+            return;
+        };
+        let label = self
+            .vault_item_label_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let detail = self
+            .vault_item_detail_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let secret = self.vault_item_secret_input.read(cx).text().to_owned();
+        if label.is_empty() || secret.is_empty() {
+            self.vault_error = Some("Item name and secret are required".into());
+            cx.notify();
+            return;
+        }
+        let metadata = match self.vault_item_draft_kind {
+            VaultItemDraftKind::Login => sift_api_types::VaultItemMetadata::Login {
+                username: detail,
+                url: None,
+            },
+            VaultItemDraftKind::Token => sift_api_types::VaultItemMetadata::Token {
+                service: detail,
+                expires_at: None,
+            },
+            VaultItemDraftKind::SecureNote => sift_api_types::VaultItemMetadata::SecureNote,
+        };
+        let request = sift_api_types::CreateVaultItemRequest {
+            label,
+            metadata,
+            secret: Some(serde_json::Value::String(secret)),
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.vault_error = Some("Vault is unavailable".into());
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::CreateVaultItem { vault_id, request })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn share_selected_vault_with_room(&mut self, cx: &mut Context<Self>) {
+        let Some(vault_id) = self.selected_vault().and_then(|vault| {
+            (vault.scope == sift_protocol::VaultScope::Team && vault.effective_capabilities.manage)
+                .then_some(vault.id.0)
+        }) else {
+            self.vault_error = Some("Select a manageable team vault".into());
+            cx.notify();
+            return;
+        };
+        let mut principal_ids = self
+            .room_members
+            .iter()
+            .map(|member| member.principal_id.0)
+            .collect::<Vec<_>>();
+        principal_ids.sort_unstable();
+        principal_ids.dedup();
+        if principal_ids.is_empty() {
+            self.vault_error = Some("No room members are available to share with".into());
+            cx.notify();
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.vault_error = Some("Vault is unavailable".into());
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::ShareVault {
+                vault_id,
+                principal_ids,
             })
             .is_ok();
         cx.notify();
@@ -23026,6 +23395,86 @@ impl WorkspaceShell {
                     }
                     _ => {
                         self.connection_nav_g_pending = false;
+                        false
+                    }
+                };
+                if handled {
+                    cx.stop_propagation();
+                    return;
+                }
+            }
+            if workspace && !modal && !text_input && has_context("SiftCollaboration") {
+                let handled = match key.as_str() {
+                    "h" => {
+                        if self.collaboration_section == CollaborationSection::Vault
+                            && self.vault_selected > 0
+                        {
+                            self.select_vault(self.vault_selected - 1, cx);
+                        } else {
+                            self.collaboration_section = CollaborationSection::People;
+                            cx.notify();
+                        }
+                        true
+                    }
+                    "l" => {
+                        if self.collaboration_section == CollaborationSection::People {
+                            self.collaboration_section = CollaborationSection::Vault;
+                            self.request_vaults(cx);
+                        } else if self.vault_selected + 1 < self.vaults.len() {
+                            self.select_vault(self.vault_selected + 1, cx);
+                        }
+                        true
+                    }
+                    "j" if self.collaboration_section == CollaborationSection::Vault => {
+                        self.vault_item_selected = (self.vault_item_selected + 1)
+                            .min(self.vault_items.len().saturating_sub(1));
+                        cx.notify();
+                        true
+                    }
+                    "k" if self.collaboration_section == CollaborationSection::Vault => {
+                        self.vault_item_selected = self.vault_item_selected.saturating_sub(1);
+                        cx.notify();
+                        true
+                    }
+                    "g" if self.collaboration_g_pending => {
+                        self.collaboration_g_pending = false;
+                        self.vault_item_selected = 0;
+                        cx.notify();
+                        true
+                    }
+                    "g" => {
+                        self.collaboration_g_pending = true;
+                        true
+                    }
+                    "shift-g" if self.collaboration_section == CollaborationSection::Vault => {
+                        self.collaboration_g_pending = false;
+                        self.vault_item_selected = self.vault_items.len().saturating_sub(1);
+                        cx.notify();
+                        true
+                    }
+                    "n" if self.collaboration_section == CollaborationSection::Vault => {
+                        self.open_create_vault_item(window, cx);
+                        true
+                    }
+                    "t" if self.collaboration_section == CollaborationSection::Vault => {
+                        self.open_create_vault(window, cx);
+                        true
+                    }
+                    "r" => {
+                        if self.collaboration_section == CollaborationSection::People {
+                            self.request_room_members(cx);
+                        } else {
+                            self.request_vaults(cx);
+                        }
+                        true
+                    }
+                    "escape" => {
+                        self.collaboration_g_pending = false;
+                        self.focus_active_pane(window, cx);
+                        true
+                    }
+                    _ => {
+                        self.collaboration_g_pending = false;
                         false
                     }
                 };
@@ -30998,7 +31447,6 @@ impl WorkspaceShell {
                             .child(div().size(px(7.)).rounded_full().bg(colors.success))
                             .child(format!("Participant {}", participant.principal_id))
                     });
-                    let room_id = self.selected_workspace().map(|workspace| workspace.room_id);
                     let member_count = self.room_members.len();
                     let member_rows = self.room_members.iter().enumerate().map(|(index, member)| {
                         let principal_id = member.principal_id.0;
@@ -31042,46 +31490,222 @@ impl WorkspaceShell {
                                 )
                             })
                     });
+                    let vault_rows = self.vaults.iter().enumerate().map(|(index, vault)| {
+                        let selected = index == self.vault_selected;
+                        let scope = match vault.scope {
+                            sift_protocol::VaultScope::Personal => "PERSONAL",
+                            sift_protocol::VaultScope::Team => "TEAM",
+                        };
+                        div()
+                            .id(("vault-row", index))
+                            .mx_2()
+                            .h(cx.theme().metrics.row_height)
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_sm()
+                            .when(selected, |row| row.bg(colors.active_surface))
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.select_vault(index, cx)
+                            }))
+                            .child(div().flex_1().min_w_0().truncate().child(vault.name.clone()))
+                            .child(div().text_xs().text_color(colors.muted_text).child(scope))
+                    });
+                    let vault_item_rows = self
+                        .vault_items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            let selected = index == self.vault_item_selected;
+                            let configured = item.secret_status
+                                == sift_api_types::VaultSecretStatus::Configured;
+                            div()
+                                .id(("vault-item-row", index))
+                                .mx_2()
+                                .h(cx.theme().metrics.row_height)
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .rounded_sm()
+                                .when(selected, |row| row.bg(colors.active_surface))
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.vault_item_selected = index;
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div().flex_1().min_w_0().truncate().child(item.label.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(if configured {
+                                            colors.success
+                                        } else {
+                                            colors.muted_text
+                                        })
+                                        .child(format!("{:?}", item.kind)),
+                                )
+                        });
                     dock_view
                         .child(
                             div()
                                 .h(px(32.))
-                                .px_3()
+                                .px_2()
                                 .flex()
                                 .items_center()
-                                .justify_between()
-                                .child(SectionLabel::new("MEMBERS"))
+                                .gap_1()
                                 .child(
-                                    Button::new("refresh-room-members", "Refresh")
-                                        .tone(ButtonTone::Ghost)
-                                        .disabled(self.room_members_loading || room_id.is_none())
+                                    Button::new("collaboration-people", "People")
+                                        .tone(if self.collaboration_section
+                                            == CollaborationSection::People
+                                        {
+                                            ButtonTone::Accent
+                                        } else {
+                                            ButtonTone::Ghost
+                                        })
                                         .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.request_room_members(cx)
+                                            shell.collaboration_section =
+                                                CollaborationSection::People;
+                                            cx.notify();
                                         })),
+                                )
+                                .child(
+                                    Button::new("collaboration-vault", "Vault")
+                                        .tone(if self.collaboration_section
+                                            == CollaborationSection::Vault
+                                        {
+                                            ButtonTone::Accent
+                                        } else {
+                                            ButtonTone::Ghost
+                                        })
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.collaboration_section =
+                                                CollaborationSection::Vault;
+                                            shell.request_vaults(cx);
+                                        })),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    IconButton::new(
+                                        "refresh-collaboration",
+                                        IconName::Refresh,
+                                        "Refresh",
+                                    )
+                                    .square(px(24.))
+                                    .icon_size(12.)
+                                    .disabled(self.room_members_loading || self.vault_loading)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        if shell.collaboration_section
+                                            == CollaborationSection::People
+                                        {
+                                            shell.request_room_members(cx)
+                                        } else {
+                                            shell.request_vaults(cx)
+                                        }
+                                    })),
                                 ),
                         )
-                        .children(self.room_members_error.as_ref().map(|message| {
-                            div().mx_2().mb_2().child(ErrorBanner::new(message.clone()))
-                        }))
-                        .children(member_rows)
-                        .child(
-                            div()
-                                .px_3()
-                                .pt_3()
-                                .pb_2()
-                                .child(SectionLabel::new(format!(
-                                    "LIVE PRESENCE · {}",
-                                    self.presence.participants.len()
-                                ))),
-                        )
-                        .child(
-                            div()
-                                .id("collaboration-scroll")
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                .children(presence_rows),
-                        )
+                        .when(self.collaboration_section == CollaborationSection::People, |panel| {
+                            panel
+                                .children(self.room_members_error.as_ref().map(|message| {
+                                    div().mx_2().mb_2().child(ErrorBanner::new(message.clone()))
+                                }))
+                                .child(div().px_3().py_2().child(SectionLabel::new("MEMBERS")))
+                                .children(member_rows)
+                                .child(
+                                    div().px_3().pt_3().pb_2().child(SectionLabel::new(format!(
+                                        "LIVE PRESENCE · {}",
+                                        self.presence.participants.len()
+                                    ))),
+                                )
+                                .child(
+                                    div()
+                                        .id("collaboration-scroll")
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_y_scroll()
+                                        .children(presence_rows),
+                                )
+                        })
+                        .when(self.collaboration_section == CollaborationSection::Vault, |panel| {
+                            let can_add_item = self
+                                .selected_vault()
+                                .is_some_and(|vault| vault.effective_capabilities.edit);
+                            let can_share = self.selected_vault().is_some_and(|vault| {
+                                vault.scope == sift_protocol::VaultScope::Team
+                                    && vault.effective_capabilities.manage
+                                    && !self.room_members.is_empty()
+                            });
+                            panel
+                                .debug_selector(|| "collaboration-vault-view".into())
+                                .children(self.vault_error.as_ref().map(|message| {
+                                    div().mx_2().mb_2().child(ErrorBanner::new(message.clone()))
+                                }))
+                                .child(
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(SectionLabel::new("VAULTS"))
+                                        .child(
+                                            Button::new("create-team-vault", "+ Team")
+                                                .tone(ButtonTone::Ghost)
+                                                .on_click(cx.listener(
+                                                    |shell, _, window, cx| {
+                                                        shell.open_create_vault(window, cx)
+                                                    },
+                                                )),
+                                        ),
+                                )
+                                .children(vault_rows)
+                                .child(
+                                    div()
+                                        .px_3()
+                                        .pt_3()
+                                        .pb_2()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(SectionLabel::new("ITEMS"))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap_1()
+                                                .child(
+                                                    Button::new("share-vault-room", "Share room")
+                                                        .tone(ButtonTone::Ghost)
+                                                        .disabled(!can_share || self.vault_loading)
+                                                        .on_click(cx.listener(
+                                                            |shell, _, _, cx| {
+                                                                shell.share_selected_vault_with_room(cx)
+                                                            },
+                                                        )),
+                                                )
+                                                .child(
+                                                    Button::new("create-vault-item", "+ Item")
+                                                        .tone(ButtonTone::Ghost)
+                                                        .disabled(!can_add_item)
+                                                        .on_click(cx.listener(
+                                                            |shell, _, window, cx| {
+                                                                shell.open_create_vault_item(window, cx)
+                                                            },
+                                                        )),
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("vault-items-scroll")
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_y_scroll()
+                                        .children(vault_item_rows),
+                                )
+                        })
                 },
             )
             .when(
@@ -37694,6 +38318,112 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::CreateVault => div()
+                    .debug_selector(|| "create-vault".into())
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Create team vault"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.muted_text)
+                            .child("Team vaults start private. Share explicit capabilities after creation."),
+                    )
+                    .child(self.vault_name_input.clone())
+                    .children(self.vault_error.as_ref().map(|message| {
+                        ErrorBanner::new(message.clone())
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("cancel-create-vault", "Cancel")
+                                    .tone(ButtonTone::Neutral)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("submit-create-vault", "Create vault")
+                                    .tone(ButtonTone::Accent)
+                                    .disabled(self.vault_loading)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.submit_create_vault(cx)
+                                    })),
+                            ),
+                    )
+                    .into_any_element(),
+                Modal::CreateVaultItem => div()
+                    .debug_selector(|| "create-vault-item".into())
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Store secret"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .children(VaultItemDraftKind::ALL.into_iter().enumerate().map(|(index, kind)| {
+                                Button::new(("vault-item-kind", index), kind.label())
+                                    .tone(if self.vault_item_draft_kind == kind {
+                                        ButtonTone::Accent
+                                    } else {
+                                        ButtonTone::Ghost
+                                    })
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.vault_item_draft_kind = kind;
+                                        cx.notify();
+                                    }))
+                            })),
+                    )
+                    .child(self.vault_item_label_input.clone())
+                    .when(
+                        self.vault_item_draft_kind != VaultItemDraftKind::SecureNote,
+                        |form| form.child(self.vault_item_detail_input.clone()),
+                    )
+                    .child(self.vault_item_secret_input.clone())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child("Secret values are stored outside metadata and never shown in this list."),
+                    )
+                    .children(self.vault_error.as_ref().map(|message| {
+                        ErrorBanner::new(message.clone())
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("cancel-create-vault-item", "Cancel")
+                                    .tone(ButtonTone::Neutral)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("submit-create-vault-item", "Store")
+                                    .tone(ButtonTone::Accent)
+                                    .disabled(self.vault_loading)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.submit_create_vault_item(cx)
+                                    })),
+                            ),
+                    )
+                    .into_any_element(),
                 Modal::WorkspaceReconcile => {
                     let changed = self
                         .workspace_files
@@ -45263,6 +45993,95 @@ mod tests {
         assert!(room_member_can_be_removed(2, &RoomRole::Viewer));
         assert!(!room_member_can_be_removed(1, &RoomRole::Editor));
         assert!(!room_member_can_be_removed(1, &RoomRole::Viewer));
+    }
+
+    #[gpui::test]
+    fn vault_item_submission_dispatches_typed_secret_request(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            let now = chrono::Utc::now();
+            shell.vaults = vec![sift_api_types::Vault {
+                id: sift_api_types::VaultId(9),
+                tenant_id: sift_api_types::TenantId(1),
+                scope: sift_protocol::VaultScope::Team,
+                owner_principal_id: None,
+                name: "Team".into(),
+                revision: 1,
+                effective_capabilities: sift_protocol::VaultCapabilities::OWNER,
+                created_at: now,
+                updated_at: now,
+            }];
+            shell
+                .vault_item_label_input
+                .update(cx, |input, cx| input.set_text("Reporting", cx));
+            shell
+                .vault_item_detail_input
+                .update(cx, |input, cx| input.set_text("reporter", cx));
+            shell
+                .vault_item_secret_input
+                .update(cx, |input, cx| input.set_text("sentinel", cx));
+            shell.submit_create_vault_item(cx);
+        });
+        match receiver.try_recv().unwrap() {
+            ExecutorCommand::CreateVaultItem { vault_id, request } => {
+                assert_eq!(vault_id, 9);
+                assert_eq!(request.label, "Reporting");
+                assert_eq!(request.secret, Some(serde_json::json!("sentinel")));
+                assert!(matches!(
+                    request.metadata,
+                    sift_api_types::VaultItemMetadata::Login { username, .. }
+                    if username == "reporter"
+                ));
+            }
+            _ => panic!("expected vault item command"),
+        }
+    }
+
+    #[gpui::test]
+    fn collaboration_vault_view_renders_redacted_items(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            let now = chrono::Utc::now();
+            shell.select_left_panel(LeftPanel::Collaboration, window, cx);
+            shell.left_dock.presentation.open = true;
+            shell.collaboration_section = CollaborationSection::Vault;
+            shell.vaults = vec![sift_api_types::Vault {
+                id: sift_api_types::VaultId(9),
+                tenant_id: sift_api_types::TenantId(1),
+                scope: sift_protocol::VaultScope::Team,
+                owner_principal_id: None,
+                name: "Analytics".into(),
+                revision: 1,
+                effective_capabilities: sift_protocol::VaultCapabilities::OWNER,
+                created_at: now,
+                updated_at: now,
+            }];
+            shell.vault_items = vec![sift_api_types::VaultItem {
+                id: sift_api_types::VaultItemId(4),
+                vault_id: sift_api_types::VaultId(9),
+                kind: sift_protocol::VaultItemKind::Login,
+                label: "Reporting".into(),
+                metadata: sift_api_types::VaultItemMetadata::Login {
+                    username: "reporter".into(),
+                    url: None,
+                },
+                secret_status: sift_api_types::VaultSecretStatus::Configured,
+                head_version: 1,
+                revision: 1,
+                created_by: sift_api_types::PrincipalId(1),
+                created_at: now,
+                updated_at: now,
+            }];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("collaboration-vault-view").is_some());
     }
 
     #[gpui::test]
