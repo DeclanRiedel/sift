@@ -8882,9 +8882,15 @@ impl WorkspaceShell {
             .get(self.active_pane)
             .is_some_and(|pane| pane.read(cx).active_item().is_some());
         let active_result = self.focused_pane_results_item(cx);
+        let active_result_has_staged_changes =
+            active_result.as_ref().is_some_and(|(item_id, results)| {
+                self.staged_result_item_id() == Some(*item_id)
+                    || results.read(cx).has_staged_changes()
+            });
         CommandContext {
             has_active_item: has_item,
             has_active_result: active_result.is_some(),
+            active_result_has_staged_changes,
             active_result_exporting: active_result
                 .is_some_and(|(_, results)| results.read(cx).export_in_progress()),
             pane_count: self.panes.len(),
@@ -27804,6 +27810,15 @@ impl WorkspaceShell {
         if self.modal == Some(Modal::CommandPalette) {
             self.focused_surface = self.command_palette_origin;
             self.dismiss_modal(&DismissModal, window, cx);
+        }
+        if matches!(id, CommandId::ExecuteStatement | CommandId::ExecuteDocument)
+            && self.command_context(cx).active_result_has_staged_changes
+        {
+            self.show_toast(
+                "Apply or discard staged result changes before running this query again".into(),
+                cx,
+            );
+            return;
         }
         match id {
             CommandId::ConnectServer => {
@@ -51254,6 +51269,75 @@ mod tests {
             );
             shell.discard_staged_result_edits(window, cx);
             assert!(shell.staged_result_edits.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn staged_result_changes_block_statement_and_document_reruns(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let editor = workspace.read_with(&cx, |workspace, cx| {
+            let pane = workspace.panes[workspace.active_pane].read(cx);
+            let item_id = pane.active_item().expect("active query item").id;
+            pane.editor(item_id).expect("active query editor")
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            let item_id = shell.panes[shell.active_pane]
+                .read(cx)
+                .active_item()
+                .unwrap()
+                .id;
+            shell.staged_result_edits.push(StagedResultEdit {
+                item_id,
+                column: "status".into(),
+                original: sift_protocol::Value::Text("open".into()),
+                value: sift_protocol::Value::Text("closed".into()),
+                original_row: vec![
+                    ("id".into(), sift_protocol::Value::Int64(1)),
+                    ("status".into(), sift_protocol::Value::Text("open".into())),
+                ],
+                source: DatabaseObjectSource {
+                    instance_id: "local".into(),
+                    tenant_id: 1,
+                    profile_id: 2,
+                    profile_name: "demo/postgres".into(),
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    catalog: Some("sifttest".into()),
+                    schema: "lab".into(),
+                    object: "orders".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                    last_refreshed_at_ms: None,
+                },
+            });
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            if editor.keymap() != EditorKeymap::Vim {
+                editor.toggle_keymap(cx);
+            }
+            editor.focus_handle(cx).focus(window, cx);
+        });
+
+        cx.simulate_keystrokes("space x s");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell
+                .toasts
+                .last()
+                .map(|toast| toast.message.clone())),
+            Some(
+                "Run Current Statement: Apply or discard staged result changes before running this query again"
+                    .into()
+            )
+        );
+        workspace.read_with(&cx, |shell, cx| {
+            for command in [CommandId::ExecuteStatement, CommandId::ExecuteDocument] {
+                assert_eq!(
+                    shell.command_spec(command, cx).disabled_reason.as_deref(),
+                    Some("Apply or discard staged result changes before running this query again")
+                );
+            }
+            assert!(shell.running_queries.is_empty());
         });
     }
 

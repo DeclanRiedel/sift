@@ -306,6 +306,7 @@ pub struct CommandContext {
     pub any_query_running: bool,
     pub database_connected: bool,
     pub has_active_result: bool,
+    pub active_result_has_staged_changes: bool,
     pub active_result_exporting: bool,
     pub transaction_active: bool,
     pub transaction_pending: bool,
@@ -354,78 +355,88 @@ impl CommandRegistry {
             label: definition.label,
             shortcut: definition.shortcut,
             language: definition.language.into(),
-            disabled_reason: match definition.availability {
-                AvailabilityRule::Always => None,
-                AvailabilityRule::ActiveItem if !context.has_active_item => {
-                    Some("No active item".into())
+            disabled_reason: if matches!(
+                id,
+                CommandId::ExecuteStatement | CommandId::ExecuteDocument
+            ) && context.active_result_has_staged_changes
+            {
+                Some(
+                    "Apply or discard staged result changes before running this query again".into(),
+                )
+            } else {
+                match definition.availability {
+                    AvailabilityRule::Always => None,
+                    AvailabilityRule::ActiveItem if !context.has_active_item => {
+                        Some("No active item".into())
+                    }
+                    AvailabilityRule::MultiplePanes if context.pane_count < 2 => {
+                        Some("Only one pane".into())
+                    }
+                    AvailabilityRule::EditableInstance if !context.has_editable_instance => {
+                        Some("Bundled Local Sift has no sift.toml".into())
+                    }
+                    AvailabilityRule::RunningQuery if !context.active_query_running => {
+                        Some("Active query is not running".into())
+                    }
+                    AvailabilityRule::ConnectedDatabase if !context.database_connected => {
+                        Some("No database connected".into())
+                    }
+                    AvailabilityRule::ActiveResult if !context.has_active_result => {
+                        Some("Active tab has no result surface".into())
+                    }
+                    AvailabilityRule::ActiveResult if context.active_result_exporting => {
+                        Some("Result export already in progress".into())
+                    }
+                    AvailabilityRule::NoActiveTransaction if !context.database_connected => {
+                        Some("No database connected".into())
+                    }
+                    AvailabilityRule::NoActiveTransaction
+                        if context.transaction_active || context.transaction_pending =>
+                    {
+                        Some("A transaction is already active".into())
+                    }
+                    AvailabilityRule::ActiveTransaction
+                        if !context.transaction_active || context.transaction_pending =>
+                    {
+                        Some("No active transaction".into())
+                    }
+                    AvailabilityRule::CommittableTransaction if !context.transaction_active => {
+                        Some("No active transaction".into())
+                    }
+                    AvailabilityRule::CommittableTransaction if context.transaction_pending => {
+                        Some("A transaction operation is already running".into())
+                    }
+                    AvailabilityRule::CommittableTransaction if context.any_query_running => {
+                        Some("Wait for running queries before committing".into())
+                    }
+                    AvailabilityRule::CommittableTransaction if context.transaction_aborted => {
+                        Some("The transaction is aborted; roll it back".into())
+                    }
+                    AvailabilityRule::GitWorkspace if !context.git_workspace_loaded => {
+                        Some("No Git-enabled workspace selected".into())
+                    }
+                    AvailabilityRule::GitSelection if !context.git_workspace_loaded => {
+                        Some("No Git-enabled workspace selected".into())
+                    }
+                    AvailabilityRule::GitSelection if !context.git_path_selected => {
+                        Some("No changed path selected".into())
+                    }
+                    AvailabilityRule::GitOperation if !context.git_operation_active => {
+                        Some("No Git operation is in progress".into())
+                    }
+                    AvailabilityRule::ActiveItem
+                    | AvailabilityRule::MultiplePanes
+                    | AvailabilityRule::EditableInstance
+                    | AvailabilityRule::RunningQuery
+                    | AvailabilityRule::ConnectedDatabase
+                    | AvailabilityRule::ActiveResult
+                    | AvailabilityRule::NoActiveTransaction
+                    | AvailabilityRule::ActiveTransaction
+                    | AvailabilityRule::CommittableTransaction
+                    | AvailabilityRule::GitWorkspace
+                    | AvailabilityRule::GitSelection
+                    | AvailabilityRule::GitOperation => None,
                 }
-                AvailabilityRule::MultiplePanes if context.pane_count < 2 => {
-                    Some("Only one pane".into())
-                }
-                AvailabilityRule::EditableInstance if !context.has_editable_instance => {
-                    Some("Bundled Local Sift has no sift.toml".into())
-                }
-                AvailabilityRule::RunningQuery if !context.active_query_running => {
-                    Some("Active query is not running".into())
-                }
-                AvailabilityRule::ConnectedDatabase if !context.database_connected => {
-                    Some("No database connected".into())
-                }
-                AvailabilityRule::ActiveResult if !context.has_active_result => {
-                    Some("Active tab has no result surface".into())
-                }
-                AvailabilityRule::ActiveResult if context.active_result_exporting => {
-                    Some("Result export already in progress".into())
-                }
-                AvailabilityRule::NoActiveTransaction if !context.database_connected => {
-                    Some("No database connected".into())
-                }
-                AvailabilityRule::NoActiveTransaction
-                    if context.transaction_active || context.transaction_pending =>
-                {
-                    Some("A transaction is already active".into())
-                }
-                AvailabilityRule::ActiveTransaction
-                    if !context.transaction_active || context.transaction_pending =>
-                {
-                    Some("No active transaction".into())
-                }
-                AvailabilityRule::CommittableTransaction if !context.transaction_active => {
-                    Some("No active transaction".into())
-                }
-                AvailabilityRule::CommittableTransaction if context.transaction_pending => {
-                    Some("A transaction operation is already running".into())
-                }
-                AvailabilityRule::CommittableTransaction if context.any_query_running => {
-                    Some("Wait for running queries before committing".into())
-                }
-                AvailabilityRule::CommittableTransaction if context.transaction_aborted => {
-                    Some("The transaction is aborted; roll it back".into())
-                }
-                AvailabilityRule::GitWorkspace if !context.git_workspace_loaded => {
-                    Some("No Git-enabled workspace selected".into())
-                }
-                AvailabilityRule::GitSelection if !context.git_workspace_loaded => {
-                    Some("No Git-enabled workspace selected".into())
-                }
-                AvailabilityRule::GitSelection if !context.git_path_selected => {
-                    Some("No changed path selected".into())
-                }
-                AvailabilityRule::GitOperation if !context.git_operation_active => {
-                    Some("No Git operation is in progress".into())
-                }
-                AvailabilityRule::ActiveItem
-                | AvailabilityRule::MultiplePanes
-                | AvailabilityRule::EditableInstance
-                | AvailabilityRule::RunningQuery
-                | AvailabilityRule::ConnectedDatabase
-                | AvailabilityRule::ActiveResult
-                | AvailabilityRule::NoActiveTransaction
-                | AvailabilityRule::ActiveTransaction
-                | AvailabilityRule::CommittableTransaction
-                | AvailabilityRule::GitWorkspace
-                | AvailabilityRule::GitSelection
-                | AvailabilityRule::GitOperation => None,
             },
         }
     }
@@ -1589,6 +1600,7 @@ mod tests {
             any_query_running: false,
             database_connected: false,
             has_active_result: false,
+            active_result_has_staged_changes: false,
             active_result_exporting: false,
             transaction_active: false,
             transaction_pending: false,
@@ -1603,6 +1615,22 @@ mod tests {
                 .as_deref(),
             Some("No active item")
         );
+        for command in [CommandId::ExecuteStatement, CommandId::ExecuteDocument] {
+            assert_eq!(
+                CommandRegistry::spec(
+                    command,
+                    CommandContext {
+                        has_active_item: true,
+                        has_active_result: true,
+                        active_result_has_staged_changes: true,
+                        ..empty
+                    }
+                )
+                .disabled_reason
+                .as_deref(),
+                Some("Apply or discard staged result changes before running this query again")
+            );
+        }
         assert_eq!(
             CommandRegistry::spec(CommandId::ClosePane, empty)
                 .disabled_reason
