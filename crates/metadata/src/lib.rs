@@ -296,6 +296,8 @@ pub enum MetadataError {
     InvalidOperationApproval,
     #[error("tenant administrator access required")]
     TenantAdminRequired,
+    #[error("tenant must retain at least one owner")]
+    FinalTenantOwner,
     #[error("tenant member access required")]
     TenantMemberRequired,
     #[error("instance administrator access required")]
@@ -3039,6 +3041,67 @@ impl MetadataStore {
         .map_err(Into::into)
     }
 
+    pub fn remove_tenant_membership(
+        &self,
+        tenant: TenantId,
+        actor: PrincipalId,
+        principal: PrincipalId,
+        audit: NewOperationAudit,
+    ) -> Result<Vec<RoomId>> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_tenant_admin_locked(&tx, tenant, actor)?;
+        let role = tx
+            .query_row(
+                "SELECT role FROM membership WHERE tenant_id = ?1 AND principal_id = ?2",
+                params![tenant.0, principal.0],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(MetadataError::TenantMembershipRequired { tenant, principal })?;
+        if role == "owner" {
+            let owners: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM membership WHERE tenant_id = ?1 AND role = 'owner'",
+                params![tenant.0],
+                |row| row.get(0),
+            )?;
+            if owners <= 1 {
+                return Err(MetadataError::FinalTenantOwner);
+            }
+        }
+        let bound_rooms = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM room
+                 WHERE tenant_id = ?1 AND bound_connection_by = ?2",
+            )?;
+            let rooms = stmt
+                .query_map(params![tenant.0, principal.0], |row| {
+                    row.get::<_, i64>(0).map(RoomId)
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rooms
+        };
+        tx.execute(
+            "UPDATE room SET bound_connection_profile_id = NULL,
+             bound_connection_by = NULL, updated_at = ?3
+             WHERE tenant_id = ?1 AND bound_connection_by = ?2",
+            params![tenant.0, principal.0, now_text()],
+        )?;
+        tx.execute(
+            "DELETE FROM vault_grant
+             WHERE principal_id = ?1 AND vault_id IN
+               (SELECT id FROM vault WHERE tenant_id = ?2)",
+            params![principal.0, tenant.0],
+        )?;
+        tx.execute(
+            "DELETE FROM membership WHERE tenant_id = ?1 AND principal_id = ?2",
+            params![tenant.0, principal.0],
+        )?;
+        insert_operation_audit_row(&tx, &audit)?;
+        tx.commit()?;
+        Ok(bound_rooms)
+    }
+
     pub fn list_principal_tenants(&self, principal: PrincipalId) -> Result<Vec<TenantMembership>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -3702,6 +3765,40 @@ impl MetadataStore {
             }
         }
         Ok((profile.configuration, credentials))
+    }
+
+    /// Revalidate the caller's current vault `use` capability for a managed
+    /// connection without resolving or reading its credential bytes.
+    pub fn authorize_vault_connection_use(
+        &self,
+        tenant: TenantId,
+        principal: PrincipalId,
+        id: ConnectionProfileId,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        let profile = connection_profile_by_id_locked(&conn, id)?;
+        if profile.tenant_id != tenant {
+            return Err(MetadataError::TenantMismatch(id, tenant));
+        }
+        let vault_id = conn
+            .query_row(
+                "SELECT i.vault_id
+                 FROM vault_connection_binding b
+                 JOIN vault_item i ON i.id = b.item_id
+                 WHERE b.connection_profile_id = ?1",
+                params![id.0],
+                |row| row.get::<_, i64>(0).map(sift_api_types::VaultId),
+            )
+            .optional()?;
+        if let Some(vault_id) = vault_id {
+            crate::vault::require_capability(
+                &conn,
+                vault_id,
+                sift_api_types::PrincipalId(principal.0),
+                |capabilities| capabilities.use_secret,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn create_room(

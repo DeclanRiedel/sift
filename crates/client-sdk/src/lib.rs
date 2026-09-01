@@ -157,6 +157,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listMetadataVaults",
     "listCatalogSnapshots",
     "listMetadataTenants",
+    "removeMetadataTenantMember",
     "listOperationAudit",
     "listOperations",
     "listPlanCaptures",
@@ -1232,6 +1233,18 @@ impl Client {
         request: AcceptTenantInvitationRequest,
     ) -> Result<TenantMembership> {
         self.post("/v1/auth/invitations/accept", &request).await
+    }
+
+    pub async fn remove_tenant_member(
+        &self,
+        tenant: TenantId,
+        principal: sift_api_types::PrincipalId,
+    ) -> Result<()> {
+        self.delete(&format!(
+            "/v1/metadata/tenants/{}/members/{}",
+            tenant.0, principal.0
+        ))
+        .await
     }
 
     pub async fn principal_keys(&self) -> Result<Vec<PrincipalKey>> {

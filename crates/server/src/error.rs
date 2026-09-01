@@ -196,6 +196,7 @@ impl ApiError {
                 }
                 MetadataError::FinalInstanceAdmin
                 | MetadataError::FinalAuthIdentity
+                | MetadataError::FinalTenantOwner
                 | MetadataError::FinalRoomOwner(_)
                 | MetadataError::ConnectionProfileManaged(_)
                 | MetadataError::InstanceManifestConflict(_)

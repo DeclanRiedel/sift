@@ -410,6 +410,10 @@ pub fn app(state: AppState) -> Router {
             get_with(list_metadata_tenants, doc("listMetadataTenants", "List current principal tenant memberships")),
         )
         .api_route(
+            "/v1/metadata/tenants/:tenant_id/members/:principal_id",
+            delete_with(remove_metadata_tenant_member, doc("removeMetadataTenantMember", "Remove a tenant member and immediately revoke inherited access")),
+        )
+        .api_route(
             "/v1/metadata/rooms",
             get_with(list_metadata_rooms, doc("listMetadataRooms", "List rooms for current principal in a tenant")).post_with(create_metadata_room, doc("createMetadataRoom", "Create room")),
         )
@@ -3859,6 +3863,19 @@ async fn execute_metadata_context(
                 })?;
                 let bound_profile =
                     metadata_for_check.get_connection_profile(room_row.tenant_id, profile_id)?;
+                metadata_for_check
+                    .authorize_vault_connection_use(
+                        room_row.tenant_id,
+                        auth_for_check.principal_id,
+                        profile_id,
+                    )
+                    .map_err(|error| match error {
+                        sift_metadata::MetadataError::VaultPermissionDenied
+                        | sift_metadata::MetadataError::TenantMembershipRequired { .. } => {
+                            ApiError::Forbidden("vault connection access required".into())
+                        }
+                        other => ApiError::Metadata(other),
+                    })?;
                 tenant_id = Some(room_row.tenant_id);
                 database_target = connection_database_target(&bound_profile);
                 // Submitter-scoped intersection: the submitting member's room role
@@ -6014,6 +6031,7 @@ async fn bind_metadata_room_connection(
     let room = room_id(id)?;
     let profile = connection_profile_id(req.connection_profile_id)?;
     let actor = auth.principal_id;
+    metadata.authorize_vault_connection_use(metadata.get_room(room)?.tenant_id, actor, profile)?;
     let room_row = metadata_blocking(move || {
         metadata
             .bind_room_connection(
@@ -14172,6 +14190,36 @@ async fn list_metadata_vaults(
         })
         .await?,
     ))
+}
+
+async fn remove_metadata_tenant_member(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((tenant_id_value, principal_id_value)): Path<(i64, i64)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(tenant_id_value)?;
+    let principal = principal_id(principal_id_value)?;
+    ensure_tenant(&auth, tenant)?;
+    let actor = auth.principal_id;
+    let rooms = metadata_blocking(move || {
+        metadata
+            .remove_tenant_membership(
+                tenant,
+                actor,
+                principal,
+                metadata_audit_record(actor, "remove_member", "tenant", Some(tenant.0)),
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    state.sessions.disconnect_managed_principal(principal).await;
+    for room in rooms {
+        state.sessions.close_room_connection(room.0).await;
+    }
+    push_metadata_operation_local(&state, actor, "remove_member", "tenant", Some(tenant.0));
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn create_metadata_vault(

@@ -662,6 +662,15 @@ impl SessionStore {
                 }
                 other => ApiError::Metadata(other),
             })?;
+        metadata
+            .authorize_vault_connection_use(tenant_id, principal_id, profile_id)
+            .map_err(|error| match error {
+                sift_metadata::MetadataError::VaultPermissionDenied
+                | sift_metadata::MetadataError::TenantMembershipRequired { .. } => {
+                    ApiError::Forbidden("vault connection access required".into())
+                }
+                other => ApiError::Metadata(other),
+            })?;
         let membership = metadata
             .list_principal_tenants(principal_id)?
             .into_iter()

@@ -1820,6 +1820,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn team_admin_recovery_does_not_grant_use_or_reveal() {
+        let (store, tenant, owner, member) = store();
+        store
+            .upsert_tenant_membership(
+                metadata_tenant(tenant),
+                metadata_principal(member),
+                MembershipRole::Admin,
+            )
+            .unwrap();
+        let vault = store.create_team_vault(tenant, owner, "Recovery").unwrap();
+        let login = store
+            .create_vault_item(
+                vault.id,
+                owner,
+                "Shared login".into(),
+                VaultItemMetadata::Login {
+                    username: "reader".into(),
+                    url: None,
+                },
+                Some(serde_json::json!("not-for-admins")),
+            )
+            .await
+            .unwrap();
+        let input = NewConnectionProfile {
+            name: "Recovery database".into(),
+            provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+            configuration: serde_json::json!({"host": "db.internal"}),
+            semantic_engine: Some(sift_protocol::Engine::Postgres),
+            credentials: Some(serde_json::json!({"password": "connection-secret"})),
+            credential_mode: CredentialMode::Shared,
+            tags: Vec::new(),
+        };
+        let (profile, _) = store
+            .upsert_vault_connection_profile(tenant, owner, Some(vault.id), input, None)
+            .await
+            .unwrap();
+
+        let visible = store.get_vault(vault.id, member).unwrap();
+        assert!(visible.effective_capabilities.inspect);
+        assert!(visible.effective_capabilities.manage);
+        assert!(!visible.effective_capabilities.use_secret);
+        assert!(!visible.effective_capabilities.reveal);
+        assert!(matches!(
+            store.authorize_vault_connection_use(
+                metadata_tenant(tenant),
+                metadata_principal(member),
+                profile.id,
+            ),
+            Err(MetadataError::VaultPermissionDenied)
+        ));
+        assert!(matches!(
+            store.reveal_vault_secret(login.id, member).await,
+            Err(MetadataError::VaultPermissionDenied)
+        ));
+    }
+
+    #[tokio::test]
+    async fn tenant_member_removal_revokes_team_vault_access() {
+        let (store, tenant, owner, member) = store();
+        let vault = store
+            .create_team_vault(tenant, owner, "Membership")
+            .unwrap();
+        store
+            .set_vault_grant(
+                vault.id,
+                owner,
+                member,
+                None,
+                VaultCapabilities {
+                    use_secret: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let input = NewConnectionProfile {
+            name: "Membership database".into(),
+            provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+            configuration: serde_json::json!({"host": "db.internal"}),
+            semantic_engine: Some(sift_protocol::Engine::Postgres),
+            credentials: Some(serde_json::json!({"password": "connection-secret"})),
+            credential_mode: CredentialMode::Shared,
+            tags: Vec::new(),
+        };
+        let (profile, _) = store
+            .upsert_vault_connection_profile(tenant, owner, Some(vault.id), input, None)
+            .await
+            .unwrap();
+        store
+            .authorize_vault_connection_use(
+                metadata_tenant(tenant),
+                metadata_principal(member),
+                profile.id,
+            )
+            .unwrap();
+
+        store
+            .remove_tenant_membership(
+                metadata_tenant(tenant),
+                metadata_principal(owner),
+                metadata_principal(member),
+                audit(owner, "remove_member", "tenant", Some(tenant.0)),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.authorize_vault_connection_use(
+                metadata_tenant(tenant),
+                metadata_principal(member),
+                profile.id,
+            ),
+            Err(MetadataError::TenantMembershipRequired { .. })
+        ));
+        assert!(store
+            .list_vault_grants(vault.id, owner)
+            .unwrap()
+            .iter()
+            .all(|grant| grant.principal_id != member));
+    }
+
+    #[tokio::test]
     async fn item_rotation_clear_restore_and_delete_are_revisioned() {
         let (store, tenant, owner, _) = store();
         let vault = store.create_team_vault(tenant, owner, "Lifecycle").unwrap();
