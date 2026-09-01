@@ -390,5 +390,35 @@ mod tests {
         let debug = format!("{request:?}");
         assert!(!debug.contains("alice"));
         assert!(!debug.contains("secret"));
+
+        let step_up = VaultRevealStepUpRequest {
+            password: "step-up-sentinel".into(),
+        };
+        assert!(!format!("{step_up:?}").contains("step-up-sentinel"));
+
+        let lease = VaultRevealStepUpResponse {
+            lease: "lease-sentinel".into(),
+            expires_in_seconds: 60,
+        };
+        assert!(!format!("{lease:?}").contains("lease-sentinel"));
+
+        let revealed = RevealVaultSecretResponse {
+            item_id: 1,
+            value: serde_json::json!("reveal-sentinel"),
+            expires_in_seconds: 30,
+        };
+        assert!(!format!("{revealed:?}").contains("reveal-sentinel"));
+
+        let connection = UpsertConnectionProfileRequest {
+            tenant_id: 1,
+            name: "Warehouse".into(),
+            provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+            configuration: serde_json::json!({"host": "db.internal"}),
+            credentials: Some(serde_json::json!({"password": "connection-sentinel"})),
+            vault_id: Some(2),
+            credential_mode: CredentialMode::Shared,
+            tags: Vec::new(),
+        };
+        assert!(!format!("{connection:?}").contains("connection-sentinel"));
     }
 }
