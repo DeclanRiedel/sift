@@ -1971,6 +1971,13 @@ shortcuts to vault-backed connection items but do not duplicate access or
 history management. The full delivery order and graduation tests live in
 `docs/PLANS/collaborative-connection-vaults.md`.
 
+The default admission limits are 160-byte labels, 32 KiB metadata, 64 KiB
+secret values, 100 vaults per tenant, and 1,000 items per vault. The server
+retains at most 50 immutable versions per item. Cleanup processes 100 handles
+every 30 seconds and retries from 30 seconds up to one hour. Operators may
+tighten or raise these values through the typed `vault` instance configuration;
+zero limits and inverted retry bounds fail validation.
+
 **Consequences.** A team member can use a shared database credential without
 learning it, an editor can replace a secret without reading the prior value,
 and explicitly authorized people can share human-readable secrets through a

@@ -1,9 +1,8 @@
 # Collaborative Server Vaults
 
-Status: **Vault-backed connection use and controlled generic-secret reveal are
-implemented; the broader item editor, restore flows, and hardening matrix remain
-in progress.** ADR-052 is graduated. Each implementation milestone remains
-independently gated by the security and test exits below.
+Status: **The V0–V3 collaborative-vault scope is implemented.** ADR-052 is
+graduated. The separately designed later work remains intentionally out of
+scope; the security and test exits below continue to gate changes.
 
 ## Outcome
 
@@ -182,33 +181,34 @@ credential readiness to `sift-protocol`. Secret-bearing HTTP request/response
 types stay in `sift-api-types`; the pure wire contract must not gain I/O or
 secret-store behavior.
 
-Implemented routes use the metadata namespace. Remaining routes stay planned:
+Implemented routes use the metadata namespace:
 
 ```text
 GET    /v1/metadata/vaults                         implemented
 POST   /v1/metadata/vaults                         implemented
-GET    /v1/metadata/vaults/{vault}                 planned
-PATCH  /v1/metadata/vaults/{vault}                 planned
-DELETE /v1/metadata/vaults/{vault}                 planned
+GET    /v1/metadata/vaults/{vault}                 implemented
+PUT    /v1/metadata/vaults/{vault}                 implemented
+DELETE /v1/metadata/vaults/{vault}                 implemented
 
 GET    /v1/metadata/vaults/{vault}/grants          implemented
 PUT    /v1/metadata/vaults/{vault}/grants/{principal} implemented
-DELETE /v1/metadata/vaults/{vault}/grants/{principal} planned
+DELETE /v1/metadata/vaults/{vault}/grants/{principal} implemented
 
 GET    /v1/metadata/vaults/{vault}/items           implemented
 POST   /v1/metadata/vaults/{vault}/items           implemented
-GET    /v1/metadata/vault-items/{item}             planned
-PUT    /v1/metadata/vault-items/{item}             planned
-DELETE /v1/metadata/vault-items/{item}             planned
-POST   /v1/metadata/vault-items/{item}/secret      planned
+GET    /v1/metadata/vault-items/{item}             implemented
+PUT    /v1/metadata/vault-items/{item}             implemented
+DELETE /v1/metadata/vault-items/{item}             implemented
+POST   /v1/metadata/vault-items/{item}/secret      implemented
+DELETE /v1/metadata/vault-items/{item}/secret      implemented
 POST   /v1/metadata/vault-items/{item}/reveal-step-up implemented
 POST   /v1/metadata/vault-items/{item}/reveal      implemented
 
 GET    /v1/metadata/vault-items/{item}/versions    implemented
-GET    /v1/metadata/vault-items/{item}/versions/{version} planned
-GET    /v1/metadata/vault-items/{item}/diff?from=&to= planned
-POST   /v1/metadata/vault-items/{item}/restore     planned
-POST   /v1/metadata/vault-items/{item}/test        planned
+GET    /v1/metadata/vault-items/{item}/versions/{version} implemented
+GET    /v1/metadata/vault-items/{item}/diff?from=&to= implemented
+POST   /v1/metadata/vault-items/{item}/restore     implemented
+POST   /v1/metadata/vault-items/{item}/test        implemented
 ```
 
 Create/update requests separate non-secret `metadata` from an optional
@@ -267,7 +267,7 @@ history or access editor.
   audit vocabulary, revocation, retention, and the host-admin boundary.
 - [x] Specify the exact step-up proof and one-use reveal response lifecycle.
 - [x] Add protocol/API redaction tests before any secret-bearing route exists.
-- [ ] Decide retention defaults, tenant quotas, maximum item/value sizes, and
+- [x] Decide retention defaults, tenant quotas, maximum item/value sizes, and
   cleanup retry policy in instance configuration.
 
 Exit: reviewers can trace every path secret bytes may take and every persisted
@@ -279,20 +279,20 @@ representation is credential-free.
   queue.
 - [x] Route existing connection profile creation and credential rotation through
   vault items while preserving the `Driver` trait and session APIs.
-- [~] Add the Collaboration `Vault` view, write-only connection form, masked
+- [x] Add the Collaboration `Vault` view, write-only connection form, masked
   history, test, and connection shortcuts.
-- [ ] Prove no connection credential reaches a client or non-secret store.
+- [x] Prove no connection credential reaches a client or non-secret store.
 
 Exit: a user can create, rotate, test, restore, and use a personal connection
 without any reveal path.
 
 ### V2 — team vaults and use-without-reveal
 
-- [~] Add team-vault lifecycle, capability grants, admin recovery, and tenant
+- [x] Add team-vault lifecycle, capability grants, admin recovery, and tenant
   membership invalidation.
-- [ ] Intersect vault authorization with room and connection policies.
+- [x] Intersect vault authorization with room and connection policies.
 - [x] Invalidate active descendants on credential rotation or grant revocation.
-- [~] Cover concurrent editors, stale revisions, cross-tenant ids, member removal,
+- [x] Cover concurrent editors, stale revisions, cross-tenant ids, member removal,
   and rotation during active queries.
 
 Exit: a member with `use` can query through a team connection but cannot obtain
@@ -303,7 +303,7 @@ its credential bytes.
 - [x] Add login, token, and secure-note items plus bounded typed envelopes.
 - [x] Implement interactive digest-bound step-up and single-use reveal.
 - [x] Add the timed desktop reveal/copy surface and safe clipboard clearing.
-- [~] Add per-principal reveal rate limits, immediate lease revocation, durable
+- [x] Add per-principal reveal rate limits, immediate lease revocation, durable
   reveal audit, and negative cache/log/crash tests.
 
 Exit: an explicitly granted member can reveal one eligible item, while API

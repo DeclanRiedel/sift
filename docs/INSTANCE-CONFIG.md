@@ -107,6 +107,32 @@ Keep `network_enabled = false` for an offline instance. An instance admin can
 inspect the realized executable, version, helper state, health, and these
 effective limits through `/v1/admin/instance/vcs-diagnostics`.
 
+## Vault policy
+
+Collaborative vault admission, retention, and cleanup use typed server
+configuration. These defaults can be set in `sift.toml` under `[vault]` or by
+the corresponding `SIFT_VAULT__*` environment variables:
+
+```toml
+[vault]
+max_label_bytes = 160
+max_metadata_bytes = 32768
+max_secret_bytes = 65536
+max_vaults_per_tenant = 100
+max_items_per_vault = 1000
+max_versions_per_item = 50
+cleanup_batch_size = 100
+cleanup_interval_secs = 30
+cleanup_retry_initial_secs = 30
+cleanup_retry_max_secs = 3600
+```
+
+Old immutable versions are pruned down to the configured per-item limit.
+Unreferenced secret handles enter the durable cleanup queue and are retried
+with bounded exponential backoff; stored cleanup failures are sanitized and
+never include secret bytes. All limits and intervals must be positive, and the
+maximum retry delay cannot be below the initial delay.
+
 ## Security and portability boundary
 
 - Both files are UTF-8 TOML, strict, bounded, and cross-platform. Unknown
@@ -129,6 +155,9 @@ effective limits through `/v1/admin/instance/vcs-diagnostics`.
 - The model reproduces Sift's declared server behavior, not the operating
   system, database contents, DNS/TLS infrastructure, or secret values. It is
   flake-like within that boundary, not a replacement for Nix.
+- Vault encryption protects secret bytes from SQLite readers. The Sift server,
+  its configured secret backend, and host administrators remain inside the
+  confidentiality boundary; this is not client-side end-to-end encryption.
 
 The normative design, threat model, and later extension/package work are in
 `docs/PLANS/reproducible-instances.md`.
