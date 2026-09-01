@@ -31009,6 +31009,7 @@ impl WorkspaceShell {
                 };
                 div()
                     .id(("repository-section", index))
+                    .w_full()
                     .h(px(28.))
                     .px_3()
                     .flex()
@@ -31020,6 +31021,7 @@ impl WorkspaceShell {
             }
             RepositoryRow::Folder { path, depth } => div()
                 .id(("repository-folder", index))
+                .w_full()
                 .h(cx.theme().metrics.row_height)
                 .pl(px(10. + depth as f32 * 12.))
                 .flex()
@@ -31064,6 +31066,8 @@ impl WorkspaceShell {
                     };
                 div()
                     .id(("repository-path", index))
+                    .debug_selector(move || format!("repository-path-{index}"))
+                    .w_full()
                     .role(Role::ListItem)
                     .aria_label(format!(
                         "{}: {:?}, {:?}",
@@ -32156,10 +32160,11 @@ impl WorkspaceShell {
                                         })
                                         .map(|(index, row)| {
                                             shell.render_repository_row(index, row, cx)
-                                        })
-                                        .collect()
+                                    })
+                                    .collect()
                                 }),
                             )
+                            .debug_selector(|| "repository-status-list".into())
                             .flex_1()
                             .min_h_0()
                             .w_full()
@@ -32182,21 +32187,26 @@ impl WorkspaceShell {
                             panel.child(
                                 div()
                                     .debug_selector(|| "repository-commit-composer".into())
-                                    .m_2()
-                                    .p_2()
-                                    .rounded(cx.theme().metrics.radius_large)
+                                    .mx_2()
+                                    .mb_2()
+                                    .rounded_sm()
                                     .border_1()
-                                    .border_color(colors.strong_border)
-                                    .bg(colors.elevated_surface)
+                                    .border_color(colors.subtle_border)
+                                    .bg(colors.surface)
+                                    .overflow_hidden()
                                     .flex()
                                     .flex_col()
-                                    .gap_2()
                                     .child(
                                         div()
+                                            .h(px(28.))
+                                            .px_2()
                                             .flex()
                                             .items_center()
                                             .justify_between()
-                                            .child(SectionLabel::new("COMMIT"))
+                                            .border_b_1()
+                                            .border_color(colors.subtle_border)
+                                            .bg(colors.elevated_surface)
+                                            .child(SectionLabel::new("COMMIT MESSAGE"))
                                             .child(
                                                 div()
                                                     .text_xs()
@@ -32212,17 +32222,16 @@ impl WorkspaceShell {
                                     )
                                     .child(
                                         div()
+                                            .min_h(px(38.))
+                                            .pl_2()
+                                            .pr_1()
                                             .flex()
                                             .items_center()
-                                            .gap_1()
+                                            .gap_2()
                                             .child(
                                                 div()
                                                     .min_w_0()
                                                     .flex_1()
-                                                    .rounded_sm()
-                                                    .border_1()
-                                                    .border_color(colors.subtle_border)
-                                                    .bg(colors.surface)
                                                     .child(self.repository_commit_input.clone()),
                                             )
                                             .child(
@@ -32237,6 +32246,8 @@ impl WorkspaceShell {
                                     .when(show_subject_length || multiline_commit, |composer| {
                                         composer.child(
                                             div()
+                                                .px_2()
+                                                .py_1()
                                                 .flex()
                                                 .items_center()
                                                 .justify_between()
@@ -32275,6 +32286,8 @@ impl WorkspaceShell {
                                     .when(commit_identity_needs_configuration, |composer| {
                                         composer.child(
                                             div()
+                                                .px_2()
+                                                .py_1()
                                                 .flex()
                                                 .items_center()
                                                 .justify_between()
@@ -32300,6 +32313,8 @@ impl WorkspaceShell {
                                     .children(recent_commit.map(|commit| {
                                         let short = commit.commit.chars().take(12).collect::<String>();
                                         div()
+                                            .px_2()
+                                            .py_1()
                                             .text_xs()
                                             .text_color(colors.success)
                                             .child(format!(
@@ -32308,7 +32323,12 @@ impl WorkspaceShell {
                                             ))
                                     }))
                                     .children(recovery_notice.map(|notice| {
-                                        div().text_xs().text_color(colors.warning).child(notice)
+                                        div()
+                                            .px_2()
+                                            .py_1()
+                                            .text_xs()
+                                            .text_color(colors.warning)
+                                            .child(notice)
                                     })),
                             )
                         })
@@ -32616,6 +32636,37 @@ impl WorkspaceShell {
                                         .children(vault_item_rows),
                                 )
                         })
+                        .child(
+                            div()
+                                .debug_selector(|| "collaboration-keyboard-hint".into())
+                                .h(px(48.))
+                                .w_full()
+                                .px_2()
+                                .flex_none()
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .items_center()
+                                .overflow_hidden()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .when(
+                                    self.collaboration_section == CollaborationSection::People,
+                                    |hint| {
+                                        hint.child("h/l switch view · r refresh")
+                                            .child("Esc return to editor")
+                                    },
+                                )
+                                .when(
+                                    self.collaboration_section == CollaborationSection::Vault,
+                                    |hint| {
+                                        hint.child("h/l vault · j/k item · Enter open")
+                                            .child("/ filter · n new · t team · e edit · r refresh")
+                                    },
+                                ),
+                        )
                 },
             )
             .when(
@@ -33314,7 +33365,8 @@ impl WorkspaceShell {
                         )
                         .child(
                             div()
-                                .h(px(40.))
+                                .debug_selector(|| "saved-queries-keyboard-hint".into())
+                                .h(px(58.))
                                 .w_full()
                                 .px_2()
                                 .flex_none()
@@ -33343,7 +33395,14 @@ impl WorkspaceShell {
                                         .text_center()
                                         .child("/ filter · R refresh"),
                                 )
-                                .child("r rename · t tags · d delete · u update"),
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_center()
+                                        .child("r rename · t tags · d delete · u update"),
+                                ),
                         )
                 },
             )
@@ -47363,6 +47422,13 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("collaboration-vault-view").is_some());
+        assert_eq!(
+            cx.debug_bounds("collaboration-keyboard-hint")
+                .expect("collaboration keyboard hint")
+                .size
+                .height,
+            px(48.)
+        );
     }
 
     #[gpui::test]
@@ -50135,6 +50201,13 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("saved-query-panel-row-0").is_some());
         assert!(cx.debug_bounds("saved-query-panel-row-1").is_some());
+        assert_eq!(
+            cx.debug_bounds("saved-queries-keyboard-hint")
+                .expect("saved-query keyboard hint")
+                .size
+                .height,
+            px(58.)
+        );
 
         cx.simulate_keystrokes("j");
         workspace.read_with(&cx, |shell, _| assert_eq!(shell.saved_queries_selected, 1));
@@ -51974,7 +52047,7 @@ mod tests {
                 "branch": "feature/performance",
                 "upstream": null,
                 "entries": [
-                    {"path":"a.sql","previous_path":null,"state":"modified","stage":"unstaged","conflict":null,"pending":null},
+                    {"path":"a.sql","previous_path":null,"state":"modified","stage":"staged","conflict":null,"pending":null},
                     {"path":"b.sql","previous_path":null,"state":"modified","stage":"unstaged","conflict":null,"pending":null}
                 ],
                 "truncated": false,
@@ -51988,6 +52061,14 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("footer-git-branch").is_some());
+        assert!(cx.debug_bounds("repository-commit-composer").is_some());
+        let staged_row = cx
+            .debug_bounds("repository-path-1")
+            .expect("full-width staged row");
+        let status_list = cx
+            .debug_bounds("repository-status-list")
+            .expect("repository status list");
+        assert_eq!(staged_row.size.width, status_list.size.width);
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.repository.selected_path().cloned()),
             Some(sift_protocol::WorkspacePath::new("a.sql").unwrap())
