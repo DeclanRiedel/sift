@@ -40,6 +40,7 @@ mod run_schedule;
 pub mod schema;
 pub mod secrets;
 mod transfer_recipe;
+mod vault;
 mod workspace;
 
 pub use approval::*;
@@ -65,7 +66,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=41 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=42 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -162,6 +163,20 @@ pub enum MetadataError {
     PolicyRevisionConflict { expected: u64, current: u64 },
     #[error("saved query revision conflict: expected {expected}, current {current}")]
     SavedQueryRevisionConflict { expected: u64, current: u64 },
+    #[error("vault {0:?} not found")]
+    VaultNotFound(sift_api_types::VaultId),
+    #[error("vault item {0:?} not found")]
+    VaultItemNotFound(sift_api_types::VaultItemId),
+    #[error("vault permission denied")]
+    VaultPermissionDenied,
+    #[error("vault revision conflict: expected {expected}, current {current}")]
+    VaultRevisionConflict { expected: u64, current: u64 },
+    #[error("vault secret is missing")]
+    VaultSecretMissing,
+    #[error("connection credentials cannot be revealed")]
+    VaultSecretNotRevealable,
+    #[error("invalid vault input: {0}")]
+    InvalidVaultInput(String),
     #[error("workspace {0:?} not found")]
     WorkspaceNotFound(sift_protocol::WorkspaceId),
     #[error("workspace node {0:?} not found")]

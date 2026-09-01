@@ -46,6 +46,7 @@ pub mod transaction_panel;
 pub mod transfer;
 pub mod tx;
 pub mod value;
+pub mod vault;
 pub mod vcs;
 pub mod workspace;
 
@@ -146,6 +147,7 @@ pub use transaction_panel::{
 };
 pub use transfer::*;
 pub use tx::{AccessMode as TxAccessMode, IsolationLevel, TxId, TxMode};
+pub use vault::*;
 pub use vcs::*;
 pub use workspace::*;
 

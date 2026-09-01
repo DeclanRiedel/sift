@@ -37,7 +37,100 @@ id_type!(
     QueryHistoryId,
     OperationAuditId,
     SavedQueryId,
+    VaultId,
+    VaultItemId,
 );
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Vault {
+    pub id: VaultId,
+    pub tenant_id: TenantId,
+    pub scope: sift_protocol::VaultScope,
+    pub owner_principal_id: Option<PrincipalId>,
+    pub name: String,
+    pub revision: u64,
+    pub effective_capabilities: sift_protocol::VaultCapabilities,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VaultGrant {
+    pub vault_id: VaultId,
+    pub principal_id: PrincipalId,
+    pub capabilities: sift_protocol::VaultCapabilities,
+    pub revision: u64,
+    pub created_by: PrincipalId,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VaultItemMetadata {
+    Connection {
+        provider_id: sift_protocol::ProviderId,
+        #[serde(default)]
+        configuration: serde_json::Value,
+    },
+    Login {
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        url: Option<String>,
+    },
+    Token {
+        #[serde(default)]
+        service: String,
+        #[serde(default)]
+        expires_at: Option<DateTime<Utc>>,
+    },
+    SecureNote,
+}
+
+impl VaultItemMetadata {
+    pub const fn kind(&self) -> sift_protocol::VaultItemKind {
+        match self {
+            Self::Connection { .. } => sift_protocol::VaultItemKind::Connection,
+            Self::Login { .. } => sift_protocol::VaultItemKind::Login,
+            Self::Token { .. } => sift_protocol::VaultItemKind::Token,
+            Self::SecureNote => sift_protocol::VaultItemKind::SecureNote,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultSecretStatus {
+    Missing,
+    Configured,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VaultItem {
+    pub id: VaultItemId,
+    pub vault_id: VaultId,
+    pub kind: sift_protocol::VaultItemKind,
+    pub label: String,
+    pub metadata: VaultItemMetadata,
+    pub secret_status: VaultSecretStatus,
+    pub head_version: u64,
+    pub revision: u64,
+    pub created_by: PrincipalId,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VaultItemVersion {
+    pub item_id: VaultItemId,
+    pub version: u64,
+    pub metadata: VaultItemMetadata,
+    pub secret_configured: bool,
+    pub change_summary: String,
+    pub created_by: PrincipalId,
+    pub created_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

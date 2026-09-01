@@ -629,6 +629,11 @@ pub enum Operation {
         workspace_id: crate::WorkspaceId,
         recipe_id: Option<crate::TransferRecipeId>,
     },
+    Vault {
+        action: crate::VaultAction,
+        vault_id: Option<i64>,
+        item_id: Option<i64>,
+    },
     BackupState,
     RestoreState {
         applied: bool,
@@ -826,6 +831,7 @@ impl Operation {
                 | TransferRecipeAction::Delete
                 | TransferRecipeAction::Validate => OperationKind::ManageTransferRecipe,
             },
+            Self::Vault { .. } => OperationKind::Metadata,
             Self::BackupState => OperationKind::BackupState,
             Self::RestoreState { .. } => OperationKind::RestoreState,
         }
@@ -1187,6 +1193,19 @@ impl Operation {
                 "transfer_recipe",
                 Some(recipe_id.map_or(workspace_id.0, |id| id.0)),
             ),
+            Operation::Vault {
+                action,
+                vault_id,
+                item_id,
+            } => summary(
+                action.audit_name(),
+                if item_id.is_some() {
+                    "vault_item"
+                } else {
+                    "vault"
+                },
+                (*item_id).or(*vault_id),
+            ),
             Operation::BackupState => summary("backup", "instance_state", None),
             Operation::RestoreState { applied } => summary(
                 if *applied {
@@ -1310,6 +1329,19 @@ single_word_audit_names!(TransferRecipeAction {
     Delete => "delete",
     Validate => "validate",
     Execute => "execute",
+});
+single_word_audit_names!(crate::VaultAction {
+    Read => "read",
+    Create => "create",
+    Update => "update",
+    Delete => "delete",
+    Grant => "grant",
+    Revoke => "revoke",
+    SetSecret => "set_secret",
+    Reveal => "reveal",
+    Restore => "restore",
+    Test => "test",
+    Use => "use",
 });
 
 #[cfg(test)]

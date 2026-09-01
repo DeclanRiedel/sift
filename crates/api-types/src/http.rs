@@ -648,6 +648,105 @@ pub struct SetCredentialRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateVaultRequest {
+    pub tenant_id: i64,
+    pub scope: sift_protocol::VaultScope,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateVaultRequest {
+    pub expected_revision: u64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SetVaultGrantRequest {
+    pub expected_revision: Option<u64>,
+    pub capabilities: sift_protocol::VaultCapabilities,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateVaultItemRequest {
+    pub label: String,
+    pub metadata: crate::VaultItemMetadata,
+    #[serde(default)]
+    pub secret: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for CreateVaultItemRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateVaultItemRequest")
+            .field("label", &self.label)
+            .field("metadata", &self.metadata)
+            .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateVaultItemRequest {
+    pub expected_revision: u64,
+    pub label: String,
+    pub metadata: crate::VaultItemMetadata,
+    #[serde(default)]
+    pub secret: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for UpdateVaultItemRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpdateVaultItemRequest")
+            .field("expected_revision", &self.expected_revision)
+            .field("label", &self.label)
+            .field("metadata", &self.metadata)
+            .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SetVaultSecretRequest {
+    pub expected_revision: u64,
+    pub secret: serde_json::Value,
+}
+
+impl std::fmt::Debug for SetVaultSecretRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SetVaultSecretRequest")
+            .field("expected_revision", &self.expected_revision)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RevealVaultSecretResponse {
+    pub item_id: i64,
+    pub value: serde_json::Value,
+    pub expires_in_seconds: u32,
+}
+
+impl std::fmt::Debug for RevealVaultSecretResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RevealVaultSecretResponse")
+            .field("item_id", &self.item_id)
+            .field("value", &"[REDACTED]")
+            .field("expires_in_seconds", &self.expires_in_seconds)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RestoreVaultItemRequest {
+    pub expected_revision: u64,
+    pub version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct OpenConnectionFromProfileRequest {
     pub tenant_id: i64,
     pub profile_id: i64,
