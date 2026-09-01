@@ -6580,70 +6580,6 @@ fn pane_tab_context_menu(
         .into_any_element()
 }
 
-fn database_breadcrumb(
-    item_id: u64,
-    source: &DatabaseObjectSource,
-    colors: sift_ui::ThemeColors,
-    cx: &mut Context<Pane>,
-) -> gpui::AnyElement {
-    let segments = [
-        (
-            DatabaseBreadcrumbLevel::Connection,
-            source.profile_name.clone(),
-        ),
-        (
-            DatabaseBreadcrumbLevel::Catalog,
-            source.catalog.clone().unwrap_or_else(|| "default".into()),
-        ),
-        (DatabaseBreadcrumbLevel::Schema, source.schema.clone()),
-        (DatabaseBreadcrumbLevel::Object, source.object.clone()),
-    ];
-    let mut row = div()
-        .id(("database-breadcrumb", item_id as usize))
-        .debug_selector(|| "database-breadcrumb".into())
-        .h(px(26.))
-        .flex_none()
-        .px_2()
-        .flex()
-        .items_center()
-        .overflow_hidden()
-        .border_b_1()
-        .border_color(colors.subtle_border)
-        .bg(colors.background)
-        .text_xs();
-    for (index, (level, label)) in segments.into_iter().enumerate() {
-        if index > 0 {
-            row = row.child(icon(IconName::ChevronRight, colors.disabled_text, 9.));
-        }
-        let source = source.clone();
-        row = row.child(
-            div()
-                .id(format!("database-breadcrumb-segment-{item_id}-{index}"))
-                .min_w_0()
-                .max_w(px(150.))
-                .px_1()
-                .truncate()
-                .rounded_sm()
-                .text_color(if level == DatabaseBreadcrumbLevel::Object {
-                    colors.text
-                } else {
-                    colors.muted_text
-                })
-                .role(Role::Button)
-                .aria_label(format!("Reveal {label} in connections"))
-                .hover(|segment| segment.bg(colors.hovered_surface).text_color(colors.text))
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(PaneEvent::RevealDatabaseObjectRequested {
-                        source: source.clone(),
-                        level,
-                    });
-                }))
-                .child(label),
-        );
-    }
-    row.into_any_element()
-}
-
 impl gpui::Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -7396,12 +7332,6 @@ impl gpui::Render for Pane {
                     {
                         match (self.editors.get(&item.id), self.results.get(&item.id)) {
                             (Some(editor), Some(result)) => {
-                                let database_breadcrumb = item.source.as_ref().and_then(|source| {
-                                    let ItemSource::DatabaseObject(source) = source else {
-                                        return None;
-                                    };
-                                    Some(database_breadcrumb(item.id, source, colors, cx))
-                                });
                                 let database_view = self
                                     .database_item_views
                                     .get(&item.id)
@@ -7641,7 +7571,6 @@ impl gpui::Render for Pane {
                                 body.when(database_view == DatabaseItemView::Json, |body| {
                                     body.key_context("SiftJsonResultEditor")
                                 })
-                                .children(database_breadcrumb)
                                 .children(database_view_switch)
                                 .child(split)
                             }
@@ -45968,7 +45897,12 @@ mod tests {
         ));
         assert_eq!(sql, "SELECT * FROM \"lab\".\"people\" LIMIT 100;");
         cx.run_until_parked();
-        assert!(cx.debug_bounds("database-breadcrumb").is_some());
+        let breadcrumb = cx
+            .debug_bounds("database-breadcrumb")
+            .expect("footer database breadcrumb");
+        let status_bar = cx.debug_bounds("status-bar").expect("status bar");
+        assert!(breadcrumb.top() >= status_bar.top());
+        assert!(breadcrumb.bottom() <= status_bar.bottom());
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             assert_eq!(pane.active_item().map(|item| item.id), Some(item_id));

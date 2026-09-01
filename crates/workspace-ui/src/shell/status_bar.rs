@@ -23,6 +23,62 @@ impl Default for StatusBar {
     }
 }
 
+fn render_database_breadcrumb(
+    item_id: u64,
+    source: DatabaseObjectSource,
+    colors: sift_ui::ThemeColors,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let segments = [
+        (
+            DatabaseBreadcrumbLevel::Connection,
+            source.profile_name.clone(),
+        ),
+        (
+            DatabaseBreadcrumbLevel::Catalog,
+            source.catalog.clone().unwrap_or_else(|| "default".into()),
+        ),
+        (DatabaseBreadcrumbLevel::Schema, source.schema.clone()),
+        (DatabaseBreadcrumbLevel::Object, source.object.clone()),
+    ];
+    let mut breadcrumb = div()
+        .id(("database-breadcrumb", item_id as usize))
+        .debug_selector(|| "database-breadcrumb".into())
+        .min_w_0()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .text_xs();
+    for (index, (level, label)) in segments.into_iter().enumerate() {
+        if index > 0 {
+            breadcrumb = breadcrumb.child(icon(IconName::ChevronRight, colors.disabled_text, 9.));
+        }
+        let source = source.clone();
+        breadcrumb = breadcrumb.child(
+            div()
+                .id(format!("database-breadcrumb-segment-{item_id}-{index}"))
+                .min_w_0()
+                .max_w(px(130.))
+                .px_1()
+                .truncate()
+                .rounded_sm()
+                .text_color(if level == DatabaseBreadcrumbLevel::Object {
+                    colors.text
+                } else {
+                    colors.muted_text
+                })
+                .role(Role::Button)
+                .aria_label(format!("Reveal {label} in connections"))
+                .hover(|segment| segment.bg(colors.hovered_surface).text_color(colors.text))
+                .on_click(cx.listener(move |shell, _, window, cx| {
+                    shell.reveal_database_object(&source, level, window, cx);
+                }))
+                .child(label),
+        );
+    }
+    breadcrumb.into_any_element()
+}
+
 pub(super) fn render_status_bar(
     shell: &WorkspaceShell,
     cx: &mut Context<WorkspaceShell>,
@@ -131,9 +187,18 @@ pub(super) fn render_status_bar(
     } else {
         ide_buffer.clone()
     };
+    let active_database_source = shell.panes.get(shell.active_pane).and_then(|pane| {
+        let pane = pane.read(cx);
+        let item = pane.active_item()?;
+        pane.database_source(item.id)
+            .map(|source| (item.id, source))
+    });
+    let database_breadcrumb = active_database_source
+        .map(|(item_id, source)| render_database_breadcrumb(item_id, source, colors, cx));
 
     div()
         .id("status-bar")
+        .debug_selector(|| "status-bar".into())
         .role(Role::Toolbar)
         .aria_label("Workspace status")
         .tab_group()
@@ -337,6 +402,7 @@ pub(super) fn render_status_bar(
                     )
                     .on_click(cx.listener(|shell, _, _, cx| shell.copy_all_global_problems(cx)))
                 }))
+                .children(database_breadcrumb)
                 .children(shell.transaction_state.transaction().map(|_| {
                     div()
                         .flex_none()
