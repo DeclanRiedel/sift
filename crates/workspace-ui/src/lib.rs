@@ -25,7 +25,7 @@ pub use presentation::{
 };
 pub use settings::{
     DataSettings, EditorMode, EditorSettings, KeyboardProfile, KeyboardSettings, KeymapSettings,
-    SettingsStore, UserSettings,
+    QueryResultsPlacement, SettingsStore, UserSettings,
 };
 pub use shell::{
     AutomationDetailsSnapshot, CancelExecution, CloseActiveItem, CloseActivePane,

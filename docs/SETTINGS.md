@@ -46,6 +46,7 @@ listed defaults.
 | `appearance.theme` | `ayu-dark`, `light`, or a custom theme id | `ayu-dark` | Active color theme. |
 | `keyboard.profile` | `vim`, `hybrid`, `standard` | `vim` | Enabled IDE shortcut language. |
 | `data.selection_aggregates` | Boolean | `false` | Shows sum and average for numeric Data-tab selections. Cell count remains visible when off. |
+| `data.query_results_placement` | `right`, `bottom` | `right` | Places query results beside the SQL editor or below it. |
 | `repository.grouping` | `staging`, `file_state` | `staging` | Groups source-control changes by staging state or file state. |
 | `repository.sort` | `path`, `file_name` | `path` | Sorts source-control paths by full path or file name. |
 | `repository.view` | `flat`, `tree` | `flat` | Displays repository changes as a flat list or folder tree. |
@@ -55,8 +56,9 @@ listed defaults.
 | `repository.commit_author_email` | String; omit for none | omitted | Explicit commit author email. |
 | `repository.commit_sign_off` | Boolean | `false` | Adds a `Signed-off-by` trailer when absent. |
 
-The in-app Settings panel exposes the common Vim, appearance, and Data
-aggregate toggles. **Open settings.toml** exposes every option above.
+The in-app Settings panel exposes the common Vim, appearance, query/result
+layout, and Data aggregate toggles. **Open settings.toml** exposes every option
+above.
 
 IDE leader bindings live beside it in `keymaps.json`:
 

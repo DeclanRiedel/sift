@@ -29,8 +29,8 @@ use crate::results::{
     StreamCompletion, StreamProgress, StreamUpdate,
 };
 use crate::settings::{
-    EditorMode, KeyboardProfile, KeymapSettings, RepositoryGrouping, RepositoryPrimaryAction,
-    RepositorySort, RepositoryView, SettingsStore, UserSettings,
+    EditorMode, KeyboardProfile, KeymapSettings, QueryResultsPlacement, RepositoryGrouping,
+    RepositoryPrimaryAction, RepositorySort, RepositoryView, SettingsStore, UserSettings,
 };
 use crate::workspace::{child_path, WorkspaceFilesProjection, WorkspaceFilesSnapshot};
 
@@ -83,6 +83,13 @@ const ROOT_PANE_DROP_TARGET_SIZE: f32 = 48.0;
 const RESULT_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const RESULT_MIN_EXTENT: f32 = 140.0;
 const EDITOR_MIN_EXTENT: f32 = 160.0;
+
+const fn result_placement(setting: QueryResultsPlacement) -> ResultPlacement {
+    match setting {
+        QueryResultsPlacement::Bottom => ResultPlacement::Bottom,
+        QueryResultsPlacement::Right => ResultPlacement::Right,
+    }
+}
 const PRESENTATION_PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn default_keymaps() -> KeymapSettings {
@@ -8516,13 +8523,15 @@ impl WorkspaceShell {
             .map(|pane| cx.new(|cx| Pane::from_presentation(pane, vim_mode_default, cx)))
             .collect::<Vec<_>>();
         let selection_aggregates = settings.data.selection_aggregates;
+        let result_placement = result_placement(settings.data.query_results_placement);
         let restored_results = panes
             .iter()
             .flat_map(|pane| pane.read(cx).results.values().cloned().collect::<Vec<_>>())
             .collect::<Vec<_>>();
         for results in restored_results {
             results.update(cx, |results, cx| {
-                results.set_selection_aggregates_visible(selection_aggregates, cx)
+                results.set_selection_aggregates_visible(selection_aggregates, cx);
+                results.set_placement(result_placement, cx);
             });
         }
         for pane in &panes {
@@ -9785,6 +9794,7 @@ impl WorkspaceShell {
                     presentation,
                     self.vim_mode_default(),
                     self.settings.data.selection_aggregates,
+                    self.settings.data.query_results_placement,
                     window,
                     cx,
                 )
@@ -9877,6 +9887,7 @@ impl WorkspaceShell {
         );
         self.sync_notifications_editor(cx);
         self.sync_selection_aggregate_setting(cx);
+        self.sync_query_results_placement(cx);
         self.sync_pane_layout_view(cx);
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.read(cx).active_focus_handle(cx).focus(window, cx);
@@ -9887,6 +9898,7 @@ impl WorkspaceShell {
         workspace: WorkspacePresentation,
         vim_mode_default: bool,
         selection_aggregates: bool,
+        query_results_placement: QueryResultsPlacement,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> WorkspaceSession {
@@ -9906,7 +9918,8 @@ impl WorkspaceShell {
             .collect::<Vec<_>>();
         for results in restored_results {
             results.update(cx, |results, cx| {
-                results.set_selection_aggregates_visible(selection_aggregates, cx)
+                results.set_selection_aggregates_visible(selection_aggregates, cx);
+                results.set_placement(result_placement(query_results_placement), cx);
             });
         }
         for pane in &panes {
@@ -23420,6 +23433,39 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn toggle_query_results_placement(&mut self, cx: &mut Context<Self>) {
+        let settings_is_open = self.settings_item.is_some_and(|item_id| {
+            self.panes
+                .iter()
+                .any(|pane| pane.read(cx).contains_item(item_id))
+        });
+        if settings_is_open {
+            self.show_toast(
+                "Save or close settings.toml before changing this preference here".into(),
+                cx,
+            );
+            return;
+        }
+        let placement = match self.settings.data.query_results_placement {
+            QueryResultsPlacement::Bottom => QueryResultsPlacement::Right,
+            QueryResultsPlacement::Right => QueryResultsPlacement::Bottom,
+        };
+        let mut settings = self.settings.clone();
+        settings.data.query_results_placement = placement;
+        if let Some(store) = &self.settings_store {
+            settings = match store.save_query_results_placement(placement) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    self.show_toast(error, cx);
+                    return;
+                }
+            };
+        }
+        self.settings = settings;
+        self.sync_query_results_placement(cx);
+        cx.notify();
+    }
+
     pub fn open_workspace(&mut self, workspace: &WorkspaceNavEntry, cx: &mut Context<Self>) {
         if let Some(current) = self.selected_workspace_id {
             let presentation = self.current_repository_presentation(cx);
@@ -31548,7 +31594,11 @@ impl WorkspaceShell {
     fn new_results_view(&self, cx: &mut Context<Self>) -> Entity<ResultsView> {
         let view = cx.new(ResultsView::new);
         view.update(cx, |view, cx| {
-            view.set_selection_aggregates_visible(self.settings.data.selection_aggregates, cx)
+            view.set_selection_aggregates_visible(self.settings.data.selection_aggregates, cx);
+            view.set_placement(
+                result_placement(self.settings.data.query_results_placement),
+                cx,
+            );
         });
         view
     }
@@ -31564,6 +31614,18 @@ impl WorkspaceShell {
             result.update(cx, |result, cx| {
                 result.set_selection_aggregates_visible(visible, cx)
             });
+        }
+    }
+
+    fn sync_query_results_placement(&self, cx: &mut Context<Self>) {
+        let placement = result_placement(self.settings.data.query_results_placement);
+        let results = self
+            .panes
+            .iter()
+            .flat_map(|pane| pane.read(cx).results.values().cloned().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        for result in results {
+            result.update(cx, |result, cx| result.set_placement(placement, cx));
         }
     }
 
@@ -37869,6 +37931,18 @@ impl WorkspaceShell {
                             dark_theme,
                             Box::new(cx.listener(
                                 |shell: &mut WorkspaceShell, _, _, cx| shell.toggle_theme(cx),
+                            )) as sift_ui::ClickHandler,
+                        ))
+                        .child(toggle_row(
+                            "settings-query-results-right",
+                            "Results beside query",
+                            "Place SQL on the left and query results on the right.",
+                            self.settings.data.query_results_placement
+                                == QueryResultsPlacement::Right,
+                            Box::new(cx.listener(
+                                |shell: &mut WorkspaceShell, _, _, cx| {
+                                    shell.toggle_query_results_placement(cx)
+                                },
                             )) as sift_ui::ClickHandler,
                         ))
                         .child(toggle_row(
@@ -45881,7 +45955,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn results_layout_is_owned_by_each_query_tab(cx: &mut TestAppContext) {
+    fn query_results_default_to_the_right_for_every_tab(cx: &mut TestAppContext) {
         let mut state = PresentationState::default();
         state.workspace.panes[0].items.push(ItemPresentation {
             id: 2,
@@ -45895,9 +45969,6 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         let pane = workspace.read_with(&cx, |shell, _| shell.panes[0].clone());
-        let result = pane.read_with(&cx, |pane, _| pane.results.get(&1).unwrap().clone());
-
-        result.update(&mut cx, ResultsView::toggle_placement);
         pane.read_with(&cx, |pane, cx| {
             assert_eq!(
                 pane.results.get(&1).unwrap().read(cx).placement(),
@@ -45905,7 +45976,7 @@ mod tests {
             );
             assert_eq!(
                 pane.results.get(&2).unwrap().read(cx).placement(),
-                ResultPlacement::Bottom
+                ResultPlacement::Right
             );
         });
     }
@@ -47809,6 +47880,10 @@ mod tests {
             .debug_bounds("settings-selection-aggregates")
             .expect("settings modal must expose Data selection aggregates");
         cx.simulate_click(aggregates.center(), Modifiers::default());
+        let result_placement = cx
+            .debug_bounds("settings-query-results-right")
+            .expect("settings modal must expose query/result placement");
+        cx.simulate_click(result_placement.center(), Modifiers::default());
         workspace.update(&mut cx, |workspace, cx| {
             workspace.toggle_vim_mode_default(cx)
         });
@@ -47816,6 +47891,10 @@ mod tests {
             assert_eq!(workspace.modal(), Some(&Modal::Settings));
             assert_eq!(workspace.settings.editor.default_mode, EditorMode::Standard);
             assert!(workspace.settings.data.selection_aggregates);
+            assert_eq!(
+                workspace.settings.data.query_results_placement,
+                QueryResultsPlacement::Bottom
+            );
             assert!(workspace.vim_mode_default());
             assert!(!workspace.snapshot(cx).legacy_vim_mode_default);
         });

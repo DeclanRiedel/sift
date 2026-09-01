@@ -1625,6 +1625,13 @@ impl ResultsView {
         cx.notify();
     }
 
+    pub(crate) fn set_placement(&mut self, placement: ResultPlacement, cx: &mut Context<Self>) {
+        if self.placement != placement {
+            self.placement = placement;
+            cx.notify();
+        }
+    }
+
     /// Adopt a new outcome, resetting selection and opening failures as text.
     pub fn set_state(&mut self, mut state: ResultState, cx: &mut Context<Self>) {
         match &mut state {

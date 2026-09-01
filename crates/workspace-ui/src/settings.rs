@@ -36,10 +36,37 @@ pub struct AppearanceSettings {
     pub theme: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryResultsPlacement {
+    Bottom,
+    #[default]
+    Right,
+}
+
+impl QueryResultsPlacement {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bottom => "bottom",
+            Self::Right => "right",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DataSettings {
     pub selection_aggregates: bool,
+    pub query_results_placement: QueryResultsPlacement,
+}
+
+impl Default for DataSettings {
+    fn default() -> Self {
+        Self {
+            selection_aggregates: false,
+            query_results_placement: QueryResultsPlacement::Right,
+        }
+    }
 }
 
 impl Default for AppearanceSettings {
@@ -615,6 +642,34 @@ impl SettingsStore {
         Ok(settings)
     }
 
+    /// Update query/result placement while preserving hand-written settings.
+    pub fn save_query_results_placement(
+        &self,
+        placement: QueryResultsPlacement,
+    ) -> Result<UserSettings, String> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "settings write lock poisoned".to_string())?;
+        let source = std::fs::read_to_string(&self.path)
+            .map_err(|error| format!("reading {} failed: {error}", self.path.display()))?;
+        let mut document = source
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("settings.toml is invalid: {error}"))?;
+        let decor = document["data"]["query_results_placement"]
+            .as_value()
+            .map(|value| value.decor().clone());
+        let mut placement_value = Value::from(placement.as_str());
+        if let Some(decor) = decor {
+            *placement_value.decor_mut() = decor;
+        }
+        document["data"]["query_results_placement"] = Item::Value(placement_value);
+        let updated = document.to_string();
+        let settings = UserSettings::decode(&updated)?;
+        self.write_source(&updated)?;
+        Ok(settings)
+    }
+
     /// Update the selected theme while preserving hand-written settings.
     pub fn save_theme(&self, theme: &str) -> Result<UserSettings, String> {
         self.load_theme(theme)?;
@@ -731,6 +786,7 @@ mod tests {
         assert!(source.contains("profile = \"vim\""));
         assert!(source.contains("theme = \"ayu-dark\""));
         assert!(source.contains("selection_aggregates = false"));
+        assert!(source.contains("query_results_placement = \"right\""));
         assert_eq!(UserSettings::decode(&source).unwrap(), settings);
     }
 
@@ -791,6 +847,27 @@ mod tests {
             .read_text()
             .unwrap()
             .contains("selection_aggregates = true"));
+    }
+
+    #[test]
+    fn result_placement_update_preserves_unrelated_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.toml"));
+        store.save(&UserSettings::default()).unwrap();
+
+        let settings = store
+            .save_query_results_placement(QueryResultsPlacement::Bottom)
+            .unwrap();
+
+        assert_eq!(
+            settings.data.query_results_placement,
+            QueryResultsPlacement::Bottom
+        );
+        assert_eq!(settings.appearance.theme, "ayu-dark");
+        assert!(store
+            .read_text()
+            .unwrap()
+            .contains("query_results_placement = \"bottom\""));
     }
 
     #[test]
