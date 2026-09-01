@@ -61,6 +61,13 @@ pub(super) fn render_status_bar(
                 },
             );
     let problem_count = error_count.saturating_add(warning_count);
+    let problem_icon_color = if error_count > 0 {
+        colors.danger
+    } else if warning_count > 0 {
+        colors.warning
+    } else {
+        colors.muted_text
+    };
     let (cursor_label, cursor_tooltip) = shell.active_cursor_position(cx).map_or_else(
         || ("-:-".into(), "No active query cursor".into()),
         |(line, column)| {
@@ -301,15 +308,7 @@ pub(super) fn render_status_bar(
                         .on_click(cx.listener(|shell, _, window, cx| {
                             shell.show_global_problems(window, cx)
                         }))
-                        .child(icon(
-                            IconName::Warning,
-                            if problem_count == 0 {
-                                colors.muted_text
-                            } else {
-                                colors.warning
-                            },
-                            14.,
-                        ))
+                        .child(icon(IconName::Warning, problem_icon_color, 14.))
                         .children((error_count > 0).then(|| {
                             div()
                                 .id("footer-error-count")
