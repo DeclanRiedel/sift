@@ -49,10 +49,6 @@ pub(super) fn render_status_bar(
             .mx_1()
             .bg(colors.border)
     };
-    let health_failure = shell
-        .connection_health
-        .as_ref()
-        .and_then(|report| report.failure.as_ref());
     let (error_count, warning_count) =
         shell
             .global_problems
@@ -338,38 +334,13 @@ pub(super) fn render_status_bar(
                     )
                     .on_click(cx.listener(|shell, _, _, cx| shell.copy_all_global_problems(cx)))
                 }))
-                .child(separator())
-                .child(
-                    div()
-                        .flex()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .items_center()
-                        .gap_1()
-                        .child(div().size(px(6.)).flex_none().rounded_full().bg(
-                            match &shell.connection_status {
-                                ConnectionStatus::Connected { .. } if health_failure.is_some() => {
-                                    colors.warning
-                                }
-                                ConnectionStatus::Connected { .. } => colors.success,
-                                ConnectionStatus::Connecting { .. } => colors.warning,
-                                ConnectionStatus::Failed { .. } => colors.danger,
-                                ConnectionStatus::Disconnected => colors.muted_text,
-                            },
-                        ))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .child(shell.status.database.clone()),
-                        ),
-                )
                 .children(shell.transaction_state.transaction().map(|_| {
                     div()
                         .flex_none()
                         .flex()
                         .items_center()
                         .gap_1()
+                        .child(separator())
                         .child(shell.status.transaction.clone())
                         .child(
                             Button::new("footer-create-savepoint", "Savepoint")
