@@ -1975,6 +1975,10 @@ pub enum PaneEvent {
     CloseItemRequested {
         item_id: u64,
     },
+    /// Close a pane-scoped set while retaining tabs with unsaved changes.
+    CloseItemsRequested {
+        item_ids: Vec<u64>,
+    },
     /// A tab-local dirty prompt chose to discard the item.
     DiscardItemRequested {
         item_id: u64,
@@ -3820,6 +3824,7 @@ pub struct Pane {
     pending_close_item: Option<u64>,
     tab_rename: Option<TabRenameState>,
     hovered_tab: Option<u64>,
+    tab_context_menu: Option<u64>,
     chrome_menu: Option<PaneChromeMenu>,
     maximized: bool,
     /// The live result entity is mounted in the workspace modal while this is
@@ -3957,6 +3962,7 @@ impl Pane {
             pending_close_item: None,
             tab_rename: None,
             hovered_tab: None,
+            tab_context_menu: None,
             chrome_menu: None,
             maximized: false,
             expanded_result_item: None,
@@ -4507,6 +4513,9 @@ impl Pane {
         self.object_browsers.remove(&item_id);
         if self.pending_close_item == Some(item_id) {
             self.pending_close_item = None;
+        }
+        if self.tab_context_menu == Some(item_id) {
+            self.tab_context_menu = None;
         }
         if self
             .tab_rename
@@ -5681,6 +5690,19 @@ fn pane_drop_preview_colors(theme: &Theme) -> (gpui::Hsla, gpui::Hsla) {
 }
 
 impl Pane {
+    fn handle_tab_context_menu_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tab_context_menu.is_some() && event.keystroke.key == "escape" {
+            self.tab_context_menu = None;
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
     fn handle_pending_close_key(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -6294,6 +6316,112 @@ fn pane_chrome_menu(
     }
 }
 
+fn pane_tab_context_menu(
+    item_id: u64,
+    other_item_ids: Vec<u64>,
+    right_item_ids: Vec<u64>,
+    all_item_ids: Vec<u64>,
+    colors: ThemeColors,
+    cx: &mut Context<Pane>,
+) -> AnyElement {
+    let item = |id: &'static str, label: &'static str, enabled: bool| {
+        div()
+            .id(id)
+            .debug_selector(move || id.into())
+            .role(Role::MenuItem)
+            .h(px(28.))
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .text_sm()
+            .text_color(if enabled {
+                colors.text
+            } else {
+                colors.disabled_text
+            })
+            .when(enabled, |row| {
+                row.hover(|row| row.bg(colors.hovered_surface))
+            })
+            .child(label)
+    };
+    let popup = div()
+        .id("pane-tab-context-menu")
+        .debug_selector(|| "pane-tab-context-menu".into())
+        .w(px(210.))
+        .p_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(colors.strong_border)
+        .bg(colors.elevated_surface)
+        .shadow_lg()
+        .occlude()
+        .role(Role::Menu)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down_out(cx.listener(|pane, _, _, cx| {
+            pane.tab_context_menu = None;
+            cx.notify();
+        }));
+
+    let close_others_enabled = !other_item_ids.is_empty();
+    let close_right_enabled = !right_item_ids.is_empty();
+    popup
+        .child(
+            item("tab-context-close", "Close", true).on_click(cx.listener(
+                move |pane, _, _, cx| {
+                    pane.tab_context_menu = None;
+                    cx.emit(PaneEvent::CloseItemRequested { item_id });
+                    cx.notify();
+                },
+            )),
+        )
+        .child(
+            item(
+                "tab-context-close-others",
+                "Close Other Tabs",
+                close_others_enabled,
+            )
+            .when(close_others_enabled, |row| {
+                row.on_click(cx.listener(move |pane, _, _, cx| {
+                    pane.tab_context_menu = None;
+                    cx.emit(PaneEvent::CloseItemsRequested {
+                        item_ids: other_item_ids.clone(),
+                    });
+                    cx.notify();
+                }))
+            }),
+        )
+        .child(
+            item(
+                "tab-context-close-right",
+                "Close Tabs to the Right",
+                close_right_enabled,
+            )
+            .when(close_right_enabled, |row| {
+                row.on_click(cx.listener(move |pane, _, _, cx| {
+                    pane.tab_context_menu = None;
+                    cx.emit(PaneEvent::CloseItemsRequested {
+                        item_ids: right_item_ids.clone(),
+                    });
+                    cx.notify();
+                }))
+            }),
+        )
+        .child(div().my_1().h(px(1.)).bg(colors.subtle_border))
+        .child(
+            item("tab-context-close-all", "Close All Tabs in Pane", true).on_click(cx.listener(
+                move |pane, _, _, cx| {
+                    pane.tab_context_menu = None;
+                    cx.emit(PaneEvent::CloseItemsRequested {
+                        item_ids: all_item_ids.clone(),
+                    });
+                    cx.notify();
+                },
+            )),
+        )
+        .into_any_element()
+}
+
 fn database_breadcrumb(
     item_id: u64,
     source: &DatabaseObjectSource,
@@ -6393,6 +6521,7 @@ impl gpui::Render for Pane {
             .relative()
             .key_context("SiftPane")
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(Self::handle_tab_context_menu_key))
             .on_key_down(cx.listener(Self::handle_pending_close_key))
             .on_key_down(cx.listener(Self::handle_object_browser_key))
             .on_action(cx.listener(Self::navigate_back_action))
@@ -6544,6 +6673,24 @@ impl gpui::Render for Pane {
                                                 results.read(cx).has_staged_changes()
                                             });
                                         let tab_debug = format!("tab-{item_id}");
+                                        let context_menu_open =
+                                            self.tab_context_menu == Some(item_id);
+                                        let other_item_ids = self
+                                            .items
+                                            .iter()
+                                            .filter_map(|candidate| {
+                                                (candidate.id != item_id).then_some(candidate.id)
+                                            })
+                                            .collect::<Vec<_>>();
+                                        let right_item_ids = self.items[index + 1..]
+                                            .iter()
+                                            .map(|candidate| candidate.id)
+                                            .collect::<Vec<_>>();
+                                        let all_item_ids = self
+                                            .items
+                                            .iter()
+                                            .map(|candidate| candidate.id)
+                                            .collect::<Vec<_>>();
                                         let rename_input = tab_rename
                                             .as_ref()
                                             .filter(|(rename_id, _)| *rename_id == item_id)
@@ -6568,6 +6715,18 @@ impl gpui::Render for Pane {
                                                     }
                                                 },
                                             ))
+                                            .on_mouse_down(
+                                                MouseButton::Right,
+                                                cx.listener(move |pane, _, window, cx| {
+                                                    cx.stop_propagation();
+                                                    pane.activate_item(index, true);
+                                                    pane.tab_context_menu = Some(item_id);
+                                                    pane.chrome_menu = None;
+                                                    pane.active_focus_handle(cx).focus(window, cx);
+                                                    cx.emit(PaneEvent::FocusRequested);
+                                                    cx.notify();
+                                                }),
+                                            )
                                             .on_drag(
                                                 TabDrag {
                                                     pane_id,
@@ -6718,9 +6877,31 @@ impl gpui::Render for Pane {
                                                                     );
                                                                 },
                                                             )),
-                                                        )
+                                                    )
                                                 },
                                             ))
+                                            .children(context_menu_open.then(|| {
+                                                div()
+                                                    .absolute()
+                                                    .bottom_0()
+                                                    .right_0()
+                                                    .size_0()
+                                                    .child(
+                                                        deferred(
+                                                            anchored()
+                                                                .anchor(Anchor::TopRight)
+                                                                .child(pane_tab_context_menu(
+                                                                    item_id,
+                                                                    other_item_ids,
+                                                                    right_item_ids,
+                                                                    all_item_ids,
+                                                                    colors,
+                                                                    cx,
+                                                                )),
+                                                        )
+                                                        .with_priority(3),
+                                                    )
+                                            }))
                                     }))
                                     .child(
                                         div()
@@ -24675,6 +24856,9 @@ impl WorkspaceShell {
                 });
                 self.close_active_item(&CloseActiveItem, window, cx);
             }
+            PaneEvent::CloseItemsRequested { item_ids } => {
+                self.close_pane_items(index, item_ids, window, cx);
+            }
             PaneEvent::DiscardItemRequested { item_id } => {
                 self.active_pane = index;
                 emitter.update(cx, |pane, _| {
@@ -25328,6 +25512,48 @@ impl WorkspaceShell {
                 );
                 self.focus_active_pane(window, cx);
             }
+        }
+    }
+
+    fn close_pane_items(
+        &mut self,
+        pane_index: usize,
+        item_ids: &[u64],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.panes.get(pane_index).cloned() else {
+            return;
+        };
+        let item_ids = item_ids.iter().copied().collect::<HashSet<_>>();
+        while let Some(current_pane_index) = self.panes.iter().position(|pane| pane == &target) {
+            let clean_item = target
+                .read(cx)
+                .items
+                .iter()
+                .position(|item| item_ids.contains(&item.id) && !item.dirty);
+            let Some(item_index) = clean_item else {
+                break;
+            };
+            self.active_pane = current_pane_index;
+            target.update(cx, |pane, _| pane.activate_item(item_index, false));
+            self.remove_active_item(window, cx);
+        }
+        if let Some(current_pane_index) = self.panes.iter().position(|pane| pane == &target) {
+            self.active_pane = current_pane_index;
+            let dirty_count = target
+                .read(cx)
+                .items
+                .iter()
+                .filter(|item| item_ids.contains(&item.id) && item.dirty)
+                .count();
+            if dirty_count > 0 {
+                self.show_toast(
+                    format!("Kept {dirty_count} tab(s) with unsaved changes"),
+                    cx,
+                );
+            }
+            self.focus_active_pane(window, cx);
         }
     }
 
@@ -47164,6 +47390,115 @@ mod tests {
         );
         assert!(cx.debug_bounds("pane-close").is_none());
         assert!(cx.debug_bounds("pane-tab-bar").is_none());
+    }
+
+    #[gpui::test]
+    fn tab_context_menu_closes_right_and_other_tabs(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.extend([
+            ItemPresentation {
+                id: 2,
+                kind: ItemKind::Query,
+                title: "two.sql".into(),
+                dirty: false,
+                source: None,
+                last_result: None,
+            },
+            ItemPresentation {
+                id: 3,
+                kind: ItemKind::Query,
+                title: "three.sql".into(),
+                dirty: false,
+                source: None,
+                last_result: None,
+            },
+        ]);
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+
+        let second = cx.debug_bounds("tab-2").expect("second tab");
+        cx.simulate_mouse_down(second.center(), MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        for selector in [
+            "pane-tab-context-menu",
+            "tab-context-close",
+            "tab-context-close-others",
+            "tab-context-close-right",
+            "tab-context-close-all",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "missing {selector}");
+        }
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.panes[0].read(cx).active_item().unwrap().id, 2);
+        });
+
+        let close_right = cx.debug_bounds("tab-context-close-right").unwrap();
+        cx.simulate_click(close_right.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(
+                shell.panes[0]
+                    .read(cx)
+                    .items
+                    .iter()
+                    .map(|item| item.id)
+                    .collect::<Vec<_>>(),
+                vec![1, 2]
+            );
+        });
+
+        let second = cx.debug_bounds("tab-2").expect("second tab remains");
+        cx.simulate_mouse_down(second.center(), MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        let close_others = cx.debug_bounds("tab-context-close-others").unwrap();
+        cx.simulate_click(close_others.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.panes[0].read(cx).items.len(), 1);
+            assert_eq!(shell.panes[0].read(cx).items[0].id, 2);
+        });
+
+        let remaining = cx.debug_bounds("tab-2").expect("remaining tab");
+        cx.simulate_mouse_down(remaining.center(), MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        let close_all = cx.debug_bounds("tab-context-close-all").unwrap();
+        cx.simulate_click(close_all.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx, |shell, cx| shell.active_item_count(cx)),
+            0
+        );
+    }
+
+    #[gpui::test]
+    fn tab_context_bulk_close_keeps_unsaved_tabs(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items.push(ItemPresentation {
+            id: 2,
+            kind: ItemKind::Query,
+            title: "dirty.sql".into(),
+            dirty: false,
+            source: None,
+            last_result: None,
+        });
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.panes[0].update(cx, |pane, _| pane.items[1].dirty = true);
+            shell.close_pane_items(0, &[1, 2], window, cx);
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.panes[0].read(cx).items.len(), 1);
+            assert_eq!(shell.panes[0].read(cx).items[0].id, 2);
+            assert!(shell.panes[0].read(cx).items[0].dirty);
+        });
+        assert!(workspace.read_with(&cx, |shell, _| shell
+            .toasts
+            .iter()
+            .any(|toast| toast.message.contains("unsaved changes"))));
     }
 
     #[gpui::test]
