@@ -22734,6 +22734,14 @@ impl WorkspaceShell {
             cx.stop_propagation();
             return;
         }
+        if self.modal == Some(Modal::WorkspaceReconcile)
+            && key == "escape"
+            && !event.keystroke.modifiers.modified()
+        {
+            self.dismiss_modal(&DismissModal, window, cx);
+            cx.stop_propagation();
+            return;
+        }
         let repository_modal = matches!(
             self.modal,
             Some(Modal::RepositoryBranches | Modal::RepositoryHistory)
@@ -29755,15 +29763,15 @@ impl WorkspaceShell {
                         "{}: {:?}, {:?}",
                         entry.path.0, entry.state, entry.stage
                     ))
-                    .mx_2()
                     .h(cx.theme().metrics.row_height)
-                    .px_2()
+                    .px_3()
                     .group(row_group.clone())
                     .flex()
                     .items_center()
                     .gap_2()
                     .border_b_1()
                     .border_color(colors.subtle_border)
+                    .when(staged, |row| row.bg(colors.staged_muted))
                     .when(selected, |row| row.bg(colors.active_surface))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -30386,17 +30394,10 @@ impl WorkspaceShell {
                         self.workspace_files.reconcile_summary();
                     let repository_detail = self.repository.status().map(|status| {
                         let branch = status.branch.as_deref().unwrap_or("Detached HEAD");
-                        let remote = status.upstream.as_ref().map_or_else(String::new, |upstream| {
-                            format!(" · ↑{} ↓{}", upstream.ahead, upstream.behind)
-                        });
-                        let run = self
-                            .automation_last_success_for_commit
-                            .as_ref()
-                            .map(|run| format!(" · run {} ✓", run.id.0))
-                            .unwrap_or_default();
+                        let changes = status.entries.len();
                         format!(
-                            "{branch}{remote} · {} change(s){run}",
-                            status.entries.len()
+                            "Git — {branch}   {changes} {}",
+                            if changes == 1 { "change" } else { "changes" }
                         )
                     });
                     let commit_message = self.repository_commit_input.read(cx).text().to_owned();
@@ -30829,14 +30830,50 @@ impl WorkspaceShell {
                             .track_scroll(&self.repository_scroll_handle),
                         )
                         .when(self.repository.status().is_some(), |panel| {
+                            let staged_count = self
+                                .repository
+                                .status()
+                                .into_iter()
+                                .flat_map(|status| &status.entries)
+                                .filter(|entry| {
+                                    matches!(
+                                        entry.stage,
+                                        sift_protocol::VcsStageState::Staged
+                                            | sift_protocol::VcsStageState::PartiallyStaged
+                                    )
+                                })
+                                .count();
                             panel.child(
                                 div()
-                                    .border_t_1()
-                                    .border_color(colors.border)
+                                    .debug_selector(|| "repository-commit-composer".into())
+                                    .m_2()
                                     .p_2()
+                                    .rounded(cx.theme().metrics.radius_large)
+                                    .border_1()
+                                    .border_color(colors.strong_border)
+                                    .bg(colors.elevated_surface)
                                     .flex()
                                     .flex_col()
-                                    .gap_1()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(SectionLabel::new("COMMIT"))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(if staged_count > 0 {
+                                                        colors.staged
+                                                    } else {
+                                                        colors.muted_text
+                                                    })
+                                                    .child(format!(
+                                                        "{staged_count} staged"
+                                                    )),
+                                            ),
+                                    )
                                     .child(
                                         div()
                                             .flex()
@@ -30846,6 +30883,10 @@ impl WorkspaceShell {
                                                 div()
                                                     .min_w_0()
                                                     .flex_1()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(colors.subtle_border)
+                                                    .bg(colors.surface)
                                                     .child(self.repository_commit_input.clone()),
                                             )
                                             .child(
@@ -32210,6 +32251,7 @@ impl WorkspaceShell {
             let transfer_recipes = matches!(modal, Modal::TransferRecipes);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
             let repository_conflict = matches!(modal, Modal::RepositoryConflict);
+            let workspace_reconcile = matches!(modal, Modal::WorkspaceReconcile);
             let change_ledger = matches!(modal, Modal::ChangeLedger);
             let repository_hosting = matches!(modal, Modal::RepositoryHosting);
             let card_width = if data_results {
@@ -32226,7 +32268,7 @@ impl WorkspaceShell {
                 || repository_hosting
             {
                 720.0
-            } else if catalog_diagram {
+            } else if catalog_diagram || workspace_reconcile {
                 1040.0
             } else if data_search || csv_import || transfer_recipes || repository_conflict {
                 900.0
@@ -37760,8 +37802,9 @@ impl WorkspaceShell {
                     });
                     div()
                         .debug_selector(|| "workspace-reconcile".into())
-                        .w(px(860.))
-                        .max_h(px(680.))
+                        .w_full()
+                        .h(gpui::relative(0.78))
+                        .max_h(px(760.))
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -38596,6 +38639,7 @@ impl WorkspaceShell {
                     | Modal::CatalogMigration
                     | Modal::CatalogSnapshots
                     | Modal::CsvImport
+                    | Modal::WorkspaceReconcile
             );
             div()
                 .id("modal-layer")
@@ -47250,6 +47294,36 @@ mod tests {
         });
         cx.simulate_keystrokes("escape");
         workspace.read_with(&cx, |shell, _| assert!(shell.modal.is_none()));
+    }
+
+    #[gpui::test]
+    fn workspace_reconcile_is_roomy_and_dismisses_with_escape_or_scrim(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.modal = Some(Modal::WorkspaceReconcile);
+            shell.focus_handle.focus(window, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let card = cx.debug_bounds("modal-card").unwrap();
+        assert!(card.size.width >= px(900.));
+        cx.simulate_keystrokes("escape");
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal.is_none()));
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.modal = Some(Modal::WorkspaceReconcile);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_mouse_down(
+            point(px(10.), px(50.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal.is_none()));
     }
 
     #[gpui::test]

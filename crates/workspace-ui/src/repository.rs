@@ -857,7 +857,10 @@ impl RepositoryProjection {
     }
 
     pub(crate) fn loading(&self) -> bool {
-        self.mutation_in_flight()
+        self.shared_operation.is_some()
+            || self.activity.is_some_and(|activity| {
+                activity.operation != RepositoryOperation::Refresh || !self.loaded()
+            })
     }
 
     fn mutation_in_flight(&self) -> bool {
@@ -873,7 +876,9 @@ impl RepositoryProjection {
     }
 
     pub(crate) fn operation(&self) -> Option<RepositoryOperation> {
-        self.activity.map(|activity| activity.operation)
+        self.activity
+            .map(|activity| activity.operation)
+            .filter(|operation| *operation != RepositoryOperation::Refresh || !self.loaded())
     }
 
     pub(crate) fn is_path_pending(&self, path: &WorkspacePath) -> bool {
@@ -1203,6 +1208,18 @@ mod tests {
         assert!(projection.take_queued_refresh());
         assert!(!projection.take_queued_refresh());
         assert!(projection.begin_refresh().is_some());
+    }
+
+    #[test]
+    fn passive_refresh_keeps_the_loaded_panel_visually_stable() {
+        let mut projection = RepositoryProjection::new(Some(12));
+        let (_, initial_request) = projection.begin_refresh().unwrap();
+        assert!(projection.apply_status_result(12, initial_request, Ok(None)));
+
+        let _ = projection.begin_refresh().unwrap();
+
+        assert!(!projection.loading());
+        assert_eq!(projection.operation(), None);
     }
 
     #[test]
