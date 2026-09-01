@@ -702,7 +702,9 @@ async fn shallow_tree(
         conn.query(
             "SELECT n.nspname AS schema_name,
                     c.relname AS object_name,
-                    c.relkind AS relkind
+                    c.relkind AS relkind,
+                    GREATEST(c.reltuples, 0)::bigint AS estimated_rows,
+                    obj_description(c.oid, 'pg_class') AS comment
              FROM pg_class c
              JOIN pg_namespace n ON n.oid = c.relnamespace
              WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -719,7 +721,9 @@ async fn shallow_tree(
         conn.query(
             "SELECT n.nspname AS schema_name,
                     c.relname AS object_name,
-                    c.relkind AS relkind
+                    c.relkind AS relkind,
+                    GREATEST(c.reltuples, 0)::bigint AS estimated_rows,
+                    obj_description(c.oid, 'pg_class') AS comment
              FROM pg_class c
              JOIN pg_namespace n ON n.oid = c.relnamespace
              WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
@@ -837,10 +841,15 @@ async fn shallow_tree(
                 continue;
             }
         }
-        by_schema
-            .entry(schema_name)
-            .or_default()
-            .push(ObjectInfo::new(object_name, kind));
+        let mut info = ObjectInfo::new(object_name, kind);
+        if matches!(
+            kind,
+            ObjectKind::Table | ObjectKind::ForeignTable | ObjectKind::PartitionedTable
+        ) {
+            info.estimated_rows = u64::try_from(row.get::<_, i64>(3)).ok();
+        }
+        info.comment = row.get(4);
+        by_schema.entry(schema_name).or_default().push(info);
     }
     for row in proc_rows {
         let schema_name: String = row.get(0);
@@ -918,6 +927,9 @@ async fn deep_tree(
     let object_info = ObjectInfo {
         name: object_name.clone(),
         kind,
+        estimated_rows: None,
+        modified_at: None,
+        comment: None,
         routine_args: object.routine_args.clone(),
         columns,
         indexes,

@@ -239,6 +239,18 @@ pub struct SchemaTree {
 pub struct ObjectInfo {
     pub name: String,
     pub kind: ObjectKind,
+    /// Provider-reported estimate for table-like objects. This is deliberately
+    /// not presented as an exact count because engines often expose catalog
+    /// statistics rather than running an expensive COUNT query.
+    #[serde(default)]
+    pub estimated_rows: Option<u64>,
+    /// Provider-native last modification timestamp, normalized as an ISO-like
+    /// display string when the engine exposes one.
+    #[serde(default)]
+    pub modified_at: Option<String>,
+    /// Database object comment or description.
+    #[serde(default)]
+    pub comment: Option<String>,
     /// Input argument type names for routines. Empty means a nullary routine;
     /// `None` means not a routine or not known.
     #[serde(default)]
@@ -262,6 +274,9 @@ impl ObjectInfo {
         Self {
             name: name.into(),
             kind,
+            estimated_rows: None,
+            modified_at: None,
+            comment: None,
             routine_args: None,
             columns: Vec::new(),
             indexes: Vec::new(),
@@ -279,4 +294,34 @@ pub struct ObjectDdl {
     /// Complete CREATE statement (for tables, includes any owned
     /// indexes and triggers as separate statements separated by `;\n`).
     pub ddl: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn object_catalog_metadata_is_optional_and_round_trips() {
+        let legacy = br#"{
+            "name":"jobs",
+            "kind":"table",
+            "columns":[],
+            "indexes":[],
+            "constraints":[],
+            "triggers":[]
+        }"#;
+        let decoded: ObjectInfo = serde_json::from_slice(legacy).unwrap();
+        assert_eq!(decoded.estimated_rows, None);
+        assert_eq!(decoded.modified_at, None);
+        assert_eq!(decoded.comment, None);
+
+        let mut object = ObjectInfo::new("jobs", ObjectKind::Table);
+        object.estimated_rows = Some(42);
+        object.modified_at = Some("2026-09-01T12:00:00".into());
+        object.comment = Some("Queued work".into());
+        let encoded = serde_json::to_vec(&object).unwrap();
+        let round_trip: ObjectInfo = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(round_trip.estimated_rows, Some(42));
+        assert_eq!(round_trip.comment.as_deref(), Some("Queued work"));
+    }
 }

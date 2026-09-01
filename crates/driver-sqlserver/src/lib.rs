@@ -647,14 +647,33 @@ async fn mssql_schema(
             let rows = conn
                 .query(
                     r#"
-SELECT s.name AS schema_name, o.name AS object_name, o.type AS object_type
+SELECT s.name AS schema_name,
+       o.name AS object_name,
+       o.type AS object_type,
+       CONVERT(varchar(33), o.modify_date, 126) AS modified_at,
+       CAST(CASE WHEN o.type = 'U' THEN (
+           SELECT SUM(p.rows)
+           FROM sys.partitions p
+           WHERE p.object_id = o.object_id AND p.index_id IN (0, 1)
+       ) END AS bigint) AS estimated_rows,
+       CAST(ep.value AS nvarchar(4000)) AS comment
 FROM sys.objects o
 JOIN sys.schemas s ON s.schema_id = o.schema_id
+LEFT JOIN sys.extended_properties ep
+  ON ep.class = 1
+ AND ep.major_id = o.object_id
+ AND ep.minor_id = 0
+ AND ep.name = 'MS_Description'
 WHERE o.type IN ('U','V','P','IF','FN','TF','SN','SO')
 UNION ALL
-SELECT s.name, t.name, 'UT'
+SELECT s.name, t.name, 'UT', NULL, NULL, CAST(ep.value AS nvarchar(4000))
 FROM sys.types t
 JOIN sys.schemas s ON s.schema_id = t.schema_id
+LEFT JOIN sys.extended_properties ep
+  ON ep.class = 6
+ AND ep.major_id = t.user_type_id
+ AND ep.minor_id = 0
+ AND ep.name = 'MS_Description'
 WHERE t.is_user_defined = 1 AND t.is_table_type = 0
 ORDER BY schema_name, object_name
 "#,
@@ -689,10 +708,20 @@ ORDER BY schema_name, object_name
                 if !schema_filter_matches(scope.filter.as_ref(), &schema, &name, kind) {
                     continue;
                 }
-                by_schema
-                    .entry(schema)
-                    .or_default()
-                    .push(ObjectInfo::new(name, kind));
+                let mut info = ObjectInfo::new(name, kind);
+                info.modified_at = row
+                    .try_get::<&str, _>(3)
+                    .map_err(ms_err)?
+                    .map(str::to_owned);
+                info.estimated_rows = row
+                    .try_get::<i64, _>(4)
+                    .map_err(ms_err)?
+                    .and_then(|rows| u64::try_from(rows).ok());
+                info.comment = row
+                    .try_get::<&str, _>(5)
+                    .map_err(ms_err)?
+                    .map(str::to_owned);
+                by_schema.entry(schema).or_default().push(info);
             }
             snapshot.trees.push(sift_protocol::CatalogTree {
                 name: "default".to_string(),

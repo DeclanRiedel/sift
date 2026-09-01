@@ -5104,6 +5104,9 @@ async fn ddl_generation_table_composes_from_deep_schema() {
             objects: vec![ObjectInfo {
                 name: "users".into(),
                 kind: ObjectKind::Table,
+                estimated_rows: None,
+                modified_at: None,
+                comment: None,
                 routine_args: None,
                 columns: vec![
                     ColumnMetadata {

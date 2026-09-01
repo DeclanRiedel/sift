@@ -5600,6 +5600,9 @@ fn comparison_table_from_graph(
         object: sift_protocol::ObjectInfo {
             name: node.name.clone(),
             kind,
+            estimated_rows: None,
+            modified_at: None,
+            comment: None,
             routine_args: None,
             columns,
             indexes,

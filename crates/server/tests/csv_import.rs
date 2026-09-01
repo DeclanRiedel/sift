@@ -36,6 +36,9 @@ fn state() -> AppState {
                     objects: vec![ObjectInfo {
                         name: "people".into(),
                         kind: ObjectKind::Table,
+                        estimated_rows: None,
+                        modified_at: None,
+                        comment: None,
                         routine_args: None,
                         columns: vec![
                             ColumnMetadata::new("id", TypeRef::Primitive(PrimitiveType::Text)),

@@ -1221,6 +1221,60 @@ fn schema_object_kind_icon(kind: sift_protocol::ObjectKind) -> IconName {
     }
 }
 
+fn is_table_like_object(kind: sift_protocol::ObjectKind) -> bool {
+    matches!(
+        kind,
+        sift_protocol::ObjectKind::Table
+            | sift_protocol::ObjectKind::ForeignTable
+            | sift_protocol::ObjectKind::PartitionedTable
+    )
+}
+
+fn build_object_browser_rows(
+    snapshot: &sift_protocol::SchemaSnapshot,
+    connection: &ConnectionNavEntry,
+    instance_id: &str,
+) -> Vec<ObjectBrowserRow> {
+    let mut rows = snapshot
+        .trees
+        .iter()
+        .flat_map(|catalog| {
+            catalog.schemas.iter().flat_map(move |schema| {
+                schema.objects.iter().map(move |object| ObjectBrowserRow {
+                    source: DatabaseObjectSource {
+                        instance_id: instance_id.to_owned(),
+                        tenant_id: connection.tenant_id,
+                        profile_id: connection.id,
+                        profile_name: connection.name.clone(),
+                        provider_id: connection.provider_id.clone(),
+                        catalog: Some(catalog.name.clone()),
+                        schema: schema.name.clone(),
+                        object: object.name.clone(),
+                        object_kind: object.kind,
+                        last_refreshed_at_ms: None,
+                    },
+                    estimated_rows: object.estimated_rows,
+                    modified_at: object.modified_at.clone(),
+                    comment: object.comment.clone(),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        (
+            &left.source.catalog,
+            &left.source.schema,
+            &left.source.object,
+        )
+            .cmp(&(
+                &right.source.catalog,
+                &right.source.schema,
+                &right.source.object,
+            ))
+    });
+    rows
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DockResizeDrag {
     dock: DockId,
@@ -1288,6 +1342,23 @@ struct TabTransfer {
     database_ddl_text: Option<String>,
     database_json_text: Option<String>,
     database_json_baseline: Option<String>,
+    object_browser: Option<ObjectBrowserState>,
+}
+
+#[derive(Debug, Clone)]
+struct ObjectBrowserRow {
+    source: DatabaseObjectSource,
+    estimated_rows: Option<u64>,
+    modified_at: Option<String>,
+    comment: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ObjectBrowserState {
+    profile_id: i64,
+    context: DatabaseObjectSource,
+    rows: Vec<ObjectBrowserRow>,
+    selected: usize,
 }
 
 struct RunVariableEditor {
@@ -1495,6 +1566,7 @@ pub enum Modal {
     CreateVaultItem,
     VaultItemDetails,
     ObjectPeek,
+    ConfirmDeleteDatabaseObject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1936,6 +2008,24 @@ pub enum PaneEvent {
     OpenDatabaseDdlRequested {
         item_id: u64,
     },
+    ObjectBrowserOpenRequested {
+        source: DatabaseObjectSource,
+    },
+    ObjectBrowserNewTableRequested {
+        source: DatabaseObjectSource,
+    },
+    ObjectBrowserDesignRequested {
+        source: DatabaseObjectSource,
+    },
+    ObjectBrowserDeleteRequested {
+        source: DatabaseObjectSource,
+    },
+    ObjectBrowserImportRequested {
+        source: DatabaseObjectSource,
+    },
+    ObjectBrowserExportRequested {
+        source: DatabaseObjectSource,
+    },
     RevealDatabaseObjectRequested {
         source: DatabaseObjectSource,
         level: DatabaseBreadcrumbLevel,
@@ -2244,6 +2334,7 @@ struct CsvPreviewColumn {
 #[derive(Debug, Clone)]
 struct CsvImportPreviewState {
     table: String,
+    create_table: bool,
     data: Vec<u8>,
     columns: Vec<CsvPreviewColumn>,
     rows: Vec<Vec<String>>,
@@ -3688,6 +3779,7 @@ pub struct Pane {
     database_ddl_texts: HashMap<u64, String>,
     database_json_texts: HashMap<u64, String>,
     database_json_baselines: HashMap<u64, String>,
+    object_browsers: HashMap<u64, ObjectBrowserState>,
     /// Transient wrapper sizes while dragging. Keeping these on the pane avoids
     /// invalidating and repainting the result grid for every pointer event.
     live_result_extents: HashMap<u64, f32>,
@@ -3838,6 +3930,7 @@ impl Pane {
             database_ddl_texts: HashMap::new(),
             database_json_texts: HashMap::new(),
             database_json_baselines: HashMap::new(),
+            object_browsers: HashMap::new(),
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
             tab_drop_target: None,
@@ -4101,6 +4194,7 @@ impl Pane {
                         | ItemKind::Problems
                         | ItemKind::Notifications
                         | ItemKind::GitDiff
+                        | ItemKind::Schema
                 )
             })
             .cloned()
@@ -4393,6 +4487,7 @@ impl Pane {
         self.database_ddl_texts.remove(&item_id);
         self.database_json_texts.remove(&item_id);
         self.database_json_baselines.remove(&item_id);
+        self.object_browsers.remove(&item_id);
         if self.pending_close_item == Some(item_id) {
             self.pending_close_item = None;
         }
@@ -4929,6 +5024,314 @@ impl Pane {
         cx.notify();
     }
 
+    fn open_object_browser(
+        &mut self,
+        item: ItemPresentation,
+        state: ObjectBrowserState,
+        cx: &mut Context<Self>,
+    ) {
+        let item_id = item.id;
+        if let Some(index) = self.object_browsers.iter().find_map(|(id, browser)| {
+            (browser.profile_id == state.profile_id)
+                .then(|| self.items.iter().position(|item| item.id == *id))
+                .flatten()
+        }) {
+            self.object_browsers.insert(self.items[index].id, state);
+            self.activate_item(index, true);
+        } else {
+            if !self.replace_new_pane_placeholder() {
+                if let Some(current) = self.active_item().map(|item| item.id) {
+                    self.backward_items.push(current);
+                    self.forward_items.clear();
+                }
+            }
+            self.items.push(item);
+            self.active_item = self.items.len() - 1;
+            self.object_browsers.insert(item_id, state);
+        }
+        self.pending_close_item = None;
+        cx.notify();
+    }
+
+    fn object_browser_action(&mut self, action: char, cx: &mut Context<Self>) {
+        let Some(item_id) = self.active_item().map(|item| item.id) else {
+            return;
+        };
+        let Some(source) = self.object_browsers.get(&item_id).and_then(|browser| {
+            browser
+                .rows
+                .get(browser.selected)
+                .map(|row| row.source.clone())
+                .or_else(|| (action == 'n').then(|| browser.context.clone()))
+        }) else {
+            return;
+        };
+        match action {
+            'o' => cx.emit(PaneEvent::ObjectBrowserOpenRequested { source }),
+            'n' => cx.emit(PaneEvent::ObjectBrowserNewTableRequested { source }),
+            'd' => cx.emit(PaneEvent::ObjectBrowserDesignRequested { source }),
+            'x' => cx.emit(PaneEvent::ObjectBrowserDeleteRequested { source }),
+            'i' => cx.emit(PaneEvent::ObjectBrowserImportRequested { source }),
+            'e' => cx.emit(PaneEvent::ObjectBrowserExportRequested { source }),
+            _ => {}
+        }
+    }
+
+    fn handle_object_browser_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        let Some(item_id) = self.active_item().map(|item| item.id) else {
+            return;
+        };
+        let Some(browser) = self.object_browsers.get_mut(&item_id) else {
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "j" | "down" => {
+                browser.selected = (browser.selected + 1).min(browser.rows.len().saturating_sub(1));
+            }
+            "k" | "up" => browser.selected = browser.selected.saturating_sub(1),
+            "enter" => self.object_browser_action('o', cx),
+            "n" => self.object_browser_action('n', cx),
+            "d" => self.object_browser_action('d', cx),
+            "x" => self.object_browser_action('x', cx),
+            "i" => self.object_browser_action('i', cx),
+            "e" => self.object_browser_action('e', cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn render_object_browser(&self, item_id: u64, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let Some(browser) = self.object_browsers.get(&item_id) else {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(colors.muted_text)
+                .child("Reconnect and reopen Objects to refresh this view")
+                .into_any_element();
+        };
+        let selected_source = browser
+            .rows
+            .get(browser.selected)
+            .map(|row| row.source.clone());
+        let new_table_source = selected_source
+            .clone()
+            .unwrap_or_else(|| browser.context.clone());
+        let table_selected = selected_source
+            .as_ref()
+            .is_some_and(|source| is_table_like_object(source.object_kind));
+        let row_count = browser.rows.len();
+        let toolbar_action = |id: &'static str,
+                              label: &'static str,
+                              action: char,
+                              disabled: bool,
+                              source: Option<DatabaseObjectSource>| {
+            Button::new((id, item_id as usize), label)
+                .debug_selector(id)
+                .tone(ButtonTone::Ghost)
+                .disabled(disabled)
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    if let Some(source) = source.clone() {
+                        let event = match action {
+                            'o' => PaneEvent::ObjectBrowserOpenRequested { source },
+                            'n' => PaneEvent::ObjectBrowserNewTableRequested { source },
+                            'd' => PaneEvent::ObjectBrowserDesignRequested { source },
+                            'x' => PaneEvent::ObjectBrowserDeleteRequested { source },
+                            'i' => PaneEvent::ObjectBrowserImportRequested { source },
+                            'e' => PaneEvent::ObjectBrowserExportRequested { source },
+                            _ => return,
+                        };
+                        cx.emit(event);
+                    }
+                }))
+        };
+        div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(34.))
+                    .flex_none()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(colors.toolbar)
+                    .child(toolbar_action(
+                        "object-browser-open",
+                        "Open",
+                        'o',
+                        selected_source.is_none(),
+                        selected_source.clone(),
+                    ))
+                    .child(toolbar_action(
+                        "object-browser-new-table",
+                        "New table",
+                        'n',
+                        false,
+                        Some(new_table_source),
+                    ))
+                    .child(toolbar_action(
+                        "object-browser-design",
+                        "Design",
+                        'd',
+                        !table_selected,
+                        selected_source.clone(),
+                    ))
+                    .child(toolbar_action(
+                        "object-browser-delete",
+                        "Delete",
+                        'x',
+                        !table_selected,
+                        selected_source.clone(),
+                    ))
+                    .child(div().flex_1())
+                    .child(toolbar_action(
+                        "object-browser-import",
+                        "Import…",
+                        'i',
+                        !table_selected,
+                        selected_source.clone(),
+                    ))
+                    .child(toolbar_action(
+                        "object-browser-export",
+                        "Export…",
+                        'e',
+                        !table_selected,
+                        selected_source,
+                    )),
+            )
+            .child(
+                div()
+                    .h(px(28.))
+                    .flex_none()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(colors.panel)
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(colors.muted_text)
+                    .child(div().min_w_0().flex_1().child("NAME"))
+                    .child(div().w(px(110.)).child("TYPE"))
+                    .child(div().w(px(80.)).text_right().child("ROWS"))
+                    .child(div().w(px(155.)).child("MODIFIED"))
+                    .child(div().w(px(220.)).child("COMMENT")),
+            )
+            .when(row_count == 0, |view| {
+                view.child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(colors.muted_text)
+                        .child("No objects in the active connection"),
+                )
+            })
+            .when(row_count > 0, |view| {
+                view.child(uniform_list(
+                    ("object-browser-rows", item_id as usize),
+                    row_count,
+                    cx.processor(move |pane, range: Range<usize>, _, cx| {
+                        let colors = cx.theme().colors;
+                        let Some(browser) = pane.object_browsers.get(&item_id) else {
+                            return Vec::new();
+                        };
+                        range
+                            .filter_map(|index| {
+                                let row = browser.rows.get(index)?.clone();
+                                let selected = browser.selected == index;
+                                let name = format!("{}.{}", row.source.schema, row.source.object);
+                                Some(
+                                    div()
+                                        .id(("object-browser-row", index))
+                                        .h(px(30.))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .gap_3()
+                                        .border_b_1()
+                                        .border_color(colors.subtle_border)
+                                        .when(selected, |row| row.bg(colors.active_surface))
+                                        .when(!selected, |row| {
+                                            row.hover(|row| row.bg(colors.hovered_surface))
+                                        })
+                                        .on_click(cx.listener(move |pane, _, _, cx| {
+                                            if let Some(browser) =
+                                                pane.object_browsers.get_mut(&item_id)
+                                            {
+                                                browser.selected = index;
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .truncate()
+                                                .child(icon(
+                                                    schema_object_kind_icon(row.source.object_kind),
+                                                    colors.muted_text,
+                                                    12.,
+                                                ))
+                                                .child(name),
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(110.))
+                                                .truncate()
+                                                .child(format!("{:?}", row.source.object_kind)),
+                                        )
+                                        .child(div().w(px(80.)).text_right().child(
+                                            row.estimated_rows.map_or_else(
+                                                || "—".into(),
+                                                |rows| rows.to_string(),
+                                            ),
+                                        ))
+                                        .child(
+                                            div().w(px(155.)).truncate().child(
+                                                row.modified_at.unwrap_or_else(|| "—".into()),
+                                            ),
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(220.))
+                                                .truncate()
+                                                .text_color(colors.muted_text)
+                                                .child(row.comment.unwrap_or_else(|| "—".into())),
+                                        )
+                                        .into_any_element(),
+                                )
+                            })
+                            .collect()
+                    }),
+                ))
+            })
+            .into_any_element()
+    }
+
     fn resize_results(
         &mut self,
         event: &gpui::DragMoveEvent<ResultResizeDrag>,
@@ -5148,7 +5551,8 @@ impl Pane {
         let item = self.items.remove(index);
         let editor = self.editors.remove(&item_id);
         let run_configuration = self.run_configuration_editors.remove(&item_id);
-        if editor.is_none() && run_configuration.is_none() {
+        let object_browser = self.object_browsers.remove(&item_id);
+        if editor.is_none() && run_configuration.is_none() && object_browser.is_none() {
             self.items.insert(index, item);
             return None;
         }
@@ -5173,6 +5577,7 @@ impl Pane {
             database_ddl_text,
             database_json_text,
             database_json_baseline,
+            object_browser,
         })
     }
 
@@ -5216,6 +5621,9 @@ impl Pane {
         }
         if let Some(text) = transfer.database_json_baseline {
             self.database_json_baselines.insert(item_id, text);
+        }
+        if let Some(browser) = transfer.object_browser {
+            self.object_browsers.insert(item_id, browser);
         }
         if let Some(results) = transfer.results {
             self.attach_results(item_id, results, cx);
@@ -5969,6 +6377,7 @@ impl gpui::Render for Pane {
             .key_context("SiftPane")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::handle_pending_close_key))
+            .on_key_down(cx.listener(Self::handle_object_browser_key))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
             // Clicking anywhere in the pane makes it the active pane. The
@@ -6892,6 +7301,9 @@ impl gpui::Render for Pane {
                             ),
                         }
                     }
+                    Some(item) if item.kind == ItemKind::Schema => {
+                        body.child(self.render_object_browser(item.id, cx))
+                    }
                     Some(item) => {
                         let definition = ItemRegistry::definition(&item.kind);
                         let message = definition.placeholder_prefix.map_or_else(
@@ -7334,6 +7746,7 @@ fn preview_csv(table: String, data: Vec<u8>) -> Result<CsvImportPreviewState, St
         .collect();
     Ok(CsvImportPreviewState {
         table,
+        create_table: true,
         data,
         columns,
         rows,
@@ -7921,6 +8334,7 @@ pub struct WorkspaceShell {
     catalog_snapshots_loading: bool,
     catalog_snapshots_error: Option<String>,
     csv_import_preview: Option<CsvImportPreviewState>,
+    csv_import_target: Option<String>,
     instance_sender: Option<tokio::sync::mpsc::UnboundedSender<InstanceCommand>>,
     saved_servers: Vec<SavedServerProfile>,
     instance_roots: Vec<SavedInstanceRoot>,
@@ -7959,6 +8373,8 @@ pub struct WorkspaceShell {
     table_definition_sections: HashMap<u64, TableDefinitionSection>,
     pending_object_ddl: HashSet<u64>,
     object_peek: Option<ObjectPeekState>,
+    pending_table_designer_item: Option<u64>,
+    pending_delete_database_object: Option<DatabaseObjectTarget>,
     table_designer: Option<TableDesignerState>,
     expanded_tenants: HashSet<i64>,
     expanded_connections: HashSet<i64>,
@@ -8947,6 +9363,7 @@ impl WorkspaceShell {
             catalog_snapshots_loading: false,
             catalog_snapshots_error: None,
             csv_import_preview: None,
+            csv_import_target: None,
             instance_sender: None,
             saved_servers: Vec::new(),
             instance_roots: Vec::new(),
@@ -8992,6 +9409,8 @@ impl WorkspaceShell {
             table_definition_sections: HashMap::new(),
             pending_object_ddl: HashSet::new(),
             object_peek: None,
+            pending_table_designer_item: None,
+            pending_delete_database_object: None,
             table_designer: None,
             expanded_tenants: HashSet::new(),
             expanded_connections: HashSet::new(),
@@ -10448,6 +10867,7 @@ impl WorkspaceShell {
                         }
                     }
                 }
+                self.sync_object_browser_rows(profile_id, &snapshot, cx);
                 self.connection_schema = ConnectionSchemaState::Ready {
                     profile_id,
                     snapshot,
@@ -10677,9 +11097,19 @@ impl WorkspaceShell {
                         );
                     }
                 }
+                if self.pending_table_designer_item == Some(item_id) {
+                    self.pending_table_designer_item = None;
+                    if self.prepare_table_designer(item_id, false, cx) {
+                        self.right_dock.presentation.open = true;
+                        self.focused_surface = WorkspaceSurface::Inspector;
+                    }
+                }
                 cx.notify();
             }
             ExecutorEvent::TableDefinitionFailed { item_id, message } => {
+                if self.pending_table_designer_item == Some(item_id) {
+                    self.pending_table_designer_item = None;
+                }
                 let source = match self.table_definitions.remove(&item_id) {
                     Some(TableDefinitionState::Loading { source })
                     | Some(TableDefinitionState::Failed { source, .. })
@@ -13939,6 +14369,25 @@ impl WorkspaceShell {
                 shell.explorer_view_menu_open = false;
                 cx.notify();
             }))
+            .child(
+                div()
+                    .id("open-objects-view")
+                    .debug_selector(|| "open-objects-view".into())
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .role(Role::MenuItem)
+                    .hover(|row| row.bg(colors.hovered_surface))
+                    .on_click(cx.listener(|shell, _, window, cx| {
+                        shell.explorer_view_menu_open = false;
+                        shell.open_active_connection_objects(window, cx)
+                    }))
+                    .child(icon(IconName::View, colors.muted_text, 11.))
+                    .child("Open Objects tab"),
+            )
             .child(SectionLabel::new("OBJECT TYPES"));
         for group in ObjectGroupKind::CANONICAL {
             let selected = self.schema_search_filters.contains(&group);
@@ -15380,6 +15829,20 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.prepare_table_designer(item_id, adding, cx) {
+            return;
+        }
+        self.table_column_name_input
+            .focus_handle(cx)
+            .focus(window, cx);
+    }
+
+    fn prepare_table_designer(
+        &mut self,
+        item_id: u64,
+        adding: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.table_definition_sections
             .insert(item_id, TableDefinitionSection::Columns);
         let (selected_column, column_order) = match self.table_definitions.get(&item_id) {
@@ -15394,7 +15857,7 @@ impl WorkspaceShell {
                     columns.into_iter().map(|node| node.id.clone()).collect(),
                 )
             }
-            _ => return,
+            _ => return false,
         };
         self.table_designer = Some(TableDesignerState {
             item_id,
@@ -15411,10 +15874,8 @@ impl WorkspaceShell {
         } else {
             self.prepare_new_table_column(cx);
         }
-        self.table_column_name_input
-            .focus_handle(cx)
-            .focus(window, cx);
         cx.notify();
+        true
     }
 
     fn close_table_designer(&mut self, cx: &mut Context<Self>) {
@@ -16113,6 +16574,279 @@ impl WorkspaceShell {
         self.focus_active_pane(window, cx);
         self.persist(cx);
         cx.notify();
+    }
+
+    fn database_target_from_source(
+        &self,
+        source: &DatabaseObjectSource,
+    ) -> Option<DatabaseObjectTarget> {
+        let connection = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| tenant.connections.iter())
+            .find(|connection| connection.id == source.profile_id)?
+            .clone();
+        Some(DatabaseObjectTarget {
+            connection,
+            catalog: source.catalog.clone().unwrap_or_default(),
+            schema: source.schema.clone(),
+            object: source.object.clone(),
+            object_kind: source.object_kind,
+        })
+    }
+
+    fn open_active_connection_objects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ConnectionStatus::Connected { profile_id, name } = &self.connection_status else {
+            self.show_toast("Connect to a database before opening Objects".into(), cx);
+            return;
+        };
+        let profile_id = *profile_id;
+        let profile_name = name.clone();
+        let Some(connection) = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| tenant.connections.iter())
+            .find(|connection| connection.id == profile_id)
+            .cloned()
+        else {
+            return;
+        };
+        let ConnectionSchemaState::Ready {
+            profile_id: ready,
+            snapshot,
+        } = &self.connection_schema
+        else {
+            self.show_toast("Schema metadata is still loading".into(), cx);
+            return;
+        };
+        if *ready != profile_id {
+            return;
+        }
+        let instance_id = self
+            .selected_instance_id
+            .clone()
+            .unwrap_or_else(|| "local".into());
+        let rows = build_object_browser_rows(snapshot, &connection, &instance_id);
+        let context = rows
+            .first()
+            .map(|row| row.source.clone())
+            .unwrap_or_else(|| {
+                let catalog = snapshot.trees.first();
+                DatabaseObjectSource {
+                    instance_id: instance_id.clone(),
+                    tenant_id: connection.tenant_id,
+                    profile_id: connection.id,
+                    profile_name: connection.name.clone(),
+                    provider_id: connection.provider_id.clone(),
+                    catalog: catalog.map(|catalog| catalog.name.clone()),
+                    schema: catalog
+                        .and_then(|catalog| catalog.schemas.first())
+                        .map(|schema| schema.name.clone())
+                        .unwrap_or_else(|| {
+                            if connection.provider_id.as_str() == "sift/sql-server" {
+                                "dbo".into()
+                            } else {
+                                "public".into()
+                            }
+                        }),
+                    object: "new_table".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                    last_refreshed_at_ms: None,
+                }
+            });
+        let item_id = self.next_id;
+        self.next_id += 1;
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_object_browser(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Schema,
+                        title: format!("Objects · {profile_name}"),
+                        dirty: false,
+                        source: None,
+                        last_result: None,
+                    },
+                    ObjectBrowserState {
+                        profile_id,
+                        context,
+                        rows,
+                        selected: 0,
+                    },
+                    cx,
+                )
+            });
+        }
+        self.focus_active_pane(window, cx);
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn sync_object_browser_rows(
+        &mut self,
+        profile_id: i64,
+        snapshot: &sift_protocol::SchemaSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| tenant.connections.iter())
+            .find(|connection| connection.id == profile_id)
+        else {
+            return;
+        };
+        let instance_id = self.selected_instance_id.as_deref().unwrap_or("local");
+        let rows = build_object_browser_rows(snapshot, connection, instance_id);
+        for pane in &self.panes {
+            pane.update(cx, |pane, cx| {
+                for browser in pane
+                    .object_browsers
+                    .values_mut()
+                    .filter(|browser| browser.profile_id == profile_id)
+                {
+                    let selected_source = browser
+                        .rows
+                        .get(browser.selected)
+                        .map(|row| row.source.clone());
+                    browser.rows = rows.clone();
+                    browser.selected = selected_source
+                        .and_then(|selected| {
+                            browser.rows.iter().position(|row| row.source == selected)
+                        })
+                        .unwrap_or(0)
+                        .min(browser.rows.len().saturating_sub(1));
+                }
+                cx.notify();
+            });
+        }
+    }
+
+    fn open_sql_scratch(
+        &mut self,
+        title: String,
+        sql: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let item_id = self.next_id;
+        self.next_id += 1;
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&sql), cx)
+                .with_keymap(EditorKeymap::Vim)
+        });
+        let results = self.new_results_view(cx);
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_query(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Query,
+                        title,
+                        dirty: true,
+                        source: None,
+                        last_result: None,
+                    },
+                    editor,
+                    results,
+                    cx,
+                )
+            });
+        }
+        self.focus_active_pane(window, cx);
+        self.persist(cx);
+        cx.notify();
+        item_id
+    }
+
+    fn create_table_from_object_browser(
+        &mut self,
+        source: &DatabaseObjectSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let schema = ddl_quote_identifier(&source.provider_id, &source.schema);
+        let table = ddl_quote_identifier(&source.provider_id, "new_table");
+        self.open_sql_scratch(
+            "new-table.sql".into(),
+            format!("CREATE TABLE {schema}.{table} (\n    id bigint NOT NULL\n);\n"),
+            window,
+            cx,
+        );
+    }
+
+    fn design_object_browser_table(
+        &mut self,
+        source: &DatabaseObjectSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.database_target_from_source(source) else {
+            return;
+        };
+        self.open_table_preview(target, window, cx);
+        let Some(item_id) = self
+            .panes
+            .get(self.active_pane)
+            .and_then(|pane| pane.read(cx).active_item().map(|item| item.id))
+        else {
+            return;
+        };
+        if matches!(
+            self.table_definitions.get(&item_id),
+            Some(TableDefinitionState::Ready { .. })
+        ) {
+            self.open_table_designer(item_id, false, window, cx);
+        } else {
+            self.pending_table_designer_item = Some(item_id);
+            self.right_dock.presentation.open = true;
+            self.show_toast("Loading table definition for Design…".into(), cx);
+        }
+    }
+
+    fn open_object_browser_export(
+        &mut self,
+        source: &DatabaseObjectSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::ExportQuery,
+            "Export table",
+            cx,
+        ) {
+            return;
+        }
+        let schema = ddl_quote_identifier(&source.provider_id, &source.schema);
+        let object = ddl_quote_identifier(&source.provider_id, &source.object);
+        let sql = format!("SELECT * FROM {schema}.{object}");
+        let item_id = self.open_sql_scratch(
+            format!("export-{}.sql", source.object),
+            sql.clone(),
+            window,
+            cx,
+        );
+        self.prompt_result_export(item_id, sql, sift_protocol::ExportFormat::Csv, cx);
+    }
+
+    fn confirm_delete_database_object(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.pending_delete_database_object.take() else {
+            return;
+        };
+        self.modal = None;
+        let schema = ddl_quote_identifier(&target.connection.provider_id, &target.schema);
+        let object = ddl_quote_identifier(&target.connection.provider_id, &target.object);
+        let sql = format!("DROP TABLE {schema}.{object};");
+        let item_id = self.open_sql_scratch(
+            format!("drop-{}.sql", target.object),
+            sql.clone(),
+            window,
+            cx,
+        );
+        self.execute_database_item(item_id, sql, cx);
     }
 
     fn open_schema_search_target(
@@ -23984,6 +24718,44 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.open_database_item_ddl(*item_id, cx);
             }
+            PaneEvent::ObjectBrowserOpenRequested { source } => {
+                self.active_pane = index;
+                if let Some(target) = self.database_target_from_source(source) {
+                    self.open_schema_search_target(target, window, cx);
+                }
+            }
+            PaneEvent::ObjectBrowserNewTableRequested { source } => {
+                self.active_pane = index;
+                self.create_table_from_object_browser(source, window, cx);
+            }
+            PaneEvent::ObjectBrowserDesignRequested { source } => {
+                self.active_pane = index;
+                self.design_object_browser_table(source, window, cx);
+            }
+            PaneEvent::ObjectBrowserDeleteRequested { source } => {
+                self.active_pane = index;
+                if !self.require_operation(
+                    sift_protocol::OperationKind::ExecuteQuery,
+                    "Delete table",
+                    cx,
+                ) {
+                    return;
+                }
+                self.pending_delete_database_object = self.database_target_from_source(source);
+                if self.pending_delete_database_object.is_some() {
+                    self.modal = Some(Modal::ConfirmDeleteDatabaseObject);
+                    cx.notify();
+                }
+            }
+            PaneEvent::ObjectBrowserImportRequested { source } => {
+                self.active_pane = index;
+                self.csv_import_target = Some(format!("{}.{}", source.schema, source.object));
+                self.prompt_csv_import(cx);
+            }
+            PaneEvent::ObjectBrowserExportRequested { source } => {
+                self.active_pane = index;
+                self.open_object_browser_export(source, window, cx);
+            }
             PaneEvent::RevealDatabaseObjectRequested { source, level } => {
                 self.active_pane = index;
                 self.reveal_database_object(source, *level, window, cx);
@@ -26074,7 +26846,7 @@ impl WorkspaceShell {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Import CSV as a new table".into()),
+            prompt: Some("Choose CSV to import".into()),
         });
         let background = cx.background_executor().clone();
         cx.spawn(async move |shell, cx| {
@@ -26091,7 +26863,11 @@ impl WorkspaceShell {
                 .await;
             let _ = shell.update(cx, |shell, cx| match data {
                 Ok(data) if data.len() <= 64 * 1024 * 1024 => match preview_csv(table, data) {
-                    Ok(preview) => {
+                    Ok(mut preview) => {
+                        if let Some(target) = shell.csv_import_target.take() {
+                            preview.table = target;
+                            preview.create_table = false;
+                        }
                         shell.csv_import_preview = Some(preview);
                         shell.modal = Some(Modal::CsvImport);
                         cx.notify();
@@ -26134,7 +26910,7 @@ impl WorkspaceShell {
             header: true,
             delimiter: ',',
             null_value: Some("NULL".into()),
-            create_table: true,
+            create_table: preview.create_table,
             conflict_policy: preview.conflict_policy,
         };
         if sender.send(ExecutorCommand::ImportCsv { request }).is_ok() {
@@ -28828,6 +29604,9 @@ impl WorkspaceShell {
                 self.pending_object_ddl.remove(&peek.item_id);
             }
         }
+        if self.modal == Some(Modal::ConfirmDeleteDatabaseObject) {
+            self.pending_delete_database_object = None;
+        }
         if self.modal == Some(Modal::CatalogMigration) {
             self.catalog_diff = None;
             self.catalog_migration_plan = None;
@@ -28905,7 +29684,10 @@ impl WorkspaceShell {
             CommandId::RenameSqlSymbol => self.open_semantic_rename(window, cx),
             CommandId::SearchSchema => self.open_schema_search(window, cx),
             CommandId::SearchData => self.open_data_search(window, cx),
-            CommandId::ImportCsv => self.prompt_csv_import(cx),
+            CommandId::ImportCsv => {
+                self.csv_import_target = None;
+                self.prompt_csv_import(cx)
+            }
             CommandId::OpenCatalogDiagram => self.open_catalog_diagram(cx),
             CommandId::CaptureCatalogSnapshot => self.capture_catalog_snapshot(cx),
             CommandId::CompareCatalogSnapshot => self.open_catalog_snapshots(cx),
@@ -41576,13 +42358,21 @@ impl WorkspaceShell {
                                 .child(row.join("  |  "))
                         })
                         .collect::<Vec<_>>();
-                    let (table, row_count, conflict_policy) = preview.map_or_else(
-                        || ("CSV import".to_owned(), 0, sift_protocol::CsvConflictPolicy::Abort),
+                    let (table, row_count, conflict_policy, create_table) = preview.map_or_else(
+                        || {
+                            (
+                                "CSV import".to_owned(),
+                                0,
+                                sift_protocol::CsvConflictPolicy::Abort,
+                                true,
+                            )
+                        },
                         |preview| {
                             (
                                 preview.table.clone(),
                                 preview.row_count,
                                 preview.conflict_policy,
+                                preview.create_table,
                             )
                         },
                     );
@@ -41635,7 +42425,11 @@ impl WorkspaceShell {
                                         .child(
                                             Button::new(
                                                 "confirm-csv-import",
-                                                "Create table and import",
+                                                if create_table {
+                                                    "Create table and import"
+                                                } else {
+                                                    "Import into table"
+                                                },
                                             )
                                             .debug_selector("confirm-csv-import")
                                             .tone(ButtonTone::Accent)
@@ -42023,6 +42817,53 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::ConfirmDeleteDatabaseObject => {
+                    let label = self
+                        .pending_delete_database_object
+                        .as_ref()
+                        .map(|target| {
+                            format!("{}.{}.{}", target.catalog, target.schema, target.object)
+                        })
+                        .unwrap_or_else(|| "selected table".into());
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Delete table?"),
+                        )
+                        .child(
+                            div()
+                                .text_color(colors.muted_text)
+                                .whitespace_normal()
+                                .child(format!(
+                                    "This will execute DROP TABLE for {label}. This cannot be undone."
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-delete-database-object", "Cancel")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("confirm-delete-database-object", "Delete table")
+                                        .tone(ButtonTone::DangerGhost)
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.confirm_delete_database_object(window, cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::ObjectPeek => {
                     let peek = self.object_peek.clone();
                     let title = peek.as_ref().map_or_else(
@@ -42172,6 +43013,7 @@ impl WorkspaceShell {
                     | Modal::CsvImport
                     | Modal::WorkspaceReconcile
                     | Modal::ObjectPeek
+                    | Modal::ConfirmDeleteDatabaseObject
             );
             div()
                 .id("modal-layer")
@@ -50584,6 +51426,78 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("object-peek-definition").is_some());
+    }
+
+    #[gpui::test]
+    fn active_connection_objects_open_in_a_keyboard_navigable_tab(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: vec![ConnectionNavEntry {
+                    id: 2,
+                    tenant_id: 1,
+                    name: "Warehouse".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    tags: Vec::new(),
+                }],
+            }];
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Warehouse".into(),
+            };
+            let mut jobs = sift_protocol::ObjectInfo::new("jobs", sift_protocol::ObjectKind::Table);
+            jobs.estimated_rows = Some(42);
+            jobs.comment = Some("Queued work".into());
+            let mut snapshot =
+                sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
+            snapshot.trees.push(sift_protocol::CatalogTree {
+                name: "warehouse".into(),
+                schemas: vec![sift_protocol::SchemaTree {
+                    name: "public".into(),
+                    objects: vec![
+                        jobs,
+                        sift_protocol::ObjectInfo::new("people", sift_protocol::ObjectKind::View),
+                    ],
+                }],
+            });
+            shell.connection_schema = ConnectionSchemaState::Ready {
+                profile_id: 2,
+                snapshot: Box::new(snapshot),
+            };
+            shell.open_active_connection_objects(window, cx);
+        });
+        cx.run_until_parked();
+        for selector in [
+            "object-browser-open",
+            "object-browser-new-table",
+            "object-browser-design",
+            "object-browser-delete",
+            "object-browser-import",
+            "object-browser-export",
+        ] {
+            assert!(cx.debug_bounds(selector).is_some(), "missing {selector}");
+        }
+        workspace.update(&mut cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.kind, ItemKind::Schema);
+            assert_eq!(item.title, "Objects · Warehouse");
+            let browser = pane.object_browsers.get(&item.id).unwrap();
+            assert_eq!(browser.rows.len(), 2);
+            assert_eq!(browser.rows[0].estimated_rows, Some(42));
+            assert_eq!(browser.rows[0].comment.as_deref(), Some("Queued work"));
+        });
+        cx.simulate_keystrokes("j");
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item_id = pane.active_item().unwrap().id;
+            assert_eq!(pane.object_browsers[&item_id].selected, 1);
+        });
     }
 
     #[gpui::test]

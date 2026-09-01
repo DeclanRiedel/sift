@@ -55,9 +55,19 @@ the single presentation-state writer, avoiding cross-window overwrite races.
 - [x] Dependency and dependent graph
 - [x] Foreign-key navigation
 - [x] Global fuzzy object search UI
-- [ ] Recent and favorite objects
-- [ ] Object filters and saved explorer views
-- [ ] Breadcrumb and peek navigation
+- [x] Recent and favorite objects
+- [x] Object filters and saved explorer views
+- [x] Breadcrumb navigation
+- [x] Peek definition
+- [x] Active-connection Objects table
+
+The Connections explorer persists identifier-only recent/favorite shortcuts
+and named object-type views. Database-backed tabs expose clickable
+connection/catalog/schema/object breadcrumbs. `Shift+P` peeks canonical DDL
+without creating a tab. The active-connection Objects tab provides a compact
+catalog-style overview with provider metadata for estimated rows, modification
+time, and comments when available, plus open, create-table, design, confirmed
+delete, import, and export workflows.
 
 ### SQL editor
 
