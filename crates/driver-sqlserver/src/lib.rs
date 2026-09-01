@@ -2273,7 +2273,26 @@ async fn connect_fresh(spec: &ConnectionSpec) -> Result<MssqlConn, DriverError> 
         .await
         .map_err(io_err)?;
     tcp.set_nodelay(true).map_err(io_err)?;
-    timeout_tds(connect_timeout, Client::connect(config, tcp.compat_write())).await
+    let mut conn =
+        timeout_tds(connect_timeout, Client::connect(config, tcp.compat_write())).await?;
+    if let Some(sift_protocol::EngineConnectionSpec::SqlServer(config)) = &spec.engine_specific {
+        for (name, value) in &config.session_variables {
+            conn.execute(
+                "EXEC sys.sp_set_session_context @key = @P1, @value = @P2",
+                &[name, value],
+            )
+            .await
+            .map_err(ms_err)?;
+        }
+        for sql in config
+            .startup_sql
+            .iter()
+            .filter(|sql| !sql.trim().is_empty())
+        {
+            execute_sql_batch(&mut conn, sql).await?;
+        }
+    }
+    Ok(conn)
 }
 
 /// Canonicalize a ConnectionSpec into a stable pool key and pull out

@@ -2,6 +2,7 @@
 
 use crate::ProviderRef;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// All a driver needs to open a connection. The engine is NOT carried here
 /// — the caller (server registry, MockDriver tests) already knows which
@@ -53,6 +54,13 @@ pub struct PgConnectionSpec {
     /// query does not pay the connect handshake. Best-effort; `open`
     /// still succeeds if pre-warm fails (e.g. temporary DB pressure).
     pub pool_min_size: Option<u32>,
+    /// PostgreSQL settings applied with `set_config` whenever Sift opens
+    /// a logical connection from the pool.
+    #[serde(default)]
+    pub session_variables: BTreeMap<String, String>,
+    /// SQL batches run after session variables are applied.
+    #[serde(default)]
+    pub startup_sql: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -71,6 +79,13 @@ pub struct MssqlConnectionSpec {
     /// refills after each pop. Best-effort — a failing top-up logs
     /// at debug and leaves the pool cold.
     pub pool_min_size: Option<u32>,
+    /// Values applied through `sp_set_session_context` on every fresh TDS
+    /// session, including sessions created by the warm pool.
+    #[serde(default)]
+    pub session_variables: BTreeMap<String, String>,
+    /// SQL batches run after session variables are applied.
+    #[serde(default)]
+    pub startup_sql: Vec<String>,
 }
 
 /// Reported by `Driver::ping` after a successful round-trip.
@@ -97,4 +112,35 @@ pub struct ServerInfo {
 pub enum AccessMode {
     ReadWrite,
     ReadOnly,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialization_options_are_backward_compatible() {
+        let config: EngineConnectionSpec = serde_json::from_value(serde_json::json!({
+            "engine": "postgres",
+            "application_name": "sift"
+        }))
+        .unwrap();
+        let EngineConnectionSpec::Postgres(config) = config else {
+            panic!("expected postgres configuration")
+        };
+        assert!(config.session_variables.is_empty());
+        assert!(config.startup_sql.is_empty());
+    }
+
+    #[test]
+    fn initialization_options_round_trip() {
+        let config = EngineConnectionSpec::SqlServer(MssqlConnectionSpec {
+            session_variables: BTreeMap::from([("tenant".into(), "analytics".into())]),
+            startup_sql: vec!["SET DEADLOCK_PRIORITY LOW".into()],
+            ..Default::default()
+        });
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["session_variables"]["tenant"], "analytics");
+        assert_eq!(value["startup_sql"][0], "SET DEADLOCK_PRIORITY LOW");
+    }
 }

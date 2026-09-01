@@ -1388,6 +1388,20 @@ fn optional_pool_min_field(input: &Entity<TextInput>, cx: &App) -> Result<Option
         .map_err(|_| "Minimum pool size must be a non-negative whole number".into())
 }
 
+fn parse_session_variables(
+    value: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    if value.trim().is_empty() {
+        return Ok(serde_json::Map::new());
+    }
+    let variables = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(value)
+        .map_err(|error| format!("Session variables must be a JSON object: {error}"))?;
+    if variables.values().any(|value| !value.is_string()) {
+        return Err("Session variable values must all be strings".into());
+    }
+    Ok(variables)
+}
+
 actions!(
     sift_shell,
     [
@@ -7552,6 +7566,8 @@ pub struct WorkspaceShell {
     database_timeout_input: Entity<TextInput>,
     database_pool_min_input: Entity<TextInput>,
     database_pool_max_input: Entity<TextInput>,
+    database_session_variables_input: Entity<TextInput>,
+    database_startup_sql_input: Entity<TextInput>,
     database_folder_input: Entity<TextInput>,
     database_tags_input: Entity<TextInput>,
     table_column_name_input: Entity<TextInput>,
@@ -8239,6 +8255,12 @@ impl WorkspaceShell {
             cx.new(|cx| TextInput::new("", "0", cx).aria_label("Minimum pool size"));
         let database_pool_max_input =
             cx.new(|cx| TextInput::new("", "Server default", cx).aria_label("Maximum pool size"));
+        let database_session_variables_input = cx.new(|cx| {
+            TextInput::new("", r#"{"statement_timeout":"30s"}"#, cx)
+                .aria_label("Session variables as JSON")
+        });
+        let database_startup_sql_input =
+            cx.new(|cx| TextInput::new("", "Optional SQL batch", cx).aria_label("Startup SQL"));
         let database_folder_input =
             cx.new(|cx| TextInput::new("", "Optional folder", cx).aria_label("Connection folder"));
         let database_tags_input = cx
@@ -8567,6 +8589,8 @@ impl WorkspaceShell {
             database_timeout_input,
             database_pool_min_input,
             database_pool_max_input,
+            database_session_variables_input,
+            database_startup_sql_input,
             database_folder_input,
             database_tags_input,
             table_column_name_input,
@@ -16101,6 +16125,24 @@ impl WorkspaceShell {
             ] {
                 input.update(cx, |input, cx| input.set_text(&value, cx));
             }
+            self.database_session_variables_input
+                .update(cx, |input, cx| {
+                    let value = engine
+                        .get("session_variables")
+                        .and_then(serde_json::Value::as_object)
+                        .map(|variables| serde_json::Value::Object(variables.clone()).to_string())
+                        .unwrap_or_default();
+                    input.set_text(&value, cx)
+                });
+            self.database_startup_sql_input.update(cx, |input, cx| {
+                let value = engine
+                    .get("startup_sql")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|statements| statements.first())
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                input.set_text(value, cx)
+            });
         }
         self.selected_database_ssl_mode = config
             .and_then(|config| config.get("ssl_mode"))
@@ -16233,6 +16275,8 @@ impl WorkspaceShell {
             &self.database_timeout_input,
             &self.database_pool_min_input,
             &self.database_pool_max_input,
+            &self.database_session_variables_input,
+            &self.database_startup_sql_input,
             &self.database_folder_input,
             &self.database_tags_input,
         ] {
@@ -16300,6 +16344,8 @@ impl WorkspaceShell {
         if self.selected_database_provider.as_deref() == Some("sift/postgres") {
             fields.push(self.database_pool_max_input.clone());
         }
+        fields.push(self.database_session_variables_input.clone());
+        fields.push(self.database_startup_sql_input.clone());
         fields.push(self.database_folder_input.clone());
         fields.push(self.database_tags_input.clone());
 
@@ -16353,6 +16399,11 @@ impl WorkspaceShell {
             .flatten();
         if matches!((pool_min, pool_max), (Some(min), Some(max)) if min > max) {
             return Some("Minimum pool size cannot exceed maximum pool size".into());
+        }
+        if let Err(error) =
+            parse_session_variables(self.database_session_variables_input.read(cx).text())
+        {
+            return Some(error);
         }
         None
     }
@@ -16471,6 +16522,15 @@ impl WorkspaceShell {
             .trim()
             .to_owned();
         let password = self.database_password_input.read(cx).text().to_owned();
+        let session_variables =
+            parse_session_variables(self.database_session_variables_input.read(cx).text())
+                .expect("form validation checked session variables");
+        let startup_sql = self
+            .database_startup_sql_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
         let mut configuration = serde_json::Map::from_iter([
             ("host".into(), serde_json::Value::String(host)),
             ("user".into(), serde_json::Value::String(user)),
@@ -16506,6 +16566,15 @@ impl WorkspaceShell {
                     .expect("form validation checked pool minimum")
                 {
                     engine.insert("pool_min_size".into(), serde_json::json!(pool_min));
+                }
+                if !session_variables.is_empty() {
+                    engine.insert(
+                        "session_variables".into(),
+                        serde_json::Value::Object(session_variables.clone()),
+                    );
+                }
+                if !startup_sql.is_empty() {
+                    engine.insert("startup_sql".into(), serde_json::json!([startup_sql]));
                 }
                 configuration.insert("engine_specific".into(), engine.into());
             } else {
@@ -16557,6 +16626,15 @@ impl WorkspaceShell {
                     .expect("form validation checked pool minimum")
                 {
                     engine.insert("pool_min_size".into(), serde_json::json!(pool_min));
+                }
+                if !session_variables.is_empty() {
+                    engine.insert(
+                        "session_variables".into(),
+                        serde_json::Value::Object(session_variables.clone()),
+                    );
+                }
+                if !startup_sql.is_empty() {
+                    engine.insert("startup_sql".into(), serde_json::json!([startup_sql]));
                 }
                 if !engine.is_empty() {
                     configuration.insert("engine_specific".into(), engine.into());
@@ -37725,6 +37803,14 @@ impl WorkspaceShell {
                                                 .flex()
                                                 .flex_wrap()
                                                 .gap_3()
+                                                .child(div().flex_1().min_w(px(220.)).child(field("SESSION VARIABLES (JSON)", self.database_session_variables_input.clone())))
+                                                .child(div().flex_1().min_w(px(220.)).child(field("STARTUP SQL", self.database_startup_sql_input.clone()))),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_wrap()
+                                                .gap_3()
                                                 .child(div().flex_1().min_w(px(220.)).child(field("FOLDER", self.database_folder_input.clone())))
                                                 .child(div().flex_1().min_w(px(220.)).child(field("TAGS", self.database_tags_input.clone()))),
                                         )
@@ -37778,6 +37864,22 @@ impl WorkspaceShell {
                                         .child(review_row(
                                             "Transport security",
                                             selected_ssl_mode.clone().unwrap_or_else(|| "Provider default".into()).replace('_', " "),
+                                        ))
+                                        .child(review_row(
+                                            "Session variables",
+                                            if self.database_session_variables_input.read(cx).text().trim().is_empty() {
+                                                "None".into()
+                                            } else {
+                                                self.database_session_variables_input.read(cx).text().trim().to_owned()
+                                            },
+                                        ))
+                                        .child(review_row(
+                                            "Startup SQL",
+                                            if self.database_startup_sql_input.read(cx).text().trim().is_empty() {
+                                                "None".into()
+                                            } else {
+                                                "Configured".into()
+                                            },
                                         ))
                                         .child(review_row(
                                             "Folder",
@@ -48282,6 +48384,16 @@ mod tests {
     }
 
     #[test]
+    fn session_variables_require_a_string_map() {
+        assert_eq!(
+            parse_session_variables(r#"{"statement_timeout":"30s"}"#).unwrap()["statement_timeout"],
+            "30s"
+        );
+        assert!(parse_session_variables(r#"{"statement_timeout":30}"#).is_err());
+        assert!(parse_session_variables("not json").is_err());
+    }
+
+    #[test]
     fn connection_url_rejects_unknown_options_instead_of_silently_dropping_them() {
         let error = parse_connection_url(
             "postgresql://sift:secret@localhost/app?target_session_attrs=read-write",
@@ -48335,6 +48447,14 @@ mod tests {
             shell
                 .database_pool_max_input
                 .update(cx, |input, cx| input.set_text("12", cx));
+            shell
+                .database_session_variables_input
+                .update(cx, |input, cx| {
+                    input.set_text(r#"{"statement_timeout":"30s"}"#, cx)
+                });
+            shell
+                .database_startup_sql_input
+                .update(cx, |input, cx| input.set_text("SET ROLE reporting", cx));
             shell.submit_database_connection(cx);
         });
         match receiver.try_recv().unwrap() {
@@ -48366,6 +48486,14 @@ mod tests {
                 assert_eq!(configuration["engine_specific"]["connect_timeout_secs"], 15);
                 assert_eq!(configuration["engine_specific"]["pool_min_size"], 2);
                 assert_eq!(configuration["engine_specific"]["pool_max_size"], 12);
+                assert_eq!(
+                    configuration["engine_specific"]["session_variables"]["statement_timeout"],
+                    "30s"
+                );
+                assert_eq!(
+                    configuration["engine_specific"]["startup_sql"],
+                    serde_json::json!(["SET ROLE reporting"])
+                );
                 assert!(configuration["engine_specific"].get("engine").is_none());
                 assert_eq!(credentials.unwrap()["password"], "top-secret");
                 assert_eq!(credential_mode, sift_api_types::CredentialMode::Shared);

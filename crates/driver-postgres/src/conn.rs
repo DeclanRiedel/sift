@@ -295,10 +295,25 @@ impl PgDriver {
         spec: &ConnectionSpec,
     ) -> Result<PooledConn, DriverError> {
         let (_hash, pool) = self.inner.pool_for(spec).await?;
-        pool.get().await.map_err(|e| match e {
+        let conn = pool.get().await.map_err(|e| match e {
             deadpool_postgres::PoolError::Backend(backend) => crate::pg_err(backend),
             other => DriverError::new(Code::PoolExhausted, other.to_string()),
-        })
+        })?;
+        if let Some(sift_protocol::EngineConnectionSpec::Postgres(config)) = &spec.engine_specific {
+            for (name, value) in &config.session_variables {
+                conn.execute("SELECT set_config($1, $2, false)", &[name, value])
+                    .await
+                    .map_err(crate::pg_err)?;
+            }
+            for sql in config
+                .startup_sql
+                .iter()
+                .filter(|sql| !sql.trim().is_empty())
+            {
+                conn.batch_execute(sql).await.map_err(crate::pg_err)?;
+            }
+        }
+        Ok(conn)
     }
 
     /// Pre-warm `extra` additional connections against the pool for

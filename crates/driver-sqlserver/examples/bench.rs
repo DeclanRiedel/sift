@@ -41,6 +41,7 @@ fn spec() -> ConnectionSpec {
             trust_server_certificate: Some(true),
             connect_timeout_secs: Some(15),
             pool_min_size: None,
+            ..Default::default()
         })),
     }
 }
