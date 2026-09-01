@@ -31476,18 +31476,34 @@ impl WorkspaceShell {
                         .child(
                             div()
                                 .h(px(40.))
+                                .w_full()
                                 .px_2()
                                 .flex_none()
                                 .flex()
                                 .flex_col()
                                 .justify_center()
                                 .items_center()
+                                .overflow_hidden()
                                 .border_t_1()
                                 .border_color(colors.subtle_border)
                                 .text_xs()
                                 .text_color(colors.muted_text)
-                                .child("j/k · Enter open · d DDL · p preview")
-                                .child("/ filter · R refresh")
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_center()
+                                        .child("j/k · Enter open · d DDL · p preview"),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_center()
+                                        .child("/ filter · R refresh"),
+                                )
                                 .child("r rename · t tags · d delete · u update"),
                         )
                 },
