@@ -3,6 +3,11 @@
 > Status: **code-grounded work-management checklist.** Every open item below
 > reflects a real gap verified against the code. This is the single ordered
 > backlog for all server-side work that must land before the product GUI.
+> Phase completion means only that this document's scoped engineering items
+> landed. It does not indicate product completeness, a release candidate, a
+> release date, platform certification, or distribution readiness. Current
+> missing product features are tracked in
+> `docs/PLANS/ide-parity-and-provider-extensibility.md`.
 >
 > Companion to `docs/DECISIONS.md` (ADRs). Items marked `[x]` are verified-present in
 > code; `[ ]` are verified-absent or stubbed.
@@ -35,9 +40,10 @@
   stable Loro selection anchors, lag recovery is explicit, and the reference
   SDK includes client-side follow-mode projection.
 - **Phase H is complete.** Direct SSH bootstrap, the persistent authenticated
-  proxy daemon, pre-release protocol range negotiation, lifecycle modes, signed
-  periodic update staging, readiness-gated activation/rollback, and release
-  CI are implemented under ADR-021.
+  proxy daemon, protocol range negotiation, lifecycle modes, signed periodic
+  update staging, readiness-gated activation/rollback, and artifact-build CI
+  are implemented under ADR-021. This is infrastructure coverage, not a
+  product-release claim.
 - **Phase I is complete.** Provider-neutral protocol v1, strict signed
   packages, supervised tenant-scoped Driver RPC, governed automation/MCP,
   connection-pipeline contracts, lifecycle management, hostile conformance,
@@ -365,8 +371,8 @@ ADR-022 and ADR-031; forward-looking gaps remain in
 
 ## Phase J — Operations polish
 
-Goal: establish the operational and public-contract foundation for a real
-release. Packaging is finalized after the selected Phase K/L v1 scope lands.
+Goal: establish operational and public-contract infrastructure that a future
+distribution could use. No distribution or release scope is declared here.
 
 - [x] [Design] Server-side metadata migration ownership, classification,
       startup compatibility gate, pre-migration SQLite backup, and offline
@@ -531,9 +537,9 @@ ADR-034.
 - **Phase L depends on H's remote topology and G's durable document model.** A
   hosted workspace cannot assume the client's filesystem is locally mounted;
   VCS and automation also consume I's plugin/permission model.
-- **The release-packaging portion of Phase J is finalized after K/L.** Contract
-  generation and observability may land earlier, but a feature-complete release
-  artifact includes the later IDE/workspace surfaces selected for v1.
+- **Phase J packaging remains open.** Contract generation and observability may
+  land earlier, but neither creates a product release or defines a v1 feature
+  boundary.
 - **Phase M consumes the completed headless surfaces through the SDK only.** M0
   removes the SDK's metadata-internal DTO dependency before GPUI feature work;
   later milestones may not reach around the public protocol for convenience.

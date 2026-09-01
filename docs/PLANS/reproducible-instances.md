@@ -1,7 +1,9 @@
 # Reproducible Sift instances
 
-Status: design revised around a flake-style two-file contract; Phase 0 freezes
-exact schemas and selected dependencies; no implementation has started.
+Status: **future design, not a release plan.** Phase 0 would freeze exact
+schemas and selected dependencies; no implementation has started. `v1` below
+names the proposed manifest and API contract version, not a product release,
+release candidate, or target date.
 
 ## Goal
 
@@ -772,9 +774,9 @@ directory expansion, or ambient environment variables.
 
 A fixed absolute path or fixed bind address is intentionally topology-specific
 and copies exactly; the plan explains when it is invalid on the new platform.
-The config format can therefore move across Linux, macOS, and Windows, but a
-release only promises realization on targets for which Sift publishes and
-tests the complete locked closure. Unsupported providers/extensions fail
+The config format can therefore move across Linux, macOS, and Windows, but
+realization is valid only on targets for which the complete locked closure is
+published and tested. Unsupported providers/extensions fail
 before mutation rather than falling back to different bytes or behavior.
 
 ## Credential schemas
@@ -1823,9 +1825,9 @@ replacement, different-origin copy, GitHub outage, no network,
 read-only manifest mounts, key loss, and offline recovery. Repeat representative
 cases with several concurrent local servers plus HTTPS and SSH remote entries.
 
-### Definition of done
+### Design-scope completion criteria
 
-A release is complete only when:
+This proposed feature scope is complete only when:
 
 - copying manifest plus lock to a clean supported device yields the same
   normalized effective desired state and locked artifacts;

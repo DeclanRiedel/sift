@@ -3,6 +3,16 @@
 Sift is a database server and desktop client written in Rust. It supports
 PostgreSQL and SQL Server.
 
+> **Project status: active development.** No release date, release candidate,
+> beta milestone, or release-ready feature set has been declared. Checked plan
+> items mean that a scoped implementation exists; they do not imply product
+> completeness, platform certification, support commitments, or distribution
+> readiness. The current missing-feature inventory lives in
+> [`docs/PLANS/ide-parity-and-provider-extensibility.md`](docs/PLANS/ide-parity-and-provider-extensibility.md).
+> In design documents, `v1` names a wire or file-format version and
+> `graduated` means an engineering decision passed its stated evidence gate;
+> neither term announces a product release.
+
 The server manages connections, query sessions, schema data, query execution,
 history, audit records, and shared rooms. Clients use its versioned HTTP and
 WebSocket API.

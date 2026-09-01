@@ -1,5 +1,9 @@
 # Desktop performance budgets
 
+> These are engineering targets, not release criteria or evidence that Sift is
+> near a release. Current recorded fixtures include substantial failures. The
+> word "graduation" below means passing one benchmark budget only.
+
 Sift targets a 120 Hz Wayland desktop. A responsive frame therefore has 8.3 ms
 for all client work, including entity updates, layout, paint, and renderer
 submission. The 16.7 ms budget remains the hard fallback for 60 Hz systems.

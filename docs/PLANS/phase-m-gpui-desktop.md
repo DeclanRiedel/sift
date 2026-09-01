@@ -1,14 +1,16 @@
 # Phase M — GPUI Desktop Client
 
-Status: **design locked on 2026-08-11; M0–M2 and M4 complete, M3 awaiting
-measured performance graduation, M5 partially complete, and M6 in progress.**
+Status: **active implementation inventory, not a release roadmap.** M0–M2 and
+M4 checklist scopes are complete; M3 still misses measured performance targets,
+M5 remains incomplete, and M6 validation is largely open. These milestone labels
+do not imply beta, release-candidate, distribution, or support readiness.
 ADR-040 is normative. Every milestone below ends in a separately reviewable
 commit with the workspace quality gates green.
 
 Milestones: M0 client boundary and GPUI feasibility, M1 native application
 shell, M2 connection and workspace lifecycle, M3 daily-driver SQL vertical
 slice, M4 database navigation and editing, M5 advanced product surfaces, and
-M6 product polish and graduation.
+M6 hardening and validation.
 
 ## Outcome
 
@@ -19,7 +21,8 @@ restore-before-I/O, and background work that cannot stall rendering. The
 database workflow combines DataGrip's semantic depth with Navicat's
 discoverability without moving product behavior out of `sift-server`.
 
-The first shippable checkpoint is M3. A user can launch Sift, open a local or
+M3 is the first end-to-end workflow checkpoint, not a shippable product claim.
+A user can launch Sift, open a local or
 remote virtual workspace, connect, edit a collaborative SQL document, use
 server-backed SQL intelligence, execute or cancel it, and inspect a large
 streamed result without blocking the UI.
@@ -35,8 +38,7 @@ streamed result without blocking the UI.
   different workspaces.
 - A query item owns its `Data`, `Messages`, `Explain`, and `History` result
   tabs. A result can be pinned or promoted to an independent pane item.
-- The initial editor ships a configurable conventional keymap. Vim emulation
-  is a follow-up, not an M3 graduation gate.
+- Vim is the supported interaction mode. Its keymap remains configurable.
 - Sift uses an original component library, theme, icon set, and brand. Zed is
   the architectural and interaction reference; its application crates and
   assets are not dependencies.
@@ -321,14 +323,14 @@ cross-platform support as a tested boundary rather than an assumption:
   compile-time branches in views.
 
 Linux is required at every milestone. Cross-compilation or native CI for
-macOS and Windows is introduced in M1 and remains green before M6 graduation.
+macOS and Windows is introduced in M1 and remains green before M6 validation.
 Platform-specific visual acceptance runs are evidence, even when they require
 dedicated runners outside the primary Linux development environment.
 
 ## Performance model
 
 M0 records reproducible baselines on the reference Linux environment before
-hard numerical budgets are graduated. The following behavioral budgets are
+hard numerical budgets are accepted. The following behavioral budgets are
 locked immediately:
 
 - first paint never waits for server, schema, Git, semantic, or result I/O;
@@ -342,7 +344,7 @@ locked immediately:
 - result memory is bounded by the SDK/server page window plus explicit pinned
   pages, never by total result cardinality.
 
-M6 graduates measured p50/p95 budgets for cold first paint, restored first
+M6 validates measured p50/p95 budgets for cold first paint, restored first
 paint, action-to-paint, editor input, 100k-row grid scrolling, 100k-object tree
 filtering, reconnect, and idle/active memory. Regressions beyond the recorded
 tolerance fail the relevant performance gate.
@@ -483,7 +485,7 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       **Partial:** the GPUI benchmark gate now covers large Vim documents,
       first-result paint, a retained 10,000-row grid, a 100,000-object schema
       filter, 20,000 Git status rows, query outlines, change-ledger rendering,
-      and command-switcher interaction. Numerical p50/p95 graduation and
+      and command-switcher interaction. Numerical p50/p95 validation and
       platform memory ceilings remain M6 work.
 
 ### M4 — database navigation and editing
@@ -515,7 +517,7 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 - [ ] Render Phase I declarative contributions through trusted actions, forms,
       tables, and read-only panels.
 
-### M6 — product polish and graduation
+### M6 — hardening and validation
 
 - [ ] Complete keyboard-only and accessibility audits for all primary flows.
 - [ ] Complete crash/restart/offline/auth-expiry/outcome-unknown recovery
@@ -524,25 +526,26 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       now require a dedicated warning review plus a second explicit action
       before the original statement can run again. Production mutation
       confirmation still applies after that recovery confirmation.
-- [ ] Graduate measured performance and memory budgets on representative large
+- [ ] Meet measured performance and memory budgets on representative large
       schemas, documents, results, diagrams, histories, and logs.
 - [ ] Validate dark/light themes, scaling, IME, keyboard layouts, clipboard,
       dialogs, window chrome, packaging, and updates on Linux/macOS/Windows.
-- [ ] Produce signed desktop artifacts using the existing release/update
-      lifecycle without weakening server verification.
-- [ ] Publish the Phase M graduation matrix and update product status docs.
+- [ ] Design, build, and validate signed desktop artifacts through the existing
+      update lifecycle without weakening server verification.
+- [ ] Publish the Phase M validation matrix and update product status docs.
 
 ### Next feature order
 
-The remaining work should proceed in this order. Product surfaces come first;
-graduation work follows once the interaction model has stopped changing.
+The remaining work should proceed in this order. This is engineering priority,
+not a countdown to a release.
 
 1. Phase I declarative contribution rendering through the trusted host UI.
-2. Numerical performance and memory graduation on the existing large fixtures.
+2. Numerical performance and memory validation on the existing large fixtures.
 3. Crash, restart, offline, authentication-expiry, and outcome-unknown recovery
    matrices.
 4. Keyboard/accessibility and Linux/macOS/Windows platform validation.
-5. Signed artifacts, update validation, and the final Phase M graduation matrix.
+5. Distribution design, signed-artifact testing, update validation, and the
+   final Phase M evidence matrix.
 
 ## Commit and quality policy
 
@@ -575,13 +578,14 @@ covered at the level specified above.
 - Full Vim emulation, forge/code-review workflows, or a mobile/tablet client in
   Phase M.
 
-## Graduation definition
+## Phase closure definition
 
-Phase M graduates only when the first-party desktop can reach every selected
+Phase M closes only when the first-party desktop can reach every selected
 v1 server capability through the public SDK, while a third-party client could
 still do the same without GPUI or private server access. Linux, macOS, and
 Windows artifacts must share the same workspace/action model and public API;
-platform differences are confined to the declared native boundary. The final
+platform differences are confined to the declared native boundary. Closing
+Phase M still does not declare a public release. The final
 evidence matrix records feature reachability, protocol/SDK parity, focus and
 accessibility behavior, recovery scenarios, dependency boundaries, native
 platform checks, and measured performance budgets.

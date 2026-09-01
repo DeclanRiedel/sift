@@ -1,5 +1,11 @@
 # Remote development and signed updates
 
+> **Capability documentation, not release status.** This file describes remote
+> topology, signing, staging, and operator contracts already present in code.
+> It does not announce an official distribution, configured release channel,
+> supported platform set, release candidate, or release date. Placeholder
+> origins and signing material remain intentionally unconfigured.
+
 Phase H supports three lifecycle modes and a direct OpenSSH remote topology.
 Runtime mode does not change deployment or authorization policy:
 

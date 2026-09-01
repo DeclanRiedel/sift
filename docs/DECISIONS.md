@@ -5,6 +5,12 @@ This file keeps only current, load-bearing decisions. Reference material
 code-grounded ordered backlog is `docs/PLANS/server-build-list-v2.md`.
 Written and candidate ADRs are indexed there against their phase.
 
+> **Status convention:** this is architecture documentation, not a release
+> roadmap. An ADR marked `graduated` has satisfied its scoped engineering
+> evidence; it does not imply beta, release-candidate, distribution, platform,
+> or product readiness. `v1` identifies a protocol or contract version unless
+> a passage explicitly says otherwise. No product release is declared here.
+
 Format is ADR-lite: **Context · Decision · Consequences.**
 
 ---

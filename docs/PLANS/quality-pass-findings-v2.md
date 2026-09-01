@@ -1,5 +1,8 @@
 # Repo-wide quality pass v2 — open findings
 
+> This is a historical engineering audit, not a release-readiness report. Its
+> severity labels and resolved findings do not declare a beta or release state.
+
 Read-only re-review across `crates/server`, both driver crates,
 `crates/metadata`, `crates/protocol`, `crates/doc`, `crates/core`,
 `crates/completion`, `crates/server/src/autocomplete.rs`, and
@@ -37,8 +40,8 @@ application protocol to version 2.
 ## Open — hygiene / transactions (metadata)
 
 - **V006 is a destructive migration with no backout** (`V006__rooms.sql:1-3`).
-  `DROP TABLE IF EXISTS …`. Fine pre-release; document before any beta user has
-  a DB they care about.
+  `DROP TABLE IF EXISTS …`. Acceptable only for disposable development data;
+  document before metadata databases are treated as durable user state.
 
 Resolved in the Phase I readiness pass: saved-query filters use one placeholder
 style, principal and tenant creation are transactional, duplicate room detach
