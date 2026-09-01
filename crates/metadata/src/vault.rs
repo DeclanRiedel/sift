@@ -1762,10 +1762,42 @@ impl MetadataStore {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{MembershipRole, MemorySecretStore};
+    use crate::{MembershipRole, MemorySecretStore, SecretStore};
+
+    #[derive(Default)]
+    struct FailingDeleteSecretStore {
+        values: Mutex<HashMap<(String, String), Vec<u8>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretStore for FailingDeleteSecretStore {
+        async fn put(&self, namespace: &str, handle: &str, secret: &[u8]) -> Result<()> {
+            self.values
+                .lock()
+                .unwrap()
+                .insert((namespace.to_owned(), handle.to_owned()), secret.to_vec());
+            Ok(())
+        }
+
+        async fn get(&self, namespace: &str, handle: &str) -> Result<Option<Vec<u8>>> {
+            Ok(self
+                .values
+                .lock()
+                .unwrap()
+                .get(&(namespace.to_owned(), handle.to_owned()))
+                .cloned())
+        }
+
+        async fn delete(&self, _: &str, _: &str) -> Result<()> {
+            Err(MetadataError::SecretStore(
+                "backend-delete-detail-sentinel".into(),
+            ))
+        }
+    }
 
     fn store() -> (MetadataStore, TenantId, PrincipalId, PrincipalId) {
         let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
@@ -2206,5 +2238,137 @@ mod tests {
             store.process_vault_secret_cleanup(100).await.unwrap(),
             (1, 0)
         );
+    }
+
+    #[tokio::test]
+    async fn secret_bytes_never_enter_sqlite_or_redacted_views() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.sqlite3");
+        let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
+        store.apply_migrations(true).unwrap();
+        store.bootstrap_local("Owner").unwrap();
+        let tenant = TenantId(1);
+        let owner = PrincipalId(1);
+        let vault = store.ensure_personal_vault(tenant, owner).unwrap();
+        let sentinel = "vault-secret-sentinel-never-persist";
+        let item = store
+            .create_vault_item(
+                vault.id,
+                owner,
+                "Registry".into(),
+                VaultItemMetadata::Token {
+                    service: "packages".into(),
+                    expires_at: None,
+                },
+                Some(serde_json::json!(sentinel)),
+            )
+            .await
+            .unwrap();
+        let public = serde_json::to_string(&(
+            store.list_vaults(tenant, owner).unwrap(),
+            store.list_vault_items(vault.id, owner).unwrap(),
+            store.list_vault_item_versions(item.id, owner).unwrap(),
+            store.list_operation_audit(100).unwrap(),
+        ))
+        .unwrap();
+        assert!(!public.contains(sentinel));
+        drop(store);
+
+        for entry in std::fs::read_dir(directory.path()).unwrap() {
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+            assert!(!bytes
+                .windows(sentinel.len())
+                .any(|window| window == sentinel.as_bytes()));
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_retry_records_only_a_sanitized_failure() {
+        let store =
+            MetadataStore::open_in_memory(Arc::new(FailingDeleteSecretStore::default())).unwrap();
+        store.bootstrap_local("Owner").unwrap();
+        store.set_vault_policy(VaultPolicy {
+            max_versions_per_item: 1,
+            ..VaultPolicy::default()
+        });
+        let tenant = TenantId(1);
+        let owner = PrincipalId(1);
+        let vault = store.ensure_personal_vault(tenant, owner).unwrap();
+        let item = store
+            .create_vault_item(
+                vault.id,
+                owner,
+                "Note".into(),
+                VaultItemMetadata::SecureNote,
+                Some(serde_json::json!("first")),
+            )
+            .await
+            .unwrap();
+        store
+            .set_vault_secret(item.id, owner, item.revision, serde_json::json!("second"))
+            .await
+            .unwrap();
+        assert_eq!(store.prune_vault_item_versions(10).unwrap(), 1);
+        assert_eq!(
+            store.process_vault_secret_cleanup(10).await.unwrap(),
+            (0, 1)
+        );
+        let last_error: String = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT last_error FROM vault_secret_cleanup_queue",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(last_error, "secret backend delete failed");
+        assert!(!last_error.contains("backend-delete-detail-sentinel"));
+    }
+
+    #[tokio::test]
+    async fn stale_and_cross_tenant_item_mutations_fail_closed() {
+        let (store, tenant, owner, _) = store();
+        let vault = store.ensure_personal_vault(tenant, owner).unwrap();
+        let item = store
+            .create_vault_item(
+                vault.id,
+                owner,
+                "Token".into(),
+                VaultItemMetadata::Token {
+                    service: "deploy".into(),
+                    expires_at: None,
+                },
+                Some(serde_json::json!("one")),
+            )
+            .await
+            .unwrap();
+        let (updated, _) = store
+            .set_vault_secret(item.id, owner, item.revision, serde_json::json!("two"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .set_vault_secret(item.id, owner, item.revision, serde_json::json!("stale"))
+                .await,
+            Err(MetadataError::VaultRevisionConflict { .. })
+        ));
+        assert_eq!(
+            store.reveal_vault_secret(item.id, owner).await.unwrap(),
+            serde_json::json!("two")
+        );
+        assert_eq!(updated.revision, 2);
+
+        let foreign_tenant = store
+            .create_tenant("foreign", crate::TenantKind::Team)
+            .unwrap();
+        let foreign = store.create_principal("foreign", "Foreign", None).unwrap();
+        store
+            .upsert_tenant_membership(foreign_tenant.id, foreign.id, MembershipRole::Owner)
+            .unwrap();
+        assert!(matches!(
+            store.get_vault_item(item.id, PrincipalId(foreign.id.0)),
+            Err(MetadataError::TenantMembershipRequired { .. })
+        ));
     }
 }

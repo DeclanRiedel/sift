@@ -5409,3 +5409,131 @@ async fn loopback_bypass_rejects_non_loopback_peer() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn api_tokens_cannot_reveal_vault_secrets() {
+    let mut state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap();
+    let vault = metadata
+        .ensure_personal_vault(sift_api_types::TenantId(1), sift_api_types::PrincipalId(1))
+        .unwrap();
+    let item = metadata
+        .create_vault_item(
+            vault.id,
+            sift_api_types::PrincipalId(1),
+            "API denial".into(),
+            sift_api_types::VaultItemMetadata::Token {
+                service: "test".into(),
+                expires_at: None,
+            },
+            Some(serde_json::json!("api-token-must-not-reveal")),
+        )
+        .await
+        .unwrap();
+    let (_, token) = metadata
+        .issue_api_token(PrincipalId(1), Some(TenantId(1)), "vault-reveal", None)
+        .unwrap();
+    state.auth.loopback_bypass = false;
+
+    let response = app(state)
+        .oneshot(
+            Request::post(format!("/v1/metadata/vault-items/{}/reveal", item.id.0))
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(!body
+        .windows("api-token-must-not-reveal".len())
+        .any(|window| window == b"api-token-must-not-reveal"));
+}
+
+#[tokio::test]
+async fn vault_rotation_disconnects_active_managed_connections() {
+    let state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap();
+    let vault = metadata
+        .ensure_personal_vault(sift_api_types::TenantId(1), sift_api_types::PrincipalId(1))
+        .unwrap();
+    let (profile, item_id) = metadata
+        .upsert_vault_connection_profile(
+            sift_api_types::TenantId(1),
+            sift_api_types::PrincipalId(1),
+            Some(vault.id),
+            NewConnectionProfile {
+                name: "Managed rotation".into(),
+                provider_id: Engine::Postgres.provider_id(),
+                configuration: serde_json::json!({
+                    "host": "mock.invalid",
+                    "port": 5432,
+                    "database": "mock",
+                    "user": "mock",
+                    "ssl_mode": "disable"
+                }),
+                semantic_engine: Some(Engine::Postgres),
+                credentials: Some(serde_json::json!({"password": "first"})),
+                credential_mode: CredentialMode::Shared,
+                tags: Vec::new(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let item_revision = metadata
+        .get_vault_item(item_id, sift_api_types::PrincipalId(1))
+        .unwrap()
+        .revision;
+    let app = app(state);
+    let session: sift_protocol::SessionInfo = body_json(
+        app.clone()
+            .oneshot(post_json_str("/v1/sessions", r#"{"tenant_id":1}"#))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let connection: sift_protocol::ConnectionInfo = body_json(
+        app.clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections/from-profile", session.id),
+                serde_json::json!({
+                    "tenant_id": 1,
+                    "profile_id": profile.id.0
+                }),
+            ))
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+
+    let rotated = app
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/metadata/vault-items/{}/secret", item_id.0),
+            serde_json::json!({
+                "expected_revision": item_revision,
+                "secret": {"password": "second"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rotated.status(), StatusCode::OK);
+
+    let ping = app
+        .oneshot(
+            Request::post(format!(
+                "/v1/sessions/{}/connections/{}/ping",
+                session.id, connection.id
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ping.status(), StatusCode::NOT_FOUND);
+}

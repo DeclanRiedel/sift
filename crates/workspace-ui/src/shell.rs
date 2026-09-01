@@ -47410,6 +47410,18 @@ mod tests {
     }
 
     #[gpui::test]
+    fn revealed_vault_values_never_enter_presentation_state(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let encoded = workspace.update(&mut cx, |shell, cx| {
+            shell.vault_revealed_value = Some("presentation-secret-sentinel".into());
+            serde_json::to_string(&shell.snapshot(cx)).unwrap()
+        });
+        assert!(!encoded.contains("presentation-secret-sentinel"));
+    }
+
+    #[gpui::test]
     fn connection_url_creates_profile_and_keeps_password_out_of_configuration(
         cx: &mut TestAppContext,
     ) {
