@@ -208,9 +208,10 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Connection profiles & credentials — connection editor
 
-- [ ] Personal/team connection vaults, masked version history, rotation, and
-  explicit team grants — [design](collaborative-connection-vaults.md); personal
-  foundation in M4, team collaboration in M5
+- [ ] Personal/team server vaults in Collaboration, including vault-backed
+  connections, capability grants, masked version history, rotation, and
+  controlled generic-secret reveal —
+  [design](collaborative-connection-vaults.md)
 - [~] `upsert_connection_profile`, `delete_connection_profile` — create and
   Save & Connect are available in the Connections dock; edit/delete remain for
   the full profile editor (M4)

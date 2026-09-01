@@ -159,6 +159,7 @@ architecture and validation work.
 - [x] Shared room connections
 - [x] Shared result references
 - [x] Workspace history and checkpoints
+- [ ] Personal and team server vaults
 - [~] Extension system
 - [~] Governed MCP tools
 - [ ] Declarative extension contribution renderer
