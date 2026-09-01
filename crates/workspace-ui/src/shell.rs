@@ -3577,6 +3577,17 @@ impl Pane {
             .unwrap_or_default()
     }
 
+    fn execution_sql(&self, item_id: u64, editor_sql: &str) -> String {
+        if self.database_item_views.get(&item_id) == Some(&DatabaseItemView::Query) {
+            return editor_sql.to_owned();
+        }
+        self.database_query_texts
+            .get(&item_id)
+            .filter(|sql| !sql.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| editor_sql.to_owned())
+    }
+
     fn on_results_event(&mut self, item_id: u64, event: &ResultsEvent, cx: &mut Context<Self>) {
         match event {
             ResultsEvent::LoadNextWindowRequested => {
@@ -3699,7 +3710,7 @@ impl Pane {
                 }
                 cx.emit(PaneEvent::ExecuteRequested {
                     item_id,
-                    sql: sql.clone(),
+                    sql: self.execution_sql(item_id, sql),
                 });
             }
             EditorEvent::SemanticRequest { revision, request } => {
@@ -49052,6 +49063,15 @@ mod tests {
                     .document()
                     .text(),
                 "{\n  \"event\": \"open\"\n}"
+            );
+            assert_eq!(
+                pane.read(cx).execution_sql(item_id, "{\"event\":\"open\"}"),
+                table_preview_sql(
+                    &sift_protocol::Engine::Postgres.provider_id(),
+                    "audit",
+                    "events"
+                ),
+                "execute-statement must use the retained query behind the JSON viewer"
             );
 
             shell.executor_sender = Some(sender);
