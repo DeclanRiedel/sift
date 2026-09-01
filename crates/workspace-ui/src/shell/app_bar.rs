@@ -21,6 +21,7 @@ pub(super) struct AppBarMenuItem {
     pub label: &'static str,
     pub shortcut: &'static str,
     pub command: Option<CommandId>,
+    pub url: Option<&'static str>,
 }
 
 impl AppBarMenuItem {
@@ -33,6 +34,16 @@ impl AppBarMenuItem {
             // here is misleading when that key context is deliberately off.
             shortcut: definition.language,
             command: Some(definition.id),
+            url: None,
+        }
+    }
+
+    fn wiki() -> Self {
+        Self {
+            label: "Wiki",
+            shortcut: "",
+            command: None,
+            url: cfg!(debug_assertions).then_some("http://127.0.0.1:8787"),
         }
     }
 }
@@ -93,6 +104,7 @@ pub(super) fn menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
             Item::available(CommandId::FocusProblems),
         ],
         AppBarMenu::Help => vec![
+            Item::wiki(),
             Item::available(CommandId::OpenCommandPalette),
             Item::available(CommandId::OpenKeymaps),
             Item::available(CommandId::OpenSettings),

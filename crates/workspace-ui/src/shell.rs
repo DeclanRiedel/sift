@@ -27100,10 +27100,14 @@ impl WorkspaceShell {
             .into_iter()
             .enumerate()
             .map(|(index, item)| {
-                let disabled_reason = item.command.map_or_else(
-                    || Some("Not implemented".into()),
-                    |command| self.command_spec(command, cx).disabled_reason,
-                );
+                let disabled_reason = if item.url.is_some() {
+                    None
+                } else {
+                    item.command.map_or_else(
+                        || Some("Not implemented".into()),
+                        |command| self.command_spec(command, cx).disabled_reason,
+                    )
+                };
                 let available = disabled_reason.is_none();
                 let row = div()
                     .id(("app-bar-menu-item", index))
@@ -27149,6 +27153,16 @@ impl WorkspaceShell {
                             shell.activate_app_bar_item(command, window, cx)
                         }))
                         .into_any_element(),
+                    _ if available && item.url.is_some() => {
+                        let url = item.url.unwrap();
+                        row.on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.app_bar_menu = None;
+                            shell.app_bar_expanded = false;
+                            cx.open_url(url);
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                    }
                     Some(_) | None => row.into_any_element(),
                 }
             })
@@ -43748,8 +43762,15 @@ mod tests {
         ] {
             let items = app_bar::menu_items(menu);
             assert!(!items.is_empty());
-            assert!(items.iter().all(|item| item.command.is_some()));
+            assert!(items.iter().all(|item| {
+                item.command.is_some()
+                    || (item.label == "Wiki"
+                        && item.url == cfg!(debug_assertions).then_some("http://127.0.0.1:8787"))
+            }));
         }
+
+        let help = app_bar::menu_items(AppBarMenu::Help);
+        assert_eq!(help[0].label, "Wiki");
     }
 
     #[test]
