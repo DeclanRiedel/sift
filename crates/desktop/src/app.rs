@@ -682,6 +682,132 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadSessions => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .list_sessions()
+                        .await
+                        .map_err(|error| format!("loading sessions failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events.send(ExecutorEvent::SessionsLoaded(result)).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::CloseSession { session_id } => {
+                let active_connection_closed = context
+                    .as_ref()
+                    .is_some_and(|opened| opened.session == session_id);
+                if active_connection_closed {
+                    cancel_active_queries(&mut active_queries);
+                    active_exports.clear();
+                    active_transfers.clear();
+                    if let Some(task) = notification_task.take() {
+                        task.abort();
+                    }
+                    context = None;
+                }
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .close_session(session_id)
+                        .await
+                        .map_err(|error| format!("closing session failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if active_connection_closed {
+                    let _ = events.send(ExecutorEvent::Connection(ConnectionStatus::Disconnected));
+                }
+                if events
+                    .send(ExecutorEvent::SessionResourceClosed {
+                        result,
+                        active_connection_closed,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CloseConnection {
+                session_id,
+                connection_id,
+            } => {
+                let active_connection_closed = context.as_ref().is_some_and(|opened| {
+                    opened.session == session_id
+                        && [
+                            opened.connection,
+                            opened.metadata_connection,
+                            opened.plan_connection,
+                        ]
+                        .contains(&connection_id)
+                });
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) if active_connection_closed => {
+                        cancel_active_queries(&mut active_queries);
+                        active_exports.clear();
+                        active_transfers.clear();
+                        if let Some(task) = notification_task.take() {
+                            task.abort();
+                        }
+                        context = None;
+                        client
+                            .close_session(session_id)
+                            .await
+                            .map_err(|error| format!("closing active session failed: {error}"))
+                    }
+                    Ok(client) => client
+                        .close_connection(session_id, connection_id)
+                        .await
+                        .map_err(|error| format!("closing connection failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if active_connection_closed {
+                    let _ = events.send(ExecutorEvent::Connection(ConnectionStatus::Disconnected));
+                }
+                if events
+                    .send(ExecutorEvent::SessionResourceClosed {
+                        result,
+                        active_connection_closed,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DisconnectConnectionProfile { profile_id } => {
+                let active_connection_closed = context
+                    .as_ref()
+                    .is_some_and(|opened| opened.profile_id == profile_id);
+                if active_connection_closed {
+                    cancel_active_queries(&mut active_queries);
+                    active_exports.clear();
+                    active_transfers.clear();
+                    if let Some(task) = notification_task.take() {
+                        task.abort();
+                    }
+                    context = None;
+                }
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .disconnect_connection_profile(ConnectionProfileId(profile_id))
+                        .await
+                        .map(|response| response.disconnected as usize)
+                        .map_err(|error| format!("disconnecting profile failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if active_connection_closed {
+                    let _ = events.send(ExecutorEvent::Connection(ConnectionStatus::Disconnected));
+                }
+                if events
+                    .send(ExecutorEvent::ConnectionProfileDisconnected { profile_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CheckConnectionHealth => {
                 active_queries.retain(|_, (_, control)| !control.is_closed());
                 if active_queries.is_empty() {

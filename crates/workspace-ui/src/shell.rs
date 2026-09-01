@@ -963,6 +963,7 @@ fn shell_connection_row_menu(
     cx: &mut Context<WorkspaceShell>,
 ) -> impl IntoElement {
     let edit_entry = entry.clone();
+    let disconnect_entry = entry.clone();
     let delete_entry = entry;
     div()
         .id("connection-row-menu")
@@ -981,6 +982,25 @@ fn shell_connection_row_menu(
             shell.connection_row_menu = None;
             cx.notify();
         }))
+        .child(
+            div()
+                .id("connection-row-disconnect-all")
+                .debug_selector(|| "connection-row-disconnect-all".into())
+                .role(Role::MenuItem)
+                .h(px(28.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_sm()
+                .hover(|item| item.bg(colors.hovered_surface))
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.connection_row_menu = None;
+                    shell.disconnect_connection_profile(disconnect_entry.id, cx);
+                }))
+                .child(icon(IconName::Close, colors.muted_text, 11.))
+                .child("Disconnect all sessions"),
+        )
         .child(
             div()
                 .id("connection-row-edit")
@@ -2335,6 +2355,17 @@ pub enum ExecutorCommand {
         name: String,
     },
     Disconnect,
+    LoadSessions,
+    CloseSession {
+        session_id: sift_protocol::SessionId,
+    },
+    CloseConnection {
+        session_id: sift_protocol::SessionId,
+        connection_id: sift_protocol::ConnectionId,
+    },
+    DisconnectConnectionProfile {
+        profile_id: i64,
+    },
     CheckConnectionHealth,
     BeginTransaction,
     CommitTransaction,
@@ -3011,6 +3042,15 @@ pub enum ExecutorCommand {
 #[derive(Debug)]
 pub enum ExecutorEvent {
     Connection(ConnectionStatus),
+    SessionsLoaded(Result<Vec<sift_protocol::SessionInfo>, String>),
+    SessionResourceClosed {
+        result: Result<(), String>,
+        active_connection_closed: bool,
+    },
+    ConnectionProfileDisconnected {
+        profile_id: i64,
+        result: Result<usize, String>,
+    },
     ConnectionHealth(ConnectionHealthReport),
     TransactionChanged(Result<Option<sift_protocol::TransactionInfo>, String>),
     SavepointChanged {
@@ -7736,6 +7776,9 @@ pub struct WorkspaceShell {
     server_connection_error: Option<String>,
     account_pending: bool,
     account_error: Option<String>,
+    server_sessions: Vec<sift_protocol::SessionInfo>,
+    server_sessions_loading: bool,
+    server_sessions_error: Option<String>,
     connection_status: ConnectionStatus,
     connection_health: Option<ConnectionHealthReport>,
     connection_health_history: Vec<ConnectionHealthReport>,
@@ -8732,6 +8775,9 @@ impl WorkspaceShell {
             server_connection_error: None,
             account_pending: false,
             account_error: None,
+            server_sessions: Vec::new(),
+            server_sessions_loading: false,
+            server_sessions_error: None,
             connection_status: ConnectionStatus::Disconnected,
             connection_health: None,
             connection_health_history: Vec::new(),
@@ -9789,6 +9835,57 @@ impl WorkspaceShell {
                         }
                     }
                     ConnectionStatus::Disconnected | ConnectionStatus::Connecting { .. } => {}
+                }
+                cx.notify();
+            }
+            ExecutorEvent::SessionsLoaded(result) => {
+                self.server_sessions_loading = false;
+                match result {
+                    Ok(sessions) => {
+                        self.server_sessions = sessions;
+                        self.server_sessions_error = None;
+                    }
+                    Err(message) => self.server_sessions_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::SessionResourceClosed {
+                result,
+                active_connection_closed,
+            } => {
+                match result {
+                    Ok(()) => {
+                        if active_connection_closed {
+                            self.show_toast("Active database connection closed".into(), cx);
+                        } else {
+                            self.show_success_toast("Session resource closed".into(), cx);
+                        }
+                        self.load_server_sessions(cx);
+                    }
+                    Err(message) => {
+                        self.server_sessions_loading = false;
+                        self.server_sessions_error = Some(message);
+                    }
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ConnectionProfileDisconnected { profile_id, result } => {
+                match result {
+                    Ok(count) => self.show_success_toast(
+                        format!("Disconnected {count} connection(s) for this profile"),
+                        cx,
+                    ),
+                    Err(message) => self.show_error_toast(message, cx),
+                }
+                if matches!(
+                    self.connection_status,
+                    ConnectionStatus::Connected { profile_id: active, .. } if active == profile_id
+                ) {
+                    self.connection_status = ConnectionStatus::Disconnected;
+                    self.status.database = "No database".into();
+                    self.connection_schema = ConnectionSchemaState::Unavailable;
+                    self.operation_capabilities.clear();
+                    self.sync_database_item_states(cx);
                 }
                 cx.notify();
             }
@@ -15784,6 +15881,21 @@ impl WorkspaceShell {
     fn request_delete_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
         self.modal = Some(Modal::ConfirmDeleteConnection(entry.clone()));
         cx.notify();
+    }
+
+    fn disconnect_connection_profile(&mut self, profile_id: i64, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            self.show_error_toast("Database connection manager is unavailable".into(), cx);
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::DisconnectConnectionProfile { profile_id })
+            .is_err()
+        {
+            self.show_error_toast("Database connection manager stopped".into(), cx);
+        } else {
+            self.show_toast("Disconnecting profile sessions…".into(), cx);
+        }
     }
 
     fn request_edit_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
@@ -28392,6 +28504,53 @@ impl WorkspaceShell {
         self.close_app_bar_modal(cx);
         self.app_bar_menu = None;
         self.modal = Some(modal);
+        if self.modal == Some(Modal::Account) {
+            self.load_server_sessions(cx);
+        }
+        cx.notify();
+    }
+
+    fn load_server_sessions(&mut self, cx: &mut Context<Self>) {
+        let Some(sender) = &self.executor_sender else {
+            self.server_sessions_error = Some("Session manager is unavailable".into());
+            return;
+        };
+        self.server_sessions_loading = true;
+        self.server_sessions_error = None;
+        if sender.send(ExecutorCommand::LoadSessions).is_err() {
+            self.server_sessions_loading = false;
+            self.server_sessions_error = Some("Session manager stopped".into());
+        }
+        cx.notify();
+    }
+
+    fn close_server_session(
+        &mut self,
+        session_id: sift_protocol::SessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.server_sessions_loading = true;
+        let _ = sender.send(ExecutorCommand::CloseSession { session_id });
+        cx.notify();
+    }
+
+    fn close_server_connection(
+        &mut self,
+        session_id: sift_protocol::SessionId,
+        connection_id: sift_protocol::ConnectionId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.server_sessions_loading = true;
+        let _ = sender.send(ExecutorCommand::CloseConnection {
+            session_id,
+            connection_id,
+        });
         cx.notify();
     }
 
@@ -36492,6 +36651,88 @@ impl WorkspaceShell {
                                 .on_click(move |_, _, cx| cx.open_url(&github_url))
                                 .child(icon(IconName::Github, colors.muted_text, 14.))
                         });
+                    let session_cards = self
+                        .server_sessions
+                        .iter()
+                        .map(|session| {
+                            let session_id = session.id;
+                            let connection_rows = session.connections.iter().map(|connection| {
+                                let connection_id = connection.id;
+                                div()
+                                    .h(px(28.))
+                                    .pl_3()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(icon(IconName::Database, colors.muted_text, 11.))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .truncate()
+                                            .text_xs()
+                                            .child(connection.display_name.clone()),
+                                    )
+                                    .child(
+                                        Button::new(
+                                            (
+                                                "close-server-connection",
+                                                connection_id.0 as usize,
+                                            ),
+                                            "Close",
+                                        )
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(self.server_sessions_loading)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.close_server_connection(
+                                                session_id,
+                                                connection_id,
+                                                cx,
+                                            )
+                                        })),
+                                    )
+                            });
+                            div()
+                                .debug_selector(move || format!("server-session-{}", session_id.0))
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.subtle_border)
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .h(px(32.))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .bg(colors.surface)
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .truncate()
+                                                .text_xs()
+                                                .child(format!(
+                                                    "Session {} · {} connection(s)",
+                                                    session_id.0,
+                                                    session.connections.len()
+                                                )),
+                                        )
+                                        .child(
+                                            Button::new(
+                                                ("close-server-session", session_id.0 as usize),
+                                                "Close session",
+                                            )
+                                            .tone(ButtonTone::DangerGhost)
+                                            .disabled(self.server_sessions_loading)
+                                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                                shell.close_server_session(session_id, cx)
+                                            })),
+                                        ),
+                                )
+                                .children(connection_rows)
+                        })
+                        .collect::<Vec<_>>();
                     let field = |label: &'static str, input: Entity<TextInput>| {
                         Field::new(label, Some(input.focus_handle(cx)), input.clone())
                     };
@@ -36552,6 +36793,53 @@ impl WorkspaceShell {
                                     .text_color(colors.muted_text)
                                     .whitespace_normal()
                                     .child("This local instance manages its built-in identity."),
+                            )
+                        })
+                        .when(identity.is_some(), |account| {
+                            account.child(
+                                div()
+                                    .debug_selector(|| "account-server-sessions".into())
+                                    .border_t_1()
+                                    .border_color(colors.subtle_border)
+                                    .px_3()
+                                    .py_2()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(SectionLabel::new("SERVER SESSIONS"))
+                                            .child(
+                                                Button::new("refresh-server-sessions", "Refresh")
+                                                    .tone(ButtonTone::Ghost)
+                                                    .loading(self.server_sessions_loading)
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.load_server_sessions(cx)
+                                                    })),
+                                            ),
+                                    )
+                                    .when(
+                                        self.server_sessions.is_empty()
+                                            && !self.server_sessions_loading
+                                            && self.server_sessions_error.is_none(),
+                                        |sessions| {
+                                            sessions.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(colors.muted_text)
+                                                    .child("No open server sessions"),
+                                            )
+                                        },
+                                    )
+                                    .children(session_cards)
+                                    .children(
+                                        self.server_sessions_error
+                                            .as_ref()
+                                            .map(|message| ErrorBanner::new(message.clone())),
+                                    ),
                             )
                         })
                         .when(!is_local && identity.is_none(), |account| {
@@ -42856,10 +43144,20 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("connection-row-menu").is_some());
         assert!(cx.debug_bounds("connection-row-edit").is_some());
+        assert!(cx.debug_bounds("connection-row-disconnect-all").is_some());
         assert!(cx.debug_bounds("connection-row-remove").is_some());
         assert!(cx.debug_bounds("connection-row-actions-7").is_some());
         assert!(cx.debug_bounds("connections-disconnect").is_some());
 
+        let disconnect = cx.debug_bounds("connection-row-disconnect-all").unwrap();
+        cx.simulate_click(disconnect.center(), Modifiers::default());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::DisconnectConnectionProfile { profile_id: 7 })
+        ));
+
+        cx.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
         let edit = cx.debug_bounds("connection-row-edit").unwrap();
         cx.simulate_click(edit.center(), Modifiers::default());
         cx.run_until_parked();
@@ -47245,6 +47543,60 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.account_error.clone()),
             Some("Username and password are required".into())
         );
+    }
+
+    #[gpui::test]
+    fn account_session_manager_lists_and_closes_server_resources(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_executor(sender, event_receiver, cx);
+            shell.load_server_sessions(cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadSessions)
+        ));
+
+        let session_id = sift_protocol::SessionId(7);
+        let connection_id = sift_protocol::ConnectionId(9);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SessionsLoaded(Ok(vec![sift_protocol::SessionInfo {
+                    id: session_id,
+                    created_at: chrono::Utc::now(),
+                    tag: Some("Sift desktop".into()),
+                    tenant_id: Some(1),
+                    connections: vec![sift_protocol::ConnectionInfo {
+                        id: connection_id,
+                        provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                        display_name: "lab@localhost".into(),
+                        created_at: chrono::Utc::now(),
+                    }],
+                }])),
+                cx,
+            );
+            shell.close_server_connection(session_id, connection_id, cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::CloseConnection {
+                session_id: sift_protocol::SessionId(7),
+                connection_id: sift_protocol::ConnectionId(9),
+            })
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.close_server_session(session_id, cx)
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::CloseSession {
+                session_id: sift_protocol::SessionId(7)
+            })
+        ));
     }
 
     #[gpui::test]
