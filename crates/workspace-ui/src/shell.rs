@@ -571,6 +571,7 @@ enum ResultInspectorView {
     Fields,
     Value,
     RowJson,
+    RelationDefinition,
 }
 
 enum RowJsonFilter {
@@ -21073,6 +21074,11 @@ impl WorkspaceShell {
         let Some((item_id, _)) = self.focused_pane_results_item(cx) else {
             return false;
         };
+        if view == ResultInspectorView::RelationDefinition
+            && self.focused_database_item(cx).map(|(id, _)| id) != Some(item_id)
+        {
+            return false;
+        }
         self.result_inspector_views.insert(item_id, view);
         self.inspector_g_pending = false;
         cx.notify();
@@ -21083,11 +21089,14 @@ impl WorkspaceShell {
         let Some((item_id, _)) = self.focused_pane_results_item(cx) else {
             return false;
         };
-        let views = [
+        let mut views = vec![
             ResultInspectorView::Value,
             ResultInspectorView::Fields,
             ResultInspectorView::RowJson,
         ];
+        if self.focused_database_item(cx).map(|(id, _)| id) == Some(item_id) {
+            views.push(ResultInspectorView::RelationDefinition);
+        }
         let current = self
             .result_inspector_views
             .get(&item_id)
@@ -21189,7 +21198,7 @@ impl WorkspaceShell {
             .copied()
             .unwrap_or_default();
         let text = match view {
-            ResultInspectorView::Fields => return false,
+            ResultInspectorView::Fields | ResultInspectorView::RelationDefinition => return false,
             ResultInspectorView::Value => results
                 .read(cx)
                 .selected_value()
@@ -21228,6 +21237,16 @@ impl WorkspaceShell {
             return;
         };
         self.show_result_row_json(item_id, window, cx);
+    }
+
+    fn show_active_relation_definition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((item_id, _)) = self.focused_database_item(cx) else {
+            self.show_toast("Active tab has no relation definition".into(), cx);
+            return;
+        };
+        self.result_inspector_views
+            .insert(item_id, ResultInspectorView::RelationDefinition);
+        self.focus_inspector(window, cx);
     }
 
     fn copy_active_result_with_headers(&mut self, cx: &mut Context<Self>) {
@@ -22816,6 +22835,8 @@ impl WorkspaceShell {
                     "1" => self.select_result_inspector_view(ResultInspectorView::Fields, cx),
                     "2" => self.select_result_inspector_view(ResultInspectorView::Value, cx),
                     "3" => self.select_result_inspector_view(ResultInspectorView::RowJson, cx),
+                    "4" => self
+                        .select_result_inspector_view(ResultInspectorView::RelationDefinition, cx),
                     "j" if fields_selected => self.move_inspector_field_selection(1, cx),
                     "k" if fields_selected => self.move_inspector_field_selection(-1, cx),
                     "g" if fields_selected && self.inspector_g_pending => {
@@ -26383,6 +26404,7 @@ impl WorkspaceShell {
             CommandId::FocusConnections => self.focus_connections(window, cx),
             CommandId::FocusEditor => self.focus_active_pane(window, cx),
             CommandId::FocusInspector => self.focus_inspector(window, cx),
+            CommandId::ShowRelationDefinition => self.show_active_relation_definition(window, cx),
             CommandId::ShowResultRowJson => self.show_active_result_row_json(window, cx),
             CommandId::CopyResultWithHeaders => self.copy_active_result_with_headers(cx),
             CommandId::FocusResults => self.focus_results(window, cx),
@@ -27824,10 +27846,14 @@ impl WorkspaceShell {
         let fields_pane = self.panes[self.active_pane].clone();
         let value_pane = fields_pane.clone();
         let json_pane = fields_pane.clone();
+        let definition_pane = fields_pane.clone();
+        let has_relation_definition =
+            self.focused_database_item(cx).map(|(id, _)| id) == Some(item_id);
         let keyboard_help = match selected {
-            ResultInspectorView::Fields => "h/l views · j/k fields · Enter toggle · a/n all/none",
-            ResultInspectorView::Value => "h/l views · y copy · 1/2/3 select view",
+            ResultInspectorView::Fields => "h/l views · j/k fields · Enter toggle · 1/2/3/4 views",
+            ResultInspectorView::Value => "h/l views · y copy · 1/2/3/4 views",
             ResultInspectorView::RowJson => "h/l views · / filter · f fold · w wrap · y copy",
+            ResultInspectorView::RelationDefinition => "1/2/3 results · 4 definition",
         };
         div()
             .flex_1()
@@ -27934,12 +27960,36 @@ impl WorkspaceShell {
                             }))
                             .child("Row JSON"),
                     )
+                    .children(has_relation_definition.then(|| {
+                        div()
+                            .id("inspector-relation-definition-view")
+                            .debug_selector(|| "inspector-relation-definition-view".into())
+                            .role(Role::Tab)
+                            .aria_label("Show relation definition")
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .on_click(cx.listener(move |shell, _, window, cx| {
+                                if definition_pane.read(cx).contains_item(item_id) {
+                                    shell
+                                        .result_inspector_views
+                                        .insert(item_id, ResultInspectorView::RelationDefinition);
+                                    shell.focused_surface = WorkspaceSurface::Inspector;
+                                    shell.inspector_focus_handle.focus(window, cx);
+                                    cx.notify();
+                                }
+                            }))
+                            .child("Definition")
+                    }))
                     .child(div().flex_1()),
             )
             .child(match selected {
                 ResultInspectorView::Fields => self.render_result_fields_inspector(results, cx),
                 ResultInspectorView::Value => self.render_result_value_inspector(results, cx),
                 ResultInspectorView::RowJson => self.render_result_row_json_inspector(results, cx),
+                ResultInspectorView::RelationDefinition => div().into_any_element(),
             })
             .child(
                 div()
@@ -31821,6 +31871,11 @@ impl WorkspaceShell {
                 let has_fields = results
                     .as_ref()
                     .is_some_and(|(_, results)| !results.read(cx).inspector_fields().is_empty());
+                let inspector_view = results
+                    .as_ref()
+                    .and_then(|(item_id, _)| self.result_inspector_views.get(item_id))
+                    .copied()
+                    .unwrap_or_default();
                 if database_item.is_none() && !has_fields {
                     return dock_view.child(
                         div()
@@ -31846,12 +31901,47 @@ impl WorkspaceShell {
                     );
                 }
                 dock_view
-                    .children(database_item.map(|(item_id, _)| {
-                        self.render_table_definition_inspector(item_id, cx)
-                    }))
-                    .children(results.filter(|_| has_fields).map(|(item_id, results)| {
-                        self.render_result_inspector(item_id, results, cx)
-                    }))
+                    .children(
+                        database_item
+                            .filter(|_| {
+                                !has_fields
+                                    || inspector_view == ResultInspectorView::RelationDefinition
+                            })
+                            .map(|(item_id, _)| {
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(self.render_table_definition_inspector(item_id, cx))
+                                    .child(
+                                        div()
+                                            .h(px(28.))
+                                            .px_2()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .border_t_1()
+                                            .border_color(colors.subtle_border)
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child("1/2/3 result views · 4 relation definition"),
+                                    )
+                            }),
+                    )
+                    .children(
+                        results
+                            .filter(|_| {
+                                has_fields
+                                    && inspector_view
+                                        != ResultInspectorView::RelationDefinition
+                            })
+                            .map(|(item_id, results)| {
+                                self.render_result_inspector(item_id, results, cx)
+                            }),
+                    )
             })
     }
 
@@ -41612,6 +41702,80 @@ mod tests {
             Some("1".into())
         );
         assert!(cx.debug_bounds("inspector-keyboard-help").is_some());
+    }
+
+    #[gpui::test]
+    fn inspector_jumps_between_relation_definition_and_result_views(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Demo".into(),
+            };
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "Demo".into(),
+                        provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    },
+                    catalog: "sifttest".into(),
+                    schema: "lab".into(),
+                    object: "people".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                window,
+                cx,
+            );
+        });
+        let item_id = match receiver.try_recv().unwrap() {
+            ExecutorCommand::Execute { item_id, .. } => item_id,
+            _ => panic!("expected preview execution"),
+        };
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadTableDefinition { .. })
+        ));
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::TableDefinitionLoaded {
+                    item_id,
+                    graph: Box::new(table_graph()),
+                },
+                cx,
+            );
+            let results = shell.focused_pane_results(cx).unwrap();
+            results.update(cx, |results, cx| {
+                results.set_state(
+                    ResultState::Ready(crate::results::ResultData {
+                        columns: vec![crate::results::ResultColumn {
+                            name: "id".into(),
+                            type_label: "bigint".into(),
+                            nullable: false,
+                        }],
+                        rows: vec![sift_protocol::Row::new(vec![sift_protocol::Value::Int64(
+                            1,
+                        )])],
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            });
+            shell.run_command(CommandId::ShowRelationDefinition, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("table-definition-inspector").is_some());
+        assert!(cx.debug_bounds("inspector-result-fields").is_none());
+
+        cx.simulate_keystrokes("1");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("table-definition-inspector").is_none());
+        assert!(cx.debug_bounds("inspector-result-fields").is_some());
     }
 
     #[gpui::test]
