@@ -19,6 +19,31 @@ pub struct DatabaseObjectBookmark {
     pub object_kind: sift_protocol::ObjectKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExplorerViewPresentation {
+    pub name: String,
+    pub object_kinds: Vec<sift_protocol::ObjectKind>,
+}
+
+fn all_explorer_object_kinds() -> Vec<sift_protocol::ObjectKind> {
+    use sift_protocol::ObjectKind;
+    vec![
+        ObjectKind::Table,
+        ObjectKind::View,
+        ObjectKind::MaterializedView,
+        ObjectKind::ForeignTable,
+        ObjectKind::PartitionedTable,
+        ObjectKind::TableValuedFunction,
+        ObjectKind::ScalarFunction,
+        ObjectKind::Procedure,
+        ObjectKind::Sequence,
+        ObjectKind::Type,
+        ObjectKind::Trigger,
+        ObjectKind::Synonym,
+        ObjectKind::Extension,
+    ]
+}
+
 const PRESENTATION_VERSION: u32 = 1;
 const MIN_WINDOW_WIDTH: f32 = 720.0;
 const MIN_WINDOW_HEIGHT: f32 = 480.0;
@@ -322,6 +347,10 @@ pub struct PresentationState {
     pub favorite_database_objects: Vec<DatabaseObjectBookmark>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_database_objects: Vec<DatabaseObjectBookmark>,
+    #[serde(default = "all_explorer_object_kinds")]
+    pub explorer_object_kinds: Vec<sift_protocol::ObjectKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explorer_views: Vec<ExplorerViewPresentation>,
 }
 
 impl Default for PresentationState {
@@ -378,6 +407,8 @@ impl Default for PresentationState {
             palette_recents: Vec::new(),
             favorite_database_objects: Vec::new(),
             recent_database_objects: Vec::new(),
+            explorer_object_kinds: all_explorer_object_kinds(),
+            explorer_views: Vec::new(),
         }
     }
 }
@@ -509,6 +540,17 @@ mod tests {
                 object: "users".into(),
                 object_kind: sift_protocol::ObjectKind::Table,
             }],
+            explorer_object_kinds: vec![
+                sift_protocol::ObjectKind::Table,
+                sift_protocol::ObjectKind::View,
+            ],
+            explorer_views: vec![ExplorerViewPresentation {
+                name: "Data objects".into(),
+                object_kinds: vec![
+                    sift_protocol::ObjectKind::Table,
+                    sift_protocol::ObjectKind::View,
+                ],
+            }],
             ..PresentationState::default()
         };
         let mut remote = state.workspace.clone();
@@ -539,6 +581,7 @@ mod tests {
         assert!(json.contains("command:local:item.save"));
         assert!(json.contains("events"));
         assert!(json.contains("users"));
+        assert!(json.contains("Data objects"));
     }
 
     #[test]

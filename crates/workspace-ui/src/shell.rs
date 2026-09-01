@@ -7514,6 +7514,9 @@ pub struct WorkspaceShell {
     connections_find_input: Entity<TextInput>,
     connections_find_open: bool,
     connections_find_query: String,
+    explorer_view_name_input: Entity<TextInput>,
+    explorer_view_menu_open: bool,
+    explorer_views: Vec<crate::presentation::ExplorerViewPresentation>,
     repository_filter_input: Entity<TextInput>,
     repository_filter_open: bool,
     saved_queries_focus_handle: FocusHandle,
@@ -7972,6 +7975,8 @@ impl WorkspaceShell {
         let palette_recents = state.palette_recents.clone();
         let favorite_database_objects = state.favorite_database_objects.clone();
         let recent_database_objects = state.recent_database_objects.clone();
+        let explorer_views = state.explorer_views.clone();
+        let explorer_object_kinds = state.explorer_object_kinds.clone();
         let vim_mode_default = settings.editor.default_mode == EditorMode::Vim;
         // Install the process-wide theme first so every child entity reads the
         // same palette through `ActiveTheme` during construction and render.
@@ -8157,6 +8162,8 @@ impl WorkspaceShell {
         let connections_find_input = cx.new(|cx| {
             TextInput::new("", "Find in connections…", cx).aria_label("Find in connections")
         });
+        let explorer_view_name_input =
+            cx.new(|cx| TextInput::new("", "View name…", cx).aria_label("Explorer view name"));
         let repository_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter changes…", cx).aria_label("Filter repository changes")
         });
@@ -8543,6 +8550,9 @@ impl WorkspaceShell {
             connections_find_input,
             connections_find_open: false,
             connections_find_query: String::new(),
+            explorer_view_name_input,
+            explorer_view_menu_open: false,
+            explorer_views,
             repository_filter_input,
             repository_filter_open: false,
             saved_queries_focus_handle: cx.focus_handle(),
@@ -8875,7 +8885,15 @@ impl WorkspaceShell {
             connection_schema: ConnectionSchemaState::Unavailable,
             schema_search_generation: 0,
             schema_search_state: SchemaSearchState::Idle,
-            schema_search_filters: ObjectGroupKind::CANONICAL.into_iter().collect(),
+            schema_search_filters: ObjectGroupKind::CANONICAL
+                .into_iter()
+                .filter(|group| {
+                    group
+                        .object_kinds()
+                        .iter()
+                        .any(|kind| explorer_object_kinds.contains(kind))
+                })
+                .collect(),
             data_search_generation: 0,
             data_search_state: DataSearchState::Idle,
             table_definitions: HashMap::new(),
@@ -13719,6 +13737,185 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn toggle_explorer_object_group(&mut self, group: ObjectGroupKind, cx: &mut Context<Self>) {
+        if !self.schema_search_filters.remove(&group) {
+            self.schema_search_filters.insert(group);
+        }
+        self.invalidate_connection_projection();
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn apply_explorer_view(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(view) = self.explorer_views.get(index) else {
+            return;
+        };
+        self.schema_search_filters = ObjectGroupKind::CANONICAL
+            .into_iter()
+            .filter(|group| {
+                group
+                    .object_kinds()
+                    .iter()
+                    .any(|kind| view.object_kinds.contains(kind))
+            })
+            .collect();
+        self.explorer_view_menu_open = false;
+        self.invalidate_connection_projection();
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn save_explorer_view(&mut self, cx: &mut Context<Self>) {
+        let name = self
+            .explorer_view_name_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        if name.is_empty() {
+            self.show_toast("Enter a name for the explorer view".into(), cx);
+            return;
+        }
+        let object_kinds = ObjectGroupKind::CANONICAL
+            .into_iter()
+            .filter(|group| self.schema_search_filters.contains(group))
+            .flat_map(|group| group.object_kinds().iter().copied())
+            .collect();
+        let view = crate::presentation::ExplorerViewPresentation { name, object_kinds };
+        if let Some(saved) = self
+            .explorer_views
+            .iter_mut()
+            .find(|saved| saved.name.eq_ignore_ascii_case(&view.name))
+        {
+            *saved = view;
+        } else {
+            self.explorer_views.push(view);
+        }
+        self.explorer_views
+            .sort_by_key(|view| view.name.to_lowercase());
+        self.explorer_view_name_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn delete_explorer_view(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.explorer_views.len() {
+            self.explorer_views.remove(index);
+            self.persist(cx);
+            cx.notify();
+        }
+    }
+
+    fn render_explorer_view_menu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let mut menu = div()
+            .id("explorer-view-menu")
+            .w(px(240.))
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(colors.strong_border)
+            .bg(colors.elevated_surface)
+            .shadow_lg()
+            .occlude()
+            .role(Role::Menu)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down_out(cx.listener(|shell, _, _, cx| {
+                shell.explorer_view_menu_open = false;
+                cx.notify();
+            }))
+            .child(SectionLabel::new("OBJECT TYPES"));
+        for group in ObjectGroupKind::CANONICAL {
+            let selected = self.schema_search_filters.contains(&group);
+            menu = menu.child(
+                div()
+                    .id(("explorer-object-filter", group as usize))
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .role(Role::MenuItem)
+                    .hover(|row| row.bg(colors.hovered_surface))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.toggle_explorer_object_group(group, cx)
+                    }))
+                    .child(div().w(px(14.)).when(selected, |slot| {
+                        slot.child(icon(IconName::Check, colors.accent, 11.))
+                    }))
+                    .child(group.label()),
+            );
+        }
+        if !self.explorer_views.is_empty() {
+            menu = menu.child(SectionLabel::new("SAVED VIEWS"));
+        }
+        for (index, view) in self.explorer_views.iter().enumerate() {
+            let name = view.name.clone();
+            menu = menu.child(
+                div()
+                    .id(("saved-explorer-view-row", index))
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .hover(|row| row.bg(colors.hovered_surface))
+                    .child(
+                        div()
+                            .id(("apply-explorer-view", index))
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .role(Role::MenuItem)
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.apply_explorer_view(index, cx)
+                            }))
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .id(("delete-explorer-view", index))
+                            .flex_none()
+                            .role(Role::Button)
+                            .aria_label("Delete saved explorer view")
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                cx.stop_propagation();
+                                shell.delete_explorer_view(index, cx)
+                            }))
+                            .child(icon(IconName::Close, colors.muted_text, 10.)),
+                    ),
+            );
+        }
+        menu.child(
+            div()
+                .mt_1()
+                .pt_2()
+                .border_t_1()
+                .border_color(colors.subtle_border)
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(self.explorer_view_name_input.clone()),
+                )
+                .child(
+                    Button::new("save-explorer-view", "Save")
+                        .tone(ButtonTone::Ghost)
+                        .on_click(cx.listener(|shell, _, _, cx| shell.save_explorer_view(cx))),
+                ),
+        )
+        .into_any_element()
+    }
+
     fn visible_connection_items(&self) -> Arc<Vec<ConnectionTreeItem>> {
         let mut connection_count = 0;
         let mut room_count = 0;
@@ -13876,6 +14073,9 @@ impl WorkspaceShell {
                             continue;
                         }
                         for group in ObjectGroupKind::CANONICAL {
+                            if !self.schema_search_filters.contains(&group) {
+                                continue;
+                            }
                             let object_count = schema
                                 .objects
                                 .iter()
@@ -22661,6 +22861,12 @@ impl WorkspaceShell {
             palette_recents: self.palette_recents.clone(),
             favorite_database_objects: self.favorite_database_objects.clone(),
             recent_database_objects: self.recent_database_objects.clone(),
+            explorer_object_kinds: ObjectGroupKind::CANONICAL
+                .into_iter()
+                .filter(|group| self.schema_search_filters.contains(group))
+                .flat_map(|group| group.object_kinds().iter().copied())
+                .collect(),
+            explorer_views: self.explorer_views.clone(),
             ..PresentationState::default()
         }
     }
@@ -32125,6 +32331,46 @@ impl WorkspaceShell {
                                                     },
                                                 )),
                                             ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("explorer-view-trigger")
+                                                .relative()
+                                                .flex_none()
+                                                .child(
+                                                    IconButton::new(
+                                                        "explorer-view-menu-button",
+                                                        IconName::Menu,
+                                                        "Filter objects and manage explorer views",
+                                                    )
+                                                    .square(px(26.))
+                                                    .icon_size(13.)
+                                                    .tooltip("Explorer views")
+                                                    .on_click(cx.listener(
+                                                        |shell, _, _, cx| {
+                                                            shell.explorer_view_menu_open =
+                                                                !shell.explorer_view_menu_open;
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                                )
+                                                .when(self.explorer_view_menu_open, |trigger| {
+                                                    trigger.child(
+                                                        div()
+                                                            .absolute()
+                                                            .bottom_0()
+                                                            .right_0()
+                                                            .size_0()
+                                                            .child(
+                                                                deferred(
+                                                                    anchored()
+                                                                        .anchor(Anchor::TopRight)
+                                                                        .child(self.render_explorer_view_menu(cx)),
+                                                                )
+                                                                .with_priority(3),
+                                                            ),
+                                                    )
+                                                }),
                                         )
                                         .child(
                                         div()
