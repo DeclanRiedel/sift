@@ -315,7 +315,113 @@ fn enqueue_cleanup(tx: &Transaction<'_>, handle: &str, reason: &str) -> Result<(
     Ok(())
 }
 
+fn sync_connection_item_locked(
+    tx: &Transaction<'_>,
+    item: VaultItemId,
+    label: &str,
+    metadata: &VaultItemMetadata,
+    now: &str,
+) -> Result<Option<ConnectionProfileId>> {
+    let profile = tx
+        .query_row(
+            "SELECT connection_profile_id FROM vault_connection_binding WHERE item_id = ?1",
+            params![item.0],
+            |row| row.get::<_, i64>(0).map(ConnectionProfileId),
+        )
+        .optional()?;
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+    let VaultItemMetadata::Connection {
+        provider_id,
+        configuration,
+    } = metadata
+    else {
+        return Err(MetadataError::InvalidVaultInput(
+            "bound connection item metadata changed kind".into(),
+        ));
+    };
+    let configuration = serde_json::to_string(configuration)?;
+    tx.execute(
+        "UPDATE connection_profile SET name = ?2, provider_id = ?3,
+         configuration_json = ?4, spec_json = ?4, updated_at = ?5 WHERE id = ?1",
+        params![profile.0, label, provider_id.as_str(), configuration, now],
+    )?;
+    Ok(Some(profile))
+}
+
 impl MetadataStore {
+    pub(crate) async fn delete_vault_secret_handles(
+        &self,
+        handles: Vec<String>,
+        reason: &str,
+    ) -> Result<()> {
+        for handle in handles {
+            if self
+                .secrets
+                .delete(VAULT_SECRET_NAMESPACE, &handle)
+                .await
+                .is_err()
+            {
+                let mut conn = self.conn()?;
+                let tx = conn.transaction()?;
+                enqueue_cleanup(&tx, &handle, reason)?;
+                tx.commit()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn process_vault_secret_cleanup(&self, limit: u32) -> Result<(u64, u64)> {
+        let limit = limit.clamp(1, 1_000);
+        let pending = {
+            let conn = self.conn()?;
+            let mut stmt = conn.prepare(
+                "SELECT secret_handle, attempts FROM vault_secret_cleanup_queue
+                 WHERE namespace = ?1 AND not_before <= ?2
+                 ORDER BY not_before, secret_handle LIMIT ?3",
+            )?;
+            let rows = stmt
+                .query_map(params![VAULT_SECRET_NAMESPACE, now_text(), limit], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+                })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut deleted = 0_u64;
+        let mut failed = 0_u64;
+        for (handle, attempts) in pending {
+            match self.secrets.delete(VAULT_SECRET_NAMESPACE, &handle).await {
+                Ok(()) => {
+                    self.conn()?.execute(
+                        "DELETE FROM vault_secret_cleanup_queue
+                         WHERE namespace = ?1 AND secret_handle = ?2",
+                        params![VAULT_SECRET_NAMESPACE, handle],
+                    )?;
+                    deleted += 1;
+                }
+                Err(_) => {
+                    let delay = 30_i64.saturating_mul(1_i64 << attempts.min(7));
+                    let not_before = (chrono::Utc::now()
+                        + chrono::Duration::seconds(delay.min(3_600)))
+                    .to_rfc3339();
+                    self.conn()?.execute(
+                        "UPDATE vault_secret_cleanup_queue
+                         SET attempts = attempts + 1, last_error = ?3, not_before = ?4
+                         WHERE namespace = ?1 AND secret_handle = ?2",
+                        params![
+                            VAULT_SECRET_NAMESPACE,
+                            handle,
+                            "secret backend delete failed",
+                            not_before
+                        ],
+                    )?;
+                    failed += 1;
+                }
+            }
+        }
+        Ok((deleted, failed))
+    }
+
     pub fn vault_connection_binding(
         &self,
         profile: ConnectionProfileId,
@@ -328,6 +434,22 @@ impl MetadataStore {
              WHERE b.connection_profile_id = ?1",
             params![profile.0],
             |row| Ok((VaultId(row.get(0)?), VaultItemId(row.get(1)?))),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn vault_connection_binding_by_item(
+        &self,
+        item: VaultItemId,
+    ) -> Result<Option<(VaultId, ConnectionProfileId)>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT i.vault_id, b.connection_profile_id
+             FROM vault_connection_binding b
+             JOIN vault_item i ON i.id = b.item_id WHERE b.item_id = ?1",
+            params![item.0],
+            |row| Ok((VaultId(row.get(0)?), ConnectionProfileId(row.get(1)?))),
         )
         .optional()
         .map_err(Into::into)
@@ -442,6 +564,114 @@ impl MetadataStore {
             .collect())
     }
 
+    pub fn get_vault(&self, id: VaultId, actor: PrincipalId) -> Result<Vault> {
+        let conn = self.conn()?;
+        vault_by_id_locked(&conn, id, actor)
+    }
+
+    pub fn update_vault(
+        &self,
+        id: VaultId,
+        actor: PrincipalId,
+        expected_revision: u64,
+        name: &str,
+    ) -> Result<Vault> {
+        validate_label(name)?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        require_capability(&tx, id, actor, |capabilities| capabilities.manage)?;
+        let current = tx
+            .query_row(
+                "SELECT revision FROM vault WHERE id = ?1",
+                params![id.0],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?
+            .ok_or(MetadataError::VaultNotFound(id))?;
+        if current != expected_revision {
+            return Err(MetadataError::VaultRevisionConflict {
+                expected: expected_revision,
+                current,
+            });
+        }
+        tx.execute(
+            "UPDATE vault SET name = ?2, revision = revision + 1, updated_at = ?3
+             WHERE id = ?1",
+            params![id.0, name.trim(), now_text()],
+        )?;
+        insert_operation_audit_row(&tx, &audit(actor, "update", "vault", Some(id.0)))?;
+        tx.commit()?;
+        vault_by_id_locked(&conn, id, actor)
+    }
+
+    pub async fn delete_vault(
+        &self,
+        id: VaultId,
+        actor: PrincipalId,
+        expected_revision: u64,
+    ) -> Result<Vec<ConnectionProfileId>> {
+        let backend = self.backend.clone();
+        let (profiles, handles) = sqlite_blocking(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction()?;
+            let (_, scope, _) = vault_capabilities_locked(&tx, id, actor)?;
+            require_capability(&tx, id, actor, |capabilities| capabilities.manage)?;
+            if scope == VaultScope::Personal {
+                return Err(MetadataError::InvalidVaultInput(
+                    "personal vaults cannot be deleted".into(),
+                ));
+            }
+            let current = tx.query_row(
+                "SELECT revision FROM vault WHERE id = ?1",
+                params![id.0],
+                |row| row.get::<_, u64>(0),
+            )?;
+            if current != expected_revision {
+                return Err(MetadataError::VaultRevisionConflict {
+                    expected: expected_revision,
+                    current,
+                });
+            }
+            let profiles = {
+                let mut stmt = tx.prepare(
+                    "SELECT b.connection_profile_id FROM vault_connection_binding b
+                     JOIN vault_item i ON i.id = b.item_id WHERE i.vault_id = ?1",
+                )?;
+                let rows = stmt
+                    .query_map(params![id.0], |row| {
+                        row.get::<_, i64>(0).map(ConnectionProfileId)
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                rows
+            };
+            let handles = {
+                let mut stmt = tx.prepare(
+                    "SELECT DISTINCT v.secret_handle FROM vault_item_version v
+                     JOIN vault_item i ON i.id = v.item_id
+                     WHERE i.vault_id = ?1 AND v.secret_handle IS NOT NULL",
+                )?;
+                let rows = stmt
+                    .query_map(params![id.0], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                rows
+            };
+            for profile in &profiles {
+                tx.execute(
+                    "DELETE FROM connection_profile WHERE id = ?1",
+                    params![profile.0],
+                )?;
+            }
+            tx.execute("DELETE FROM vault WHERE id = ?1", params![id.0])?;
+            insert_operation_audit_row(&tx, &audit(actor, "delete", "vault", Some(id.0)))?;
+            tx.commit()?;
+            Ok((profiles, handles))
+        })
+        .await?;
+        self.delete_vault_secret_handles(handles, "delete_vault")
+            .await?;
+        Ok(profiles)
+    }
+
     pub fn list_vault_grants(&self, id: VaultId, actor: PrincipalId) -> Result<Vec<VaultGrant>> {
         let conn = self.conn()?;
         require_capability(&conn, id, actor, |capabilities| capabilities.manage)?;
@@ -548,6 +778,43 @@ impl MetadataStore {
             .ok_or(MetadataError::VaultPermissionDenied)
     }
 
+    pub fn delete_vault_grant(
+        &self,
+        id: VaultId,
+        actor: PrincipalId,
+        principal: PrincipalId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let (_, scope, _) = vault_capabilities_locked(&tx, id, actor)?;
+        require_capability(&tx, id, actor, |capabilities| capabilities.manage)?;
+        if scope != VaultScope::Team || actor == principal {
+            return Err(MetadataError::VaultPermissionDenied);
+        }
+        let current = tx
+            .query_row(
+                "SELECT revision FROM vault_grant WHERE vault_id = ?1 AND principal_id = ?2",
+                params![id.0, principal.0],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?
+            .ok_or(MetadataError::VaultPermissionDenied)?;
+        if current != expected_revision {
+            return Err(MetadataError::VaultRevisionConflict {
+                expected: expected_revision,
+                current,
+            });
+        }
+        tx.execute(
+            "DELETE FROM vault_grant WHERE vault_id = ?1 AND principal_id = ?2",
+            params![id.0, principal.0],
+        )?;
+        insert_operation_audit_row(&tx, &audit(actor, "revoke", "vault", Some(id.0)))?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_vault_items(&self, id: VaultId, actor: PrincipalId) -> Result<Vec<VaultItem>> {
         let conn = self.conn()?;
         require_capability(&conn, id, actor, |capabilities| capabilities.inspect)?;
@@ -569,6 +836,11 @@ impl MetadataStore {
             })
         })?;
         Ok(mapped.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_vault_item(&self, id: VaultItemId, actor: PrincipalId) -> Result<VaultItem> {
+        let conn = self.conn()?;
+        item_by_id_locked(&conn, id, actor)
     }
 
     pub async fn create_vault_item(
@@ -644,6 +916,346 @@ impl MetadataStore {
             }
         }
         result
+    }
+
+    pub async fn update_vault_item(
+        &self,
+        id: VaultItemId,
+        actor: PrincipalId,
+        expected_revision: u64,
+        label: String,
+        metadata: VaultItemMetadata,
+        secret: Option<serde_json::Value>,
+    ) -> Result<(VaultItem, Option<ConnectionProfileId>)> {
+        validate_label(&label)?;
+        let metadata_json = validate_metadata(&metadata)?;
+        if metadata.kind() == VaultItemKind::Connection {
+            if let Some(secret) = secret.as_ref() {
+                validate_provider_credentials(secret)?;
+            }
+        }
+        let new_handle = if let Some(secret) = secret.as_ref() {
+            let bytes = validate_secret(secret)?;
+            let handle = Uuid::new_v4().to_string();
+            self.secrets
+                .put(VAULT_SECRET_NAMESPACE, &handle, &bytes)
+                .await?;
+            Some(handle)
+        } else {
+            None
+        };
+        let backend = self.backend.clone();
+        let db_handle = new_handle.clone();
+        let result: Result<(VaultItem, Option<ConnectionProfileId>)> = sqlite_blocking(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction()?;
+            let (vault_id, kind, current, head, inherited): (
+                i64,
+                String,
+                u64,
+                u64,
+                Option<String>,
+            ) = tx
+                .query_row(
+                    "SELECT i.vault_id, i.kind, i.revision, i.head_version, v.secret_handle
+                     FROM vault_item i JOIN vault_item_version v
+                       ON v.item_id = i.id AND v.version = i.head_version
+                     WHERE i.id = ?1",
+                    params![id.0],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or(MetadataError::VaultItemNotFound(id))?;
+            require_capability(&tx, VaultId(vault_id), actor, |capabilities| {
+                capabilities.edit
+            })?;
+            if current != expected_revision {
+                return Err(MetadataError::VaultRevisionConflict {
+                    expected: expected_revision,
+                    current,
+                });
+            }
+            if parse_kind(kind)? != metadata.kind() {
+                return Err(MetadataError::InvalidVaultInput(
+                    "vault item kind cannot be changed".into(),
+                ));
+            }
+            let now = now_text();
+            let next = head + 1;
+            let version_handle = db_handle.clone().or(inherited);
+            tx.execute(
+                "UPDATE vault_item SET label = ?2, metadata_json = ?3,
+                 head_version = ?4, revision = revision + 1, updated_at = ?5 WHERE id = ?1",
+                params![id.0, label.trim(), metadata_json, next, now],
+            )?;
+            tx.execute(
+                "INSERT INTO vault_item_version
+                 (item_id, version, parent_version, metadata_json, secret_handle,
+                  change_summary, created_by, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    id.0,
+                    next,
+                    head,
+                    metadata_json,
+                    version_handle,
+                    if db_handle.is_some() {
+                        "Updated and rotated"
+                    } else {
+                        "Updated"
+                    },
+                    actor.0,
+                    now,
+                ],
+            )?;
+            let profile = sync_connection_item_locked(&tx, id, label.trim(), &metadata, &now)?;
+            insert_operation_audit_row(&tx, &audit(actor, "update", "vault_item", Some(id.0)))?;
+            tx.commit()?;
+            Ok((item_by_id_locked(&conn, id, actor)?, profile))
+        })
+        .await;
+        if result.is_err() {
+            if let Some(handle) = new_handle {
+                self.delete_vault_secret_handles(vec![handle], "update_vault_item_rollback")
+                    .await?;
+            }
+        }
+        result
+    }
+
+    pub async fn set_vault_secret(
+        &self,
+        id: VaultItemId,
+        actor: PrincipalId,
+        expected_revision: u64,
+        secret: serde_json::Value,
+    ) -> Result<(VaultItem, Option<ConnectionProfileId>)> {
+        let item = self.get_vault_item(id, actor)?;
+        self.update_vault_item(
+            id,
+            actor,
+            expected_revision,
+            item.label,
+            item.metadata,
+            Some(secret),
+        )
+        .await
+    }
+
+    pub fn clear_vault_secret(
+        &self,
+        id: VaultItemId,
+        actor: PrincipalId,
+        expected_revision: u64,
+    ) -> Result<(VaultItem, Option<ConnectionProfileId>)> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let (vault_id, current, head, metadata_json): (i64, u64, u64, String) = tx
+            .query_row(
+                "SELECT vault_id, revision, head_version, metadata_json
+                 FROM vault_item WHERE id = ?1",
+                params![id.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?
+            .ok_or(MetadataError::VaultItemNotFound(id))?;
+        require_capability(&tx, VaultId(vault_id), actor, |capabilities| {
+            capabilities.edit
+        })?;
+        if current != expected_revision {
+            return Err(MetadataError::VaultRevisionConflict {
+                expected: expected_revision,
+                current,
+            });
+        }
+        let now = now_text();
+        let next = head + 1;
+        tx.execute(
+            "UPDATE vault_item SET head_version = ?2, revision = revision + 1,
+             updated_at = ?3 WHERE id = ?1",
+            params![id.0, next, now],
+        )?;
+        tx.execute(
+            "INSERT INTO vault_item_version
+             (item_id, version, parent_version, metadata_json, secret_handle,
+              change_summary, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, 'Secret cleared', ?5, ?6)",
+            params![id.0, next, head, metadata_json, actor.0, now],
+        )?;
+        insert_operation_audit_row(&tx, &audit(actor, "clear", "vault_item", Some(id.0)))?;
+        let profile = tx
+            .query_row(
+                "SELECT connection_profile_id FROM vault_connection_binding WHERE item_id = ?1",
+                params![id.0],
+                |row| row.get::<_, i64>(0).map(ConnectionProfileId),
+            )
+            .optional()?;
+        tx.commit()?;
+        Ok((item_by_id_locked(&conn, id, actor)?, profile))
+    }
+
+    pub async fn restore_vault_item(
+        &self,
+        id: VaultItemId,
+        actor: PrincipalId,
+        expected_revision: u64,
+        version: u64,
+    ) -> Result<(VaultItem, Option<ConnectionProfileId>)> {
+        let (metadata, source_handle) = {
+            let conn = self.conn()?;
+            let item = item_by_id_locked(&conn, id, actor)?;
+            require_capability(&conn, item.vault_id, actor, |capabilities| {
+                capabilities.edit
+            })?;
+            conn.query_row(
+                "SELECT metadata_json, secret_handle FROM vault_item_version
+                 WHERE item_id = ?1 AND version = ?2",
+                params![id.0, version],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+            .ok_or(MetadataError::VaultItemNotFound(id))?
+        };
+        let metadata_value: VaultItemMetadata = serde_json::from_str(&metadata)?;
+        let new_handle = if let Some(source) = source_handle {
+            let bytes = self
+                .secrets
+                .get(VAULT_SECRET_NAMESPACE, &source)
+                .await?
+                .ok_or(MetadataError::VaultSecretMissing)?;
+            let handle = Uuid::new_v4().to_string();
+            self.secrets
+                .put(VAULT_SECRET_NAMESPACE, &handle, &bytes)
+                .await?;
+            Some(handle)
+        } else {
+            None
+        };
+        let backend = self.backend.clone();
+        let db_handle = new_handle.clone();
+        let result: Result<(VaultItem, Option<ConnectionProfileId>)> = sqlite_blocking(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction()?;
+            let (vault_id, current, head, label): (i64, u64, u64, String) = tx
+                .query_row(
+                    "SELECT vault_id, revision, head_version, label FROM vault_item WHERE id = ?1",
+                    params![id.0],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?
+                .ok_or(MetadataError::VaultItemNotFound(id))?;
+            require_capability(&tx, VaultId(vault_id), actor, |capabilities| {
+                capabilities.edit
+            })?;
+            if current != expected_revision {
+                return Err(MetadataError::VaultRevisionConflict {
+                    expected: expected_revision,
+                    current,
+                });
+            }
+            let now = now_text();
+            let next = head + 1;
+            tx.execute(
+                "UPDATE vault_item SET metadata_json = ?2, head_version = ?3,
+                 revision = revision + 1, updated_at = ?4 WHERE id = ?1",
+                params![id.0, metadata, next, now],
+            )?;
+            tx.execute(
+                "INSERT INTO vault_item_version
+                 (item_id, version, parent_version, metadata_json, secret_handle,
+                  change_summary, created_by, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    id.0,
+                    next,
+                    head,
+                    metadata,
+                    db_handle,
+                    format!("Restored from v{version}"),
+                    actor.0,
+                    now,
+                ],
+            )?;
+            let profile = sync_connection_item_locked(&tx, id, &label, &metadata_value, &now)?;
+            insert_operation_audit_row(&tx, &audit(actor, "restore", "vault_item", Some(id.0)))?;
+            tx.commit()?;
+            Ok((item_by_id_locked(&conn, id, actor)?, profile))
+        })
+        .await;
+        if result.is_err() {
+            if let Some(handle) = new_handle {
+                self.delete_vault_secret_handles(vec![handle], "restore_vault_item_rollback")
+                    .await?;
+            }
+        }
+        result
+    }
+
+    pub async fn delete_vault_item(
+        &self,
+        id: VaultItemId,
+        actor: PrincipalId,
+        expected_revision: u64,
+    ) -> Result<(VaultId, Option<ConnectionProfileId>)> {
+        let backend = self.backend.clone();
+        let (vault, profile, handles) = sqlite_blocking(move || {
+            let mut conn = backend.conn()?;
+            let tx = conn.transaction()?;
+            let (vault, current): (i64, u64) = tx
+                .query_row(
+                    "SELECT vault_id, revision FROM vault_item WHERE id = ?1",
+                    params![id.0],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?
+                .ok_or(MetadataError::VaultItemNotFound(id))?;
+            require_capability(&tx, VaultId(vault), actor, |capabilities| capabilities.edit)?;
+            if current != expected_revision {
+                return Err(MetadataError::VaultRevisionConflict {
+                    expected: expected_revision,
+                    current,
+                });
+            }
+            let profile = tx
+                .query_row(
+                    "SELECT connection_profile_id FROM vault_connection_binding WHERE item_id = ?1",
+                    params![id.0],
+                    |row| row.get::<_, i64>(0).map(ConnectionProfileId),
+                )
+                .optional()?;
+            let handles = {
+                let mut stmt = tx.prepare(
+                    "SELECT DISTINCT secret_handle FROM vault_item_version
+                     WHERE item_id = ?1 AND secret_handle IS NOT NULL",
+                )?;
+                let rows = stmt
+                    .query_map(params![id.0], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                rows
+            };
+            if let Some(profile) = profile {
+                tx.execute(
+                    "DELETE FROM connection_profile WHERE id = ?1",
+                    params![profile.0],
+                )?;
+            }
+            tx.execute("DELETE FROM vault_item WHERE id = ?1", params![id.0])?;
+            insert_operation_audit_row(&tx, &audit(actor, "delete", "vault_item", Some(id.0)))?;
+            tx.commit()?;
+            Ok((VaultId(vault), profile, handles))
+        })
+        .await?;
+        self.delete_vault_secret_handles(handles, "delete_vault_item")
+            .await?;
+        Ok((vault, profile))
     }
 
     pub async fn upsert_vault_connection_profile(
@@ -949,6 +1561,48 @@ impl MetadataStore {
         Ok(versions)
     }
 
+    pub fn get_vault_item_version(
+        &self,
+        id: VaultItemId,
+        actor: PrincipalId,
+        version: u64,
+    ) -> Result<VaultItemVersion> {
+        self.list_vault_item_versions(id, actor)?
+            .into_iter()
+            .find(|candidate| candidate.version == version)
+            .ok_or(MetadataError::VaultItemNotFound(id))
+    }
+
+    pub fn diff_vault_item_versions(
+        &self,
+        id: VaultItemId,
+        actor: PrincipalId,
+        from: u64,
+        to: u64,
+    ) -> Result<sift_api_types::VaultItemVersionDiff> {
+        let conn = self.conn()?;
+        let item = item_by_id_locked(&conn, id, actor)?;
+        let load = |version| {
+            conn.query_row(
+                "SELECT metadata_json, secret_handle FROM vault_item_version
+                 WHERE item_id = ?1 AND version = ?2",
+                params![id.0, version],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+        };
+        let left = load(from)?.ok_or(MetadataError::VaultItemNotFound(id))?;
+        let right = load(to)?.ok_or(MetadataError::VaultItemNotFound(id))?;
+        debug_assert_eq!(item.id, id);
+        Ok(sift_api_types::VaultItemVersionDiff {
+            item_id: id,
+            from_version: from,
+            to_version: to,
+            metadata_changed: left.0 != right.0,
+            secret_changed: left.1 != right.1,
+        })
+    }
+
     pub async fn reveal_vault_secret(
         &self,
         id: VaultItemId,
@@ -1163,5 +1817,99 @@ mod tests {
                 .await,
             Err(MetadataError::VaultPermissionDenied)
         ));
+    }
+
+    #[tokio::test]
+    async fn item_rotation_clear_restore_and_delete_are_revisioned() {
+        let (store, tenant, owner, _) = store();
+        let vault = store.create_team_vault(tenant, owner, "Lifecycle").unwrap();
+        let item = store
+            .create_vault_item(
+                vault.id,
+                owner,
+                "Deploy token".into(),
+                VaultItemMetadata::Token {
+                    service: "deploy".into(),
+                    expires_at: None,
+                },
+                Some(serde_json::json!("first")),
+            )
+            .await
+            .unwrap();
+        let (updated, _) = store
+            .update_vault_item(
+                item.id,
+                owner,
+                item.revision,
+                item.label.clone(),
+                item.metadata.clone(),
+                Some(serde_json::json!("second")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.revision, 2);
+        assert_eq!(
+            store.reveal_vault_secret(item.id, owner).await.unwrap(),
+            serde_json::json!("second")
+        );
+        let (cleared, _) = store
+            .clear_vault_secret(item.id, owner, updated.revision)
+            .unwrap();
+        assert_eq!(cleared.secret_status, VaultSecretStatus::Missing);
+        let (restored, _) = store
+            .restore_vault_item(item.id, owner, cleared.revision, 1)
+            .await
+            .unwrap();
+        assert_eq!(restored.head_version, 4);
+        assert_eq!(
+            store.reveal_vault_secret(item.id, owner).await.unwrap(),
+            serde_json::json!("first")
+        );
+        let diff = store
+            .diff_vault_item_versions(item.id, owner, 3, 4)
+            .unwrap();
+        assert!(diff.secret_changed);
+        store
+            .delete_vault_item(item.id, owner, restored.revision)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.get_vault_item(item.id, owner),
+            Err(MetadataError::VaultItemNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn team_vault_and_grant_deletion_are_revision_safe() {
+        let (store, tenant, owner, member) = store();
+        let vault = store.create_team_vault(tenant, owner, "Original").unwrap();
+        let renamed = store
+            .update_vault(vault.id, owner, vault.revision, "Renamed")
+            .unwrap();
+        assert_eq!(renamed.name, "Renamed");
+        assert!(matches!(
+            store.update_vault(vault.id, owner, vault.revision, "Stale"),
+            Err(MetadataError::VaultRevisionConflict { .. })
+        ));
+        let grant = store
+            .set_vault_grant(
+                vault.id,
+                owner,
+                member,
+                None,
+                VaultCapabilities {
+                    inspect: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .delete_vault_grant(vault.id, owner, member, grant.revision)
+            .unwrap();
+        assert!(store
+            .list_vaults(tenant, member)
+            .unwrap()
+            .iter()
+            .all(|row| row.id != vault.id));
     }
 }

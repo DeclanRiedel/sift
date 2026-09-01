@@ -3446,11 +3446,12 @@ impl MetadataStore {
         mut audit: NewOperationAudit,
     ) -> Result<()> {
         let backend = self.backend.clone();
-        let handles = sqlite_blocking(move || {
+        let (handles, vault_handles) = sqlite_blocking(move || {
             let mut conn = backend.conn()?;
             let tx = conn.transaction()?;
             ensure_tenant_admin_locked(&tx, tenant, actor)?;
             let mut handles = Vec::new();
+            let mut vault_handles = Vec::new();
             let managed = tx.query_row(
                 "SELECT EXISTS(
                     SELECT 1 FROM instance_managed_resource
@@ -3480,6 +3481,24 @@ impl MetadataStore {
                 let credential_handles = rows(stmt.query_map(params![id.0], |row| row.get(0))?)?;
                 handles.extend(credential_handles);
             }
+            let bound_item = tx
+                .query_row(
+                    "SELECT item_id FROM vault_connection_binding
+                     WHERE connection_profile_id = ?1",
+                    params![id.0],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            if let Some(item) = bound_item {
+                let mut stmt = tx.prepare(
+                    "SELECT DISTINCT secret_handle FROM vault_item_version
+                     WHERE item_id = ?1 AND secret_handle IS NOT NULL",
+                )?;
+                vault_handles.extend(rows(
+                    stmt.query_map(params![item], |row| row.get::<_, String>(0))?,
+                )?);
+                tx.execute("DELETE FROM vault_item WHERE id = ?1", params![item])?;
+            }
             let deleted = tx.execute(
                 "DELETE FROM connection_profile WHERE tenant_id = ?1 AND id = ?2",
                 params![tenant.0, id.0],
@@ -3490,13 +3509,15 @@ impl MetadataStore {
             audit.actor_principal_id = Some(actor);
             insert_operation_audit_row(&tx, &audit)?;
             tx.commit()?;
-            Ok(handles)
+            Ok((handles, vault_handles))
         })
         .await?;
         for handle in handles {
             self.delete_secret_best_effort(&handle, "delete_connection_profile")
                 .await;
         }
+        self.delete_vault_secret_handles(vault_handles, "delete_connection_profile")
+            .await?;
         Ok(())
     }
 

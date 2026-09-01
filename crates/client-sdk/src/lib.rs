@@ -10,6 +10,19 @@ pub use room_replica::{FollowEvent, FollowMode, Ingest, RoomReplica};
 /// extracted from the live router. Keeping the declaration here prevents the
 /// server from claiming SDK coverage on the SDK's behalf.
 pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
+    "clearMetadataVaultItemSecret",
+    "deleteMetadataVault",
+    "deleteMetadataVaultGrant",
+    "deleteMetadataVaultItem",
+    "diffMetadataVaultItemVersions",
+    "getMetadataVault",
+    "getMetadataVaultItem",
+    "getMetadataVaultItemVersion",
+    "restoreMetadataVaultItem",
+    "setMetadataVaultItemSecret",
+    "testMetadataVaultItem",
+    "updateMetadataVault",
+    "updateMetadataVaultItem",
     "acceptTenantInvitation",
     "addMetadataRoomMember",
     "adminCreatePasswordPrincipal",
@@ -3866,6 +3879,27 @@ impl Client {
         self.post("/v1/metadata/vaults", &request).await
     }
 
+    pub async fn vault(&self, vault: VaultId) -> Result<Vault> {
+        self.get(&format!("/v1/metadata/vaults/{}", vault.0)).await
+    }
+
+    pub async fn update_vault(
+        &self,
+        vault: VaultId,
+        request: sift_api_types::UpdateVaultRequest,
+    ) -> Result<Vault> {
+        self.put(&format!("/v1/metadata/vaults/{}", vault.0), &request)
+            .await
+    }
+
+    pub async fn delete_vault(&self, vault: VaultId, expected_revision: u64) -> Result<()> {
+        self.delete(&format!(
+            "/v1/metadata/vaults/{}?expected_revision={expected_revision}",
+            vault.0
+        ))
+        .await
+    }
+
     pub async fn vault_items(&self, vault: VaultId) -> Result<Vec<VaultItem>> {
         self.get(&format!("/v1/metadata/vaults/{}/items", vault.0))
             .await
@@ -3878,6 +3912,52 @@ impl Client {
     ) -> Result<VaultItem> {
         self.post(&format!("/v1/metadata/vaults/{}/items", vault.0), &request)
             .await
+    }
+
+    pub async fn vault_item(&self, item: VaultItemId) -> Result<VaultItem> {
+        self.get(&format!("/v1/metadata/vault-items/{}", item.0))
+            .await
+    }
+
+    pub async fn update_vault_item(
+        &self,
+        item: VaultItemId,
+        request: sift_api_types::UpdateVaultItemRequest,
+    ) -> Result<VaultItem> {
+        self.put(&format!("/v1/metadata/vault-items/{}", item.0), &request)
+            .await
+    }
+
+    pub async fn delete_vault_item(&self, item: VaultItemId, expected_revision: u64) -> Result<()> {
+        self.delete(&format!(
+            "/v1/metadata/vault-items/{}?expected_revision={expected_revision}",
+            item.0
+        ))
+        .await
+    }
+
+    pub async fn set_vault_item_secret(
+        &self,
+        item: VaultItemId,
+        request: sift_api_types::SetVaultSecretRequest,
+    ) -> Result<VaultItem> {
+        self.post(
+            &format!("/v1/metadata/vault-items/{}/secret", item.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn clear_vault_item_secret(
+        &self,
+        item: VaultItemId,
+        expected_revision: u64,
+    ) -> Result<VaultItem> {
+        self.delete_response(&format!(
+            "/v1/metadata/vault-items/{}/secret?expected_revision={expected_revision}",
+            item.0
+        ))
+        .await
     }
 
     pub async fn vault_grants(&self, vault: VaultId) -> Result<Vec<VaultGrant>> {
@@ -3898,9 +3978,66 @@ impl Client {
         .await
     }
 
+    pub async fn delete_vault_grant(
+        &self,
+        vault: VaultId,
+        principal: sift_api_types::PrincipalId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.delete(&format!(
+            "/v1/metadata/vaults/{}/grants/{}?expected_revision={expected_revision}",
+            vault.0, principal.0
+        ))
+        .await
+    }
+
     pub async fn vault_item_versions(&self, item: VaultItemId) -> Result<Vec<VaultItemVersion>> {
         self.get(&format!("/v1/metadata/vault-items/{}/versions", item.0))
             .await
+    }
+
+    pub async fn vault_item_version(
+        &self,
+        item: VaultItemId,
+        version: u64,
+    ) -> Result<VaultItemVersion> {
+        self.get(&format!(
+            "/v1/metadata/vault-items/{}/versions/{version}",
+            item.0
+        ))
+        .await
+    }
+
+    pub async fn diff_vault_item_versions(
+        &self,
+        item: VaultItemId,
+        from: u64,
+        to: u64,
+    ) -> Result<sift_api_types::VaultItemVersionDiff> {
+        self.get(&format!(
+            "/v1/metadata/vault-items/{}/diff?from={from}&to={to}",
+            item.0
+        ))
+        .await
+    }
+
+    pub async fn restore_vault_item(
+        &self,
+        item: VaultItemId,
+        request: sift_api_types::RestoreVaultItemRequest,
+    ) -> Result<VaultItem> {
+        self.post(
+            &format!("/v1/metadata/vault-items/{}/restore", item.0),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn test_vault_item(&self, item: VaultItemId) -> Result<()> {
+        let _: serde_json::Value = self
+            .post_empty(&format!("/v1/metadata/vault-items/{}/test", item.0))
+            .await?;
+        Ok(())
     }
 
     pub async fn step_up_vault_reveal(
@@ -4508,6 +4645,10 @@ impl Client {
     async fn delete(&self, path: &str) -> Result<()> {
         let _: serde_json::Value = self.send(self.http.delete(self.url(path))).await?;
         Ok(())
+    }
+
+    async fn delete_response<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.send(self.http.delete(self.url(path))).await
     }
 
     async fn delete_body<B: serde::Serialize>(&self, path: &str, body: &B) -> Result<()> {

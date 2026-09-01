@@ -15,7 +15,7 @@ use sift_protocol::{
     WorkspaceRevision,
 };
 
-use crate::{ApiTokenRow, CredentialMode, RoomKind, RoomRole};
+use crate::{ApiTokenRow, CredentialMode, RoomKind, RoomRole, VaultItemId};
 
 /// Editable desired-state document for a server launched from an instance root.
 /// Host filesystem paths are intentionally not part of the public response.
@@ -733,6 +733,11 @@ pub struct SetVaultSecretRequest {
     pub secret: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ClearVaultSecretRequest {
+    pub expected_revision: u64,
+}
+
 impl std::fmt::Debug for SetVaultSecretRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -810,6 +815,15 @@ impl std::fmt::Debug for RevealVaultSecretResponse {
 pub struct RestoreVaultItemRequest {
     pub expected_revision: u64,
     pub version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VaultItemVersionDiff {
+    pub item_id: VaultItemId,
+    pub from_version: u64,
+    pub to_version: u64,
+    pub metadata_changed: bool,
+    pub secret_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

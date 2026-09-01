@@ -824,6 +824,10 @@ pub fn app(state: AppState) -> Router {
             get_with(list_metadata_vaults, doc("listMetadataVaults", "List personal and shared vaults visible to the caller")).post_with(create_metadata_vault, doc("createMetadataVault", "Create a personal or team vault")),
         )
         .api_route(
+            "/v1/metadata/vaults/:id",
+            get_with(get_metadata_vault, doc("getMetadataVault", "Read one visible vault")).put_with(update_metadata_vault, doc("updateMetadataVault", "Rename a vault with optimistic revision checking")).delete_with(delete_metadata_vault, doc("deleteMetadataVault", "Delete a team vault and its stored items")),
+        )
+        .api_route(
             "/v1/metadata/vaults/:id/items",
             get_with(list_metadata_vault_items, doc("listMetadataVaultItems", "List redacted vault item metadata")).post_with(create_metadata_vault_item, doc("createMetadataVaultItem", "Store a versioned vault item")),
         )
@@ -833,11 +837,35 @@ pub fn app(state: AppState) -> Router {
         )
         .api_route(
             "/v1/metadata/vaults/:id/grants/:principal",
-            put_with(set_metadata_vault_grant, doc("setMetadataVaultGrant", "Create or replace a team-vault grant")),
+            put_with(set_metadata_vault_grant, doc("setMetadataVaultGrant", "Create or replace a team-vault grant")).delete_with(delete_metadata_vault_grant, doc("deleteMetadataVaultGrant", "Remove a team-vault grant")),
+        )
+        .api_route(
+            "/v1/metadata/vault-items/:id",
+            get_with(get_metadata_vault_item, doc("getMetadataVaultItem", "Read redacted vault item metadata")).put_with(update_metadata_vault_item, doc("updateMetadataVaultItem", "Update metadata and optionally rotate a vault item secret")).delete_with(delete_metadata_vault_item, doc("deleteMetadataVaultItem", "Delete a vault item and retire its secret versions")),
+        )
+        .api_route(
+            "/v1/metadata/vault-items/:id/secret",
+            post_with(set_metadata_vault_item_secret, doc("setMetadataVaultItemSecret", "Replace a vault item secret without revealing the prior value")).delete_with(clear_metadata_vault_item_secret, doc("clearMetadataVaultItemSecret", "Clear a vault item secret")),
         )
         .api_route(
             "/v1/metadata/vault-items/:id/versions",
             get_with(list_metadata_vault_item_versions, doc("listMetadataVaultItemVersions", "List redacted vault item history")),
+        )
+        .api_route(
+            "/v1/metadata/vault-items/:id/versions/:version",
+            get_with(get_metadata_vault_item_version, doc("getMetadataVaultItemVersion", "Read one redacted vault item version")),
+        )
+        .api_route(
+            "/v1/metadata/vault-items/:id/diff",
+            get_with(diff_metadata_vault_item_versions, doc("diffMetadataVaultItemVersions", "Compare redacted vault item versions")),
+        )
+        .api_route(
+            "/v1/metadata/vault-items/:id/restore",
+            post_with(restore_metadata_vault_item, doc("restoreMetadataVaultItem", "Restore a retained vault item version as a new head")),
+        )
+        .api_route(
+            "/v1/metadata/vault-items/:id/test",
+            post_with(test_metadata_vault_item, doc("testMetadataVaultItem", "Test a vault-backed connection without revealing credentials")),
         )
         .api_route(
             "/v1/metadata/vault-items/:id/reveal",
@@ -1683,6 +1711,17 @@ struct RoomRouting {
 #[derive(Deserialize, JsonSchema)]
 struct TenantQuery {
     tenant: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct VaultExpectedRevisionQuery {
+    expected_revision: u64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct VaultVersionDiffQuery {
+    from: u64,
+    to: u64,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -14173,6 +14212,93 @@ async fn create_metadata_vault(
     Ok(Json(vault))
 }
 
+async fn get_metadata_vault(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<sift_api_types::Vault>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state, headers).await?;
+    Ok(Json(
+        metadata_blocking(move || {
+            metadata
+                .get_vault(
+                    sift_api_types::VaultId(id),
+                    api_principal(auth.principal_id),
+                )
+                .map_err(Into::into)
+        })
+        .await?,
+    ))
+}
+
+async fn update_metadata_vault(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<sift_api_types::UpdateVaultRequest>,
+) -> ApiResult<Json<sift_api_types::Vault>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let actor = api_principal(auth.principal_id);
+    let vault = metadata_blocking(move || {
+        metadata
+            .update_vault(
+                sift_api_types::VaultId(id),
+                actor,
+                request.expected_revision,
+                &request.name,
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    state.sessions.push_operation(
+        Operation::Vault {
+            action: sift_protocol::VaultAction::Update,
+            vault_id: Some(id),
+            item_id: None,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(vault))
+}
+
+async fn delete_metadata_vault(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<VaultExpectedRevisionQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let vault = metadata.get_vault(
+        sift_api_types::VaultId(id),
+        api_principal(auth.principal_id),
+    )?;
+    let profiles = metadata
+        .delete_vault(
+            sift_api_types::VaultId(id),
+            api_principal(auth.principal_id),
+            query.expected_revision,
+        )
+        .await?;
+    for profile in profiles {
+        state
+            .sessions
+            .disconnect_managed_profile(sift_metadata::TenantId(vault.tenant_id.0), profile)
+            .await;
+    }
+    state.sessions.push_operation(
+        Operation::Vault {
+            action: sift_protocol::VaultAction::Delete,
+            vault_id: Some(id),
+            item_id: None,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn list_metadata_vault_items(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -14287,6 +14413,222 @@ async fn set_metadata_vault_grant(
     Ok(Json(grant))
 }
 
+async fn delete_metadata_vault_grant(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, principal)): Path<(i64, i64)>,
+    Query(query): Query<VaultExpectedRevisionQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let actor = api_principal(auth.principal_id);
+    let profiles = metadata.vault_connection_profiles(sift_api_types::VaultId(id))?;
+    metadata_blocking(move || {
+        metadata
+            .delete_vault_grant(
+                sift_api_types::VaultId(id),
+                actor,
+                sift_api_types::PrincipalId(principal),
+                query.expected_revision,
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    for profile in profiles {
+        state
+            .sessions
+            .disconnect_managed_profile_principal(profile, sift_metadata::PrincipalId(principal))
+            .await;
+    }
+    state.sessions.push_operation(
+        Operation::Vault {
+            action: sift_protocol::VaultAction::Revoke,
+            vault_id: Some(id),
+            item_id: None,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn get_metadata_vault_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<sift_api_types::VaultItem>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state, headers).await?;
+    Ok(Json(
+        metadata_blocking(move || {
+            metadata
+                .get_vault_item(
+                    sift_api_types::VaultItemId(id),
+                    api_principal(auth.principal_id),
+                )
+                .map_err(Into::into)
+        })
+        .await?,
+    ))
+}
+
+async fn disconnect_vault_profile(
+    state: &AppState,
+    metadata: &MetadataStore,
+    item: &sift_api_types::VaultItem,
+    profile: Option<sift_metadata::ConnectionProfileId>,
+    actor: sift_api_types::PrincipalId,
+) -> ApiResult<()> {
+    if let Some(profile) = profile {
+        let vault = metadata.get_vault(item.vault_id, actor)?;
+        state
+            .sessions
+            .disconnect_managed_profile(sift_metadata::TenantId(vault.tenant_id.0), profile)
+            .await;
+    }
+    Ok(())
+}
+
+async fn update_metadata_vault_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<sift_api_types::UpdateVaultItemRequest>,
+) -> ApiResult<Json<sift_api_types::VaultItem>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let (item, profile) = metadata
+        .update_vault_item(
+            sift_api_types::VaultItemId(id),
+            api_principal(auth.principal_id),
+            request.expected_revision,
+            request.label,
+            request.metadata,
+            request.secret,
+        )
+        .await?;
+    disconnect_vault_profile(
+        &state,
+        metadata,
+        &item,
+        profile,
+        api_principal(auth.principal_id),
+    )
+    .await?;
+    state.sessions.push_operation(
+        Operation::Vault {
+            action: sift_protocol::VaultAction::Update,
+            vault_id: Some(item.vault_id.0),
+            item_id: Some(id),
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(item))
+}
+
+async fn set_metadata_vault_item_secret(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<sift_api_types::SetVaultSecretRequest>,
+) -> ApiResult<Json<sift_api_types::VaultItem>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let (item, profile) = metadata
+        .set_vault_secret(
+            sift_api_types::VaultItemId(id),
+            api_principal(auth.principal_id),
+            request.expected_revision,
+            request.secret,
+        )
+        .await?;
+    disconnect_vault_profile(
+        &state,
+        metadata,
+        &item,
+        profile,
+        api_principal(auth.principal_id),
+    )
+    .await?;
+    state.sessions.push_operation(
+        Operation::Vault {
+            action: sift_protocol::VaultAction::SetSecret,
+            vault_id: Some(item.vault_id.0),
+            item_id: Some(id),
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(item))
+}
+
+async fn clear_metadata_vault_item_secret(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<VaultExpectedRevisionQuery>,
+) -> ApiResult<Json<sift_api_types::VaultItem>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let (item, profile) = metadata.clear_vault_secret(
+        sift_api_types::VaultItemId(id),
+        api_principal(auth.principal_id),
+        query.expected_revision,
+    )?;
+    disconnect_vault_profile(
+        &state,
+        metadata,
+        &item,
+        profile,
+        api_principal(auth.principal_id),
+    )
+    .await?;
+    state.sessions.push_operation(
+        Operation::Vault {
+            action: sift_protocol::VaultAction::SetSecret,
+            vault_id: Some(item.vault_id.0),
+            item_id: Some(id),
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(item))
+}
+
+async fn delete_metadata_vault_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<VaultExpectedRevisionQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let item = metadata.get_vault_item(
+        sift_api_types::VaultItemId(id),
+        api_principal(auth.principal_id),
+    )?;
+    let vault = metadata.get_vault(item.vault_id, api_principal(auth.principal_id))?;
+    let (_, profile) = metadata
+        .delete_vault_item(
+            item.id,
+            api_principal(auth.principal_id),
+            query.expected_revision,
+        )
+        .await?;
+    if let Some(profile) = profile {
+        state
+            .sessions
+            .disconnect_managed_profile(sift_metadata::TenantId(vault.tenant_id.0), profile)
+            .await;
+    }
+    state.sessions.push_operation(
+        Operation::Vault {
+            action: sift_protocol::VaultAction::Delete,
+            vault_id: Some(item.vault_id.0),
+            item_id: Some(id),
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn list_metadata_vault_item_versions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -14303,6 +14645,138 @@ async fn list_metadata_vault_item_versions(
         })
         .await?,
     ))
+}
+
+async fn get_metadata_vault_item_version(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, version)): Path<(i64, u64)>,
+) -> ApiResult<Json<sift_api_types::VaultItemVersion>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state, headers).await?;
+    Ok(Json(
+        metadata_blocking(move || {
+            metadata
+                .get_vault_item_version(
+                    sift_api_types::VaultItemId(id),
+                    api_principal(auth.principal_id),
+                    version,
+                )
+                .map_err(Into::into)
+        })
+        .await?,
+    ))
+}
+
+async fn diff_metadata_vault_item_versions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<VaultVersionDiffQuery>,
+) -> ApiResult<Json<sift_api_types::VaultItemVersionDiff>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state, headers).await?;
+    Ok(Json(
+        metadata_blocking(move || {
+            metadata
+                .diff_vault_item_versions(
+                    sift_api_types::VaultItemId(id),
+                    api_principal(auth.principal_id),
+                    query.from,
+                    query.to,
+                )
+                .map_err(Into::into)
+        })
+        .await?,
+    ))
+}
+
+async fn restore_metadata_vault_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<sift_api_types::RestoreVaultItemRequest>,
+) -> ApiResult<Json<sift_api_types::VaultItem>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let actor = api_principal(auth.principal_id);
+    let (item, profile) = metadata
+        .restore_vault_item(
+            sift_api_types::VaultItemId(id),
+            actor,
+            request.expected_revision,
+            request.version,
+        )
+        .await?;
+    disconnect_vault_profile(&state, metadata, &item, profile, actor).await?;
+    state.sessions.push_operation(
+        Operation::Vault {
+            action: sift_protocol::VaultAction::Restore,
+            vault_id: Some(item.vault_id.0),
+            item_id: Some(id),
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(item))
+}
+
+async fn test_metadata_vault_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let metadata = metadata_store(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let item_id = sift_api_types::VaultItemId(id);
+    let item = metadata.get_vault_item(item_id, api_principal(auth.principal_id))?;
+    if item.kind != sift_protocol::VaultItemKind::Connection {
+        return Err(ApiError::BadRequest(
+            "only connection vault items can be tested".into(),
+        ));
+    }
+    let (_, profile_id) = metadata
+        .vault_connection_binding_by_item(item_id)?
+        .ok_or_else(|| ApiError::BadRequest("connection item is not bound to a profile".into()))?;
+    let vault = metadata.get_vault(item.vault_id, api_principal(auth.principal_id))?;
+    let tenant = sift_metadata::TenantId(vault.tenant_id.0);
+    let profile = metadata.get_connection_profile(tenant, profile_id)?;
+    let (configuration, credentials) = metadata
+        .resolve_provider_connection(tenant, auth.principal_id, profile_id)
+        .await?;
+    let session = state.sessions.open_session_with_owner(
+        OpenSessionRequest {
+            tag: Some(format!("vault-test:{id}")),
+            tenant_id: Some(tenant.0),
+        },
+        Some(auth.principal_id),
+        Some(tenant),
+        false,
+    )?;
+    let tested = state
+        .sessions
+        .open_managed_connection(
+            session.id,
+            profile.provider_id,
+            configuration,
+            credentials,
+            auth.principal_id,
+            tenant,
+            profile_id,
+            profile.policy.revision,
+            auth.trusted_local,
+        )
+        .await;
+    let _ = state.sessions.close_session(session.id);
+    tested?;
+    state.sessions.push_operation(
+        Operation::Vault {
+            action: sift_protocol::VaultAction::Test,
+            vault_id: Some(item.vault_id.0),
+            item_id: Some(id),
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn reveal_metadata_vault_item(
