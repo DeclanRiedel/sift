@@ -267,3 +267,10 @@ delete, import, and export workflows.
 - [ ] SQL Server Query Store
 - [ ] SQL Server Agent
 - [ ] SQL Server server-settings browser
+
+### Platform and operations
+
+- [ ] Prometheus metrics endpoint
+- [ ] OpenTelemetry trace export
+- [~] Cross-platform desktop packaging
+- [ ] Signed artifact and installer validation matrix

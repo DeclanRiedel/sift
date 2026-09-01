@@ -1,5 +1,8 @@
 # DDL — known gaps
 
+Status: **active code-grounded backlog, audited 2026-09-01.** Resolved items
+remain summarized only where they explain the boundary of an open item.
+
 Snapshot of what the Phase D DDL generator (`crates/server/src/ddl.rs`)
 does *not* cover today, ordered by priority. Each entry names the
 missing kind or feature, the smallest concrete task that would close

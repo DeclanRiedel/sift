@@ -1,7 +1,7 @@
 # Keyboard-first desktop interaction language
 
-Status: **foundation in progress (2026-08-24).** This plan refines Phase M before
-editable query results add another dense interaction surface.
+Status: **active keyboard backlog, audited 2026-09-01.** Implemented foundations
+and the remaining grid/edit-equivalence work are tracked below.
 
 ## Decision
 

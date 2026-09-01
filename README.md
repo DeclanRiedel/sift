@@ -35,11 +35,11 @@ Desktop preferences are stored in a local `settings.toml`. See
 
 ## Documentation
 
-- [`docs/PLANS/server-build-list-v2.md`](docs/PLANS/server-build-list-v2.md) —
-  current backlog
+- [`docs/PLANS/ide-parity-and-provider-extensibility.md`](docs/PLANS/ide-parity-and-provider-extensibility.md) —
+  canonical missing-feature inventory
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — design decisions
 - [`docs/PLANS/phase-m-gpui-desktop.md`](docs/PLANS/phase-m-gpui-desktop.md) —
-  desktop plan
+  remaining desktop architecture and validation work
 - [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — desktop frame and memory budgets
 - [`docs/INSTANCE-CONFIG.md`](docs/INSTANCE-CONFIG.md) — instance configuration
 - [`docs/REMOTE-AND-UPDATES.md`](docs/REMOTE-AND-UPDATES.md) — remote use and

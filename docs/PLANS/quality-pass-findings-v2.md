@@ -1,7 +1,9 @@
-# Repo-wide quality pass v2 — open findings
+# Server quality and scaling backlog
 
-> This is a historical engineering audit, not a release-readiness report. Its
-> severity labels and resolved findings do not declare a beta or release state.
+Status: **retained technical-debt inventory, reviewed for relevance
+2026-09-01.** This is not a release-readiness report. Individual findings were
+not revalidated; file/line anchors are discovery hints and must be rechecked
+against current code before implementation.
 
 Read-only re-review across `crates/server`, both driver crates,
 `crates/metadata`, `crates/protocol`, `crates/doc`, `crates/core`,

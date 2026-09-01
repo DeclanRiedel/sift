@@ -1,6 +1,7 @@
 # Metadata migration lifecycle
 
-Status: accepted for implementation (ADR-038).
+Status: **implemented.** ADR-038 is normative; this file retains the detailed
+operator policy and compatibility matrix.
 
 ## Ownership
 

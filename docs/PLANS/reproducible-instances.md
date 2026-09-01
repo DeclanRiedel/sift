@@ -1,8 +1,11 @@
 # Reproducible Sift instances
 
-Status: **future design, not a release plan.** Phase 0 would freeze exact
-schemas and selected dependencies; no implementation has started. `v1` below
-names the proposed manifest and API contract version, not a product release,
+Status: **partially implemented contract, not a release plan.** The two-file
+manifest/lock model, validation and offline plan/apply path, destination state
+and generations, desktop multi-instance lifecycle, and local/SSH/hosted
+connection workspace exist. Later claim automation, complete generation
+management, portable bundles, and hardening sections remain planned. `v1`
+below names the manifest and API contract version, not a product release,
 release candidate, or target date.
 
 ## Goal

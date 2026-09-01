@@ -1,6 +1,7 @@
 # Sift state backup and restore
 
-Status: accepted for implementation (ADR-039).
+Status: **implemented and graduated.** ADR-039 is normative; this file retains
+the archive, restore, and failure-recovery contract.
 
 ## Recovery boundary
 

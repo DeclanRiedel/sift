@@ -15,7 +15,8 @@ what sift is and the five product goals; this file is the operational subset.
 - `crates/client-sdk` — thin reference HTTP + WebSocket consumer.
 - `crates/core` — reserved for shared server-internal types (currently empty).
 - `docs/DECISIONS.md` — load-bearing ADRs.
-- `docs/PLANS/server-build-list-v2.md` — code-grounded ordered backlog before GUI.
+- `docs/PLANS/ide-parity-and-provider-extensibility.md` — canonical product
+  feature inventory; unchecked and partial items are current work candidates.
 
 ## Non-negotiable rules
 

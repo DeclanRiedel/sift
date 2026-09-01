@@ -1,9 +1,9 @@
 # sift — Architectural Decisions
 
-This file keeps only current, load-bearing decisions. Reference material
-(feature checklist, Zed-lessons rationale) lives under `docs/legacy/`; the
-code-grounded ordered backlog is `docs/PLANS/server-build-list-v2.md`.
-Written and candidate ADRs are indexed there against their phase.
+This file keeps only current, load-bearing decisions. Product gaps live in
+`docs/PLANS/ide-parity-and-provider-extensibility.md`; focused implementation
+and validation plans remain under `docs/PLANS/` only while they carry active
+work or normative contract detail.
 
 > **Status convention:** this is architecture documentation, not a release
 > roadmap. An ADR marked `graduated` has satisfied its scoped engineering
