@@ -46274,6 +46274,12 @@ mod tests {
             );
         });
         cx.run_until_parked();
+        let data_tab = cx.debug_bounds("result-tab-data").expect("Data result tab");
+        let result_row = cx.debug_bounds("result-row-0").expect("result row");
+        assert!(
+            data_tab.bottom() <= result_row.top(),
+            "result tabs should remain above side-by-side results"
+        );
         let expand = cx
             .debug_bounds("open-result-data-modal")
             .expect("Data expand button");

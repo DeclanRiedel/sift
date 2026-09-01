@@ -3697,117 +3697,6 @@ impl ResultsView {
             )
     }
 
-    fn render_vertical_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors;
-        let tab_height = cx.theme().metrics.tab_height;
-        div()
-            .w(px(92.))
-            .h_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .border_r_1()
-            .border_color(colors.subtle_border)
-            .bg(colors.toolbar)
-            .children(ResultTab::ALL.into_iter().map(|tab| {
-                let selected = tab == self.tab;
-                div()
-                    .id(("result-tab-vertical", tab as usize))
-                    .debug_selector(move || format!("result-tab-{}", tab.label().to_lowercase()))
-                    .relative()
-                    .h(tab_height)
-                    .px_2()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .when(selected, |tab| {
-                        tab.bg(colors.background).text_color(colors.text).child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .top_1()
-                                .bottom_1()
-                                .w(px(1.))
-                                .bg(colors.accent),
-                        )
-                    })
-                    .when(!selected, |tab| tab.text_color(colors.muted_text))
-                    .hover(|tab| tab.bg(colors.hovered_surface).text_color(colors.text))
-                    .on_click(cx.listener(move |view, _, _, cx| view.select_tab(tab, cx)))
-                    .child(tab.label())
-            }))
-            .child(div().flex_1())
-            .child(
-                div()
-                    .px_2()
-                    .pb_2()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(colors.muted_text)
-                    .children(
-                        (!Self::is_error_state(&self.state))
-                            .then(|| div().truncate().child(self.state.status_label())),
-                    )
-                    .children((self.tab == ResultTab::Data).then(|| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .children(
-                                self.selection_summary()
-                                    .map(|summary| div().w_full().truncate().child(summary)),
-                            )
-                            .children((!self.staged_cells.is_empty()).then(|| {
-                                Button::new(
-                                    "review-staged-result-edits-vertical",
-                                    format!("Review {} staged", self.staged_cells.len()),
-                                )
-                                .debug_selector("review-staged-result-edits")
-                                .tone(ButtonTone::Neutral)
-                                .on_click(cx.listener(
-                                    |_, _, _, cx| cx.emit(ResultsEvent::ReviewStagedEditsRequested),
-                                ))
-                            }))
-                            .children((!self.large_view).then(|| {
-                                div()
-                                    .debug_selector(|| "open-result-data-modal".into())
-                                    .child(
-                                        IconButton::new(
-                                            "open-result-data-modal-vertical",
-                                            IconName::Maximize,
-                                            "Open Data in large view",
-                                        )
-                                        .icon_size(13.)
-                                        .text("Expand")
-                                        .tooltip("Open Data in large view")
-                                        .on_click(
-                                            cx.listener(|_, _, _, cx| {
-                                                cx.emit(ResultsEvent::OpenDataModalRequested)
-                                            }),
-                                        ),
-                                    )
-                            }))
-                            .child(
-                                IconButton::new(
-                                    "copy-result-cell-vertical",
-                                    IconName::Copy,
-                                    "Copy highlighted fields",
-                                )
-                                .icon_size(13.)
-                                .text("Copy")
-                                .tooltip("Copy highlighted fields")
-                                .on_click(cx.listener(
-                                    |view, _, window, cx| {
-                                        view.copy_selected_cell(&CopySelectedCell, window, cx)
-                                    },
-                                )),
-                            )
-                    })),
-            )
-    }
-
     fn render_grid_transform_editor(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let column_index = self.grid_transform_column?;
         let column = self.rendered_columns.get(column_index)?;
@@ -5616,21 +5505,13 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::previous_result_tab))
             .on_action(cx.listener(Self::next_result_tab))
             .flex()
-            .when(self.placement == ResultPlacement::Bottom, |view| {
-                view.flex_col()
-            })
-            .when(self.placement == ResultPlacement::Right, |view| view.flex())
+            .flex_col()
             .size_full()
             .flex_1()
             .min_h_0()
             .bg(colors.background)
             .text_color(colors.text)
-            .when(self.placement == ResultPlacement::Bottom, |view| {
-                view.child(self.render_tab_bar(cx))
-            })
-            .when(self.placement == ResultPlacement::Right, |view| {
-                view.child(self.render_vertical_tab_bar(cx))
-            })
+            .child(self.render_tab_bar(cx))
             .child(
                 div()
                     .flex()
