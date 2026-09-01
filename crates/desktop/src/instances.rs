@@ -1,6 +1,7 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
 
 use keyring::{Entry, Error as KeyringError};
 use sift_client_sdk::SessionTokenProvider;
@@ -8,7 +9,7 @@ use sift_protocol::{AuthClientKind, AuthTokensResponse, PasswordLoginRequest};
 use sift_workspace_ui::{
     InstanceCommand, InstanceConfigurationPresentation, InstanceCredentialKind,
     InstanceCredentialPresentation, InstanceManagerEvent, InstancePlanPresentation,
-    SavedInstanceRoot, SavedServerProfile,
+    SavedInstanceRoot, SavedServerKind, SavedServerProfile,
 };
 
 use crate::app::DesktopServer;
@@ -249,24 +250,43 @@ pub async fn run_instance_manager(
     // window is currently connected to. This lets one desktop supervise
     // several isolated auto-loopback instances without conflating UI state.
     let mut configured_targets = std::collections::HashMap::new();
+    let mut ssh_supervisor: Option<tokio::task::JoinHandle<()>> = None;
     annotate_saved_tokens(&mut profiles, &credentials).await;
     if let Some(profile) = restored_profile_id
         .as_deref()
         .and_then(|id| profiles.iter().find(|profile| profile.id == id))
         .cloned()
     {
-        let session = credentials.get_session(&profile.id).await.ok().flatten();
-        let token = if session.is_none() && profile.has_saved_token {
-            credentials.get(&profile.id).await.ok().flatten()
+        if profile.kind == SavedServerKind::Ssh {
+            if let Ok((_, task)) = connect_ssh(
+                &store,
+                &mut profiles,
+                &channels.targets,
+                Some(profile.id.clone()),
+                profile.name,
+                profile.base_url,
+                profile
+                    .ssh_state_dir
+                    .unwrap_or_else(|| ".local/state/sift/remote".into()),
+            )
+            .await
+            {
+                ssh_supervisor = Some(task);
+            }
         } else {
-            None
-        };
-        let target = DesktopServer::remote(profile, token);
-        let target = match session {
-            Some(session) => target.with_session_tokens(session).unwrap_or(target),
-            None => target,
-        };
-        let _ = channels.targets.send(target);
+            let session = credentials.get_session(&profile.id).await.ok().flatten();
+            let token = if session.is_none() && profile.has_saved_token {
+                credentials.get(&profile.id).await.ok().flatten()
+            } else {
+                None
+            };
+            let target = DesktopServer::remote(profile, token);
+            let target = match session {
+                Some(session) => target.with_session_tokens(session).unwrap_or(target),
+                None => target,
+            };
+            let _ = channels.targets.send(target);
+        }
     }
     if channels
         .events
@@ -281,6 +301,9 @@ pub async fn run_instance_manager(
     while let Some(command) = channels.commands.recv().await {
         let (authentication, result) = match command {
             InstanceCommand::UseLocal => {
+                if let Some(task) = ssh_supervisor.take() {
+                    task.abort();
+                }
                 (false, connect_local(&channels.targets, &local_target).await)
             }
             InstanceCommand::Connect {
@@ -290,6 +313,9 @@ pub async fn run_instance_manager(
                 bearer_token,
                 remember_token,
             } => {
+                if let Some(task) = ssh_supervisor.take() {
+                    task.abort();
+                }
                 let _ = channels.events.send(InstanceManagerEvent::Testing);
                 (
                     false,
@@ -306,6 +332,32 @@ pub async fn run_instance_manager(
                     )
                     .await,
                 )
+            }
+            InstanceCommand::ConnectSsh {
+                profile_id,
+                name,
+                destination,
+                state_dir,
+            } => {
+                if let Some(task) = ssh_supervisor.take() {
+                    task.abort();
+                }
+                let _ = channels.events.send(InstanceManagerEvent::Testing);
+                let result = connect_ssh(
+                    &store,
+                    &mut profiles,
+                    &channels.targets,
+                    profile_id,
+                    name,
+                    destination,
+                    state_dir,
+                )
+                .await
+                .map(|(outcome, task)| {
+                    ssh_supervisor = Some(task);
+                    outcome
+                });
+                (false, result)
             }
             InstanceCommand::Forget { profile_id } => (
                 false,
@@ -1107,6 +1159,8 @@ async fn connect(
         id: profile_id.clone(),
         name: name.clone(),
         base_url,
+        kind: SavedServerKind::Hosted,
+        ssh_state_dir: None,
         has_saved_token: remember_token && token.is_some(),
     };
     let target = DesktopServer::remote(profile.clone(), token.clone());
@@ -1135,6 +1189,178 @@ async fn connect(
         .send(target)
         .map_err(|_| "desktop server supervisor stopped".to_string())?;
     Ok(ManagerOutcome::Connected(name))
+}
+
+async fn connect_ssh(
+    store: &InstanceStore,
+    profiles: &mut Vec<SavedServerProfile>,
+    targets: &tokio::sync::watch::Sender<DesktopServer>,
+    requested_id: Option<String>,
+    name: String,
+    destination: String,
+    state_dir: String,
+) -> Result<(ManagerOutcome, tokio::task::JoinHandle<()>), String> {
+    let name = name.trim().to_owned();
+    let destination = destination.trim().to_owned();
+    if name.is_empty() || name.len() > 120 {
+        return Err("server name must be between 1 and 120 characters".into());
+    }
+    if destination.is_empty()
+        || destination.starts_with('-')
+        || destination.chars().any(char::is_whitespace)
+    {
+        return Err("SSH destination must be one OpenSSH host or user@host token".into());
+    }
+    if state_dir.is_empty()
+        || state_dir.starts_with('/')
+        || state_dir
+            .split('/')
+            .any(|part| part.is_empty() || part == "..")
+        || !state_dir
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
+    {
+        return Err("SSH state directory must be a safe relative path".into());
+    }
+
+    let helper = std::env::current_exe()
+        .map_err(|error| format!("locating sift-desktop executable failed: {error}"))?
+        .parent()
+        .map(|directory| {
+            directory.join(if cfg!(windows) {
+                "sift-remote.exe"
+            } else {
+                "sift-remote"
+            })
+        })
+        .ok_or_else(|| "sift-desktop executable has no parent directory".to_string())?;
+    if !helper.is_file() {
+        return Err(format!(
+            "SSH helper is not installed beside sift-desktop: {}",
+            helper.display()
+        ));
+    }
+
+    let mut child = tokio::process::Command::new(&helper)
+        .arg(&destination)
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("starting SSH helper failed: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "SSH helper stdout was unavailable".to_string())?;
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let first = match tokio::time::timeout(std::time::Duration::from_secs(120), lines.next_line())
+        .await
+    {
+        Ok(Ok(Some(line))) => line,
+        Ok(Ok(None)) => {
+            return Err(
+                ssh_helper_failure(&mut child, "SSH helper exited before remote readiness").await,
+            )
+        }
+        Ok(Err(error)) => {
+            return Err(ssh_helper_failure(
+                &mut child,
+                &format!("reading SSH helper readiness failed: {error}"),
+            )
+            .await)
+        }
+        Err(_) => {
+            return Err(ssh_helper_failure(
+                &mut child,
+                "SSH helper timed out before remote readiness",
+            )
+            .await)
+        }
+    };
+    let ready: sift_protocol::RemoteReady = serde_json::from_str(&first).map_err(|error| {
+        format!("decoding SSH helper readiness failed: {error}; output: {first}")
+    })?;
+
+    let profile_id = requested_id
+        .filter(|id| profiles.iter().any(|profile| profile.id == *id))
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let runtime_profile = SavedServerProfile {
+        id: profile_id.clone(),
+        name: name.clone(),
+        base_url: ready.local_base_url.clone(),
+        kind: SavedServerKind::Ssh,
+        ssh_state_dir: Some(state_dir.clone()),
+        has_saved_token: false,
+    };
+    let target = DesktopServer::remote(runtime_profile, Some(ready.access_token));
+    test_client(&target.client().await?, "SSH server").await?;
+
+    let saved = SavedServerProfile {
+        id: profile_id.clone(),
+        name: name.clone(),
+        base_url: destination,
+        kind: SavedServerKind::Ssh,
+        ssh_state_dir: Some(state_dir.clone()),
+        has_saved_token: false,
+    };
+    if let Some(index) = profiles.iter().position(|profile| profile.id == profile_id) {
+        profiles[index] = saved;
+    } else {
+        profiles.push(saved);
+    }
+    profiles.sort_by(|left, right| left.name.cmp(&right.name));
+    store.save(profiles)?;
+    targets
+        .send(target)
+        .map_err(|_| "desktop server supervisor stopped".to_string())?;
+
+    let renewal_targets = targets.clone();
+    let renewal_name = name.clone();
+    let task = tokio::spawn(async move {
+        let stderr_task = child.stderr.take().map(|stderr| {
+            tokio::spawn(async move {
+                let mut stderr = tokio::io::BufReader::new(stderr);
+                let mut sink = Vec::new();
+                let _ = stderr.read_to_end(&mut sink).await;
+            })
+        });
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(ready) = serde_json::from_str::<sift_protocol::RemoteReady>(&line) else {
+                continue;
+            };
+            let profile = SavedServerProfile {
+                id: profile_id.clone(),
+                name: renewal_name.clone(),
+                base_url: ready.local_base_url,
+                kind: SavedServerKind::Ssh,
+                ssh_state_dir: Some(state_dir.clone()),
+                has_saved_token: false,
+            };
+            let _ = renewal_targets.send(DesktopServer::remote(profile, Some(ready.access_token)));
+        }
+        let _ = child.kill().await;
+        if let Some(task) = stderr_task {
+            task.abort();
+        }
+    });
+    Ok((ManagerOutcome::Connected(name), task))
+}
+
+async fn ssh_helper_failure(child: &mut tokio::process::Child, summary: &str) -> String {
+    let _ = child.kill().await;
+    let mut detail = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut detail).await;
+    }
+    let detail = detail.trim();
+    if detail.is_empty() {
+        summary.to_owned()
+    } else {
+        format!("{summary}: {detail}")
+    }
 }
 
 async fn test_client(client: &sift_client_sdk::Client, label: &str) -> Result<(), String> {
@@ -1184,6 +1410,8 @@ mod tests {
             id: "one".into(),
             name: "LAN".into(),
             base_url: "https://sift.lan".into(),
+            kind: SavedServerKind::Hosted,
+            ssh_state_dir: None,
             has_saved_token: true,
         };
         store.save(std::slice::from_ref(&profile)).unwrap();
@@ -1203,6 +1431,8 @@ mod tests {
             id: "one".into(),
             name: "LAN".into(),
             base_url: "https://sift.lan".into(),
+            kind: SavedServerKind::Hosted,
+            ssh_state_dir: None,
             has_saved_token: false,
         };
         let root = SavedInstanceRoot {
@@ -1237,6 +1467,8 @@ mod tests {
                 id: "remote".into(),
                 name: "Remote".into(),
                 base_url: "https://sift.invalid".into(),
+                kind: SavedServerKind::Hosted,
+                ssh_state_dir: None,
                 has_saved_token: false,
             },
             None,

@@ -95,10 +95,22 @@ impl DesktopServer {
         Self::Remote {
             client,
             instance: sift_workspace_ui::InstanceSpec {
-                id: format!("hosted:{}", profile.id),
+                id: format!(
+                    "{}:{}",
+                    if profile.kind == sift_workspace_ui::SavedServerKind::Ssh {
+                        "ssh"
+                    } else {
+                        "hosted"
+                    },
+                    profile.id
+                ),
                 name: profile.name,
                 base_url: profile.base_url,
-                kind: sift_workspace_ui::InstanceKind::Hosted,
+                kind: if profile.kind == sift_workspace_ui::SavedServerKind::Ssh {
+                    sift_workspace_ui::InstanceKind::Ssh
+                } else {
+                    sift_workspace_ui::InstanceKind::Hosted
+                },
             },
         }
     }
@@ -286,6 +298,7 @@ impl SiftApp {
             runtime: self.runtime.clone(),
             server: restored_profile
                 .as_ref()
+                .filter(|profile| profile.kind != sift_workspace_ui::SavedServerKind::Ssh)
                 .map(|profile| DesktopServer::remote(profile.clone(), None))
                 .unwrap_or_else(|| self.server.clone()),
             instance_store: self.instance_store.clone(),
@@ -341,7 +354,10 @@ fn restored_server_profile(
     if startup_remote {
         return None;
     }
-    let profile_id = instance_id?.strip_prefix("hosted:")?;
+    let instance_id = instance_id?;
+    let profile_id = instance_id
+        .strip_prefix("hosted:")
+        .or_else(|| instance_id.strip_prefix("ssh:"))?;
     profiles
         .iter()
         .find(|profile| profile.id == profile_id)
@@ -6668,6 +6684,8 @@ mod tests {
             id: "server-one".into(),
             name: "LAN".into(),
             base_url: "https://sift.lan".into(),
+            kind: sift_workspace_ui::SavedServerKind::Hosted,
+            ssh_state_dir: None,
             has_saved_token: true,
         };
         assert_eq!(

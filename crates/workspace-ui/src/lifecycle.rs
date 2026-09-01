@@ -261,8 +261,32 @@ pub async fn load_instance(
 ) -> Result<LoadedInstance, DegradedReason> {
     if !send(&sender, LifecycleEvent::Selected(instance))
         || !send(&sender, LifecycleEvent::Phase(ConnectionPhase::Connecting))
-        || !send(&sender, LifecycleEvent::Phase(ConnectionPhase::Negotiating))
     {
+        return Err(DegradedReason::Offline);
+    }
+    if let Err(error) = client.health().await {
+        return Err(fail(&sender, &error));
+    }
+    let readiness = match client.ready().await {
+        Ok(readiness) => readiness,
+        Err(error) => return Err(fail(&sender, &error)),
+    };
+    if !readiness.ready {
+        let reason = DegradedReason::Server(if readiness.draining {
+            "server is draining".into()
+        } else if !readiness.drivers_registered {
+            "no database providers are ready".into()
+        } else if readiness.metadata_ok == Some(false) {
+            "metadata is unavailable".into()
+        } else {
+            "server is not ready".into()
+        });
+        let _ = sender.send(LifecycleEvent::Phase(ConnectionPhase::Degraded(
+            reason.clone(),
+        )));
+        return Err(reason);
+    }
+    if !send(&sender, LifecycleEvent::Phase(ConnectionPhase::Negotiating)) {
         return Err(DegradedReason::Offline);
     }
     let handshake = match client.connect().await {

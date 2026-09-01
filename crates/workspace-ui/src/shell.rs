@@ -1647,8 +1647,20 @@ pub struct SavedServerProfile {
     pub id: String,
     pub name: String,
     pub base_url: String,
+    #[serde(default)]
+    pub kind: SavedServerKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_state_dir: Option<String>,
     #[serde(default, skip_serializing)]
     pub has_saved_token: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedServerKind {
+    #[default]
+    Hosted,
+    Ssh,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1724,6 +1736,12 @@ pub enum InstanceCommand {
         base_url: String,
         bearer_token: Option<String>,
         remember_token: bool,
+    },
+    ConnectSsh {
+        profile_id: Option<String>,
+        name: String,
+        destination: String,
+        state_dir: String,
     },
     Forget {
         profile_id: String,
@@ -7774,6 +7792,7 @@ pub struct WorkspaceShell {
     remember_server_token: bool,
     server_connection_pending: bool,
     server_connection_error: Option<String>,
+    server_connection_ssh: bool,
     account_pending: bool,
     account_error: Option<String>,
     server_sessions: Vec<sift_protocol::SessionInfo>,
@@ -8773,6 +8792,7 @@ impl WorkspaceShell {
             remember_server_token: true,
             server_connection_pending: false,
             server_connection_error: None,
+            server_connection_ssh: false,
             account_pending: false,
             account_error: None,
             server_sessions: Vec::new(),
@@ -26435,12 +26455,23 @@ impl WorkspaceShell {
         if self.server_connection_pending {
             return;
         }
-        let command = InstanceCommand::Connect {
-            profile_id: Some(profile.id.clone()),
-            name: profile.name.clone(),
-            base_url: profile.base_url.clone(),
-            bearer_token: None,
-            remember_token: profile.has_saved_token,
+        let command = match profile.kind {
+            SavedServerKind::Hosted => InstanceCommand::Connect {
+                profile_id: Some(profile.id.clone()),
+                name: profile.name.clone(),
+                base_url: profile.base_url.clone(),
+                bearer_token: None,
+                remember_token: profile.has_saved_token,
+            },
+            SavedServerKind::Ssh => InstanceCommand::ConnectSsh {
+                profile_id: Some(profile.id.clone()),
+                name: profile.name.clone(),
+                destination: profile.base_url.clone(),
+                state_dir: profile
+                    .ssh_state_dir
+                    .clone()
+                    .unwrap_or_else(|| ".local/state/sift/remote".into()),
+            },
         };
         if self.transaction_state.transaction().is_some() {
             self.pending_connection_change = Some(PendingConnectionChange::SwitchServer {
@@ -26476,6 +26507,7 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         self.selected_server_profile = Some(profile.id.clone());
+        self.server_connection_ssh = profile.kind == SavedServerKind::Ssh;
         self.server_name_input
             .update(cx, |input, cx| input.set_text(profile.name.clone(), cx));
         self.server_url_input
@@ -26489,6 +26521,7 @@ impl WorkspaceShell {
 
     fn new_server_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_server_profile = None;
+        self.server_connection_ssh = false;
         self.server_name_input
             .update(cx, |input, cx| input.set_text("", cx));
         self.server_url_input
@@ -26508,16 +26541,29 @@ impl WorkspaceShell {
         let base_url = self.server_url_input.read(cx).text().trim().to_owned();
         let token = self.server_token_input.read(cx).text().to_owned();
         if name.is_empty() || base_url.is_empty() {
-            self.server_connection_error = Some("Display name and server URL are required".into());
+            self.server_connection_error = Some(if self.server_connection_ssh {
+                "Display name and SSH destination are required".into()
+            } else {
+                "Display name and server URL are required".into()
+            });
             cx.notify();
             return;
         }
-        let command = InstanceCommand::Connect {
-            profile_id: self.selected_server_profile.clone(),
-            name,
-            base_url,
-            bearer_token: (!token.is_empty()).then_some(token),
-            remember_token: self.remember_server_token,
+        let command = if self.server_connection_ssh {
+            InstanceCommand::ConnectSsh {
+                profile_id: self.selected_server_profile.clone(),
+                name,
+                destination: base_url,
+                state_dir: ".local/state/sift/remote".into(),
+            }
+        } else {
+            InstanceCommand::Connect {
+                profile_id: self.selected_server_profile.clone(),
+                name,
+                base_url,
+                bearer_token: (!token.is_empty()).then_some(token),
+                remember_token: self.remember_server_token,
+            }
         };
         if self.transaction_state.transaction().is_some() {
             self.pending_connection_change = Some(PendingConnectionChange::SwitchServer {
@@ -35748,6 +35794,7 @@ impl WorkspaceShell {
                     let selected = self.selected_server_profile.clone();
                     let pending = self.server_connection_pending;
                     let remember = self.remember_server_token;
+                    let ssh = self.server_connection_ssh;
                     let mut saved_rows = Vec::new();
                     for (profile_index, profile) in profiles.into_iter().enumerate() {
                         let active = selected.as_deref() == Some(profile.id.as_str());
@@ -35783,7 +35830,11 @@ impl WorkspaceShell {
                                                 .text_xs()
                                                 .text_color(colors.muted_text)
                                                 .truncate()
-                                                .child(profile.base_url.clone()),
+                                                .child(if profile.kind == SavedServerKind::Ssh {
+                                                    format!("SSH · {}", profile.base_url)
+                                                } else {
+                                                    profile.base_url.clone()
+                                                }),
                                         ),
                                 )
                                 .when(profile.has_saved_token, |row| {
@@ -35870,6 +35921,46 @@ impl WorkspaceShell {
                             )
                         })
                         .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    Button::new("server-mode-hosted", "URL")
+                                        .tone(if ssh {
+                                            ButtonTone::Ghost
+                                        } else {
+                                            ButtonTone::Neutral
+                                        })
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.server_connection_ssh = false;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("server-mode-ssh", "SSH")
+                                        .tone(if ssh {
+                                            ButtonTone::Neutral
+                                        } else {
+                                            ButtonTone::Ghost
+                                        })
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.server_connection_ssh = true;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(if ssh {
+                                            "Uses your OpenSSH config and host-key policy"
+                                        } else {
+                                            "Connect directly to a Sift server"
+                                        }),
+                                ),
+                        )
+                        .child(
                             Field::new(
                                 "NAME",
                                 Some(self.server_name_input.focus_handle(cx)),
@@ -35878,19 +35969,19 @@ impl WorkspaceShell {
                         )
                         .child(
                             Field::new(
-                                "SERVER URL",
+                                if ssh { "SSH DESTINATION" } else { "SERVER URL" },
                                 Some(self.server_url_input.focus_handle(cx)),
                                 self.server_url_input.clone(),
                             ),
                         )
-                        .child(
+                        .when(!ssh, |form| form.child(
                             Field::new(
                                 "BEARER TOKEN",
                                 Some(self.server_token_input.focus_handle(cx)),
                                 self.server_token_input.clone(),
                             ),
-                        )
-                        .child(
+                        ))
+                        .when(!ssh, |form| form.child(
                             div()
                                 .id("remember-server-token")
                                 .role(Role::CheckBox)
@@ -35938,7 +36029,7 @@ impl WorkspaceShell {
                                         .whitespace_normal()
                                         .child("Remember token in the OS keychain"),
                                 ),
-                        )
+                        ))
                         .children(self.server_connection_error.as_ref().map(|message| {
                             ErrorBanner::new(message.clone())
                         }))
@@ -48435,6 +48526,37 @@ mod tests {
     }
 
     #[gpui::test]
+    fn connect_dialog_dispatches_ssh_destination_without_secret_material(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_instance_manager(sender, event_receiver, Vec::new(), cx);
+            shell.server_connection_ssh = true;
+            shell
+                .server_name_input
+                .update(cx, |input, cx| input.set_text("Development", cx));
+            shell
+                .server_url_input
+                .update(cx, |input, cx| input.set_text("declan@devbox", cx));
+            shell.submit_server_connection(cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(InstanceCommand::ConnectSsh {
+                profile_id: None,
+                name,
+                destination,
+                state_dir,
+            }) if name == "Development"
+                && destination == "declan@devbox"
+                && state_dir == ".local/state/sift/remote"
+        ));
+    }
+
+    #[gpui::test]
     fn app_bar_server_picker_switches_using_the_saved_profile(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -48445,6 +48567,8 @@ mod tests {
             id: "team".into(),
             name: "Team Sift".into(),
             base_url: "https://sift.example.test".into(),
+            kind: SavedServerKind::Hosted,
+            ssh_state_dir: None,
             has_saved_token: true,
         };
         workspace.update(&mut cx, |shell, cx| {
