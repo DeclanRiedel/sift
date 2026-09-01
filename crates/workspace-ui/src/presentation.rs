@@ -9,6 +9,16 @@ use crate::settings::{
     RepositoryGrouping, RepositoryPrimaryAction, RepositorySort, RepositoryView,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseObjectBookmark {
+    pub instance_id: String,
+    pub profile_id: i64,
+    pub catalog: String,
+    pub schema: String,
+    pub object: String,
+    pub object_kind: sift_protocol::ObjectKind,
+}
+
 const PRESENTATION_VERSION: u32 = 1;
 const MIN_WINDOW_WIDTH: f32 = 720.0;
 const MIN_WINDOW_HEIGHT: f32 = 480.0;
@@ -306,6 +316,12 @@ pub struct PresentationState {
     /// text and product content are never persisted here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub palette_recents: Vec<String>,
+    /// Client-local object shortcuts. They contain stable identifiers only,
+    /// never object data, DDL, query text, or credentials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favorite_database_objects: Vec<DatabaseObjectBookmark>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_database_objects: Vec<DatabaseObjectBookmark>,
 }
 
 impl Default for PresentationState {
@@ -360,6 +376,8 @@ impl Default for PresentationState {
             repository_commit_drafts: HashMap::new(),
             repository_workspaces: HashMap::new(),
             palette_recents: Vec::new(),
+            favorite_database_objects: Vec::new(),
+            recent_database_objects: Vec::new(),
         }
     }
 }
@@ -475,6 +493,22 @@ mod tests {
     fn presentation_round_trip_contains_references_not_product_data() {
         let mut state = PresentationState {
             palette_recents: vec!["command:local:item.save".into()],
+            favorite_database_objects: vec![DatabaseObjectBookmark {
+                instance_id: "hosted:team".into(),
+                profile_id: 9,
+                catalog: "analytics".into(),
+                schema: "public".into(),
+                object: "events".into(),
+                object_kind: sift_protocol::ObjectKind::View,
+            }],
+            recent_database_objects: vec![DatabaseObjectBookmark {
+                instance_id: "local".into(),
+                profile_id: 2,
+                catalog: "app".into(),
+                schema: "public".into(),
+                object: "users".into(),
+                object_kind: sift_protocol::ObjectKind::Table,
+            }],
             ..PresentationState::default()
         };
         let mut remote = state.workspace.clone();
@@ -503,6 +537,8 @@ mod tests {
             assert!(!json.contains(forbidden));
         }
         assert!(json.contains("command:local:item.save"));
+        assert!(json.contains("events"));
+        assert!(json.contains("users"));
     }
 
     #[test]

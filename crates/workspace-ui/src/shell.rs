@@ -851,6 +851,8 @@ enum ConnectionTreeAction {
         group: ObjectGroupKind,
     },
     Object(DatabaseObjectTarget),
+    FavoriteObject(DatabaseObjectTarget),
+    RecentObject(DatabaseObjectTarget),
     Room(i64),
     Workspace(WorkspaceNavEntry),
     Document(DocumentNavEntry),
@@ -7578,6 +7580,8 @@ pub struct WorkspaceShell {
     palette_selected: usize,
     palette_scroll_handle: UniformListScrollHandle,
     palette_recents: Vec<String>,
+    favorite_database_objects: Vec<crate::presentation::DatabaseObjectBookmark>,
+    recent_database_objects: Vec<crate::presentation::DatabaseObjectBookmark>,
     command_projection_revision: u64,
     command_projection_cache: RefCell<Option<(CommandProjectionKey, Arc<Vec<CommandSpec>>)>>,
     query_history_focus_handle: FocusHandle,
@@ -7966,6 +7970,8 @@ impl WorkspaceShell {
         let repository_commit_drafts = state.repository_commit_drafts.clone();
         let repository_workspaces = state.repository_workspaces.clone();
         let palette_recents = state.palette_recents.clone();
+        let favorite_database_objects = state.favorite_database_objects.clone();
+        let recent_database_objects = state.recent_database_objects.clone();
         let vim_mode_default = settings.editor.default_mode == EditorMode::Vim;
         // Install the process-wide theme first so every child entity reads the
         // same palette through `ActiveTheme` during construction and render.
@@ -8601,6 +8607,8 @@ impl WorkspaceShell {
             palette_selected: 0,
             palette_scroll_handle: UniformListScrollHandle::new(),
             palette_recents,
+            favorite_database_objects,
+            recent_database_objects,
             command_projection_revision: 0,
             command_projection_cache: RefCell::new(None),
             query_history_focus_handle: cx.focus_handle(),
@@ -13624,6 +13632,93 @@ impl WorkspaceShell {
         self.connection_projection_cache.get_mut().take();
     }
 
+    fn database_object_bookmark(
+        &self,
+        target: &DatabaseObjectTarget,
+    ) -> crate::presentation::DatabaseObjectBookmark {
+        crate::presentation::DatabaseObjectBookmark {
+            instance_id: self
+                .selected_instance_id
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            profile_id: target.connection.id,
+            catalog: target.catalog.clone(),
+            schema: target.schema.clone(),
+            object: target.object.clone(),
+            object_kind: target.object_kind,
+        }
+    }
+
+    fn target_for_database_object_bookmark(
+        &self,
+        bookmark: &crate::presentation::DatabaseObjectBookmark,
+    ) -> Option<DatabaseObjectTarget> {
+        if self.selected_instance_id.as_deref().unwrap_or("local") != bookmark.instance_id
+            || !matches!(
+                self.connection_status,
+                ConnectionStatus::Connected { profile_id, .. }
+                    if profile_id == bookmark.profile_id
+            )
+        {
+            return None;
+        }
+        let connection = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| tenant.connections.iter())
+            .find(|connection| connection.id == bookmark.profile_id)?
+            .clone();
+        Some(DatabaseObjectTarget {
+            connection,
+            catalog: bookmark.catalog.clone(),
+            schema: bookmark.schema.clone(),
+            object: bookmark.object.clone(),
+            object_kind: bookmark.object_kind,
+        })
+    }
+
+    fn record_recent_database_object(
+        &mut self,
+        target: &DatabaseObjectTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let bookmark = self.database_object_bookmark(target);
+        self.recent_database_objects
+            .retain(|candidate| candidate != &bookmark);
+        self.recent_database_objects.insert(0, bookmark);
+        self.recent_database_objects.truncate(12);
+        self.invalidate_connection_projection();
+        self.persist(cx);
+    }
+
+    fn toggle_favorite_database_object(
+        &mut self,
+        target: &DatabaseObjectTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let bookmark = self.database_object_bookmark(target);
+        if let Some(index) = self
+            .favorite_database_objects
+            .iter()
+            .position(|candidate| candidate == &bookmark)
+        {
+            self.favorite_database_objects.remove(index);
+        } else {
+            self.favorite_database_objects.push(bookmark);
+            self.favorite_database_objects.sort_by(|left, right| {
+                (&left.catalog, &left.schema, &left.object).cmp(&(
+                    &right.catalog,
+                    &right.schema,
+                    &right.object,
+                ))
+            });
+        }
+        self.invalidate_connection_projection();
+        self.persist(cx);
+        cx.notify();
+    }
+
     fn visible_connection_items(&self) -> Arc<Vec<ConnectionTreeItem>> {
         let mut connection_count = 0;
         let mut room_count = 0;
@@ -13675,6 +13770,26 @@ impl WorkspaceShell {
 
     fn build_visible_connection_items(&self) -> Vec<ConnectionTreeItem> {
         let mut items = Vec::new();
+        items.extend(
+            self.favorite_database_objects
+                .iter()
+                .filter_map(|bookmark| {
+                    Some(ConnectionTreeItem {
+                        depth: 0,
+                        action: ConnectionTreeAction::FavoriteObject(
+                            self.target_for_database_object_bookmark(bookmark)?,
+                        ),
+                    })
+                }),
+        );
+        items.extend(self.recent_database_objects.iter().filter_map(|bookmark| {
+            Some(ConnectionTreeItem {
+                depth: 0,
+                action: ConnectionTreeAction::RecentObject(
+                    self.target_for_database_object_bookmark(bookmark)?,
+                ),
+            })
+        }));
         for tenant in &self.lifecycle.tenants {
             let tenant_id = tenant.id.0;
             items.push(ConnectionTreeItem {
@@ -13865,7 +13980,9 @@ impl WorkspaceShell {
                 group,
                 ..
             } => format!("{catalog}.{schema} {}", group.label()),
-            ConnectionTreeAction::Object(target) => format!(
+            ConnectionTreeAction::Object(target)
+            | ConnectionTreeAction::FavoriteObject(target)
+            | ConnectionTreeAction::RecentObject(target) => format!(
                 "{}.{}.{} {:?}",
                 target.catalog, target.schema, target.object, target.object_kind
             ),
@@ -13901,9 +14018,25 @@ impl WorkspaceShell {
         let mut current_tenant = None;
         let mut current_connection_section = None;
         let mut workspace_section_rendered = false;
+        let mut favorite_objects_rendered = false;
+        let mut recent_objects_rendered = false;
 
         for (nav_index, item) in items.iter().cloned().enumerate() {
             match &item.action {
+                ConnectionTreeAction::FavoriteObject(_) => {
+                    if !favorite_objects_rendered {
+                        rows.push(ConnectionDockRow::Section("★ FAVORITE OBJECTS".into()));
+                        favorite_objects_rendered = true;
+                    }
+                    rows.push(ConnectionDockRow::Navigation { nav_index, item });
+                }
+                ConnectionTreeAction::RecentObject(_) => {
+                    if !recent_objects_rendered {
+                        rows.push(ConnectionDockRow::Section("RECENT OBJECTS".into()));
+                        recent_objects_rendered = true;
+                    }
+                    rows.push(ConnectionDockRow::Navigation { nav_index, item });
+                }
                 ConnectionTreeAction::Tenant(tenant_id) => {
                     let tenant_id = *tenant_id;
                     current_tenant = Some(tenant_id);
@@ -14418,7 +14551,15 @@ impl WorkspaceShell {
                     )
                     .into_any_element()
             }
-            ConnectionTreeAction::Object(target) => {
+            action @ (ConnectionTreeAction::Object(_)
+            | ConnectionTreeAction::FavoriteObject(_)
+            | ConnectionTreeAction::RecentObject(_)) => {
+                let (target, depth) = match action {
+                    ConnectionTreeAction::Object(target) => (target, 5),
+                    ConnectionTreeAction::FavoriteObject(target)
+                    | ConnectionTreeAction::RecentObject(target) => (target, 1),
+                    _ => unreachable!(),
+                };
                 let can_preview = matches!(
                     target.object_kind,
                     sift_protocol::ObjectKind::Table
@@ -14429,9 +14570,12 @@ impl WorkspaceShell {
                 );
                 let icon_name = schema_object_kind_icon(target.object_kind);
                 let object_name = target.object.clone();
-                let preview_target = target.clone();
-                let ddl_target = target;
-                base(5)
+                let open_target = target.clone();
+                let favorite_target = target.clone();
+                let is_favorite = self
+                    .favorite_database_objects
+                    .contains(&self.database_object_bookmark(&target));
+                base(depth)
                     .id(("schema-object-row", row_index))
                     .text_color(if can_preview {
                         colors.text
@@ -14439,18 +14583,10 @@ impl WorkspaceShell {
                         colors.muted_text
                     })
                     .hover(|row| row.bg(colors.hovered_surface))
-                    .when(can_preview, |row| {
-                        row.on_click(cx.listener(move |shell, _, window, cx| {
-                            shell.set_connection_selection(nav_index, cx);
-                            shell.open_table_preview(preview_target.clone(), window, cx)
-                        }))
-                    })
-                    .when(!can_preview, |row| {
-                        row.on_click(cx.listener(move |shell, _, window, cx| {
-                            shell.set_connection_selection(nav_index, cx);
-                            shell.open_schema_search_target(ddl_target.clone(), window, cx)
-                        }))
-                    })
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.set_connection_selection(nav_index, cx);
+                        shell.open_schema_search_target(open_target.clone(), window, cx)
+                    }))
                     .child(tree_spacer_slot())
                     .child(
                         div()
@@ -14462,6 +14598,36 @@ impl WorkspaceShell {
                             .truncate()
                             .child(icon(icon_name, colors.muted_text, 12.))
                             .child(div().min_w_0().truncate().child(object_name)),
+                    )
+                    .child(
+                        div()
+                            .id(("favorite-database-object", row_index))
+                            .flex_none()
+                            .w(px(20.))
+                            .h(px(20.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .text_xs()
+                            .text_color(if is_favorite {
+                                colors.warning
+                            } else {
+                                colors.disabled_text
+                            })
+                            .role(Role::Button)
+                            .aria_label(if is_favorite {
+                                "Remove favorite object"
+                            } else {
+                                "Favorite object"
+                            })
+                            .hover(|button| button.bg(colors.active_surface))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                cx.stop_propagation();
+                                shell.toggle_favorite_database_object(&favorite_target, cx)
+                            }))
+                            .child(if is_favorite { "★" } else { "☆" }),
                     )
                     .into_any_element()
             }
@@ -14615,6 +14781,8 @@ impl WorkspaceShell {
             )),
             ConnectionTreeAction::Room(id) => self.expanded_rooms.contains(id),
             ConnectionTreeAction::Object(_)
+            | ConnectionTreeAction::FavoriteObject(_)
+            | ConnectionTreeAction::RecentObject(_)
             | ConnectionTreeAction::Workspace(_)
             | ConnectionTreeAction::Document(_) => false,
         }
@@ -14656,6 +14824,8 @@ impl WorkspaceShell {
             } => self.toggle_object_group(profile_id, catalog, schema, group, cx),
             ConnectionTreeAction::Room(id) => self.toggle_room(id, cx),
             ConnectionTreeAction::Object(_)
+            | ConnectionTreeAction::FavoriteObject(_)
+            | ConnectionTreeAction::RecentObject(_)
             | ConnectionTreeAction::Workspace(_)
             | ConnectionTreeAction::Document(_) => {}
         }
@@ -14688,6 +14858,8 @@ impl WorkspaceShell {
                 } => self.toggle_object_group(profile_id, catalog, schema, group, cx),
                 ConnectionTreeAction::Room(id) => self.toggle_room(id, cx),
                 ConnectionTreeAction::Object(_)
+                | ConnectionTreeAction::FavoriteObject(_)
+                | ConnectionTreeAction::RecentObject(_)
                 | ConnectionTreeAction::Workspace(_)
                 | ConnectionTreeAction::Document(_) => {}
             }
@@ -14715,7 +14887,9 @@ impl WorkspaceShell {
             ConnectionTreeAction::Connection(entry) if !matches!(self.connection_status, ConnectionStatus::Connected { profile_id, .. } if profile_id == entry.id) => {
                 self.connect(&entry, cx)
             }
-            ConnectionTreeAction::Object(target) => {
+            ConnectionTreeAction::Object(target)
+            | ConnectionTreeAction::FavoriteObject(target)
+            | ConnectionTreeAction::RecentObject(target) => {
                 self.open_schema_search_target(target, window, cx)
             }
             ConnectionTreeAction::Workspace(entry) => self.open_workspace(&entry, cx),
@@ -14744,7 +14918,10 @@ impl WorkspaceShell {
 
     fn open_selected_schema_object_ddl(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ConnectionTreeItem {
-            action: ConnectionTreeAction::Object(target),
+            action:
+                ConnectionTreeAction::Object(target)
+                | ConnectionTreeAction::FavoriteObject(target)
+                | ConnectionTreeAction::RecentObject(target),
             ..
         }) = self
             .visible_connection_items()
@@ -14758,7 +14935,10 @@ impl WorkspaceShell {
 
     fn preview_selected_schema_object(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ConnectionTreeItem {
-            action: ConnectionTreeAction::Object(target),
+            action:
+                ConnectionTreeAction::Object(target)
+                | ConnectionTreeAction::FavoriteObject(target)
+                | ConnectionTreeAction::RecentObject(target),
             ..
         }) = self
             .visible_connection_items()
@@ -15489,6 +15669,7 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.record_recent_database_object(&target, cx);
         let DatabaseObjectTarget {
             connection,
             catalog,
@@ -15579,6 +15760,7 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.record_recent_database_object(&target, cx);
         let source = DatabaseObjectSource {
             instance_id: self
                 .selected_instance_id
@@ -22477,6 +22659,8 @@ impl WorkspaceShell {
             repository_commit_drafts: self.repository_commit_drafts.clone(),
             repository_workspaces,
             palette_recents: self.palette_recents.clone(),
+            favorite_database_objects: self.favorite_database_objects.clone(),
+            recent_database_objects: self.recent_database_objects.clone(),
             ..PresentationState::default()
         }
     }
