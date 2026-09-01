@@ -1292,6 +1292,40 @@ fn build_object_browser_rows(
     rows
 }
 
+fn object_browser_context(
+    snapshot: &sift_protocol::SchemaSnapshot,
+    connection: &ConnectionNavEntry,
+    instance_id: &str,
+    rows: &[ObjectBrowserRow],
+) -> DatabaseObjectSource {
+    rows.first()
+        .map(|row| row.source.clone())
+        .unwrap_or_else(|| {
+            let catalog = snapshot.trees.first();
+            DatabaseObjectSource {
+                instance_id: instance_id.to_owned(),
+                tenant_id: connection.tenant_id,
+                profile_id: connection.id,
+                profile_name: connection.name.clone(),
+                provider_id: connection.provider_id.clone(),
+                catalog: catalog.map(|catalog| catalog.name.clone()),
+                schema: catalog
+                    .and_then(|catalog| catalog.schemas.first())
+                    .map(|schema| schema.name.clone())
+                    .unwrap_or_else(|| {
+                        if connection.provider_id.as_str() == "sift/sql-server" {
+                            "dbo".into()
+                        } else {
+                            "public".into()
+                        }
+                    }),
+                object: "new_table".into(),
+                object_kind: sift_protocol::ObjectKind::Table,
+                last_refreshed_at_ms: None,
+            }
+        })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DockResizeDrag {
     dock: DockId,
@@ -1376,6 +1410,8 @@ struct ObjectBrowserState {
     context: DatabaseObjectSource,
     rows: Vec<ObjectBrowserRow>,
     selected: usize,
+    connections: Vec<ConnectionNavEntry>,
+    connection_picker_open: bool,
 }
 
 struct RunVariableEditor {
@@ -2031,6 +2067,10 @@ pub enum PaneEvent {
     },
     ObjectBrowserOpenRequested {
         source: DatabaseObjectSource,
+    },
+    ObjectBrowserConnectionRequested {
+        item_id: u64,
+        profile_id: i64,
     },
     ObjectBrowserNewTableRequested {
         source: DatabaseObjectSource,
@@ -5158,6 +5198,50 @@ impl Pane {
             .as_ref()
             .is_some_and(|source| is_table_like_object(source.object_kind));
         let row_count = browser.rows.len();
+        let connection_picker_open = browser.connection_picker_open;
+        let active_profile_id = browser.profile_id;
+        let connection_name = browser.context.profile_name.clone();
+        let connections = browser.connections.clone();
+        let connection_items = connections
+            .into_iter()
+            .enumerate()
+            .map(|(index, connection)| {
+                let profile_id = connection.id;
+                let selected = profile_id == active_profile_id;
+                div()
+                    .id(("object-browser-connection", index))
+                    .debug_selector(move || format!("object-browser-connection-{profile_id}"))
+                    .role(Role::MenuItem)
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .when(selected, |item| item.bg(colors.active_surface))
+                    .hover(|item| item.bg(colors.hovered_surface))
+                    .on_click(cx.listener(move |pane, _, _, cx| {
+                        if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
+                            browser.connection_picker_open = false;
+                        }
+                        cx.emit(PaneEvent::ObjectBrowserConnectionRequested {
+                            item_id,
+                            profile_id,
+                        });
+                    }))
+                    .child(icon(
+                        IconName::Database,
+                        if selected {
+                            colors.success
+                        } else {
+                            colors.muted_text
+                        },
+                        11.,
+                    ))
+                    .child(div().min_w_0().truncate().child(connection.name))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         let toolbar_action = |id: &'static str,
                               label: &'static str,
                               action: char,
@@ -5198,6 +5282,79 @@ impl Pane {
                     .border_b_1()
                     .border_color(colors.subtle_border)
                     .bg(colors.toolbar)
+                    .child(
+                        div()
+                            .relative()
+                            .flex_none()
+                            .child(
+                                Button::new(
+                                    ("object-browser-connection-picker", item_id as usize),
+                                    connection_name,
+                                )
+                                .debug_selector("object-browser-connection-picker")
+                                .tone(ButtonTone::Neutral)
+                                .on_click(cx.listener(
+                                    move |pane, _, _, cx| {
+                                        if let Some(browser) =
+                                            pane.object_browsers.get_mut(&item_id)
+                                        {
+                                            browser.connection_picker_open =
+                                                !browser.connection_picker_open;
+                                        }
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .when(connection_picker_open, |trigger| {
+                                trigger.child(
+                                    div().absolute().top_full().left_0().child(
+                                        deferred(
+                                            anchored().anchor(Anchor::TopLeft).child(
+                                                div()
+                                                    .id("object-browser-connection-menu")
+                                                    .debug_selector(|| {
+                                                        "object-browser-connection-menu".into()
+                                                    })
+                                                    .w(px(220.))
+                                                    .p_1()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(colors.strong_border)
+                                                    .bg(colors.elevated_surface)
+                                                    .shadow_lg()
+                                                    .occlude()
+                                                    .role(Role::Menu)
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                        cx.stop_propagation()
+                                                    })
+                                                    .on_mouse_down_out(cx.listener(
+                                                        move |pane, _, _, cx| {
+                                                            if let Some(browser) = pane
+                                                                .object_browsers
+                                                                .get_mut(&item_id)
+                                                            {
+                                                                browser.connection_picker_open =
+                                                                    false;
+                                                            }
+                                                            cx.notify();
+                                                        },
+                                                    ))
+                                                    .children(connection_items),
+                                            ),
+                                        )
+                                        .with_priority(3),
+                                    ),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(1.))
+                            .h(px(16.))
+                            .mx_1()
+                            .bg(colors.subtle_border),
+                    )
                     .child(toolbar_action(
                         "object-browser-open",
                         "Open",
@@ -16835,33 +16992,19 @@ impl WorkspaceShell {
             .clone()
             .unwrap_or_else(|| "local".into());
         let rows = build_object_browser_rows(snapshot, &connection, &instance_id);
-        let context = rows
-            .first()
-            .map(|row| row.source.clone())
-            .unwrap_or_else(|| {
-                let catalog = snapshot.trees.first();
-                DatabaseObjectSource {
-                    instance_id: instance_id.clone(),
-                    tenant_id: connection.tenant_id,
-                    profile_id: connection.id,
-                    profile_name: connection.name.clone(),
-                    provider_id: connection.provider_id.clone(),
-                    catalog: catalog.map(|catalog| catalog.name.clone()),
-                    schema: catalog
-                        .and_then(|catalog| catalog.schemas.first())
-                        .map(|schema| schema.name.clone())
-                        .unwrap_or_else(|| {
-                            if connection.provider_id.as_str() == "sift/sql-server" {
-                                "dbo".into()
-                            } else {
-                                "public".into()
-                            }
-                        }),
-                    object: "new_table".into(),
-                    object_kind: sift_protocol::ObjectKind::Table,
-                    last_refreshed_at_ms: None,
-                }
-            });
+        let context = object_browser_context(snapshot, &connection, &instance_id, &rows);
+        let mut connections = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| tenant.connections.iter().cloned())
+            .collect::<Vec<_>>();
+        connections.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.id.cmp(&right.id))
+        });
         let item_id = self.next_id;
         self.next_id += 1;
         if let Some(pane) = self.panes.get(self.active_pane) {
@@ -16880,6 +17023,8 @@ impl WorkspaceShell {
                         context,
                         rows,
                         selected: 0,
+                        connections,
+                        connection_picker_open: false,
                     },
                     cx,
                 )
@@ -16902,11 +17047,28 @@ impl WorkspaceShell {
             .iter()
             .flat_map(|tenant| tenant.connections.iter())
             .find(|connection| connection.id == profile_id)
+            .cloned()
         else {
             return;
         };
-        let instance_id = self.selected_instance_id.as_deref().unwrap_or("local");
-        let rows = build_object_browser_rows(snapshot, connection, instance_id);
+        let instance_id = self
+            .selected_instance_id
+            .clone()
+            .unwrap_or_else(|| "local".into());
+        let rows = build_object_browser_rows(snapshot, &connection, &instance_id);
+        let context = object_browser_context(snapshot, &connection, &instance_id, &rows);
+        let mut connections = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| tenant.connections.iter().cloned())
+            .collect::<Vec<_>>();
+        connections.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.id.cmp(&right.id))
+        });
         for pane in &self.panes {
             pane.update(cx, |pane, cx| {
                 for browser in pane
@@ -16919,6 +17081,8 @@ impl WorkspaceShell {
                         .get(browser.selected)
                         .map(|row| row.source.clone());
                     browser.rows = rows.clone();
+                    browser.context = context.clone();
+                    browser.connections = connections.clone();
                     browser.selected = selected_source
                         .and_then(|selected| {
                             browser.rows.iter().position(|row| row.source == selected)
@@ -16928,6 +17092,74 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             });
+        }
+    }
+
+    fn select_object_browser_connection(
+        &mut self,
+        pane: &Entity<Pane>,
+        item_id: u64,
+        profile_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| tenant.connections.iter())
+            .find(|connection| connection.id == profile_id)
+            .cloned()
+        else {
+            self.show_toast(
+                "That connection is no longer available on this server".into(),
+                cx,
+            );
+            return;
+        };
+        let instance_id = self
+            .selected_instance_id
+            .clone()
+            .unwrap_or_else(|| "local".into());
+        let snapshot = match &self.connection_schema {
+            ConnectionSchemaState::Ready {
+                profile_id: ready,
+                snapshot,
+            } if *ready == profile_id => Some(snapshot.as_ref().clone()),
+            _ => None,
+        };
+        let rows = snapshot
+            .as_ref()
+            .map(|snapshot| build_object_browser_rows(snapshot, &connection, &instance_id))
+            .unwrap_or_default();
+        let empty_snapshot =
+            sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
+        let context = object_browser_context(
+            snapshot.as_ref().unwrap_or(&empty_snapshot),
+            &connection,
+            &instance_id,
+            &rows,
+        );
+        pane.update(cx, |pane, cx| {
+            if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
+                browser.profile_id = profile_id;
+                browser.context = context;
+                browser.rows = rows;
+                browser.selected = 0;
+                browser.connection_picker_open = false;
+            }
+            if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
+                item.title = format!("Objects · {}", connection.name);
+            }
+            cx.notify();
+        });
+        if !matches!(
+            self.connection_status,
+            ConnectionStatus::Connected {
+                profile_id: active,
+                ..
+            } if active == profile_id
+        ) {
+            self.connect(&connection, cx);
         }
     }
 
@@ -24965,6 +25197,13 @@ impl WorkspaceShell {
                 if let Some(target) = self.database_target_from_source(source) {
                     self.open_schema_search_target(target, window, cx);
                 }
+            }
+            PaneEvent::ObjectBrowserConnectionRequested {
+                item_id,
+                profile_id,
+            } => {
+                self.active_pane = index;
+                self.select_object_browser_connection(emitter, *item_id, *profile_id, cx);
             }
             PaneEvent::ObjectBrowserNewTableRequested { source } => {
                 self.active_pane = index;
@@ -51919,18 +52158,29 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
             shell.lifecycle.tenants = vec![crate::TenantNavEntry {
                 id: sift_api_types::TenantId(1),
                 name: "Personal".into(),
                 rooms: Vec::new(),
-                connections: vec![ConnectionNavEntry {
-                    id: 2,
-                    tenant_id: 1,
-                    name: "Warehouse".into(),
-                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
-                    tags: Vec::new(),
-                }],
+                connections: vec![
+                    ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "Warehouse".into(),
+                        provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                        tags: Vec::new(),
+                    },
+                    ConnectionNavEntry {
+                        id: 3,
+                        tenant_id: 1,
+                        name: "Analytics".into(),
+                        provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                        tags: Vec::new(),
+                    },
+                ],
             }];
             shell.connection_status = ConnectionStatus::Connected {
                 profile_id: 2,
@@ -51959,6 +52209,7 @@ mod tests {
         });
         cx.run_until_parked();
         for selector in [
+            "object-browser-connection-picker",
             "object-browser-open",
             "object-browser-new-table",
             "object-browser-design",
@@ -51983,6 +52234,59 @@ mod tests {
             let pane = shell.panes[shell.active_pane].read(cx);
             let item_id = pane.active_item().unwrap().id;
             assert_eq!(pane.object_browsers[&item_id].selected, 1);
+        });
+
+        let picker = cx
+            .debug_bounds("object-browser-connection-picker")
+            .expect("connection picker");
+        cx.simulate_click(picker.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("object-browser-connection-2").is_some());
+        let analytics = cx
+            .debug_bounds("object-browser-connection-3")
+            .expect("Analytics connection");
+        cx.simulate_click(analytics.center(), Modifiers::default());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::Connect { profile_id: 3, .. })
+        ));
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.title, "Objects · Analytics");
+            let browser = &pane.object_browsers[&item.id];
+            assert_eq!(browser.profile_id, 3);
+            assert!(browser.rows.is_empty());
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            let mut snapshot =
+                sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
+            snapshot.trees.push(sift_protocol::CatalogTree {
+                name: "analytics".into(),
+                schemas: vec![sift_protocol::SchemaTree {
+                    name: "public".into(),
+                    objects: vec![sift_protocol::ObjectInfo::new(
+                        "events",
+                        sift_protocol::ObjectKind::Table,
+                    )],
+                }],
+            });
+            shell.on_executor_event(
+                ExecutorEvent::SchemaLoaded {
+                    profile_id: 3,
+                    snapshot: Box::new(snapshot),
+                },
+                cx,
+            );
+        });
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            let browser = &pane.object_browsers[&item.id];
+            assert_eq!(browser.rows.len(), 1);
+            assert_eq!(browser.rows[0].source.object, "events");
+            assert_eq!(browser.context.profile_name, "Analytics");
         });
     }
 
