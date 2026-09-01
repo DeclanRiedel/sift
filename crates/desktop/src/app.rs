@@ -1229,6 +1229,22 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadVaultGrants { vault_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .vault_grants(sift_api_types::VaultId(vault_id))
+                        .await
+                        .map_err(|error| format!("loading vault access failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultGrantsLoaded { vault_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::RevealVaultItem { item_id, password } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
@@ -1295,6 +1311,191 @@ async fn run_query_executor(
                 };
                 if events
                     .send(ExecutorEvent::VaultItemCreated { vault_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::UpdateVaultItem { item_id, request } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .update_vault_item(sift_api_types::VaultItemId(item_id), request)
+                        .await
+                        .map(Some)
+                        .map_err(|error| format!("updating vault item failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultItemMutated {
+                        item_id,
+                        action: "Updated",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SetVaultItemSecret { item_id, request } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .set_vault_item_secret(sift_api_types::VaultItemId(item_id), request)
+                        .await
+                        .map(Some)
+                        .map_err(|error| format!("rotating vault secret failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultItemMutated {
+                        item_id,
+                        action: "Rotated",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ClearVaultItemSecret {
+                item_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .clear_vault_item_secret(
+                            sift_api_types::VaultItemId(item_id),
+                            expected_revision,
+                        )
+                        .await
+                        .map(Some)
+                        .map_err(|error| format!("clearing vault secret failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultItemMutated {
+                        item_id,
+                        action: "Cleared",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RestoreVaultItem { item_id, request } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .restore_vault_item(sift_api_types::VaultItemId(item_id), request)
+                        .await
+                        .map(Some)
+                        .map_err(|error| format!("restoring vault item failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultItemMutated {
+                        item_id,
+                        action: "Restored",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteVaultItem {
+                vault_id: _,
+                item_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_vault_item(sift_api_types::VaultItemId(item_id), expected_revision)
+                        .await
+                        .map(|()| None)
+                        .map_err(|error| format!("deleting vault item failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultItemMutated {
+                        item_id,
+                        action: "Deleted",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::TestVaultItem { item_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .test_vault_item(sift_api_types::VaultItemId(item_id))
+                        .await
+                        .map(|()| None)
+                        .map_err(|error| format!("testing vault connection failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultItemMutated {
+                        item_id,
+                        action: "Connection test passed for",
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SetVaultGrant {
+                vault_id,
+                principal_id,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .set_vault_grant(
+                            sift_api_types::VaultId(vault_id),
+                            sift_api_types::PrincipalId(principal_id),
+                            request,
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("updating vault access failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultGrantMutated { vault_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteVaultGrant {
+                vault_id,
+                principal_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_vault_grant(
+                            sift_api_types::VaultId(vault_id),
+                            sift_api_types::PrincipalId(principal_id),
+                            expected_revision,
+                        )
+                        .await
+                        .map_err(|error| format!("revoking vault access failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VaultGrantMutated { vault_id, result })
                     .is_err()
                 {
                     return;

@@ -564,6 +564,28 @@ enum VaultItemDraftKind {
     SecureNote,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum VaultEditorSection {
+    #[default]
+    Overview,
+    Secret,
+    Access,
+    History,
+}
+
+impl VaultEditorSection {
+    const ALL: [Self; 4] = [Self::Overview, Self::Secret, Self::Access, Self::History];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Secret => "Secret",
+            Self::Access => "Access",
+            Self::History => "History",
+        }
+    }
+}
+
 impl VaultItemDraftKind {
     const ALL: [Self; 3] = [Self::Login, Self::Token, Self::SecureNote];
 
@@ -2387,6 +2409,9 @@ pub enum ExecutorCommand {
     LoadVaultItemVersions {
         item_id: i64,
     },
+    LoadVaultGrants {
+        vault_id: i64,
+    },
     RevealVaultItem {
         item_id: i64,
         password: Option<String>,
@@ -2398,6 +2423,40 @@ pub enum ExecutorCommand {
     CreateVaultItem {
         vault_id: i64,
         request: sift_api_types::CreateVaultItemRequest,
+    },
+    UpdateVaultItem {
+        item_id: i64,
+        request: sift_api_types::UpdateVaultItemRequest,
+    },
+    SetVaultItemSecret {
+        item_id: i64,
+        request: sift_api_types::SetVaultSecretRequest,
+    },
+    ClearVaultItemSecret {
+        item_id: i64,
+        expected_revision: u64,
+    },
+    RestoreVaultItem {
+        item_id: i64,
+        request: sift_api_types::RestoreVaultItemRequest,
+    },
+    DeleteVaultItem {
+        vault_id: i64,
+        item_id: i64,
+        expected_revision: u64,
+    },
+    TestVaultItem {
+        item_id: i64,
+    },
+    SetVaultGrant {
+        vault_id: i64,
+        principal_id: i64,
+        request: sift_api_types::SetVaultGrantRequest,
+    },
+    DeleteVaultGrant {
+        vault_id: i64,
+        principal_id: i64,
+        expected_revision: u64,
     },
     ShareVault {
         vault_id: i64,
@@ -3022,6 +3081,10 @@ pub enum ExecutorEvent {
         item_id: i64,
         result: Result<Vec<sift_api_types::VaultItemVersion>, String>,
     },
+    VaultGrantsLoaded {
+        vault_id: i64,
+        result: Result<Vec<sift_api_types::VaultGrant>, String>,
+    },
     VaultItemRevealed {
         item_id: i64,
         result: Result<sift_api_types::RevealVaultSecretResponse, String>,
@@ -3030,6 +3093,15 @@ pub enum ExecutorEvent {
     VaultItemCreated {
         vault_id: i64,
         result: Result<sift_api_types::VaultItem, String>,
+    },
+    VaultItemMutated {
+        item_id: i64,
+        action: &'static str,
+        result: Result<Option<sift_api_types::VaultItem>, String>,
+    },
+    VaultGrantMutated {
+        vault_id: i64,
+        result: Result<(), String>,
     },
     VaultShared {
         vault_id: i64,
@@ -7481,7 +7553,13 @@ pub struct WorkspaceShell {
     vault_item_secret_input: Entity<TextInput>,
     vault_reveal_password_input: Entity<TextInput>,
     vault_item_versions: Vec<sift_api_types::VaultItemVersion>,
+    vault_grants: Vec<sift_api_types::VaultGrant>,
     vault_detail_item_id: Option<i64>,
+    vault_editor_section: VaultEditorSection,
+    vault_editor_label_input: Entity<TextInput>,
+    vault_editor_detail_input: Entity<TextInput>,
+    vault_editor_secret_input: Entity<TextInput>,
+    vault_grant_principal_input: Entity<TextInput>,
     vault_revealed_value: Option<String>,
     vault_reveal_generation: u64,
     repository: RepositoryProjection,
@@ -7884,6 +7962,19 @@ impl WorkspaceShell {
             TextInput::new("", "Current account password", cx)
                 .aria_label("Vault reveal password")
                 .masked()
+        });
+        let vault_editor_label_input =
+            cx.new(|cx| TextInput::new("", "Item name", cx).aria_label("Vault editor item name"));
+        let vault_editor_detail_input = cx.new(|cx| {
+            TextInput::new("", "Username or service", cx).aria_label("Vault editor item detail")
+        });
+        let vault_editor_secret_input = cx.new(|cx| {
+            TextInput::new("", "New secret value", cx)
+                .aria_label("New vault secret value")
+                .masked()
+        });
+        let vault_grant_principal_input = cx.new(|cx| {
+            TextInput::new("", "Principal ID", cx).aria_label("Vault grant principal ID")
         });
         let result_cell_edit_input = cx.new(|cx| TextInput::new("", "New value…", cx));
         let repository_commit_draft = selected_workspace_id
@@ -8453,7 +8544,13 @@ impl WorkspaceShell {
             vault_item_secret_input,
             vault_reveal_password_input,
             vault_item_versions: Vec::new(),
+            vault_grants: Vec::new(),
             vault_detail_item_id: None,
+            vault_editor_section: VaultEditorSection::default(),
+            vault_editor_label_input,
+            vault_editor_detail_input,
+            vault_editor_secret_input,
+            vault_grant_principal_input,
             vault_revealed_value: None,
             vault_reveal_generation: 0,
             repository,
@@ -10770,6 +10867,20 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            ExecutorEvent::VaultGrantsLoaded { vault_id, result } => {
+                if self.selected_vault().map(|vault| vault.id.0) != Some(vault_id) {
+                    return;
+                }
+                self.vault_loading = false;
+                match result {
+                    Ok(grants) => {
+                        self.vault_grants = grants;
+                        self.vault_error = None;
+                    }
+                    Err(message) => self.vault_error = Some(message),
+                }
+                cx.notify();
+            }
             ExecutorEvent::VaultItemRevealed { item_id, result } => {
                 if self.vault_detail_item_id != Some(item_id) {
                     return;
@@ -10833,6 +10944,67 @@ impl WorkspaceShell {
                         self.show_success_toast(format!("Stored {}", item.label), cx);
                         if self.selected_vault().map(|vault| vault.id.0) == Some(vault_id) {
                             self.request_selected_vault_items(cx);
+                        }
+                    }
+                    Err(message) => self.vault_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::VaultItemMutated {
+                item_id,
+                action,
+                result,
+            } => {
+                self.vault_loading = false;
+                match result {
+                    Ok(Some(item)) => {
+                        if let Some(current) = self
+                            .vault_items
+                            .iter_mut()
+                            .find(|current| current.id.0 == item_id)
+                        {
+                            *current = item.clone();
+                        }
+                        self.vault_editor_label_input
+                            .update(cx, |input, cx| input.set_text(item.label.clone(), cx));
+                        self.vault_editor_secret_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                        self.vault_error = None;
+                        self.show_success_toast(format!("{action} {}", item.label), cx);
+                        if let Some(sender) = &self.executor_sender {
+                            let _ = sender.send(ExecutorCommand::LoadVaultItemVersions { item_id });
+                        }
+                    }
+                    Ok(None) => {
+                        let label = self
+                            .vault_items
+                            .iter()
+                            .find(|item| item.id.0 == item_id)
+                            .map(|item| item.label.clone())
+                            .unwrap_or_else(|| "vault item".into());
+                        if action == "Deleted" {
+                            self.vault_items.retain(|item| item.id.0 != item_id);
+                            self.modal = None;
+                            self.vault_detail_item_id = None;
+                        }
+                        self.vault_error = None;
+                        self.show_success_toast(format!("{action} {label}"), cx);
+                    }
+                    Err(message) => self.vault_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::VaultGrantMutated { vault_id, result } => {
+                self.vault_loading = false;
+                match result {
+                    Ok(()) => {
+                        self.vault_error = None;
+                        self.vault_grant_principal_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                        if let Some(sender) = &self.executor_sender {
+                            self.vault_loading = sender
+                                .send(ExecutorCommand::LoadVaultGrants { vault_id })
+                                .is_ok();
                         }
                     }
                     Err(message) => self.vault_error = Some(message),
@@ -16565,25 +16737,38 @@ impl WorkspaceShell {
     }
 
     fn open_selected_vault_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item_id) = self
-            .vault_items
-            .get(self.vault_item_selected)
-            .map(|item| item.id.0)
-        else {
+        let Some(item) = self.vault_items.get(self.vault_item_selected).cloned() else {
             self.show_toast("Select a vault item first".into(), cx);
             return;
         };
+        let item_id = item.id.0;
         let Some(sender) = &self.executor_sender else {
             self.vault_error = Some("Vault is unavailable".into());
             return;
         };
         self.vault_detail_item_id = Some(item_id);
         self.vault_item_versions.clear();
+        self.vault_grants.clear();
+        self.vault_editor_section = VaultEditorSection::Overview;
+        self.vault_editor_label_input
+            .update(cx, |input, cx| input.set_text(item.label.clone(), cx));
+        let detail = match &item.metadata {
+            sift_api_types::VaultItemMetadata::Login { username, .. } => username.clone(),
+            sift_api_types::VaultItemMetadata::Token { service, .. } => service.clone(),
+            _ => String::new(),
+        };
+        self.vault_editor_detail_input
+            .update(cx, |input, cx| input.set_text(detail, cx));
+        self.vault_editor_secret_input
+            .update(cx, |input, cx| input.set_text("", cx));
         self.vault_revealed_value = None;
         self.vault_error = None;
         self.vault_loading = sender
             .send(ExecutorCommand::LoadVaultItemVersions { item_id })
             .is_ok();
+        if let Some(vault_id) = self.selected_vault().map(|vault| vault.id.0) {
+            let _ = sender.send(ExecutorCommand::LoadVaultGrants { vault_id });
+        }
         self.modal = Some(Modal::VaultItemDetails);
         self.focus_handle.focus(window, cx);
         cx.notify();
@@ -16632,6 +16817,264 @@ impl WorkspaceShell {
             });
         })
         .detach();
+    }
+
+    fn selected_vault_detail_item(&self) -> Option<&sift_api_types::VaultItem> {
+        let id = self.vault_detail_item_id?;
+        self.vault_items.iter().find(|item| item.id.0 == id)
+    }
+
+    fn submit_vault_overview_update(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.selected_vault_detail_item().cloned() else {
+            return;
+        };
+        let label = self
+            .vault_editor_label_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        if label.is_empty() {
+            self.vault_error = Some("Item name is required".into());
+            cx.notify();
+            return;
+        }
+        let detail = self
+            .vault_editor_detail_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let metadata = match item.metadata {
+            sift_api_types::VaultItemMetadata::Login { url, .. } => {
+                sift_api_types::VaultItemMetadata::Login {
+                    username: detail,
+                    url,
+                }
+            }
+            sift_api_types::VaultItemMetadata::Token { expires_at, .. } => {
+                sift_api_types::VaultItemMetadata::Token {
+                    service: detail,
+                    expires_at,
+                }
+            }
+            metadata => metadata,
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.vault_error = Some("Vault is unavailable".into());
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::UpdateVaultItem {
+                item_id: item.id.0,
+                request: sift_api_types::UpdateVaultItemRequest {
+                    expected_revision: item.revision,
+                    label,
+                    metadata,
+                    secret: None,
+                },
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn rotate_vault_item_secret(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.selected_vault_detail_item().cloned() else {
+            return;
+        };
+        if item.kind == sift_protocol::VaultItemKind::Connection {
+            self.vault_error = Some("Edit connection credentials from Connections".into());
+            cx.notify();
+            return;
+        }
+        let secret = self.vault_editor_secret_input.read(cx).text().to_owned();
+        if secret.is_empty() {
+            self.vault_error = Some("Enter a new secret value".into());
+            cx.notify();
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::SetVaultItemSecret {
+                item_id: item.id.0,
+                request: sift_api_types::SetVaultSecretRequest {
+                    expected_revision: item.revision,
+                    secret: serde_json::Value::String(secret),
+                },
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn clear_vault_item_secret(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.selected_vault_detail_item() else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::ClearVaultItemSecret {
+                item_id: item.id.0,
+                expected_revision: item.revision,
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn restore_vault_item_version(&mut self, version: u64, cx: &mut Context<Self>) {
+        let Some(item) = self.selected_vault_detail_item() else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::RestoreVaultItem {
+                item_id: item.id.0,
+                request: sift_api_types::RestoreVaultItemRequest {
+                    expected_revision: item.revision,
+                    version,
+                },
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn delete_vault_detail_item(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.selected_vault_detail_item() else {
+            return;
+        };
+        let Some(vault_id) = self.selected_vault().map(|vault| vault.id.0) else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::DeleteVaultItem {
+                vault_id,
+                item_id: item.id.0,
+                expected_revision: item.revision,
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn test_vault_detail_connection(&mut self, cx: &mut Context<Self>) {
+        let Some(item_id) = self.vault_detail_item_id else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::TestVaultItem { item_id })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn set_vault_grant_preset(
+        &mut self,
+        capabilities: sift_protocol::VaultCapabilities,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(vault_id) = self.selected_vault().map(|vault| vault.id.0) else {
+            return;
+        };
+        let Ok(principal_id) = self
+            .vault_grant_principal_input
+            .read(cx)
+            .text()
+            .trim()
+            .parse::<i64>()
+        else {
+            self.vault_error = Some("Enter a numeric principal ID".into());
+            cx.notify();
+            return;
+        };
+        let expected_revision = self
+            .vault_grants
+            .iter()
+            .find(|grant| grant.principal_id.0 == principal_id)
+            .map(|grant| grant.revision);
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::SetVaultGrant {
+                vault_id,
+                principal_id,
+                request: sift_api_types::SetVaultGrantRequest {
+                    expected_revision,
+                    capabilities,
+                },
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn revoke_vault_grant(&mut self, principal_id: i64, revision: u64, cx: &mut Context<Self>) {
+        let Some(vault_id) = self.selected_vault().map(|vault| vault.id.0) else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        self.vault_loading = sender
+            .send(ExecutorCommand::DeleteVaultGrant {
+                vault_id,
+                principal_id,
+                expected_revision: revision,
+            })
+            .is_ok();
+        cx.notify();
+    }
+
+    fn handle_vault_editor_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        let current = VaultEditorSection::ALL
+            .iter()
+            .position(|section| *section == self.vault_editor_section)
+            .unwrap_or_default();
+        match event.keystroke.key.as_str() {
+            "h" | "left" => {
+                self.vault_editor_section = VaultEditorSection::ALL[current.saturating_sub(1)]
+            }
+            "l" | "right" => {
+                self.vault_editor_section =
+                    VaultEditorSection::ALL[(current + 1).min(VaultEditorSection::ALL.len() - 1)]
+            }
+            "1" => self.vault_editor_section = VaultEditorSection::Overview,
+            "2" => self.vault_editor_section = VaultEditorSection::Secret,
+            "3" => self.vault_editor_section = VaultEditorSection::Access,
+            "4" => self.vault_editor_section = VaultEditorSection::History,
+            "s" if self.vault_editor_section == VaultEditorSection::Overview => {
+                self.submit_vault_overview_update(cx)
+            }
+            "r" if self.vault_editor_section == VaultEditorSection::Secret => {
+                self.rotate_vault_item_secret(cx)
+            }
+            "c" if self.vault_editor_section == VaultEditorSection::Secret => {
+                self.clear_vault_item_secret(cx)
+            }
+            "t" if self.vault_editor_section == VaultEditorSection::Secret => {
+                self.test_vault_detail_connection(cx)
+            }
+            "escape" => self.dismiss_modal(&DismissModal, window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
     }
 
     fn submit_create_vault_item(&mut self, cx: &mut Context<Self>) {
@@ -27086,11 +27529,18 @@ impl WorkspaceShell {
                 .update(cx, |input, cx| input.set_text("", cx));
         }
         if self.modal == Some(Modal::VaultItemDetails) {
-            self.vault_reveal_password_input
-                .update(cx, |input, cx| input.set_text("", cx));
+            for input in [
+                &self.vault_reveal_password_input,
+                &self.vault_editor_secret_input,
+                &self.vault_grant_principal_input,
+            ] {
+                input.update(cx, |input, cx| input.set_text("", cx));
+            }
             self.vault_revealed_value = None;
             self.vault_detail_item_id = None;
             self.vault_item_versions.clear();
+            self.vault_grants.clear();
+            self.vault_editor_section = VaultEditorSection::Overview;
             self.vault_reveal_generation = self.vault_reveal_generation.wrapping_add(1);
         }
         if matches!(self.modal, Some(Modal::DataResults(_))) {
@@ -38530,64 +38980,181 @@ impl WorkspaceShell {
                     let item = self
                         .vault_detail_item_id
                         .and_then(|id| self.vault_items.iter().find(|item| item.id.0 == id));
+                    let capabilities = self
+                        .selected_vault()
+                        .map(|vault| vault.effective_capabilities)
+                        .unwrap_or_default();
                     let can_reveal = item.is_some_and(|item| {
                         item.kind.revealable()
                             && item.secret_status
                                 == sift_api_types::VaultSecretStatus::Configured
-                            && self
-                                .selected_vault()
-                                .is_some_and(|vault| vault.effective_capabilities.reveal)
+                            && capabilities.reveal
                     });
+                    let can_edit = capabilities.edit;
+                    let can_manage = capabilities.manage;
+                    let is_connection = item
+                        .is_some_and(|item| item.kind == sift_protocol::VaultItemKind::Connection);
+                    let secret_status = item
+                        .map(|item| format!("{:?}", item.secret_status))
+                        .unwrap_or_else(|| "Unavailable".into());
+                    let head_version = item.map_or(0, |item| item.head_version);
                     let title = item
                         .map(|item| item.label.clone())
                         .unwrap_or_else(|| "Vault item".into());
                     let metadata = item
                         .and_then(|item| serde_json::to_string_pretty(&item.metadata).ok())
                         .unwrap_or_default();
-                    let version_rows = self.vault_item_versions.iter().map(|version| {
+                    let version_rows = self.vault_item_versions.iter().enumerate().map(|(index, version)| {
+                        let version_number = version.version;
                         div()
+                            .id(("vault-version-row", index))
                             .px_2()
                             .py_1()
                             .flex()
                             .items_center()
                             .justify_between()
-                            .child(format!("v{} · {}", version.version, version.change_summary))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child(version.created_at.to_string()),
-                            )
+                            .child(div().flex_1().min_w_0().child(format!(
+                                "v{} · {}",
+                                version.version, version.change_summary
+                            )))
+                            .child(div().text_xs().text_color(colors.muted_text).child(
+                                version.created_at.to_string(),
+                            ))
+                            .when(can_edit && version.version != head_version, |row| {
+                                row.child(
+                                    Button::new(("restore-vault-version", index), "Restore")
+                                        .tone(ButtonTone::Ghost)
+                                        .disabled(self.vault_loading)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.restore_vault_item_version(version_number, cx)
+                                        })),
+                                )
+                            })
                     });
-                    div()
-                        .debug_selector(|| "vault-item-details".into())
-                        .w(px(620.))
-                        .max_h(px(620.))
+                    let grant_rows = self.vault_grants.iter().enumerate().map(|(index, grant)| {
+                        let principal_id = grant.principal_id.0;
+                        let revision = grant.revision;
+                        let mut names = Vec::new();
+                        if grant.capabilities.use_secret { names.push("use"); }
+                        if grant.capabilities.reveal { names.push("reveal"); }
+                        if grant.capabilities.edit { names.push("edit"); }
+                        if grant.capabilities.manage { names.push("manage"); }
+                        div()
+                            .id(("vault-grant-row", index))
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1().child(format!(
+                                "Principal {principal_id} · {}",
+                                names.join(", ")
+                            )))
+                            .when(can_manage, |row| {
+                                row.child(
+                                    Button::new(("revoke-vault-grant", index), "Revoke")
+                                        .tone(ButtonTone::DangerMuted)
+                                        .disabled(self.vault_loading)
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            shell.revoke_vault_grant(principal_id, revision, cx)
+                                        })),
+                                )
+                            })
+                    });
+                    let section_tabs = VaultEditorSection::ALL.into_iter().enumerate().map(
+                        |(index, section)| {
+                            Button::new(("vault-editor-section", index), section.label())
+                                .tone(if self.vault_editor_section == section {
+                                    ButtonTone::Accent
+                                } else {
+                                    ButtonTone::Ghost
+                                })
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.vault_editor_section = section;
+                                    cx.notify();
+                                }))
+                        },
+                    );
+                    let connection_capabilities = sift_protocol::VaultCapabilities {
+                        inspect: true,
+                        use_secret: true,
+                        ..Default::default()
+                    };
+                    let reader_capabilities = sift_protocol::VaultCapabilities {
+                        inspect: true,
+                        reveal: true,
+                        ..Default::default()
+                    };
+                    let editor_capabilities = sift_protocol::VaultCapabilities {
+                        inspect: true,
+                        use_secret: true,
+                        edit: true,
+                        ..Default::default()
+                    };
+                    let owner_capabilities = sift_protocol::VaultCapabilities::OWNER;
+                    let secret_panel = div()
+                        .flex_1()
+                        .min_h_0()
                         .flex()
                         .flex_col()
                         .gap_3()
                         .child(
                             div()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(title),
+                                .flex()
+                                .justify_between()
+                                .child(SectionLabel::new("SECRET STATUS"))
+                                .child(secret_status),
                         )
-                        .child(
-                            div()
-                                .p_2()
-                                .rounded_sm()
-                                .bg(colors.surface)
-                                .text_sm()
-                                .child(metadata),
-                        )
-                        .when(can_reveal, |details| {
-                            details
-                                .child(self.vault_reveal_password_input.clone())
+                        .when(is_connection, |section| {
+                            section.child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("test-vault-connection", "Test connection")
+                                            .tone(ButtonTone::Accent)
+                                            .disabled(self.vault_loading)
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.test_vault_detail_connection(cx)
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child("Credential edits stay in Connections."),
+                                    ),
+                            )
+                        })
+                        .when(!is_connection && can_edit, |section| {
+                            section
+                                .child(self.vault_editor_secret_input.clone())
                                 .child(
                                     div()
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .child("Leave blank on trusted local sessions. Remote reveal requires your current password."),
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("rotate-vault-secret", "Set / replace")
+                                                .tone(ButtonTone::Accent)
+                                                .disabled(self.vault_loading)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.rotate_vault_item_secret(cx)
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("clear-vault-secret", "Clear")
+                                                .tone(ButtonTone::DangerMuted)
+                                                .disabled(self.vault_loading)
+                                                .on_click(cx.listener(|shell, _, _, cx| {
+                                                    shell.clear_vault_item_secret(cx)
+                                                })),
+                                        ),
                                 )
+                        })
+                        .when(can_reveal, |section| {
+                            section
+                                .child(SectionLabel::new("TEMPORARY REVEAL"))
+                                .child(self.vault_reveal_password_input.clone())
                                 .child(
                                     div()
                                         .flex()
@@ -38600,19 +39167,25 @@ impl WorkspaceShell {
                                                     shell.reveal_selected_vault_item(cx)
                                                 })),
                                         )
-                                        .when(self.vault_revealed_value.is_some(), |actions| {
-                                            actions.child(
-                                                Button::new("copy-vault-value", "Copy")
-                                                    .tone(ButtonTone::Neutral)
-                                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                                        shell.copy_revealed_vault_value(cx)
-                                                    })),
-                                            )
-                                        }),
+                                        .when(
+                                            self.vault_revealed_value.is_some(),
+                                            |actions| {
+                                                actions.child(
+                                                    Button::new("copy-vault-value", "Copy")
+                                                        .tone(ButtonTone::Neutral)
+                                                        .on_click(cx.listener(
+                                                            |shell, _, _, cx| {
+                                                                shell
+                                                                    .copy_revealed_vault_value(cx)
+                                                            },
+                                                        )),
+                                                )
+                                            },
+                                        ),
                                 )
                         })
-                        .when_some(self.vault_revealed_value.clone(), |details, value| {
-                            details.child(
+                        .when_some(self.vault_revealed_value.clone(), |section, value| {
+                            section.child(
                                 div()
                                     .p_2()
                                     .rounded_sm()
@@ -38621,22 +39194,95 @@ impl WorkspaceShell {
                                     .bg(colors.surface)
                                     .child(value),
                             )
-                        })
-                        .children(self.vault_error.as_ref().map(|message| {
-                            ErrorBanner::new(message.clone())
-                        }))
-                        .child(SectionLabel::new("VERSION HISTORY"))
+                        });
+                    let access_panel = div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
                         .child(
                             div()
-                                .id("vault-version-history")
-                                .max_h(px(180.))
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .child("Capabilities are independent. Edit does not imply reveal; tenant admins recover manage only."),
+                        )
+                        .when(can_manage, |section| {
+                            section
+                                .child(self.vault_grant_principal_input.clone())
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_1()
+                                        .child(Button::new("grant-vault-use", "Connection user").tone(ButtonTone::Ghost).on_click(cx.listener(move |shell, _, _, cx| shell.set_vault_grant_preset(connection_capabilities, cx))))
+                                        .child(Button::new("grant-vault-reader", "Secret reader").tone(ButtonTone::Ghost).on_click(cx.listener(move |shell, _, _, cx| shell.set_vault_grant_preset(reader_capabilities, cx))))
+                                        .child(Button::new("grant-vault-editor", "Editor").tone(ButtonTone::Ghost).on_click(cx.listener(move |shell, _, _, cx| shell.set_vault_grant_preset(editor_capabilities, cx))))
+                                        .child(Button::new("grant-vault-owner", "Owner").tone(ButtonTone::Ghost).on_click(cx.listener(move |shell, _, _, cx| shell.set_vault_grant_preset(owner_capabilities, cx)))),
+                                )
+                        })
+                        .child(
+                            div()
+                                .id("vault-grants-scroll")
+                                .flex_1()
+                                .min_h_0()
                                 .overflow_y_scroll()
                                 .border_1()
                                 .border_color(colors.subtle_border)
-                                .children(version_rows),
-                        )
+                                .children(grant_rows),
+                        );
+                    div()
+                        .debug_selector(|| "vault-item-details".into())
+                        .key_context("SiftVaultEditor")
+                        .on_key_down(cx.listener(Self::handle_vault_editor_key))
+                        .w(px(680.))
+                        .h(px(600.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().flex().items_center().justify_between().child(
+                            div().font_weight(gpui::FontWeight::SEMIBOLD).child(title),
+                        ).child(div().text_xs().text_color(colors.muted_text).child(
+                            "h/l or 1–4 switches sections",
+                        )))
+                        .child(div().flex().gap_1().children(section_tabs))
+                        .children(self.vault_error.as_ref().map(|message| {
+                            ErrorBanner::new(message.clone())
+                        }))
+                        .when(self.vault_editor_section == VaultEditorSection::Overview, |details| {
+                            details.child(
+                                div().flex_1().min_h_0().flex().flex_col().gap_3()
+                                    .child(SectionLabel::new("NON-SECRET METADATA"))
+                                    .child(self.vault_editor_label_input.clone())
+                                    .when(!is_connection && item.is_some_and(|item| item.kind != sift_protocol::VaultItemKind::SecureNote), |section| {
+                                        section.child(self.vault_editor_detail_input.clone())
+                                    })
+                                    .child(div().p_2().rounded_sm().bg(colors.surface).text_sm().child(metadata))
+                                    .child(div().flex().justify_between().child(
+                                        Button::new("delete-vault-item", "Delete item")
+                                            .tone(ButtonTone::DangerMuted)
+                                            .disabled(!can_edit || self.vault_loading)
+                                            .on_click(cx.listener(|shell, _, _, cx| shell.delete_vault_detail_item(cx))),
+                                    ).child(
+                                        Button::new("save-vault-overview", "Save overview")
+                                            .tone(ButtonTone::Accent)
+                                            .disabled(!can_edit || self.vault_loading)
+                                            .on_click(cx.listener(|shell, _, _, cx| shell.submit_vault_overview_update(cx))),
+                                    ))
+                            )
+                        })
+                        .when(self.vault_editor_section == VaultEditorSection::Secret, |details| {
+                            details.child(secret_panel)
+                        })
+                        .when(self.vault_editor_section == VaultEditorSection::Access, |details| {
+                            details.child(access_panel)
+                        })
+                        .when(self.vault_editor_section == VaultEditorSection::History, |details| details.child(
+                            div().id("vault-version-history").flex_1().min_h_0().overflow_y_scroll().border_1().border_color(colors.subtle_border).children(version_rows)
+                        ))
                         .child(
-                            div().flex().justify_end().child(
+                            div().flex().justify_between()
+                            .child(div().text_xs().text_color(colors.muted_text).child("s save · r rotate · c clear · t test · Esc close"))
+                            .child(
                                 Button::new("close-vault-details", "Close")
                                     .tone(ButtonTone::Neutral)
                                     .on_click(cx.listener(|shell, _, window, cx| {
@@ -46453,6 +47099,10 @@ mod tests {
         assert!(matches!(
             receiver.try_recv().unwrap(),
             ExecutorCommand::LoadVaultItemVersions { item_id: 4 }
+        ));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            ExecutorCommand::LoadVaultGrants { vault_id: 9 }
         ));
 
         workspace.update(&mut cx, |shell, cx| {
