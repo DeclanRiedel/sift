@@ -508,6 +508,7 @@ struct QueryContext {
     /// sequence must not interleave when two tabs request plans together.
     plan_lock: Arc<tokio::sync::Mutex<()>>,
     profile_id: i64,
+    connection_profile_id: Option<i64>,
     tenant_id: i64,
     /// Semantic work runs on its own task; dropping this sender ends it and
     /// releases every server document it owns with the connection.
@@ -672,6 +673,67 @@ async fn run_query_executor(
                         if events
                             .send(ExecutorEvent::Connection(ConnectionStatus::Failed {
                                 profile_id,
+                                reason,
+                            }))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            ExecutorCommand::ConnectAdHoc {
+                tenant_id,
+                name,
+                provider_id,
+                configuration,
+                credentials,
+            } => {
+                cancel_active_queries(&mut active_queries);
+                active_exports.clear();
+                active_transfers.clear();
+                if let Some(task) = notification_task.take() {
+                    task.abort();
+                }
+                if let Some(previous) = context.take() {
+                    let _ = previous.client.close_session(previous.session).await;
+                }
+                let server = targets.borrow().clone();
+                match open_ad_hoc_query_context(
+                    &server,
+                    tenant_id,
+                    provider_id,
+                    configuration,
+                    credentials,
+                    &events,
+                )
+                .await
+                {
+                    Ok(opened) => {
+                        if events
+                            .send(ExecutorEvent::Connection(ConnectionStatus::Connected {
+                                profile_id: 0,
+                                name,
+                            }))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        if events.send(load_capabilities(&opened).await).is_err() {
+                            return;
+                        }
+                        let schema_event = load_schema(&opened).await;
+                        notification_task =
+                            Some(spawn_notification_stream(&opened, events.clone()));
+                        context = Some(opened);
+                        if events.send(schema_event).is_err() {
+                            return;
+                        }
+                    }
+                    Err(reason) => {
+                        if events
+                            .send(ExecutorEvent::Connection(ConnectionStatus::Failed {
+                                profile_id: 0,
                                 reason,
                             }))
                             .is_err()
@@ -6193,16 +6255,108 @@ async fn open_query_context(
         plan_connection,
         plan_lock: Arc::new(tokio::sync::Mutex::new(())),
         profile_id,
+        connection_profile_id: Some(profile_id),
         tenant_id,
         semantic,
     })
+}
+
+async fn open_ad_hoc_query_context(
+    server: &DesktopServer,
+    tenant_id: i64,
+    provider_id: sift_protocol::ProviderId,
+    mut configuration: serde_json::Value,
+    credentials: Option<serde_json::Value>,
+    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) -> Result<QueryContext, String> {
+    if let (Some(configuration), Some(credentials)) = (
+        configuration.as_object_mut(),
+        credentials.and_then(|value| value.as_object().cloned()),
+    ) {
+        configuration.extend(credentials);
+    }
+    let spec: sift_protocol::ConnectionSpec = serde_json::from_value(configuration)
+        .map_err(|error| format!("invalid ad-hoc connection configuration: {error}"))?;
+    let client = server.client().await?;
+    let session = client
+        .open_session_for_tenant(Some("Sift desktop · ad-hoc".into()), Some(tenant_id))
+        .await
+        .map_err(|error| format!("opening an ad-hoc session failed: {error}"))?
+        .id;
+    let connection =
+        open_explicit_connection(&client, session, &provider_id, &spec, "query").await?;
+    let metadata_connection =
+        match open_explicit_connection(&client, session, &provider_id, &spec, "metadata").await {
+            Ok(connection) => connection,
+            Err(error) => {
+                let _ = client.close_session(session).await;
+                return Err(error);
+            }
+        };
+    let plan_connection =
+        match open_explicit_connection(&client, session, &provider_id, &spec, "plan").await {
+            Ok(connection) => connection,
+            Err(error) => {
+                let _ = client.close_session(session).await;
+                return Err(error);
+            }
+        };
+    let semantic_connection =
+        match open_explicit_connection(&client, session, &provider_id, &spec, "semantic").await {
+            Ok(connection) => connection,
+            Err(error) => {
+                let _ = client.close_session(session).await;
+                return Err(error);
+            }
+        };
+    let (semantic, controls) = tokio::sync::mpsc::unbounded_channel();
+    std::mem::drop(tokio::spawn(run_semantic_service(
+        client.clone(),
+        session,
+        semantic_connection,
+        controls,
+        events.clone(),
+    )));
+    Ok(QueryContext {
+        client,
+        session,
+        connection,
+        transaction: None,
+        metadata_connection,
+        plan_connection,
+        plan_lock: Arc::new(tokio::sync::Mutex::new(())),
+        profile_id: 0,
+        connection_profile_id: None,
+        tenant_id,
+        semantic,
+    })
+}
+
+async fn open_explicit_connection(
+    client: &Client,
+    session: SessionId,
+    provider_id: &sift_protocol::ProviderId,
+    spec: &sift_protocol::ConnectionSpec,
+    lane: &str,
+) -> Result<ConnectionId, String> {
+    client
+        .open_connection(
+            session,
+            sift_protocol::OpenConnectionRequest {
+                provider_id: provider_id.clone(),
+                spec: spec.clone(),
+            },
+        )
+        .await
+        .map(|connection| connection.id)
+        .map_err(|error| format!("opening ad-hoc {lane} connection failed: {error}"))
 }
 
 async fn load_capabilities(opened: &QueryContext) -> ExecutorEvent {
     let context = sift_protocol::OperationCapabilityContext {
         tenant_id: Some(opened.tenant_id),
         room_id: None,
-        connection_profile_id: Some(opened.profile_id),
+        connection_profile_id: opened.connection_profile_id,
         session: Some(opened.session),
         connection: Some(opened.connection),
         transaction: None,

@@ -2372,6 +2372,13 @@ pub enum ExecutorCommand {
         profile_id: i64,
         name: String,
     },
+    ConnectAdHoc {
+        tenant_id: i64,
+        name: String,
+        provider_id: sift_protocol::ProviderId,
+        configuration: serde_json::Value,
+        credentials: Option<serde_json::Value>,
+    },
     Disconnect,
     LoadSessions,
     CloseSession {
@@ -16066,6 +16073,14 @@ impl WorkspaceShell {
     }
 
     fn submit_connection_url(&mut self, cx: &mut Context<Self>) {
+        self.dispatch_connection_url(true, cx);
+    }
+
+    fn connect_connection_url_once(&mut self, cx: &mut Context<Self>) {
+        self.dispatch_connection_url(false, cx);
+    }
+
+    fn dispatch_connection_url(&mut self, save_profile: bool, cx: &mut Context<Self>) {
         if self.database_connection_pending {
             return;
         }
@@ -16089,8 +16104,8 @@ impl WorkspaceShell {
                 return;
             }
         };
-        if sender
-            .send(ExecutorCommand::CreateConnectionProfile {
+        let command = if save_profile {
+            ExecutorCommand::CreateConnectionProfile {
                 tenant_id,
                 vault_id: None,
                 name: parsed.name,
@@ -16099,9 +16114,17 @@ impl WorkspaceShell {
                 credentials: parsed.credentials,
                 credential_mode: sift_api_types::CredentialMode::Shared,
                 tags: Vec::new(),
-            })
-            .is_err()
-        {
+            }
+        } else {
+            ExecutorCommand::ConnectAdHoc {
+                tenant_id,
+                name: parsed.name,
+                provider_id: parsed.provider_id,
+                configuration: parsed.configuration,
+                credentials: parsed.credentials,
+            }
+        };
+        if sender.send(command).is_err() {
             let message = "Database connection manager stopped".to_owned();
             self.database_connection_error = Some(message.clone());
             self.record_connection_problem("Save database connection", message, cx);
@@ -37134,6 +37157,14 @@ impl WorkspaceShell {
                                         })),
                                 )
                                 .child(
+                                    Button::new("connection-url-once", "Connect once")
+                                        .tone(ButtonTone::Neutral)
+                                        .disabled(pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.connect_connection_url_once(cx)
+                                        })),
+                                )
+                                .child(
                                     Button::new(
                                         "connection-url-submit",
                                         if pending { "Connecting…" } else { "Add & connect" },
@@ -48554,6 +48585,38 @@ mod tests {
                 && destination == "declan@devbox"
                 && state_dir == ".local/state/sift/remote"
         ));
+    }
+
+    #[gpui::test]
+    fn connection_url_can_open_an_unsaved_explicit_connection(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_database_tenant = Some(3);
+            shell.connection_url_input.update(cx, |input, cx| {
+                input.set_text("postgres://sift:secret@db.internal:5433/lab", cx)
+            });
+            shell.connect_connection_url_once(cx);
+        });
+        match receiver.try_recv().unwrap() {
+            ExecutorCommand::ConnectAdHoc {
+                tenant_id,
+                provider_id,
+                configuration,
+                credentials,
+                ..
+            } => {
+                assert_eq!(tenant_id, 3);
+                assert_eq!(provider_id.as_str(), "sift/postgres");
+                assert_eq!(configuration["host"], "db.internal");
+                assert_eq!(configuration["port"], 5433);
+                assert_eq!(credentials.unwrap()["password"], "secret");
+            }
+            _ => panic!("expected explicit ad-hoc connection command"),
+        }
     }
 
     #[gpui::test]

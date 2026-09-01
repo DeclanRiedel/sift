@@ -29,28 +29,37 @@ surfaces, then admin/platform. Within P0, the connection experience comes first.
 
 ### Connections & sessions — connection picker, connected indicator, disconnect
 
-- [~] `health`, `ready` — connection/handshake indicator (M2)
+- [x] `health`, `ready` — instance lifecycle gates negotiation on both probes
+  and surfaces failed readiness as a degraded state (M2)
 - [x] `open_session`, `open_connection_from_profile` — **connection picker built**: Connections dock rows connect on click; executor opens session + connection for the chosen tenant/profile (M3)
 - [x] `connection_profiles` — profiles listed with a live status dot (disconnected / connecting / connected / failed) and connect/disconnect (M3)
 - [x] `close_session` — used by the Disconnect action and on reconnect (M3)
-- [ ] `open_session_for_tenant` — tenant-scoped session when multi-tenant (M2)
-- [ ] `list_sessions` — session list panel (M4)
-- [ ] `open_connection` (explicit spec) — ad-hoc connection dialog (M4)
+- [x] `open_session_for_tenant` — every profile and ad-hoc query context opens
+  a tenant-scoped session (M2)
+- [x] `list_sessions` — Account lists live sessions and their physical
+  connections, with refresh and close controls (M4)
+- [x] `open_connection` (explicit spec) — connection-URL dialog offers
+  **Connect once** without creating a durable profile (M4)
 - [x] `ping_connection` — periodic connection health chip with latency, failure
   classification, last-success time, and explicit reconnect (M4)
-- [ ] `close_connection`, `disconnect_connection_profile` — finer-grained disconnect (M4)
+- [x] `close_connection`, `disconnect_connection_profile` — Account closes an
+  individual physical connection or session; profile actions disconnect that
+  profile across sessions (M4)
 - [x] **footer/status bar** — connection target, execution outcome, and live
   transaction status are wired. Exclusive, client-local left-panel and
   bottom-tool selection is landed.
 
 ### Sign-in enough to connect — sign-in modal, account state
 
-- [~] `whoami` — read by executor; surface the signed-in identity (M2)
+- [x] `whoami` — signed-in identity and account/session controls are surfaced
+  in the app bar account popover (M2)
 - [x] `password_login`, `refresh_session` — hosted sign-in modal and explicit
       session refresh (M2)
 - [x] `logout`, `logout_all` — account menu (M2)
 - [x] `github_authorization_url`, `github_native_start`, `github_native_exchange`, `github_callback` — GitHub native sign-in (M2)
-- [ ] `exchange_ssh_proxy_capability` — SSH remote connect (M2/H)
+- [x] `exchange_ssh_proxy_capability` — desktop SSH profiles own the
+  `sift-remote` helper, consume its short-lived grant, follow renewals, and
+  preserve OpenSSH host-key/authentication policy (M2/H)
 
 ### Execute — finish the run path
 
@@ -253,12 +262,13 @@ Not user-facing — reconnect/websocket machinery behind the above: `connect`,
 
 ## Rollup
 
-- **Built (`[x]`):** `execute` → results grid. Plus non-SDK UI: editor, panes /
-  docks / toolbar, command palette (filtering + dispatch), clickable workspace
-  rows.
-- **Plumbed (`[~]`), no dedicated UI:** `health`/`ready`, `open_session`,
-  `open_connection_from_profile`, `whoami`, `connection_profiles`, `rooms`,
-  `room_workspaces`/`workspace`, presence stream.
-- **Next up (P0):** a real **connection picker** (choose profile → connect →
-  connected state → disconnect), sign-in-to-connect, and streaming execute +
-  cancel — then the status bar stops faking database/transaction/execution.
+- **P0 is implemented:** health/readiness, hosted and SSH sign-in, profile and
+  one-shot connections, tenant sessions, session/connection teardown,
+  streaming execution, paging, cancellation, and typed parameters all have
+  working desktop paths.
+- **Partial (`[~]`) items now begin at P4:** collaboration documents,
+  presence, and read-only virtual-workspace navigation still have follow-up UI
+  work described in their sections.
+- **Next unchecked API/UI work:** P1 provider rendering refinements and P2
+  semantic refactor/statement/plan-capture depth; priority remains governed by
+  the current product backlog rather than the historical milestone labels.
