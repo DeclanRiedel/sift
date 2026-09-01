@@ -1557,7 +1557,7 @@ impl ResultsView {
             }
             _ => self.query_started_at = None,
         }
-        self.rendered_columns = match &state {
+        let rendered_columns = match &state {
             ResultState::Streaming(data) | ResultState::Ready(data) => data
                 .columns
                 .iter()
@@ -1569,6 +1569,17 @@ impl ResultsView {
                 .collect(),
             _ => Vec::new(),
         };
+        let preserve_field_projection = !rendered_columns.is_empty()
+            && rendered_columns.len() == self.rendered_columns.len()
+            && rendered_columns
+                .iter()
+                .zip(&self.rendered_columns)
+                .all(|(next, previous)| {
+                    next.name == previous.name
+                        && next.type_label == previous.type_label
+                        && next.nullable == previous.nullable
+                });
+        self.rendered_columns = rendered_columns;
         self.rendered_rows = match &state {
             ResultState::Streaming(data) | ResultState::Ready(data) => data
                 .rows
@@ -1604,8 +1615,10 @@ impl ResultsView {
         self.column_filter_input
             .update(cx, |input, cx| input.set_text("", cx));
         self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
-        self.column_order = (0..self.rendered_columns.len()).collect();
-        self.included_columns = vec![true; self.rendered_columns.len()];
+        if !preserve_field_projection {
+            self.column_order = (0..self.rendered_columns.len()).collect();
+            self.included_columns = vec![true; self.rendered_columns.len()];
+        }
         self.messages = Self::messages_for_state(&state);
         self.selected_message = None;
         self.tab = if Self::is_error_state(&state) {
@@ -1702,13 +1715,35 @@ impl ResultsView {
     }
 
     pub fn set_pending(&mut self, cx: &mut Context<Self>) {
-        self.set_state(ResultState::Pending, cx);
+        self.query_started_at = Some(std::time::Instant::now());
+        self.state = ResultState::Pending;
+        self.messages.clear();
+        self.selected_message = None;
+        self.stream_result_seen = false;
+        self.window_start = 0;
+        self.window_held = false;
+        cx.notify();
     }
 
     /// Reset this surface for a cursor-backed stream. Subsequent pages append
     /// incrementally and retain at most [`MAX_RETAINED_ROWS`].
     pub fn begin_stream(&mut self, cx: &mut Context<Self>) {
-        self.set_state(ResultState::Streaming(ResultData::default()), cx);
+        self.query_started_at
+            .get_or_insert_with(std::time::Instant::now);
+        self.state = ResultState::Streaming(ResultData::default());
+        self.rendered_rows.clear();
+        self.display_rows = Arc::new(Vec::new());
+        self.messages.clear();
+        self.selected_message = None;
+        self.stream_result_seen = false;
+        self.window_start = 0;
+        self.window_held = false;
+        self.selected = None;
+        self.inline_cell_edit = None;
+        self.staged_cells.clear();
+        self.staged_undo.clear();
+        self.staged_redo.clear();
+        cx.notify();
     }
 
     /// Consume one server page.
@@ -1740,7 +1775,7 @@ impl ResultsView {
                 } else {
                     self.stream_result_seen = true;
                     data.columns = columns.iter().map(ResultColumn::from_metadata).collect();
-                    self.rendered_columns = columns
+                    let rendered_columns: Vec<CachedColumnRender> = columns
                         .iter()
                         .map(|column| CachedColumnRender {
                             name: column.name.clone().into(),
@@ -1748,9 +1783,21 @@ impl ResultsView {
                             nullable: matches!(column.nullable, Nullability::Nullable),
                         })
                         .collect();
+                    let preserve_field_projection = rendered_columns.len()
+                        == self.rendered_columns.len()
+                        && rendered_columns.iter().zip(&self.rendered_columns).all(
+                            |(next, previous)| {
+                                next.name == previous.name
+                                    && next.type_label == previous.type_label
+                                    && next.nullable == previous.nullable
+                            },
+                        );
+                    self.rendered_columns = rendered_columns;
                     self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
-                    self.column_order = (0..self.rendered_columns.len()).collect();
-                    self.included_columns = vec![true; self.rendered_columns.len()];
+                    if !preserve_field_projection {
+                        self.column_order = (0..self.rendered_columns.len()).collect();
+                        self.included_columns = vec![true; self.rendered_columns.len()];
+                    }
                     self.column_filters = vec![String::new(); self.rendered_columns.len()];
                     self.column_filter_operators = vec![
                         sift_protocol::ResultFilterOperator::Contains;
@@ -6215,6 +6262,50 @@ mod tests {
         assert!(!GridSelection::Column(5).highlights_row(0));
         assert!(GridSelection::All.highlights_row(99));
         assert!(GridSelection::All.highlights_column(99));
+    }
+
+    #[gpui::test]
+    fn rerunning_same_schema_preserves_inspector_field_projection(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        let result = || {
+            ResultState::Ready(ResultData {
+                columns: vec![
+                    ResultColumn {
+                        name: "id".into(),
+                        type_label: "bigint".into(),
+                        nullable: false,
+                    },
+                    ResultColumn {
+                        name: "payload".into(),
+                        type_label: "json".into(),
+                        nullable: true,
+                    },
+                ],
+                rows: vec![Row::new(vec![Value::Int64(1), Value::Null])],
+                ..Default::default()
+            })
+        };
+
+        view.update(cx, |view, cx| {
+            view.set_state(result(), cx);
+            view.set_column_included(1, false, cx);
+            view.set_pending(cx);
+            assert_eq!(
+                view.inspector_fields()
+                    .iter()
+                    .map(|field| field.included)
+                    .collect::<Vec<_>>(),
+                vec![true, false]
+            );
+            view.set_state(result(), cx);
+            assert_eq!(
+                view.inspector_fields()
+                    .iter()
+                    .map(|field| field.included)
+                    .collect::<Vec<_>>(),
+                vec![true, false]
+            );
+        });
     }
 
     #[test]
