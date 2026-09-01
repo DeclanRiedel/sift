@@ -10,7 +10,7 @@ use sift_protocol::{
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -40,6 +40,13 @@ struct SshSession {
     control_socket: Arc<PathBuf>,
     control_guard: Arc<Mutex<()>>,
     multiplex: Arc<AtomicBool>,
+    remote_runtime: Arc<RwLock<Option<RemoteRuntime>>>,
+}
+
+#[derive(Clone)]
+struct RemoteRuntime {
+    loader: String,
+    library_path: String,
 }
 
 #[tokio::main]
@@ -56,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
         control_socket: Arc::new(control_dir.join("control")),
         control_guard: Arc::new(Mutex::new(())),
         multiplex: Arc::new(AtomicBool::new(true)),
+        remote_runtime: Arc::new(RwLock::new(None)),
     };
 
     session.ensure_master().await?;
@@ -83,6 +91,13 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
             os = std::env::consts::OS,
             arch = std::env::consts::ARCH
         );
+    }
+    let local_binary = options
+        .local_server_binary
+        .as_ref()
+        .context("local server artifact was not selected")?;
+    if binary_needs_dynamic_loader(local_binary)? {
+        session.detect_nixos_runtime().await?;
     }
     validate_remote_path(&options.remote_binary)?;
     let mut probe = match session
@@ -341,10 +356,10 @@ async fn wait_for_daemon(
 
 async fn start_daemon(options: &Options, session: &SshSession) -> anyhow::Result<()> {
     let log = format!("{}/daemon.log", options.state_dir);
+    let binary = session.executable_command(&options.remote_binary);
     let command = format!(
         "mkdir -p {state} && chmod 700 {state} && {binary} remote migrate --state-dir {state} >>{log} 2>&1 && nohup {binary} remote daemon --state-dir {state} >>{log} 2>&1 </dev/null &",
         state = options.state_dir,
-        binary = options.remote_binary,
     );
     match tokio::time::timeout(DAEMON_LAUNCH_ACK_TIMEOUT, session.ssh_status(&[&command])).await {
         Ok(result) => result,
@@ -412,6 +427,8 @@ async fn install_server(options: &Options, session: &SshSession) -> anyhow::Resu
             &options.state_dir,
             "--destination",
             &options.remote_binary,
+            "--source",
+            &staging,
             "--sha256",
             &digest,
         ])
@@ -506,6 +523,50 @@ async fn forward_connection(
 }
 
 impl SshSession {
+    async fn detect_nixos_runtime(&self) -> anyhow::Result<()> {
+        let output = self
+            .ssh_output(&[
+                "if test -e /etc/NIXOS; then loader=$(find /nix/store -maxdepth 3 -path '*glibc*/lib/ld-linux-*.so.*' -print -quit 2>/dev/null); libgcc=$(find /nix/store -maxdepth 3 -path '*gcc*/lib/libgcc_s.so.1' -print -quit 2>/dev/null); test -n \"$loader\" && test -n \"$libgcc\" && printf '%s\\n%s\\n' \"$loader\" \"$libgcc\"; fi",
+            ])
+            .await?;
+        if output.is_empty() {
+            return Ok(());
+        }
+        let output = String::from_utf8(output).context("NixOS runtime paths were not UTF-8")?;
+        let mut lines = output.lines();
+        let loader = lines.next().context("NixOS glibc loader was not found")?;
+        let libgcc = lines.next().context("NixOS libgcc runtime was not found")?;
+        validate_nix_store_runtime_path(loader)?;
+        validate_nix_store_runtime_path(libgcc)?;
+        let glibc_dir = Path::new(loader)
+            .parent()
+            .context("NixOS glibc loader has no parent")?
+            .to_string_lossy();
+        let libgcc_dir = Path::new(libgcc)
+            .parent()
+            .context("NixOS libgcc has no parent")?
+            .to_string_lossy();
+        *self.remote_runtime.write().unwrap() = Some(RemoteRuntime {
+            loader: loader.to_owned(),
+            library_path: format!("{glibc_dir}:{libgcc_dir}"),
+        });
+        Ok(())
+    }
+
+    fn executable_command(&self, binary: &str) -> String {
+        self.remote_runtime
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|runtime| {
+                format!(
+                    "{} --library-path {} {binary}",
+                    runtime.loader, runtime.library_path
+                )
+            })
+            .unwrap_or_else(|| binary.to_owned())
+    }
+
     async fn ensure_master(&self) -> anyhow::Result<()> {
         if !self.multiplex.load(Ordering::Acquire) {
             return Ok(());
@@ -570,7 +631,17 @@ impl SshSession {
         &self,
         remote_args: &[&str],
     ) -> anyhow::Result<T> {
-        let output = self.ssh_output(remote_args).await?;
+        let runtime = self.remote_runtime.read().unwrap().clone();
+        let output = if let Some(runtime) = runtime {
+            let mut args = Vec::with_capacity(remote_args.len() + 3);
+            args.push(runtime.loader.as_str());
+            args.push("--library-path");
+            args.push(runtime.library_path.as_str());
+            args.extend_from_slice(remote_args);
+            self.ssh_output(&args).await?
+        } else {
+            self.ssh_output(remote_args).await?
+        };
         serde_json::from_slice(&output).context("decoding bounded remote-agent response")
     }
 
@@ -642,6 +713,25 @@ impl SshSession {
         }
         Ok(())
     }
+}
+
+fn binary_needs_dynamic_loader(path: &Path) -> anyhow::Result<bool> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading local server artifact: {}", path.display()))?;
+    Ok(bytes
+        .windows(b"ld-linux".len())
+        .any(|window| window == b"ld-linux"))
+}
+
+fn validate_nix_store_runtime_path(path: &str) -> anyhow::Result<()> {
+    if !path.starts_with("/nix/store/")
+        || !path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
+    {
+        bail!("remote NixOS runtime returned an unsafe path")
+    }
+    Ok(())
 }
 
 fn parse_options(args: impl IntoIterator<Item = String>) -> anyhow::Result<Options> {
@@ -823,5 +913,22 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(options.local_port, 7777);
+    }
+
+    #[test]
+    fn dynamic_loader_detection_and_nix_paths_are_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let dynamic = directory.path().join("dynamic");
+        std::fs::write(&dynamic, b"ELF\0/lib64/ld-linux-x86-64.so.2\0").unwrap();
+        let static_binary = directory.path().join("static");
+        std::fs::write(&static_binary, b"ELF\0static\0").unwrap();
+
+        assert!(binary_needs_dynamic_loader(&dynamic).unwrap());
+        assert!(!binary_needs_dynamic_loader(&static_binary).unwrap());
+        assert!(
+            validate_nix_store_runtime_path("/nix/store/abc-glibc/lib/ld-linux-x86-64.so.2")
+                .is_ok()
+        );
+        assert!(validate_nix_store_runtime_path("/tmp/ld-linux.so;id").is_err());
     }
 }

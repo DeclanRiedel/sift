@@ -156,10 +156,15 @@ async fn main() -> anyhow::Result<()> {
         ServerCommand::RemoteInstall {
             state_dir,
             destination,
+            source,
             sha256,
         } => {
-            let response =
-                sift_server::remote_agent::install_uploaded(&state_dir, &destination, &sha256)?;
+            let response = sift_server::remote_agent::install_uploaded(
+                &state_dir,
+                &destination,
+                source.as_deref(),
+                &sha256,
+            )?;
             sift_server::remote_agent::write_json(&response)?;
             return Ok(());
         }
@@ -461,6 +466,7 @@ enum ServerCommand {
     RemoteInstall {
         state_dir: std::path::PathBuf,
         destination: std::path::PathBuf,
+        source: Option<std::path::PathBuf>,
         sha256: String,
     },
 }
@@ -628,6 +634,7 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
     let mut nonce = None;
     let mut signature = None;
     let mut destination = None;
+    let mut source = None;
     let mut sha256 = None;
     while let Some(argument) = args.next() {
         let value = args
@@ -639,6 +646,7 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
             "--nonce" => nonce = Some(value),
             "--signature" => signature = Some(value),
             "--destination" => destination = Some(value.into()),
+            "--source" => source = Some(value.into()),
             "--sha256" => sha256 = Some(value),
             _ => anyhow::bail!("unknown remote argument `{argument}`"),
         }
@@ -662,6 +670,7 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
         "install" => Ok(ServerCommand::RemoteInstall {
             state_dir,
             destination: destination.context("remote install requires --destination")?,
+            source,
             sha256: sha256.context("remote install requires --sha256")?,
         }),
         _ => anyhow::bail!("unknown remote action `{action}`"),

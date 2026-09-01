@@ -116,6 +116,7 @@ fn clear_stale_descriptor(runtime_dir: &Path, descriptor: &Path) -> anyhow::Resu
 pub fn install_uploaded(
     state_dir: &Path,
     destination: &Path,
+    source: Option<&Path>,
     expected_sha256: &str,
 ) -> anyhow::Result<RemoteProbeResponse> {
     if expected_sha256.len() != 64
@@ -132,7 +133,13 @@ pub fn install_uploaded(
     let lock = lock_options.open(state_dir.join("install.lock"))?;
     lock.lock_exclusive()?;
 
-    let uploaded = std::env::current_exe().context("resolving uploaded executable")?;
+    let uploaded = source
+        .map(Path::to_owned)
+        .map(Ok)
+        .unwrap_or_else(|| std::env::current_exe().context("resolving uploaded executable"))?;
+    if source.is_some() {
+        validate_upload_source(destination, &uploaded)?;
+    }
     verify_artifact_digest(&uploaded, expected_sha256)?;
     let parent = destination
         .parent()
@@ -154,6 +161,26 @@ pub fn install_uploaded(
     }
     fs2::FileExt::unlock(&lock)?;
     probe(state_dir)
+}
+
+fn validate_upload_source(destination: &Path, uploaded: &Path) -> anyhow::Result<()> {
+    let parent = destination
+        .parent()
+        .context("remote install destination has no parent")?;
+    let destination_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("remote install destination has no safe file name")?;
+    let uploaded_name = uploaded
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("remote upload has no safe file name")?;
+    if uploaded.parent() != Some(parent)
+        || !uploaded_name.starts_with(&format!("{destination_name}.upload-"))
+    {
+        bail!("remote upload source is outside the destination staging area");
+    }
+    Ok(())
 }
 
 pub fn challenge(state_dir: &Path, fingerprint: &str) -> anyhow::Result<RemoteKeyChallenge> {
@@ -468,5 +495,25 @@ mod tests {
 
         assert!(probe(dir.path()).unwrap().daemon.is_none());
         assert!(!runtime.join("daemon.json").exists());
+    }
+
+    #[test]
+    fn explicit_upload_source_must_be_the_destination_staging_file() {
+        let destination = Path::new(".local/share/sift/bin/hash/sift-server");
+        assert!(validate_upload_source(
+            destination,
+            Path::new(".local/share/sift/bin/hash/sift-server.upload-1234")
+        )
+        .is_ok());
+        assert!(validate_upload_source(
+            destination,
+            Path::new(".local/share/sift/bin/other/sift-server.upload-1234")
+        )
+        .is_err());
+        assert!(validate_upload_source(
+            destination,
+            Path::new(".local/share/sift/bin/hash/other.upload-1234")
+        )
+        .is_err());
     }
 }
