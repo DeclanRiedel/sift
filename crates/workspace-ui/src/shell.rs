@@ -48558,7 +48558,11 @@ mod tests {
         let pane = workspace.read_with(&cx, |shell, _| shell.panes[0].clone());
 
         pane.update_in(&mut cx, |pane, window, cx| {
-            // Existing bottom extent is 240, so sub-pixel movement is a no-op.
+            pane.results.get(&1).unwrap().update(cx, |results, cx| {
+                results.set_extent(240.0, cx);
+            });
+            // An explicitly sized bottom extent is known, so sub-pixel
+            // movement around it remains a no-op.
             pane.queue_result_resize(1, 240.4, window, cx);
             assert!(!pane.result_resize_frame_pending);
 
