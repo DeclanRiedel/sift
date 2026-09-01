@@ -53,6 +53,18 @@ pub(super) fn render_status_bar(
         .connection_health
         .as_ref()
         .and_then(|report| report.failure.as_ref());
+    let (error_count, warning_count) =
+        shell
+            .global_problems
+            .iter()
+            .fold(
+                (0usize, 0usize),
+                |(errors, warnings), problem| match problem.severity {
+                    ProblemSeverity::Error => (errors.saturating_add(1), warnings),
+                    ProblemSeverity::Warning => (errors, warnings.saturating_add(1)),
+                },
+            );
+    let problem_count = error_count.saturating_add(warning_count);
     let (cursor_label, cursor_tooltip) = shell.active_cursor_position(cx).map_or_else(
         || ("-:-".into(), "No active query cursor".into()),
         |(line, column)| {
@@ -274,34 +286,58 @@ pub(super) fn render_status_bar(
                 .items_center()
                 .gap_1()
                 .child(
-                    button(
-                        "footer-problems",
-                        IconName::Warning,
-                        if shell.unread_problems == 0 {
-                            "Open problems".into()
-                        } else {
-                            format!("Open problems ({})", shell.unread_problems)
-                        },
-                        false,
-                        Some(shell.unread_problems),
-                        shell.unread_problems > 0,
-                    )
-                    .on_click(
-                        cx.listener(|shell, _, window, cx| shell.show_global_problems(window, cx)),
-                    ),
+                    div()
+                        .id("footer-problems")
+                        .role(Role::Button)
+                        .aria_label(format!(
+                            "Open problems: {error_count} error(s), {warning_count} warning(s)"
+                        ))
+                        .h(theme.metrics.compact_control_height)
+                        .min_w(theme.metrics.compact_control_height)
+                        .px_1()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap_1()
+                        .rounded_sm()
+                        .hover(|button| button.bg(colors.hovered_surface))
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            shell.show_global_problems(window, cx)
+                        }))
+                        .child(icon(
+                            IconName::Warning,
+                            if problem_count == 0 {
+                                colors.muted_text
+                            } else {
+                                colors.warning
+                            },
+                            14.,
+                        ))
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_color(colors.danger)
+                                .child(error_count.to_string()),
+                        )
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_color(colors.warning)
+                                .child(warning_count.to_string()),
+                        ),
                 )
-                .child(
+                .children((problem_count > 0).then(|| {
                     button(
                         "footer-copy-problems",
                         IconName::Copy,
-                        "Copy problems list".into(),
+                        "Copy errors and warnings".into(),
                         false,
                         None,
                         false,
                     )
-                    .disabled(shell.global_problems.is_empty())
-                    .on_click(cx.listener(|shell, _, _, cx| shell.copy_all_global_problems(cx))),
-                )
+                    .on_click(cx.listener(|shell, _, _, cx| shell.copy_all_global_problems(cx)))
+                }))
                 .child(separator())
                 .child(
                     div()
