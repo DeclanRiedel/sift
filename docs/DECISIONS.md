@@ -1984,3 +1984,82 @@ and explicitly authorized people can share human-readable secrets through a
 narrow audited reveal surface. The server and its secret backend remain inside
 the confidentiality boundary; end-to-end encryption and external secret
 brokers require separate designs.
+
+---
+
+## ADR-053 — Dialect-Owned SQL Intelligence And Explicit Execution Results
+
+**Context.** Sift has one revisioned semantic document service and both drivers
+already stream `Page::NextResult` boundaries, but the desktop retains only the
+first result set and the HTTP adapter rejects a second. The current semantic
+catalog projection carries object and column names, which is enough for basic
+completion but not trustworthy hover types, expression inference, or star
+expansion. Treating PostgreSQL and T-SQL as small variations of one generic SQL
+grammar would also make completion and edits least reliable where users depend
+on them most: aliases, temporary objects, batches, functions, variables,
+quoting, and type coercion.
+
+**Decision.** Core continues to own semantic document identity, immutable
+revisions, resource limits, catalog authorization, cache lifecycle, public
+routes, and edit validation. Each dialect pack owns lossless parsing,
+error-recovery rules, identifier normalization and quoting, scope construction,
+type inference, variable compilation, star expansion, and completion
+enrichments. Packs return bounded portable facts and edits; they never receive
+a driver, secret store, metadata store, or unfiltered catalog. PostgreSQL and
+T-SQL remain separate first-party conformance packs behind the ADR-032
+capability boundary rather than branches inside UI code.
+
+Completion, hover, and prepared edits bind against the active connection's
+policy-filtered catalog revision and database identity. The server builds an
+immutable indexed binding view containing stable object ids, kinds, qualified
+names, ordered typed columns, nullability, comments, routine signatures, and
+explicit completeness. Warm editor requests perform no database I/O. Answers
+echo semantic and catalog revisions; the desktop discards stale answers.
+`Tab` accepts the active completion in Vim insert mode, while aliases,
+qualifiers, CTEs, temporary objects, and current-scope columns outrank global
+catalog candidates. An unqualified field is never offered as unambiguous when
+multiple visible relations provide it.
+
+Execution v2 uses an explicit ordered event lifecycle: execution start,
+statement start, result-set start, rows addressed to a result-set id,
+result-set completion, command completion, notices, progress, terminal error,
+and execution completion. Result-set completion is distinct from batch
+completion. The server owns execution/result-set ids, backpressure, quotas,
+spill, retention, and paging. The desktop renders only the active result grid;
+inactive result tabs keep summaries and server page references. Legacy v1
+single-result adapters may project the first result set, but must report
+truncation rather than silently treating a batch as one result.
+
+Portable progress always reports honest lifecycle facts such as queueing,
+connection acquisition, current statement, elapsed time, rows and bytes
+received, spilling, and cancellation. Engine-native percentages are optional
+extension-trait telemetry sampled on a separate bounded monitor connection.
+Missing privileges, monitor saturation, or an engine without determinate
+progress degrades to an indeterminate phase and never delays or fails the
+query. Sift does not estimate a fake percentage for ordinary queries.
+
+SQL variables use a Sift-owned token form distinct from native PostgreSQL and
+T-SQL variables. Value and value-list variables compile only to driver bind
+parameters; identifier variables compile only through dialect quoting. Raw SQL
+variables are excluded from the initial contract. Query history and audit keep
+the template digest, names, kinds, and redacted provenance rather than resolved
+secret values. Snippet tabstops remain editor-local and syntactically distinct
+from execution variables. Built-in, personal, workspace, and tenant snippets
+are dialect-scoped; catalog-generated templates are prepared by the server
+against an exact catalog revision.
+
+The locked `Driver` method signatures do not change. The existing
+`ExecuteRequest` and streamed protocol shapes may receive a versioned breaking
+revision under ADR-017. Engine-only native telemetry is added through `PgExt`
+and `MssqlExt`. `sift-protocol` remains pure serde; parsing, dictionaries,
+catalog indexes, and UI state stay outside it. Full delivery order and evidence
+gates live in `docs/PLANS/sql-editor-productivity-and-execution.md`.
+
+**Consequences.** Editor intelligence follows the selected connection and
+database without embedding a second parser in GPUI or querying a database on
+every keystroke. PostgreSQL and SQL Server can achieve native depth without
+leaking engine details through the core driver trait. Multiple result sets and
+commands gain stable independent status, paging, export, and cancellation
+semantics. This requires a protocol-versioned execution migration, a richer
+catalog binding projection, and two maintained dialect corpora instead of one
+permissive generic parser corpus.
