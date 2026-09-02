@@ -721,14 +721,19 @@ impl SettingsStore {
         if document.get("ui").is_none() {
             document["ui"] = Item::Table(toml_edit::Table::new());
         }
-        let decor = document["ui"]["recent_objects"]
-            .as_value()
+        let ui = document
+            .get_mut("ui")
+            .and_then(Item::as_table_mut)
+            .ok_or_else(|| "settings.toml [ui] must be a table".to_owned())?;
+        let decor = ui
+            .get("recent_objects")
+            .and_then(Item::as_value)
             .map(|value| value.decor().clone());
         let mut enabled_value = Value::from(enabled);
         if let Some(decor) = decor {
             *enabled_value.decor_mut() = decor;
         }
-        document["ui"]["recent_objects"] = Item::Value(enabled_value);
+        ui.insert("recent_objects", Item::Value(enabled_value));
         let updated = document.to_string();
         let settings = UserSettings::decode(&updated)?;
         self.write_source(&updated)?;
@@ -749,14 +754,19 @@ impl SettingsStore {
         if document.get("ui").is_none() {
             document["ui"] = Item::Table(toml_edit::Table::new());
         }
-        let decor = document["ui"]["navigation_hints"]
-            .as_value()
+        let ui = document
+            .get_mut("ui")
+            .and_then(Item::as_table_mut)
+            .ok_or_else(|| "settings.toml [ui] must be a table".to_owned())?;
+        let decor = ui
+            .get("navigation_hints")
+            .and_then(Item::as_value)
             .map(|value| value.decor().clone());
         let mut mode_value = Value::from(mode.as_str());
         if let Some(decor) = decor {
             *mode_value.decor_mut() = decor;
         }
-        document["ui"]["navigation_hints"] = Item::Value(mode_value);
+        ui.insert("navigation_hints", Item::Value(mode_value));
         let updated = document.to_string();
         let settings = UserSettings::decode(&updated)?;
         self.write_source(&updated)?;
@@ -995,6 +1005,25 @@ mod tests {
             let settings = store.save_navigation_hints(mode).unwrap();
             assert_eq!(settings.ui.navigation_hints, mode);
         }
+    }
+
+    #[test]
+    fn navigation_hint_update_creates_a_missing_ui_table() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        std::fs::write(&path, "version = 1\n").unwrap();
+        let store = SettingsStore::new(&path);
+
+        let settings = store
+            .save_navigation_hints(NavigationHints::Hidden)
+            .unwrap();
+
+        assert_eq!(settings.ui.navigation_hints, NavigationHints::Hidden);
+        assert!(settings.ui.recent_objects);
+        assert!(store
+            .read_text()
+            .unwrap()
+            .contains("navigation_hints = \"hidden\""));
     }
 
     #[test]
