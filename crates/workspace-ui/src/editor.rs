@@ -1176,7 +1176,16 @@ impl QueryEditor {
         if self.keymap != EditorKeymap::Vim {
             return;
         }
+        let preserve_insert = self.vim_mode == VimMode::Insert;
         self.apply_keymap(EditorKeymap::Vim);
+        if preserve_insert {
+            let snapshot = self
+                .vim
+                .as_mut()
+                .expect("Vim keymap must own an engine")
+                .input_text("i");
+            self.vim_mode = snapshot.mode;
+        }
         cx.emit(EditorEvent::VimStateChanged);
     }
 
@@ -4506,6 +4515,8 @@ mod tests {
     fn accepting_a_completion_replaces_the_server_reported_range(cx: &mut TestAppContext) {
         let (mut cx, editor, spy) = editor_with_spy("select * from us", cx);
         editor.update_in(&mut cx, |editor, window, cx| {
+            editor.set_keymap(EditorKeymap::Vim, cx);
+            assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
             editor.document.set_selection(16..16, false);
             editor.complete(&Complete, window, cx);
         });
@@ -4531,6 +4542,7 @@ mod tests {
         editor.read_with(&cx, |editor, _| {
             assert_eq!(editor.document().text(), "select * from users");
             assert!(editor.semantic().completion().is_none());
+            assert_eq!(editor.vim_mode(), VimMode::Insert);
         });
     }
 
