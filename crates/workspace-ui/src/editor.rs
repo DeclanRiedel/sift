@@ -1630,7 +1630,9 @@ impl QueryEditor {
             }
         }
         self.resync_keymap_after_external_change(cx);
-        self.edited(cx);
+        // Acceptance is terminal for this popup. Re-triggering automatic
+        // completion here makes the accepted token immediately reappear.
+        self.edited_with_auto_completion(false, cx);
         true
     }
 
@@ -4695,15 +4697,20 @@ mod tests {
                 cx,
             ));
         });
-        // Tab accepts the highlighted candidate instead of indenting.
+        // Enter accepts the highlighted candidate without reopening it.
         editor.update_in(&mut cx, |editor, window, cx| {
-            editor.indent(&Indent, window, cx);
+            editor.newline(&Newline, window, cx);
         });
+        cx.run_until_parked();
         editor.read_with(&cx, |editor, _| {
             assert_eq!(editor.document().text(), "select * from users");
             assert!(editor.semantic().completion().is_none());
             assert_eq!(editor.vim_mode(), VimMode::Insert);
         });
+        let requests = spy.read_with(&cx, |spy, _| spy.0.clone());
+        assert!(requests
+            .iter()
+            .all(|(_, request)| !matches!(request, SemanticRequestKind::AutoComplete { .. })));
     }
 
     #[gpui::test]
