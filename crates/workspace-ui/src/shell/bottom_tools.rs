@@ -280,12 +280,8 @@ pub(super) fn render_bottom_panel(
                     .map(|(index, configuration)| {
                         let edit_configuration = configuration.clone();
                         let run = shell.automation_runs.get(&configuration.id);
-                        let running = run.is_some_and(automation_run_is_active);
-                        let requires_variables = configuration
-                            .variables
-                            .iter()
-                            .any(|variable| variable.required);
                         let selected = index == shell.automation_selected;
+                        let expanded = shell.automation_expanded == Some(configuration.id);
                         let (status, status_color, status_background) =
                             match run.map(|run| run.state) {
                                 None => ("Never run", colors.disabled_text, colors.panel),
@@ -324,7 +320,7 @@ pub(super) fn render_bottom_panel(
                             .id(("automation-configuration", index))
                             .debug_selector(move || format!("automation-configuration-{index}"))
                             .role(Role::Button)
-                            .h(px(36.))
+                            .min_h(px(36.))
                             .px_3()
                             .flex()
                             .items_center()
@@ -361,13 +357,14 @@ pub(super) fn render_bottom_panel(
                             )
                             .child(
                                 div()
-                                    .w(px(72.))
+                                    .w(px(56.))
+                                    .flex_none()
                                     .text_xs()
                                     .text_color(colors.muted_text)
                                     .child(format!("{}", configuration.scripts.len())),
                             )
                             .child(
-                                div().w(px(104.)).flex().items_center().child(
+                                div().w(px(96.)).flex_none().flex().items_center().child(
                                     div()
                                         .px_2()
                                         .py(px(2.))
@@ -380,27 +377,24 @@ pub(super) fn render_bottom_panel(
                             )
                             .child(
                                 div()
-                                    .w(px(224.))
+                                    .w(px(18.))
+                                    .flex_none()
                                     .flex()
                                     .items_center()
                                     .justify_end()
-                                    .gap_1()
-                                    .text_xs()
-                                    .text_color(colors.disabled_text)
-                                    .when(selected, |hints| {
-                                        hints
-                                            .child(KeyBinding::new("Enter"))
-                                            .child("Edit")
-                                            .when(running, |hints| {
-                                                hints.child(KeyBinding::new("c")).child("Cancel")
-                                            })
-                                            .when(!running && !requires_variables, |hints| {
-                                                hints.child(KeyBinding::new("r")).child("Run")
-                                            })
-                                            .when(requires_variables, |hints| {
-                                                hints.child("Values required")
-                                            })
-                                    }),
+                                    .child(icon(
+                                        if expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        },
+                                        if selected {
+                                            colors.text
+                                        } else {
+                                            colors.disabled_text
+                                        },
+                                        10.,
+                                    )),
                             )
                     });
             let schedules =
@@ -424,6 +418,7 @@ pub(super) fn render_bottom_panel(
                             .px_2()
                             .py_1()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap_2()
                             .border_b_1()
@@ -638,7 +633,7 @@ pub(super) fn render_bottom_panel(
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
-                .border_l_1()
+                .border_t_1()
                 .border_color(colors.subtle_border)
                 .overflow_y_scroll()
                 .child(
@@ -646,6 +641,7 @@ pub(super) fn render_bottom_panel(
                         .h(px(28.))
                         .px_2()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .justify_between()
                         .child(SectionLabel::new("SCHEDULES"))
@@ -664,6 +660,7 @@ pub(super) fn render_bottom_panel(
                         .px_2()
                         .pb_2()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap_2()
                         .child(
@@ -792,16 +789,9 @@ pub(super) fn render_bottom_panel(
                         .text_xs()
                         .text_color(colors.disabled_text)
                         .child(div().flex_1().min_w_0().child("CONFIGURATION"))
-                        .child(div().w(px(72.)).child("STEPS"))
-                        .child(div().w(px(104.)).child("STATUS"))
-                        .when(shell.navigation_hints_visible(), |header| {
-                            header.child(
-                                div()
-                                    .w(px(224.))
-                                    .text_right()
-                                    .child("j/k SELECT · DOUBLE-CLICK EDIT"),
-                            )
-                        }),
+                        .child(div().w(px(56.)).flex_none().child("STEPS"))
+                        .child(div().w(px(96.)).flex_none().child("STATUS"))
+                        .child(div().w(px(18.)).flex_none()),
                 )
                 .children(
                     shell.automations_error.as_ref().map(|message| {
@@ -827,16 +817,21 @@ pub(super) fn render_bottom_panel(
                         .flex_1()
                         .min_h_0()
                         .flex()
+                        .flex_col()
                         .child(
                             div()
                                 .id("automation-configuration-list")
-                                .w(px(440.))
-                                .min_w(px(300.))
+                                .w_full()
+                                .min_w_0()
                                 .min_h_0()
+                                .when(shell.automation_expanded.is_some(), |list| {
+                                    list.flex_none().max_h(px(180.))
+                                })
+                                .when(shell.automation_expanded.is_none(), |list| list.flex_1())
                                 .overflow_y_scroll()
                                 .children(rows),
                         )
-                        .child(details),
+                        .children(shell.automation_expanded.map(|_| details)),
                 )
                 .into_any_element()
         } else {

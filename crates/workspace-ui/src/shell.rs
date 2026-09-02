@@ -8684,6 +8684,7 @@ pub struct WorkspaceShell {
     automation_last_success_for_commit: Option<sift_protocol::Run>,
     automation_focus_handle: FocusHandle,
     automation_selected: usize,
+    automation_expanded: Option<sift_protocol::RunConfigurationId>,
     automation_detail_configuration: Option<sift_protocol::RunConfigurationId>,
     automation_schedules: Vec<sift_protocol::RunSchedule>,
     automation_occurrences: Vec<sift_protocol::ScheduleOccurrence>,
@@ -9821,6 +9822,7 @@ impl WorkspaceShell {
             automation_last_success_for_commit: None,
             automation_focus_handle: cx.focus_handle(),
             automation_selected: 0,
+            automation_expanded: None,
             automation_detail_configuration: None,
             automation_schedules: Vec::new(),
             automation_occurrences: Vec::new(),
@@ -12989,6 +12991,14 @@ impl WorkspaceShell {
                         self.automation_selected = self
                             .automation_selected
                             .min(self.automation_configurations.len().saturating_sub(1));
+                        if self.automation_expanded.is_some_and(|expanded| {
+                            !self
+                                .automation_configurations
+                                .iter()
+                                .any(|configuration| configuration.id == expanded)
+                        }) {
+                            self.automation_expanded = None;
+                        }
                         self.automations_error = None;
                     }
                     Err(message) => self.automations_error = Some(message),
@@ -13000,7 +13010,9 @@ impl WorkspaceShell {
                     }
                     Err(_) => {}
                 }
-                self.request_automation_details(cx);
+                if self.automation_expanded.is_some() {
+                    self.request_automation_details(cx);
+                }
                 cx.notify();
             }
             ExecutorEvent::RunConfigurationSaved { item_id, result } => {
@@ -23187,18 +23199,22 @@ impl WorkspaceShell {
         match event.keystroke.key.as_str() {
             "j" | "down" if count > 0 => {
                 self.automation_selected = (self.automation_selected + 1).min(count - 1);
+                self.automation_expanded = self.selected_automation_id();
                 self.request_automation_details(cx);
             }
             "k" | "up" if count > 0 => {
                 self.automation_selected = self.automation_selected.saturating_sub(1);
+                self.automation_expanded = self.selected_automation_id();
                 self.request_automation_details(cx);
             }
             "g" if count > 0 => {
                 self.automation_selected = 0;
+                self.automation_expanded = self.selected_automation_id();
                 self.request_automation_details(cx);
             }
             "G" if count > 0 => {
                 self.automation_selected = count - 1;
+                self.automation_expanded = self.selected_automation_id();
                 self.request_automation_details(cx);
             }
             "enter" | "e" if count > 0 => {
@@ -23227,7 +23243,14 @@ impl WorkspaceShell {
         if index >= self.automation_configurations.len() {
             return;
         }
+        let configuration_id = self.automation_configurations[index].id;
         self.automation_selected = index;
+        if self.automation_expanded == Some(configuration_id) {
+            self.automation_expanded = None;
+            cx.notify();
+            return;
+        }
+        self.automation_expanded = Some(configuration_id);
         self.clear_automation_schedule_editor(cx);
         self.request_automation_details(cx);
         cx.notify();
@@ -54031,6 +54054,7 @@ mod tests {
             shell.bottom_dock.presentation.open = true;
             shell.automation_configurations =
                 vec![automation_configuration(1, "Daily refresh", false)];
+            shell.automation_expanded = Some(sift_protocol::RunConfigurationId(1));
             shell.automation_occurrences = vec![sift_protocol::ScheduleOccurrence {
                 id: sift_protocol::ScheduleOccurrenceId(12),
                 schedule_id: sift_protocol::ScheduleId(8),
@@ -54062,6 +54086,12 @@ mod tests {
                 occurrence_id: sift_protocol::ScheduleOccurrenceId(12),
             })
         ));
+        let row = cx
+            .debug_bounds("automation-configuration-0")
+            .expect("automation row");
+        cx.simulate_click(row.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("automation-details").is_none());
     }
 
     #[gpui::test]
