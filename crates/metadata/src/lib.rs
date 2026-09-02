@@ -67,7 +67,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=43 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=44 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -4527,8 +4527,8 @@ impl MetadataStore {
         conn.execute(
             "INSERT INTO query_history
              (principal_id, connection_profile_id, sql_text, started_at, duration_ms,
-              row_count, status, error_code, error_message, room_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              row_count, status, error_code, error_message, room_id, variable_descriptors_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 input.principal_id.0,
                 input.connection_profile_id.map(|id| id.0),
@@ -4539,7 +4539,8 @@ impl MetadataStore {
                 input.status.as_str(),
                 input.error_code,
                 input.error_message,
-                input.room_id.map(|id| id.0)
+                input.room_id.map(|id| id.0),
+                serde_json::to_string(&input.variable_descriptors)?
             ],
         )?;
         let history_id = QueryHistoryId(conn.last_insert_rowid());
@@ -4639,7 +4640,8 @@ impl MetadataStore {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, principal_id, connection_profile_id, sql_text, started_at,
-                    duration_ms, row_count, status, error_code, error_message, room_id
+                    duration_ms, row_count, status, error_code, error_message, room_id,
+                    variable_descriptors_json
              FROM query_history
              WHERE room_id = ?1 AND (?2 IS NULL OR id < ?2)
              ORDER BY id DESC
@@ -4669,7 +4671,8 @@ impl MetadataStore {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, principal_id, connection_profile_id, sql_text, started_at,
-                    duration_ms, row_count, status, error_code, error_message, room_id
+                    duration_ms, row_count, status, error_code, error_message, room_id,
+                    variable_descriptors_json
              FROM query_history
              WHERE principal_id = ?1 AND (?2 IS NULL OR id < ?2)
              ORDER BY id DESC
@@ -5068,7 +5071,8 @@ impl MetadataStore {
     ) -> Result<QueryHistory> {
         conn.query_row(
             "SELECT id, principal_id, connection_profile_id, sql_text, started_at,
-                    duration_ms, row_count, status, error_code, error_message, room_id
+                    duration_ms, row_count, status, error_code, error_message, room_id,
+                    variable_descriptors_json
              FROM query_history WHERE id = ?1",
             params![id.0],
             query_history_from_row,
@@ -5627,6 +5631,15 @@ fn query_history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueryHist
         error_code: row.get(8)?,
         error_message: row.get(9)?,
         room_id: row.get::<_, Option<i64>>(10)?.map(RoomId),
+        variable_descriptors: serde_json::from_str(&row.get::<_, String>(11)?).map_err(
+            |error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    11,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            },
+        )?,
     })
 }
 
@@ -8811,6 +8824,13 @@ mod tests {
                 status: QueryStatus::Ok,
                 error_code: None,
                 error_message: None,
+                variable_descriptors: vec![sift_protocol::RedactedSqlVariableDescriptor {
+                    name: "tenant".into(),
+                    kind: sift_protocol::SqlVariableKind::Value,
+                    scope: sift_protocol::SqlVariableScope::RunPrompt,
+                    secret: false,
+                    bind_count: 1,
+                }],
             })
             .unwrap();
         assert_eq!(row.room_id, Some(room.id));
@@ -8819,6 +8839,7 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].sql_text, "select 1");
         assert_eq!(history[0].status, QueryStatus::Ok);
+        assert_eq!(history[0].variable_descriptors[0].name, "tenant");
 
         store
             .record_query_history(NewQueryHistory {
@@ -8831,6 +8852,7 @@ mod tests {
                 status: QueryStatus::Ok,
                 error_code: None,
                 error_message: None,
+                variable_descriptors: Vec::new(),
             })
             .unwrap();
         let first_page = store

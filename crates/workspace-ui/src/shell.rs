@@ -2228,6 +2228,7 @@ struct PendingDatabaseExecution {
     item_id: u64,
     sql: String,
     params: Vec<sift_protocol::Value>,
+    variable_context: Option<sift_protocol::SqlVariableHistoryContext>,
     source: DatabaseObjectSource,
 }
 
@@ -2235,16 +2236,25 @@ struct PendingProductionExecution {
     item_id: u64,
     sql: String,
     params: Vec<sift_protocol::Value>,
+    variable_context: Option<sift_protocol::SqlVariableHistoryContext>,
 }
 
 struct PendingParameterRun {
     item_id: u64,
     sql: String,
     binding_key: String,
+    engine: sift_protocol::Engine,
+}
+
+#[derive(Clone, Copy)]
+enum ParameterBindingKind {
+    Native,
+    Template(sift_protocol::SqlVariableKind),
 }
 
 struct ParameterBindingInput {
     label: String,
+    kind: ParameterBindingKind,
     input: Entity<TextInput>,
 }
 
@@ -2642,6 +2652,7 @@ pub enum ExecutorCommand {
         params: Vec<sift_protocol::Value>,
         transform: Option<sift_protocol::ResultTransform>,
         source: Option<sift_protocol::VersionedExecutionContext>,
+        variable_context: Option<sift_protocol::SqlVariableHistoryContext>,
     },
     Explain {
         item_id: u64,
@@ -8167,6 +8178,38 @@ fn parse_parameter_value(text: &str) -> Result<sift_protocol::Value, String> {
     })
 }
 
+fn parse_template_binding(
+    name: &str,
+    kind: sift_protocol::SqlVariableKind,
+    text: &str,
+) -> Result<sift_protocol::SqlVariableBinding, String> {
+    let value = match kind {
+        sift_protocol::SqlVariableKind::Value => {
+            sift_protocol::SqlVariableValue::Scalar(parse_parameter_value(text)?)
+        }
+        sift_protocol::SqlVariableKind::Identifier => {
+            sift_protocol::SqlVariableValue::Identifier(text.trim().to_owned())
+        }
+        sift_protocol::SqlVariableKind::List => {
+            let value: serde_json::Value = serde_json::from_str(text.trim())
+                .map_err(|error| format!("Expected a non-empty JSON array: {error}"))?;
+            let serde_json::Value::Array(values) = value else {
+                return Err("Expected a non-empty JSON array".into());
+            };
+            let values = values
+                .into_iter()
+                .map(|value| parse_parameter_value(&value.to_string()))
+                .collect::<Result<Vec<_>, _>>()?;
+            sift_protocol::SqlVariableValue::List(values)
+        }
+    };
+    Ok(sift_protocol::SqlVariableBinding {
+        name: name.to_owned(),
+        value,
+        scope: sift_protocol::SqlVariableScope::RunPrompt,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct ResultEditApplyFailure {
     pub message: String,
@@ -10802,7 +10845,13 @@ impl WorkspaceShell {
                                     == self.selected_instance_id.as_deref().unwrap_or_default()
                         });
                         if let Some(pending) = pending {
-                            self.send_execution(pending.item_id, pending.sql, pending.params, cx);
+                            self.send_execution_with_context(
+                                pending.item_id,
+                                pending.sql,
+                                pending.params,
+                                pending.variable_context,
+                                cx,
+                            );
                         }
                         let pending = self.pending_database_explain.take().filter(|pending| {
                             pending.source.profile_id == profile_id
@@ -13528,14 +13577,21 @@ impl WorkspaceShell {
 
     fn execute_database_item(&mut self, item_id: u64, sql: String, cx: &mut Context<Self>) {
         let parameters = detect_query_parameters(&sql);
-        if !parameters.is_empty() {
+        let template_references = match sift_sql_variables::references(&sql) {
+            Ok(references) => references,
+            Err(error) => {
+                self.show_error_toast(error.to_string(), cx);
+                return;
+            }
+        };
+        if !parameters.is_empty() || !template_references.is_empty() {
             let binding_key = parameter_binding_key(&sql);
             let remembered = self
                 .remembered_parameter_bindings
                 .get(&binding_key)
                 .cloned()
                 .unwrap_or_default();
-            self.parameter_binding_inputs = parameters
+            let mut inputs = parameters
                 .into_iter()
                 .enumerate()
                 .map(|(index, label)| {
@@ -13544,13 +13600,55 @@ impl WorkspaceShell {
                     let input = cx.new(|cx| {
                         TextInput::new(text, "Enter a value…", cx).aria_label(aria_label)
                     });
-                    ParameterBindingInput { label, input }
+                    ParameterBindingInput {
+                        label,
+                        kind: ParameterBindingKind::Native,
+                        input,
+                    }
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            let native_count = inputs.len();
+            let mut seen = std::collections::HashSet::new();
+            inputs.extend(
+                template_references
+                    .into_iter()
+                    .filter(|reference| seen.insert(reference.name.clone()))
+                    .enumerate()
+                    .map(|(index, reference)| {
+                        let text = remembered
+                            .get(native_count + index)
+                            .cloned()
+                            .unwrap_or_default();
+                        let placeholder = match reference.kind {
+                            sift_protocol::SqlVariableKind::Value => "Enter a value…",
+                            sift_protocol::SqlVariableKind::Identifier => "schema.table",
+                            sift_protocol::SqlVariableKind::List => "[1, 2, 3]",
+                        };
+                        let label = reference.name;
+                        let aria_label = format!("Value for {label}");
+                        let input = cx
+                            .new(|cx| TextInput::new(text, placeholder, cx).aria_label(aria_label));
+                        ParameterBindingInput {
+                            label,
+                            kind: ParameterBindingKind::Template(reference.kind),
+                            input,
+                        }
+                    }),
+            );
+            self.parameter_binding_inputs = inputs;
+            let engine = self
+                .active_connection_provider_id()
+                .and_then(|provider| match provider.as_str() {
+                    "sift/postgres" => Some(sift_protocol::Engine::Postgres),
+                    "sift/sql-server" => Some(sift_protocol::Engine::SqlServer),
+                    _ => None,
+                })
+                .unwrap_or(sift_protocol::Engine::Postgres);
             self.pending_parameter_run = Some(PendingParameterRun {
                 item_id,
                 sql,
                 binding_key,
+                engine,
             });
             self.parameter_binding_error = None;
             self.modal = Some(Modal::QueryParameters);
@@ -13558,6 +13656,21 @@ impl WorkspaceShell {
             return;
         }
         self.execute_database_item_with_params(item_id, sql, Vec::new(), cx);
+    }
+
+    fn active_connection_provider_id(&self) -> Option<&sift_protocol::ProviderId> {
+        let profile_id = match self.connection_status {
+            ConnectionStatus::Connected { profile_id, .. }
+            | ConnectionStatus::Connecting { profile_id }
+            | ConnectionStatus::Failed { profile_id, .. } => profile_id,
+            ConnectionStatus::Disconnected => return None,
+        };
+        self.lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| tenant.connections.iter())
+            .find(|connection| connection.id == profile_id)
+            .map(|connection| &connection.provider_id)
     }
 
     fn remembered_query_params(&self, sql: &str) -> Result<Vec<sift_protocol::Value>, String> {
@@ -13592,15 +13705,18 @@ impl WorkspaceShell {
             .iter()
             .map(|binding| binding.input.read(cx).text().to_owned())
             .collect::<Vec<_>>();
-        let params = self
+        let native_params = self
             .parameter_binding_inputs
             .iter()
             .zip(&texts)
+            .filter_map(|(binding, text)| {
+                matches!(binding.kind, ParameterBindingKind::Native).then_some((binding, text))
+            })
             .map(|(binding, text)| {
                 parse_parameter_value(text).map_err(|error| format!("{}: {error}", binding.label))
             })
             .collect::<Result<Vec<_>, _>>();
-        let params = match params {
+        let native_params = match native_params {
             Ok(params) => params,
             Err(error) => {
                 self.pending_parameter_run = Some(pending);
@@ -13609,6 +13725,32 @@ impl WorkspaceShell {
                 return;
             }
         };
+        let bindings = self
+            .parameter_binding_inputs
+            .iter()
+            .zip(&texts)
+            .filter_map(|(binding, text)| match binding.kind {
+                ParameterBindingKind::Native => None,
+                ParameterBindingKind::Template(kind) => Some(
+                    parse_template_binding(&binding.label, kind, text)
+                        .map_err(|error| format!("{}: {error}", binding.label)),
+                ),
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let compiled = match bindings.and_then(|bindings| {
+            sift_sql_variables::compile(pending.engine, &pending.sql, &bindings)
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                self.pending_parameter_run = Some(pending);
+                self.parameter_binding_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let mut params = native_params;
+        params.extend(compiled.params);
         self.remembered_parameter_bindings
             .insert(pending.binding_key, texts);
         if let Some(store) = &self.settings_store {
@@ -13624,7 +13766,19 @@ impl WorkspaceShell {
         self.parameter_binding_inputs.clear();
         self.parameter_binding_error = None;
         self.modal = None;
-        self.execute_database_item_with_params(pending.item_id, pending.sql, params, cx);
+        let variable_context = (!compiled.descriptors.is_empty()).then_some(
+            sift_protocol::SqlVariableHistoryContext {
+                template_sql: pending.sql,
+                descriptors: compiled.descriptors,
+            },
+        );
+        self.execute_database_item_with_params_and_context(
+            pending.item_id,
+            compiled.sql,
+            params,
+            variable_context,
+            cx,
+        );
     }
 
     fn execute_database_item_with_params(
@@ -13634,8 +13788,19 @@ impl WorkspaceShell {
         params: Vec<sift_protocol::Value>,
         cx: &mut Context<Self>,
     ) {
+        self.execute_database_item_with_params_and_context(item_id, sql, params, None, cx);
+    }
+
+    fn execute_database_item_with_params_and_context(
+        &mut self,
+        item_id: u64,
+        sql: String,
+        params: Vec<sift_protocol::Value>,
+        variable_context: Option<sift_protocol::SqlVariableHistoryContext>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(source) = self.database_source(item_id, cx) else {
-            self.send_execution(item_id, sql, params, cx);
+            self.send_execution_with_context(item_id, sql, params, variable_context, cx);
             return;
         };
         if self.selected_instance_id.as_deref() != Some(source.instance_id.as_str()) {
@@ -13651,7 +13816,7 @@ impl WorkspaceShell {
             ConnectionStatus::Connected { profile_id, .. } if profile_id == source.profile_id
         ) {
             self.sync_database_item_states(cx);
-            self.send_execution(item_id, sql, params, cx);
+            self.send_execution_with_context(item_id, sql, params, variable_context, cx);
             return;
         }
 
@@ -13659,6 +13824,7 @@ impl WorkspaceShell {
             item_id,
             sql,
             params,
+            variable_context,
             source: source.clone(),
         });
         let Some(sender) = &self.executor_sender else {
@@ -13700,11 +13866,12 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn send_execution(
+    fn send_execution_with_context(
         &mut self,
         item_id: u64,
         sql: String,
         params: Vec<sift_protocol::Value>,
+        variable_context: Option<sift_protocol::SqlVariableHistoryContext>,
         cx: &mut Context<Self>,
     ) {
         let production = match &self.connection_status {
@@ -13718,12 +13885,13 @@ impl WorkspaceShell {
                 item_id,
                 sql,
                 params,
+                variable_context,
             });
             self.modal = Some(Modal::ConfirmProductionExecution);
             cx.notify();
             return;
         }
-        self.send_execution_now(item_id, sql, params, None, cx);
+        self.send_execution_now(item_id, sql, params, None, variable_context, cx);
     }
 
     fn confirm_production_execution(&mut self, cx: &mut Context<Self>) {
@@ -13731,7 +13899,14 @@ impl WorkspaceShell {
             return;
         };
         self.modal = None;
-        self.send_execution_now(pending.item_id, pending.sql, pending.params, None, cx);
+        self.send_execution_now(
+            pending.item_id,
+            pending.sql,
+            pending.params,
+            None,
+            pending.variable_context,
+            cx,
+        );
     }
 
     fn confirm_outcome_unknown_rerun(&mut self, cx: &mut Context<Self>) {
@@ -13747,6 +13922,7 @@ impl WorkspaceShell {
         sql: String,
         params: Vec<sift_protocol::Value>,
         transform: Option<sift_protocol::ResultTransform>,
+        variable_context: Option<sift_protocol::SqlVariableHistoryContext>,
         cx: &mut Context<Self>,
     ) {
         if self.staged_result_item_id() == Some(item_id) {
@@ -13775,6 +13951,7 @@ impl WorkspaceShell {
                 params,
                 transform,
                 source,
+                variable_context,
             })
             .is_ok()
         {
@@ -13837,7 +14014,7 @@ impl WorkspaceShell {
                 return;
             }
         };
-        self.send_execution_now(item_id, sql.to_owned(), params, Some(transform), cx);
+        self.send_execution_now(item_id, sql.to_owned(), params, Some(transform), None, cx);
     }
 
     fn explain_database_item(
@@ -36981,17 +37158,29 @@ impl WorkspaceShell {
                                         )),
                                 )
                                 .children(self.parameter_binding_inputs.iter().map(|binding| {
+                                    let kind = match binding.kind {
+                                        ParameterBindingKind::Native => "native",
+                                        ParameterBindingKind::Template(
+                                            sift_protocol::SqlVariableKind::Value,
+                                        ) => "value",
+                                        ParameterBindingKind::Template(
+                                            sift_protocol::SqlVariableKind::Identifier,
+                                        ) => "identifier",
+                                        ParameterBindingKind::Template(
+                                            sift_protocol::SqlVariableKind::List,
+                                        ) => "list",
+                                    };
                                     div()
                                         .flex()
                                         .items_center()
                                         .gap_3()
                                         .child(
                                             div()
-                                                .w(px(64.))
+                                                .w(px(104.))
                                                 .font_family("monospace")
                                                 .text_sm()
                                                 .text_color(colors.muted_text)
-                                                .child(binding.label.clone()),
+                                                .child(format!("{} · {kind}", binding.label)),
                                         )
                                         .child(div().flex_1().min_w_0().child(binding.input.clone()))
                                 }))
@@ -36999,7 +37188,7 @@ impl WorkspaceShell {
                                     div()
                                         .text_xs()
                                         .text_color(colors.muted_text)
-                                        .child("Use JSON for numbers, booleans, strings, arrays, and objects. Type null for SQL NULL; unquoted values are text."),
+                                        .child("Values use JSON typing; null is SQL NULL. Lists require a non-empty JSON array. Identifiers are dialect-quoted, never raw SQL."),
                                 )
                                 .children(self.parameter_binding_error.as_ref().map(|error| {
                                     div()
@@ -37024,7 +37213,7 @@ impl WorkspaceShell {
                                     div()
                                         .text_xs()
                                         .text_color(colors.muted_text)
-                                        .child("Bindings are remembered for this query"),
+                                        .child("Run-prompt values override remembered query bindings"),
                                 )
                                 .child(
                                     div()
@@ -47062,6 +47251,7 @@ mod tests {
                             status: sift_api_types::QueryStatus::Ok,
                             error_code: None,
                             error_message: None,
+                            variable_descriptors: Vec::new(),
                         }],
                         next_cursor: None,
                     }),
@@ -47723,7 +47913,13 @@ mod tests {
                 profile_id: 7,
                 name: "payments-prod".into(),
             };
-            shell.send_execution(9, "delete from invoices".into(), Vec::new(), cx);
+            shell.send_execution_with_context(
+                9,
+                "delete from invoices".into(),
+                Vec::new(),
+                None,
+                cx,
+            );
             assert_eq!(shell.modal, Some(Modal::ConfirmProductionExecution));
         });
         assert!(receiver.try_recv().is_err());
@@ -53349,6 +53545,7 @@ mod tests {
             status: sift_api_types::QueryStatus::Error,
             error_code: Some("XX000".into()),
             error_message: Some("worker failed".into()),
+            variable_descriptors: Vec::new(),
         };
 
         workspace.update_in(&mut cx, |shell, window, cx| {
@@ -53467,6 +53664,7 @@ mod tests {
             status: sift_api_types::QueryStatus::Error,
             error_code: Some("XX000".into()),
             error_message: Some("worker failed".into()),
+            variable_descriptors: Vec::new(),
         };
 
         workspace.update_in(&mut cx, |shell, window, cx| {
@@ -56012,5 +56210,56 @@ mod tests {
                 vec!["42", "open"]
             );
         });
+    }
+
+    #[gpui::test]
+    fn typed_template_dialog_compiles_values_identifiers_and_lists(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "development".into(),
+            };
+            shell.execute_database_item(
+                1,
+                "select * from {{ident:table}} where id in ({{list:ids}}) and state = {{state}}"
+                    .into(),
+                cx,
+            );
+            assert_eq!(shell.modal, Some(Modal::QueryParameters));
+            assert_eq!(shell.parameter_binding_inputs.len(), 3);
+            for (binding, value) in
+                shell
+                    .parameter_binding_inputs
+                    .iter()
+                    .zip(["sales.orders", "[1, 2]", "ready"])
+            {
+                binding
+                    .input
+                    .update(cx, |input, cx| input.set_text(value, cx));
+            }
+            shell.submit_query_parameters(cx);
+        });
+        let command = commands.try_recv().expect("compiled execution");
+        let ExecutorCommand::Execute {
+            sql,
+            params,
+            variable_context,
+            ..
+        } = command
+        else {
+            panic!("unexpected executor command")
+        };
+        assert_eq!(
+            sql,
+            "select * from \"sales\".\"orders\" where id in ($1, $2) and state = $3"
+        );
+        assert_eq!(params.len(), 3);
+        assert_eq!(variable_context.unwrap().descriptors.len(), 3);
     }
 }

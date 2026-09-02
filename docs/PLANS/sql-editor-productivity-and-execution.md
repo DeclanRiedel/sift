@@ -277,7 +277,7 @@ scope, UTF-8 ranges, and generated-edit validation fail safely.
 
 ### 8. SQL variables
 
-- [ ] Add typed declarations, scope resolution, prompt UI, dialect compiler,
+- [x] Add typed declarations, scope resolution, prompt UI, dialect compiler,
   bind generation, identifier quoting, source maps, and redacted history.
 
 Gate: injection corpus, typed nulls, empty lists, limits, secret sentinels,

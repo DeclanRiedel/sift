@@ -4039,6 +4039,7 @@ async fn record_execute_history(
         status,
         error_code,
         error_message,
+        variable_descriptors: Vec::new(),
     };
     if let Err(error) = metadata_blocking(move || {
         context
@@ -18966,6 +18967,7 @@ async fn handle_ws(
                         tx,
                         transform,
                         source,
+                        variable_context,
                     } => {
                         if event_version.is_some_and(|version| {
                             version != sift_protocol::EXECUTION_EVENT_VERSION
@@ -18995,9 +18997,37 @@ async fn handle_ws(
                         // Track the streaming query against the drain gate for
                         // its whole lifetime (execute + paging).
                         let _query_guard = state.shutdown.track_query();
+                        let variable_context = variable_context.map(|context| *context);
+                        if let Some(context) = &variable_context {
+                            if context.template_sql.len() > 1_048_576 {
+                                return Err(ApiError::BadRequest(
+                                    "SQL variable template exceeds 1 MiB".into(),
+                                ));
+                            }
+                            let expected = sift_sql_variables::references(&context.template_sql)
+                                .map_err(|error| ApiError::BadRequest(error.to_string()))?
+                                .into_iter()
+                                .map(|reference| (reference.name, reference.kind))
+                                .collect::<std::collections::BTreeSet<_>>();
+                            let described = context
+                                .descriptors
+                                .iter()
+                                .map(|descriptor| (descriptor.name.clone(), descriptor.kind))
+                                .collect::<std::collections::BTreeSet<_>>();
+                            if expected != described || described.len() != context.descriptors.len()
+                            {
+                                return Err(ApiError::BadRequest(
+                                    "SQL variable history descriptors do not match the template"
+                                        .into(),
+                                ));
+                            }
+                        }
                         let change_kind = sql_change_kind(&sql);
                         let sql_fingerprint = change_kind.map(|_| crate::fingerprint::sql(&sql));
-                        let ledger_scope = if change_kind.is_some() || source.is_some() {
+                        let ledger_scope = if change_kind.is_some()
+                            || source.is_some()
+                            || variable_context.is_some()
+                        {
                             database_actor_scope_for_ws(
                                 &state,
                                 auth.as_ref(),
@@ -19039,6 +19069,7 @@ async fn handle_ws(
                             }
                             (None, _) => None,
                         };
+                        let history_started = Instant::now();
                         let transaction_id = tx.as_ref().map(|tx| tx.tx_id.0.to_string());
                         let stream = match state
                             .sessions
@@ -19130,6 +19161,52 @@ async fn handle_ws(
                             },
                         )
                         .await?;
+                        if let (Some(scope), Some(context)) =
+                            (ledger_scope.as_ref(), variable_context)
+                        {
+                            let metadata = metadata_store_cloned(&state)?;
+                            let sql_text = if state.sessions.store_sql() {
+                                context.template_sql
+                            } else {
+                                crate::fingerprint::sql(&context.template_sql)
+                            };
+                            let status = match &terminal.outcome {
+                                StreamOutcome::Completed => QueryStatus::Ok,
+                                StreamOutcome::Cancelled => QueryStatus::Canceled,
+                                StreamOutcome::Failed { .. } => QueryStatus::Error,
+                            };
+                            let error_code = match &terminal.outcome {
+                                StreamOutcome::Failed { code } => Some(code.clone()),
+                                _ => None,
+                            };
+                            let record = NewQueryHistory {
+                                principal_id: scope.actor,
+                                room_id: None,
+                                connection_profile_id: scope.connection_profile_id,
+                                sql_text,
+                                duration_ms: Some(
+                                    history_started.elapsed().as_millis().min(i64::MAX as u128)
+                                        as i64,
+                                ),
+                                row_count: terminal
+                                    .affected_rows
+                                    .and_then(|rows| i64::try_from(rows).ok()),
+                                status,
+                                error_code,
+                                error_message: None,
+                                variable_descriptors: context.descriptors,
+                            };
+                            if let Err(error) = metadata_blocking(move || {
+                                metadata
+                                    .record_query_history(record)
+                                    .map(|_| ())
+                                    .map_err(Into::into)
+                            })
+                            .await
+                            {
+                                tracing::warn!(%error, "failed to record variable query history");
+                            }
+                        }
                         if let (Some(scope), Some(operation)) = (ledger_scope, change_kind) {
                             let (outcome, result_code) = match terminal.outcome {
                                 StreamOutcome::Completed if transaction_id.is_none() => {

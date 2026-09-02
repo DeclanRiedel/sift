@@ -327,6 +327,8 @@ pub enum WsClientMessage {
         transform: Option<crate::ResultTransform>,
         #[serde(default)]
         source: Option<Box<crate::VersionedExecutionContext>>,
+        #[serde(default)]
+        variable_context: Option<Box<crate::SqlVariableHistoryContext>>,
     },
     Listen {
         request_id: String,

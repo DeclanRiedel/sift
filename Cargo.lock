@@ -7775,6 +7775,7 @@ dependencies = [
  "sift-plugin-host",
  "sift-protocol",
  "sift-semantic",
+ "sift-sql-variables",
  "sqlparser",
  "tempfile",
  "thiserror 1.0.69",
@@ -7788,6 +7789,14 @@ dependencies = [
  "url",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "sift-sql-variables"
+version = "0.1.0"
+dependencies = [
+ "sift-protocol",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -7820,6 +7829,7 @@ dependencies = [
  "sift-completion",
  "sift-doc",
  "sift-protocol",
+ "sift-sql-variables",
  "sift-ui",
  "tempfile",
  "tokio",

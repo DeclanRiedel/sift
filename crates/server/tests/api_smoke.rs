@@ -1154,6 +1154,7 @@ async fn websocket_mid_stream_cancel_stops_paging() {
             tx: None,
             transform: None,
             source: None,
+            variable_context: None,
         })
         .unwrap()
         .into(),
@@ -1348,6 +1349,7 @@ async fn websocket_execute_requires_active_tx_ref() {
             tx: None,
             transform: None,
             source: None,
+            variable_context: None,
         })
         .unwrap()
         .into(),

@@ -337,6 +337,8 @@ pub struct QueryHistory {
     pub status: QueryStatus,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+    #[serde(default)]
+    pub variable_descriptors: Vec<sift_protocol::RedactedSqlVariableDescriptor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

@@ -697,6 +697,7 @@ pub struct QueryHistory {
     pub status: QueryStatus,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+    pub variable_descriptors: Vec<sift_protocol::RedactedSqlVariableDescriptor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -710,6 +711,7 @@ pub struct NewQueryHistory {
     pub status: QueryStatus,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+    pub variable_descriptors: Vec<sift_protocol::RedactedSqlVariableDescriptor>,
 }
 
 /// A durable operation-audit row: who did what, to which resource, and how it

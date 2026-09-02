@@ -4528,6 +4528,7 @@ impl Client {
                 tx,
                 transform,
                 source: source.map(Box::new),
+                variable_context: None,
             })
             .await?;
 
@@ -4563,6 +4564,24 @@ impl Client {
         transform: Option<sift_protocol::ResultTransform>,
         source: Option<sift_protocol::VersionedExecutionContext>,
     ) -> Result<QueryEventStream> {
+        self.start_query_event_stream_versioned_with_variables(
+            session, connection, sql, params, tx, transform, source, None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_query_event_stream_versioned_with_variables(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        sql: impl Into<String>,
+        params: Vec<Value>,
+        tx: Option<TxHandleRef>,
+        transform: Option<sift_protocol::ResultTransform>,
+        source: Option<sift_protocol::VersionedExecutionContext>,
+        variable_context: Option<sift_protocol::SqlVariableHistoryContext>,
+    ) -> Result<QueryEventStream> {
         let mut socket = self.connect_session_websocket(session).await?;
         let request_id = "sdk-stream-execution-v2".to_string();
         socket
@@ -4575,6 +4594,7 @@ impl Client {
                 tx,
                 transform,
                 source: source.map(Box::new),
+                variable_context: variable_context.map(Box::new),
             })
             .await?;
 

@@ -43,6 +43,7 @@ pub mod schema_diff;
 pub mod search;
 pub mod semantic;
 pub mod session;
+pub mod sql_variable;
 pub mod transaction_panel;
 pub mod transfer;
 pub mod tx;
@@ -143,6 +144,7 @@ pub use session::{
     SavepointRequest, SessionId, SessionInfo, TransactionInfo, TxHandleRef, WsClientMessage,
     WsServerMessage,
 };
+pub use sql_variable::*;
 pub use transaction_panel::{
     SavepointInfo, SavepointState, TransactionCondition, TransactionEndAction, TransactionPreview,
     TransactionPreviewRequest, TransactionState,

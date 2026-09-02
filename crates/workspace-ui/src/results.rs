@@ -5906,6 +5906,7 @@ mod tests {
             status: sift_api_types::QueryStatus::Ok,
             error_code: None,
             error_message: None,
+            variable_descriptors: Vec::new(),
         }
     }
 

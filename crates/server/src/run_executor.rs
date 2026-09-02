@@ -9,7 +9,8 @@ use sift_metadata::{
 use sift_protocol::{
     BeginTransactionRequest, EndTransactionRequest, ExecuteRequestHttp, OpenSessionRequest,
     ProviderId, RunConfiguration, RunErrorPolicy, RunId, RunState, RunStepState,
-    RunTransactionPolicy, RunVariableKind, TxHandleRef, Value,
+    RunTransactionPolicy, RunVariableKind, SqlVariableBinding, SqlVariableScope, SqlVariableValue,
+    TxHandleRef, Value,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -551,6 +552,7 @@ fn record_query_history(
         status: outcome.status,
         error_code: None,
         error_message: None,
+        variable_descriptors: Vec::new(),
     });
 }
 
@@ -581,99 +583,104 @@ pub fn substitute_variables(
     values: &BTreeMap<String, serde_json::Value>,
     provider: &ProviderId,
 ) -> ApiResult<(String, Vec<Value>)> {
-    let mut output = String::with_capacity(template.len());
-    let mut params = Vec::new();
-    let bytes = template.as_bytes();
-    let mut index = 0;
-    let mut single_quote = false;
-    let mut double_quote = false;
-    let mut line_comment = false;
-    let mut block_comment = false;
-    while index < bytes.len() {
-        if line_comment {
-            output.push(bytes[index] as char);
-            if bytes[index] == b'\n' {
-                line_comment = false;
-            }
-            index += 1;
+    let engine = match provider.as_str() {
+        "sift/postgres" => sift_protocol::Engine::Postgres,
+        "sift/sql-server" => sift_protocol::Engine::SqlServer,
+        _ => {
+            return Err(ApiError::BadRequest(
+                "run variables require PostgreSQL or SQL Server".into(),
+            ));
+        }
+    };
+    let references = sift_sql_variables::references(template)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let mut bindings = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for reference in references {
+        if !seen.insert(reference.name.clone()) {
             continue;
         }
-        if block_comment {
-            if bytes[index..].starts_with(b"*/") {
-                output.push_str("*/");
-                index += 2;
-                block_comment = false;
-            } else {
-                output.push(bytes[index] as char);
-                index += 1;
-            }
-            continue;
-        }
-        if !single_quote && !double_quote && bytes[index..].starts_with(b"--") {
-            output.push_str("--");
-            index += 2;
-            line_comment = true;
-            continue;
-        }
-        if !single_quote && !double_quote && bytes[index..].starts_with(b"/*") {
-            output.push_str("/*");
-            index += 2;
-            block_comment = true;
-            continue;
-        }
-        if bytes[index] == b'\'' && !double_quote {
-            output.push('\'');
-            if single_quote && bytes.get(index + 1) == Some(&b'\'') {
-                output.push('\'');
-                index += 2;
-                continue;
-            }
-            single_quote = !single_quote;
-            index += 1;
-            continue;
-        }
-        if bytes[index] == b'"' && !single_quote {
-            output.push('"');
-            double_quote = !double_quote;
-            index += 1;
-            continue;
-        }
-        if !single_quote && !double_quote && bytes[index..].starts_with(b"{{") {
-            let rest = &template[index + 2..];
-            let end = rest
-                .find("}}")
-                .ok_or_else(|| ApiError::BadRequest("unterminated run variable".into()))?;
-            let name = &rest[..end];
-            let definition = definitions
-                .iter()
-                .find(|definition| definition.name == name)
-                .ok_or_else(|| ApiError::BadRequest("undeclared run variable".into()))?;
-            let value = values.get(name).unwrap_or(&serde_json::Value::Null);
-            if definition.kind == RunVariableKind::Identifier {
-                output.push_str(&quote_identifier(value, provider)?);
-            } else {
-                params.push(value_for_kind(value, definition.kind)?);
-                let placeholder = if provider.as_str() == "sift/postgres" {
-                    format!("${}", params.len())
-                } else if provider.as_str() == "sift/sqlserver" {
-                    format!("@P{}", params.len())
-                } else {
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == reference.name)
+            .ok_or_else(|| ApiError::BadRequest("undeclared run variable".into()))?;
+        let value = values
+            .get(&reference.name)
+            .unwrap_or(&serde_json::Value::Null);
+        let value = match reference.kind {
+            sift_protocol::SqlVariableKind::Identifier => {
+                if definition.kind != RunVariableKind::Identifier {
                     return Err(ApiError::BadRequest(
-                        "run variables require PostgreSQL or SQL Server".into(),
+                        "identifier template requires an identifier declaration".into(),
                     ));
-                };
-                output.push_str(&placeholder);
+                }
+                SqlVariableValue::Identifier(
+                    value
+                        .as_str()
+                        .ok_or_else(|| {
+                            ApiError::BadRequest("identifier variable must be a string".into())
+                        })?
+                        .to_owned(),
+                )
             }
-            index += end + 4;
-            continue;
-        }
-        output.push(bytes[index] as char);
-        index += 1;
+            sift_protocol::SqlVariableKind::List => {
+                let values = value.as_array().ok_or_else(|| {
+                    ApiError::BadRequest("list variable must be a JSON array".into())
+                })?;
+                SqlVariableValue::List(
+                    values
+                        .iter()
+                        .map(generic_json_value)
+                        .collect::<ApiResult<Vec<_>>>()?,
+                )
+            }
+            sift_protocol::SqlVariableKind::Value => {
+                if definition.kind == RunVariableKind::Identifier {
+                    return Err(ApiError::BadRequest(format!(
+                        "identifier variable `{}` must use {{{{ident:{}}}}}",
+                        definition.name, definition.name
+                    )));
+                }
+                if definition.kind == RunVariableKind::Secret {
+                    return Err(ApiError::BadRequest(
+                        "secret variable handle could not be resolved".into(),
+                    ));
+                }
+                SqlVariableValue::Scalar(value_for_kind(value, definition.kind, engine)?)
+            }
+        };
+        bindings.push(SqlVariableBinding {
+            name: reference.name,
+            value,
+            scope: SqlVariableScope::RunConfiguration,
+        });
     }
-    Ok((output, params))
+    let compiled = sift_sql_variables::compile(engine, template, &bindings)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok((compiled.sql, compiled.params))
 }
 
-fn value_for_kind(value: &serde_json::Value, kind: RunVariableKind) -> ApiResult<Value> {
+fn value_for_kind(
+    value: &serde_json::Value,
+    kind: RunVariableKind,
+    engine: sift_protocol::Engine,
+) -> ApiResult<Value> {
+    if value.is_null() {
+        let type_name = match (engine, kind) {
+            (sift_protocol::Engine::Postgres, RunVariableKind::String) => "text",
+            (sift_protocol::Engine::Postgres, RunVariableKind::Integer) => "int8",
+            (sift_protocol::Engine::Postgres, RunVariableKind::Decimal) => "numeric",
+            (sift_protocol::Engine::Postgres, RunVariableKind::Boolean) => "bool",
+            (sift_protocol::Engine::SqlServer, RunVariableKind::String) => "nvarchar(max)",
+            (sift_protocol::Engine::SqlServer, RunVariableKind::Integer) => "bigint",
+            (sift_protocol::Engine::SqlServer, RunVariableKind::Decimal) => "decimal(38, 10)",
+            (sift_protocol::Engine::SqlServer, RunVariableKind::Boolean) => "bit",
+            (_, RunVariableKind::Identifier | RunVariableKind::Secret) => unreachable!(),
+        };
+        return Ok(Value::TypedNull {
+            type_name: type_name.into(),
+        });
+    }
     match kind {
         RunVariableKind::String | RunVariableKind::Secret => value
             .as_str()
@@ -706,38 +713,18 @@ fn value_for_kind(value: &serde_json::Value, kind: RunVariableKind) -> ApiResult
     }
 }
 
-fn quote_identifier(value: &serde_json::Value, provider: &ProviderId) -> ApiResult<String> {
-    let value = value
-        .as_str()
-        .ok_or_else(|| ApiError::BadRequest("identifier variable must be a string".into()))?;
-    let parts = value.split('.').collect::<Vec<_>>();
-    if parts.is_empty()
-        || parts.iter().any(|part| {
-            part.is_empty()
-                || part.len() > 128
-                || !part
-                    .bytes()
-                    .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
-        })
-    {
-        return Err(ApiError::BadRequest(
-            "identifier variable is invalid".into(),
-        ));
-    }
-    let (open, close) = if provider.as_str() == "sift/postgres" {
-        ('"', '"')
-    } else if provider.as_str() == "sift/sqlserver" {
-        ('[', ']')
-    } else {
-        return Err(ApiError::BadRequest(
-            "identifier variables require PostgreSQL or SQL Server".into(),
-        ));
-    };
-    Ok(parts
-        .into_iter()
-        .map(|part| format!("{open}{part}{close}"))
-        .collect::<Vec<_>>()
-        .join("."))
+fn generic_json_value(value: &serde_json::Value) -> ApiResult<Value> {
+    Ok(match value {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(value) => Value::Bool(*value),
+        serde_json::Value::Number(value) => value
+            .as_i64()
+            .map_or_else(|| Value::Decimal(value.to_string()), Value::Int64),
+        serde_json::Value::String(value) => Value::Text(value.clone()),
+        value @ (serde_json::Value::Array(_) | serde_json::Value::Object(_)) => {
+            Value::Json(value.clone())
+        }
+    })
 }
 
 pub fn manifest_digest(bytes: &[u8]) -> String {
@@ -771,5 +758,49 @@ mod tests {
             "select '{{id}}', id from users where id = $1 -- {{id}}"
         );
         assert_eq!(params, vec![Value::Int64(7)]);
+    }
+
+    #[test]
+    fn substitution_supports_sql_server_identifiers_lists_and_typed_nulls() {
+        let definitions = vec![
+            RunVariableDefinition {
+                name: "table".into(),
+                kind: RunVariableKind::Identifier,
+                required: true,
+                persist_non_secret_value: false,
+                secret_handle_present: false,
+            },
+            RunVariableDefinition {
+                name: "ids".into(),
+                kind: RunVariableKind::Integer,
+                required: true,
+                persist_non_secret_value: false,
+                secret_handle_present: false,
+            },
+            RunVariableDefinition {
+                name: "state".into(),
+                kind: RunVariableKind::String,
+                required: false,
+                persist_non_secret_value: false,
+                secret_handle_present: false,
+            },
+        ];
+        let values = BTreeMap::from([
+            ("table".into(), serde_json::json!("sales.Order")),
+            ("ids".into(), serde_json::json!([1, 2])),
+            ("state".into(), serde_json::Value::Null),
+        ]);
+        let (sql, params) = substitute_variables(
+            "select * from {{ident:table}} where id in ({{list:ids}}) and state = {{state}}",
+            &definitions,
+            &values,
+            &ProviderId::new("sift/sql-server").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            sql,
+            "select * from [sales].[Order] where id in (@P1, @P2) and state = @P3"
+        );
+        assert!(matches!(params[2], Value::TypedNull { .. }));
     }
 }
