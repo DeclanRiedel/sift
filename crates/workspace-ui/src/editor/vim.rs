@@ -133,6 +133,16 @@ impl VimEngine {
         self.snapshot(text_changed, false, clipboard_changed)
     }
 
+    /// Apply insert-mode Backspace without cloning the complete ModalKit
+    /// buffer into the snapshot. The caller already knows the exact local
+    /// deletion and mirrors it into the canonical CRDT document directly.
+    pub fn backspace_without_text_snapshot(&mut self) -> VimSnapshot {
+        debug_assert_eq!(self.bindings.mode(), ModalVimMode::Insert);
+        let (_, clipboard_changed) =
+            self.input_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        self.snapshot(false, false, clipboard_changed)
+    }
+
     fn input_key_event(&mut self, event: KeyEvent) -> (bool, bool) {
         let mut text_changed = false;
         let register_before = self.unnamed_register();
@@ -375,6 +385,16 @@ mod tests {
             assert_eq!(snapshot.cursor, (0, 4));
             assert_eq!(snapshot.text, None);
         }
+    }
+
+    #[test]
+    fn insert_backspace_can_skip_the_full_text_snapshot() {
+        let mut vim = VimEngine::new("abc", 3);
+        assert_eq!(vim.input_text("i").mode, VimMode::Insert);
+        let snapshot = vim.backspace_without_text_snapshot();
+        assert_eq!(snapshot.text, None);
+        assert_eq!(snapshot.cursor, (0, 2));
+        assert_eq!(vim.input_text("x").text.as_deref(), Some("abx"));
     }
 
     #[test]

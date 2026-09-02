@@ -1890,6 +1890,10 @@ impl QueryEditor {
     }
 
     fn edited(&mut self, cx: &mut Context<Self>) {
+        self.edited_with_auto_completion(true, cx);
+    }
+
+    fn edited_with_auto_completion(&mut self, allow_auto_completion: bool, cx: &mut Context<Self>) {
         self.marked_range = None;
         self.revision = self.revision.wrapping_add(1);
         let mut cache = self.line_cache.borrow_mut();
@@ -1915,7 +1919,8 @@ impl QueryEditor {
         } else {
             self.request_semantic(SemanticRequestKind::Analyze, cx);
         }
-        let auto_complete = self.keymap == EditorKeymap::Vim
+        let auto_complete = allow_auto_completion
+            && self.keymap == EditorKeymap::Vim
             && self.vim_mode == VimMode::Insert
             && should_auto_complete(self.document.text(), self.document.cursor());
         if reopen_completion || auto_complete {
@@ -2118,11 +2123,25 @@ impl QueryEditor {
         if self.read_only {
             return;
         }
+        if self.keymap == EditorKeymap::Vim
+            && self.vim_mode == VimMode::Insert
+            && self.document.selection().is_empty()
+        {
+            let snapshot = self
+                .vim
+                .as_mut()
+                .expect("Vim keymap must own an engine")
+                .backspace_without_text_snapshot();
+            self.document.backspace();
+            self.apply_vim_snapshot(snapshot, cx);
+            self.edited_with_auto_completion(false, cx);
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Backspace, cx) {
             return;
         }
         self.document.backspace();
-        self.edited(cx);
+        self.edited_with_auto_completion(false, cx);
     }
 
     fn delete_forward(&mut self, _: &DeleteForward, _: &mut Window, cx: &mut Context<Self>) {
@@ -4458,6 +4477,28 @@ mod tests {
             request,
             SemanticRequestKind::AutoComplete { cursor: 16 }
         )));
+    }
+
+    #[gpui::test]
+    fn vim_insert_backspace_avoids_snapshot_and_new_completion_work(cx: &mut TestAppContext) {
+        let (mut cx, editor, spy) = editor_with_spy("select users", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.set_keymap(EditorKeymap::Vim, cx);
+            assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
+            editor.backspace(&Backspace, window, cx);
+        });
+        cx.run_until_parked();
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.document().text(), "select user");
+            assert_eq!(editor.vim_mode(), VimMode::Insert);
+        });
+        let requests = spy.read_with(&cx, |spy, _| spy.0.clone());
+        assert!(requests
+            .iter()
+            .any(|(_, request)| matches!(request, SemanticRequestKind::Analyze)));
+        assert!(requests
+            .iter()
+            .all(|(_, request)| !matches!(request, SemanticRequestKind::AutoComplete { .. })));
     }
 
     /// Collects the semantic intents an editor raises so tests can assert on
