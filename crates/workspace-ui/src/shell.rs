@@ -6790,6 +6790,7 @@ impl gpui::Render for Pane {
                     .bg(colors.toolbar)
                     .child(
                         div()
+                            .debug_selector(|| "pane-history-actions".into())
                             .w(EDITOR_GUTTER_WIDTH)
                             .h_full()
                             .flex_none()
@@ -7172,8 +7173,9 @@ impl gpui::Render for Pane {
                             .gap(px(2.))
                             .px_1()
                             .border_l_1()
+                            .border_r_1()
                             .border_color(colors.subtle_border)
-                            .bg(colors.background)
+                            .bg(colors.toolbar)
                             .child(
                                 div()
                                     .relative()
@@ -48938,6 +48940,12 @@ mod tests {
         assert!(cx.debug_bounds("pane-actions").is_some());
         assert!(cx.debug_bounds("pane-new-action").is_some());
         assert!(cx.debug_bounds("pane-split-action").is_some());
+        let history_actions = cx
+            .debug_bounds("pane-history-actions")
+            .expect("history action group");
+        let pane_actions = cx.debug_bounds("pane-actions").expect("pane action group");
+        assert_eq!(pane_actions.top(), history_actions.top());
+        assert_eq!(pane_actions.bottom(), history_actions.bottom());
 
         let tab = cx.debug_bounds("tab-1").expect("first tab");
         let resting_tab_width = tab.size.width;
