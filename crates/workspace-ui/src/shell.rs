@@ -72,7 +72,7 @@ pub use pane_layout::SplitDirection;
 const PALETTE_VISIBLE_ROWS: usize = 10;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
 const PALETTE_RECENT_LIMIT: usize = 32;
-const RECENT_DATABASE_OBJECT_LIMIT: usize = 3;
+const RECENT_DATABASE_OBJECT_LIMIT: usize = 5;
 const DOCK_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const PANE_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const PANE_MIN_WIDTH: f32 = 180.0;
@@ -14611,6 +14611,9 @@ impl WorkspaceShell {
         target: &DatabaseObjectTarget,
         cx: &mut Context<Self>,
     ) {
+        if !self.settings.ui.recent_objects {
+            return;
+        }
         let bookmark = self.database_object_bookmark(target);
         self.recent_database_objects
             .retain(|candidate| candidate != &bookmark);
@@ -14909,14 +14912,16 @@ impl WorkspaceShell {
                     })
                 }),
         );
-        items.extend(self.recent_database_objects.iter().filter_map(|bookmark| {
-            Some(ConnectionTreeItem {
-                depth: 0,
-                action: ConnectionTreeAction::RecentObject(
-                    self.target_for_database_object_bookmark(bookmark)?,
-                ),
-            })
-        }));
+        if self.settings.ui.recent_objects {
+            items.extend(self.recent_database_objects.iter().filter_map(|bookmark| {
+                Some(ConnectionTreeItem {
+                    depth: 0,
+                    action: ConnectionTreeAction::RecentObject(
+                        self.target_for_database_object_bookmark(bookmark)?,
+                    ),
+                })
+            }));
+        }
         for tenant in &self.lifecycle.tenants {
             let tenant_id = tenant.id.0;
             items.push(ConnectionTreeItem {
@@ -23941,6 +23946,36 @@ impl WorkspaceShell {
         }
         self.settings = settings;
         self.sync_query_results_placement(cx);
+        cx.notify();
+    }
+
+    fn toggle_recent_objects(&mut self, cx: &mut Context<Self>) {
+        let settings_is_open = self.settings_item.is_some_and(|item_id| {
+            self.panes
+                .iter()
+                .any(|pane| pane.read(cx).contains_item(item_id))
+        });
+        if settings_is_open {
+            self.show_toast(
+                "Save or close settings.toml before changing this preference here".into(),
+                cx,
+            );
+            return;
+        }
+        let enabled = !self.settings.ui.recent_objects;
+        let mut settings = self.settings.clone();
+        settings.ui.recent_objects = enabled;
+        if let Some(store) = &self.settings_store {
+            settings = match store.save_recent_objects(enabled) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    self.show_toast(error, cx);
+                    return;
+                }
+            };
+        }
+        self.settings = settings;
+        self.invalidate_connection_projection();
         cx.notify();
     }
 
@@ -38505,6 +38540,17 @@ impl WorkspaceShell {
                                 },
                             )) as sift_ui::ClickHandler,
                         ))
+                        .child(toggle_row(
+                            "settings-recent-objects",
+                            "Recent database objects",
+                            "Remember and show up to five recently opened database objects.",
+                            self.settings.ui.recent_objects,
+                            Box::new(cx.listener(
+                                |shell: &mut WorkspaceShell, _, _, cx| {
+                                    shell.toggle_recent_objects(cx)
+                                },
+                            )) as sift_ui::ClickHandler,
+                        ))
                         .child(
                             div()
                                 .pt_3()
@@ -45796,7 +45842,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn recent_database_objects_keep_only_the_latest_three(cx: &mut TestAppContext) {
+    fn recent_database_objects_keep_only_the_latest_five(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -45808,7 +45854,7 @@ mod tests {
                 provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
                 tags: Vec::new(),
             };
-            for object in ["one", "two", "three", "four"] {
+            for object in ["one", "two", "three", "four", "five", "six"] {
                 shell.record_recent_database_object(
                     &DatabaseObjectTarget {
                         connection: connection.clone(),
@@ -45820,9 +45866,26 @@ mod tests {
                     cx,
                 );
             }
-            assert_eq!(shell.recent_database_objects.len(), 3);
-            assert_eq!(shell.recent_database_objects[0].object, "four");
-            assert_eq!(shell.recent_database_objects[2].object, "two");
+            assert_eq!(shell.recent_database_objects.len(), 5);
+            assert_eq!(shell.recent_database_objects[0].object, "six");
+            assert_eq!(shell.recent_database_objects[4].object, "two");
+
+            shell.settings.ui.recent_objects = false;
+            shell.record_recent_database_object(
+                &DatabaseObjectTarget {
+                    connection,
+                    catalog: "warehouse".into(),
+                    schema: "public".into(),
+                    object: "seven".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                cx,
+            );
+            assert_eq!(shell.recent_database_objects.len(), 5);
+            assert!(shell
+                .build_visible_connection_items()
+                .iter()
+                .all(|item| { !matches!(item.action, ConnectionTreeAction::RecentObject(_)) }));
         });
     }
 
