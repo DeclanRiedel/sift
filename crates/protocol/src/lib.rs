@@ -43,6 +43,7 @@ pub mod schema_diff;
 pub mod search;
 pub mod semantic;
 pub mod session;
+pub mod snippet;
 pub mod sql_variable;
 pub mod transaction_panel;
 pub mod transfer;
@@ -100,7 +101,8 @@ pub use migration::*;
 pub use operation::{
     AuthenticationMethod, DdlSourceAction, ExtensionAdminAction, IdentityAdminAction,
     InstanceConfigurationAction, Operation, OperationSummary, PolicyAdminAction, RunAction,
-    RunConfigurationAction, ScheduleAction, TransferRecipeAction, VcsAction, WorkspaceAction,
+    RunConfigurationAction, ScheduleAction, SnippetAction, TransferRecipeAction, VcsAction,
+    WorkspaceAction,
 };
 pub use pagination::CursorPage;
 pub use plan::*;
@@ -144,6 +146,7 @@ pub use session::{
     SavepointRequest, SessionId, SessionInfo, TransactionInfo, TxHandleRef, WsClientMessage,
     WsServerMessage,
 };
+pub use snippet::*;
 pub use sql_variable::*;
 pub use transaction_panel::{
     SavepointInfo, SavepointState, TransactionCondition, TransactionEndAction, TransactionPreview,

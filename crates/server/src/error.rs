@@ -161,6 +161,7 @@ impl ApiError {
                 | MetadataError::DocumentNotFound(_)
                 | MetadataError::RoomAttachmentNotFound(_)
                 | MetadataError::SavedQueryNotFound(_)
+                | MetadataError::SqlSnippetNotFound(_)
                 | MetadataError::WorkspaceNotFound(_)
                 | MetadataError::WorkspaceNodeNotFound(_)
                 | MetadataError::WorkspaceCheckpointNotFound(_)
@@ -210,6 +211,9 @@ impl ApiError {
                 }
                 MetadataError::SavedQueryRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "saved_query_revision_conflict")
+                }
+                MetadataError::SqlSnippetRevisionConflict { .. } => {
+                    (StatusCode::CONFLICT, "sql_snippet_revision_conflict")
                 }
                 MetadataError::WorkspaceRevisionConflict { .. } => {
                     (StatusCode::CONFLICT, "workspace_revision_conflict")
@@ -278,6 +282,7 @@ impl ApiError {
                 | MetadataError::InstanceAdminRequired
                 | MetadataError::TenantMembershipRequired { .. }
                 | MetadataError::RoomOwnerRequired { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+                MetadataError::SqlSnippetPermissionDenied => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::VaultPermissionDenied => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::TenantMismatch(_, _) => (StatusCode::FORBIDDEN, "forbidden"),
                 MetadataError::MissingCredential(_, _)
@@ -311,6 +316,7 @@ impl ApiError {
                 | MetadataError::InvalidRunConfiguration
                 | MetadataError::InvalidRunSchedule
                 | MetadataError::InvalidTransferRecipe
+                | MetadataError::InvalidSqlSnippet(_)
                 | MetadataError::InstanceConfig(_)
                 | MetadataError::InstanceCredentialInvalid { .. }
                 | MetadataError::InvalidVaultInput(_)

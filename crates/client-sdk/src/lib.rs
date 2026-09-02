@@ -3960,6 +3960,64 @@ impl Client {
         .await
     }
 
+    pub async fn sql_snippets(
+        &self,
+        tenant: TenantId,
+        workspace: Option<sift_protocol::WorkspaceId>,
+    ) -> Result<Vec<sift_protocol::SqlSnippet>> {
+        let mut path = format!("/v1/metadata/sql-snippets?tenant={}", tenant.0);
+        if let Some(workspace) = workspace {
+            path.push_str(&format!("&workspace={}", workspace.0));
+        }
+        self.get(&path).await
+    }
+
+    pub async fn create_sql_snippet(
+        &self,
+        request: sift_protocol::CreateSqlSnippetRequest,
+    ) -> Result<sift_protocol::SqlSnippet> {
+        self.post("/v1/metadata/sql-snippets", &request).await
+    }
+
+    pub async fn update_sql_snippet(
+        &self,
+        id: sift_protocol::SnippetId,
+        request: sift_protocol::UpdateSqlSnippetRequest,
+    ) -> Result<sift_protocol::SqlSnippet> {
+        self.put(&format!("/v1/metadata/sql-snippets/{}", id.0), &request)
+            .await
+    }
+
+    pub async fn delete_sql_snippet(
+        &self,
+        tenant: TenantId,
+        workspace: Option<sift_protocol::WorkspaceId>,
+        id: sift_protocol::SnippetId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        let mut path = format!(
+            "/v1/metadata/sql-snippets/{}?tenant={}&expected_revision={expected_revision}",
+            id.0, tenant.0
+        );
+        if let Some(workspace) = workspace {
+            path.push_str(&format!("&workspace={}", workspace.0));
+        }
+        self.delete(&path).await
+    }
+
+    pub async fn prepare_catalog_snippet(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::PrepareCatalogSnippetRequest,
+    ) -> Result<sift_protocol::PreparedCatalogSnippet> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/catalog/snippets/prepare"),
+            &request,
+        )
+        .await
+    }
+
     pub async fn vaults(&self, tenant: TenantId) -> Result<Vec<Vault>> {
         self.get(&format!("/v1/metadata/vaults?tenant={}", tenant.0))
             .await

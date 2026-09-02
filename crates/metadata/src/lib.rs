@@ -39,6 +39,8 @@ mod run_configuration;
 mod run_schedule;
 pub mod schema;
 pub mod secrets;
+mod snippet;
+pub use snippet::SnippetWriteAuthorization;
 mod transfer_recipe;
 mod vault;
 pub use vault::VaultPolicy;
@@ -67,7 +69,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
         26 | 27 => Ok(MigrationKind::Data),
-        1..=5 | 7..=18 | 20..=25 | 28..=44 => Ok(MigrationKind::Expand),
+        1..=5 | 7..=18 | 20..=25 | 28..=45 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
         ))),
@@ -330,6 +332,14 @@ pub enum MetadataError {
     RoomAttachmentNotFound(RoomAttachmentId),
     #[error("saved query {0:?} not found")]
     SavedQueryNotFound(SavedQueryId),
+    #[error("SQL snippet {0:?} was not found")]
+    SqlSnippetNotFound(sift_protocol::SnippetId),
+    #[error("SQL snippet revision conflict: expected {expected}, current {current}")]
+    SqlSnippetRevisionConflict { expected: u64, current: u64 },
+    #[error("SQL snippet permission denied")]
+    SqlSnippetPermissionDenied,
+    #[error("invalid SQL snippet: {0}")]
+    InvalidSqlSnippet(String),
     #[error("principal {0:?} not found")]
     PrincipalNotFound(PrincipalId),
     #[error("authentication identity {0:?} not found")]

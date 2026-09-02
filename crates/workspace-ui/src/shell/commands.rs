@@ -131,6 +131,7 @@ pub enum CommandId {
     OpenSchemaSwitcher,
     OpenTabSwitcher,
     OpenSavedQuerySwitcher,
+    ManageSnippets,
     ToggleTheme,
     Quit,
 }
@@ -262,6 +263,7 @@ impl CommandId {
             Self::OpenSchemaSwitcher => "ui.switcher-schema",
             Self::OpenTabSwitcher => "ui.switcher-tabs",
             Self::OpenSavedQuerySwitcher => "ui.switcher-saved-queries",
+            Self::ManageSnippets => "query.manage-snippets",
             Self::ToggleTheme => "ui.toggle-theme",
             Self::Quit => "window.quit",
         }
@@ -1503,6 +1505,14 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "",
         "<leader> f q",
         false,
+        AvailabilityRule::Always,
+    ),
+    command(
+        CommandId::ManageSnippets,
+        "Manage SQL Snippets…",
+        "",
+        "<leader> e s",
+        true,
         AvailabilityRule::Always,
     ),
     command(

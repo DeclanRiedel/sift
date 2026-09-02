@@ -969,6 +969,8 @@ pub struct QueryEditor {
     replace_query: Entity<TextInput>,
     find_case_sensitive: bool,
     find_cache: RefCell<FindMatchCache>,
+    snippet_tabstops: Vec<Range<usize>>,
+    snippet_tabstop_index: usize,
 }
 
 impl QueryEditor {
@@ -1011,6 +1013,8 @@ impl QueryEditor {
             replace_query,
             find_case_sensitive: false,
             find_cache: RefCell::new(FindMatchCache::default()),
+            snippet_tabstops: Vec::new(),
+            snippet_tabstop_index: 0,
         }
     }
 
@@ -1489,12 +1493,68 @@ impl QueryEditor {
             return false;
         };
         let insert = candidate.insert.to_string();
+        let snippet = (candidate.kind == sift_protocol::completion::CompletionKind::Snippet)
+            .then(|| sift_snippets::expand(&insert))
+            .transpose();
         let replace = menu.replace.clone();
         self.semantic.cancel_completion();
-        self.document.replace_range(replace, &insert);
+        match snippet {
+            Ok(Some(expansion)) => {
+                let base = replace.start;
+                self.document.replace_range(replace, &expansion.text);
+                self.snippet_tabstops = expansion
+                    .tabstops
+                    .into_iter()
+                    .map(|tabstop| base + tabstop.range.start..base + tabstop.range.end)
+                    .collect();
+                self.snippet_tabstop_index = 0;
+                if let Some(range) = self.snippet_tabstops.first().cloned() {
+                    self.document.set_selection(range, false);
+                }
+            }
+            Ok(None) | Err(_) => {
+                self.document.replace_range(replace, &insert);
+                self.snippet_tabstops.clear();
+            }
+        }
         self.resync_keymap_after_external_change(cx);
         self.edited(cx);
         true
+    }
+
+    fn advance_snippet_tabstop(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.snippet_tabstops.is_empty() {
+            return false;
+        }
+        self.snippet_tabstop_index += 1;
+        let Some(range) = self
+            .snippet_tabstops
+            .get(self.snippet_tabstop_index)
+            .cloned()
+        else {
+            self.snippet_tabstops.clear();
+            return false;
+        };
+        self.document.set_selection(range, false);
+        self.resync_keymap_after_external_change(cx);
+        self.selection_changed(cx);
+        true
+    }
+
+    fn adjust_snippet_tabstops(&mut self, edited: Range<usize>, inserted_len: usize) {
+        if self.snippet_tabstops.is_empty() {
+            return;
+        }
+        let removed_len = edited.end.saturating_sub(edited.start);
+        let delta = inserted_len as isize - removed_len as isize;
+        for range in &mut self.snippet_tabstops {
+            if range.start >= edited.end {
+                range.start = range.start.saturating_add_signed(delta);
+                range.end = range.end.saturating_add_signed(delta);
+            } else if range.end > edited.start {
+                *range = edited.start..edited.start + inserted_len;
+            }
+        }
     }
 
     fn accept_star_expansion(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1874,6 +1934,10 @@ impl QueryEditor {
             };
             self.document
                 .replace_range(prefix..old_suffix, &snapshot_text[prefix..new_suffix]);
+            self.adjust_snippet_tabstops(
+                prefix..old_suffix,
+                snapshot_text[prefix..new_suffix].len(),
+            );
             document_changed = true;
         }
         let cursor = byte_from_line_column(self.document.text(), snapshot.cursor);
@@ -1988,6 +2052,9 @@ impl QueryEditor {
             return;
         }
         if self.accept_active_completion(cx) {
+            return;
+        }
+        if self.advance_snippet_tabstop(cx) {
             return;
         }
         if self.accept_star_expansion(cx) {
@@ -2689,11 +2756,10 @@ impl EntityInputHandler for QueryEditor {
         let range = range_utf16
             .as_ref()
             .map(|range| self.range_from_utf16(range))
-            .or_else(|| self.marked_range.clone());
-        match range {
-            Some(range) => self.document.replace_range(range, new_text),
-            None => self.document.insert(new_text),
-        }
+            .or_else(|| self.marked_range.clone())
+            .unwrap_or_else(|| self.document.selection());
+        self.adjust_snippet_tabstops(range.clone(), new_text.len());
+        self.document.replace_range(range, new_text);
         self.marked_range = None;
         self.edited(cx);
     }
@@ -2714,6 +2780,7 @@ impl EntityInputHandler for QueryEditor {
             .map(|range| self.range_from_utf16(range))
             .or_else(|| self.marked_range.clone())
             .unwrap_or_else(|| self.document.selection());
+        self.adjust_snippet_tabstops(range.clone(), new_text.len());
         self.document.replace_range(range.clone(), new_text);
         self.marked_range =
             (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
@@ -4322,6 +4389,50 @@ mod tests {
             );
         });
         editor.update_in(&mut cx, |editor, window, cx| {
+            editor.vim_undo(&VimUndo, window, cx);
+        });
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.document().text(), source);
+            assert_eq!(editor.keymap(), EditorKeymap::Vim);
+        });
+    }
+
+    #[gpui::test]
+    fn snippet_completion_has_tabstops_and_is_one_vim_undo(cx: &mut TestAppContext) {
+        let source = "sel";
+        let (mut cx, editor, spy) = editor_with_spy(source, cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.set_keymap(EditorKeymap::Vim, cx);
+            editor.document.set_selection(3..3, false);
+            editor.complete(&Complete, window, cx);
+        });
+        cx.run_until_parked();
+        let (revision, request) = spy
+            .read_with(&cx, |spy, _| spy.0.last().cloned())
+            .expect("completion request raised");
+        assert_eq!(request, SemanticRequestKind::Complete { cursor: 3 });
+        editor.update(&mut cx, |editor, cx| {
+            assert!(editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Completions {
+                    replaced: sift_protocol::TextRange { start: 0, end: 3 },
+                    candidates: vec![sift_protocol::completion::CompletionCandidate {
+                        label: "sel".into(),
+                        insert: "SELECT ${1:*} FROM ${2:table};$0".into(),
+                        kind: sift_protocol::completion::CompletionKind::Snippet,
+                        detail: Some("snippet".into()),
+                        qualified_name: None,
+                        score: 2_000,
+                    }],
+                },
+                cx,
+            ));
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.indent(&Indent, window, cx);
+            assert_eq!(editor.document.selected_text(), "*");
+            editor.indent(&Indent, window, cx);
+            assert_eq!(editor.document.selected_text(), "table");
             editor.vim_undo(&VimUndo, window, cx);
         });
         editor.read_with(&cx, |editor, _| {

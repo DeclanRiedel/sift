@@ -13,6 +13,7 @@ sift-instance-config = { workspace = true }
 sift-protocol = { workspace = true }
 sift-core = { workspace = true }
 sift-sql-variables = { workspace = true }
+sift-snippets = { workspace = true }
 sift-driver-api = { workspace = true, features = ["mock"] }
 sift-driver-postgres = { workspace = true }
 sift-driver-sqlserver = { workspace = true }

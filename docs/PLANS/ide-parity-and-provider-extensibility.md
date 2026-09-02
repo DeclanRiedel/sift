@@ -84,7 +84,7 @@ delete, import, and export workflows.
 - [x] Line numbers and editor gutter
 - [x] Split editor panes
 - [x] Scratch SQL query tabs
-- [ ] Snippets and templates
+- [x] Snippets and templates
 - [ ] SQL variables
 - [ ] Multi-cursor editing
 - [ ] Code folding

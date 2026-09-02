@@ -1592,6 +1592,7 @@ pub enum Modal {
     ServerConnection,
     InstanceSetup,
     Settings,
+    Snippets,
     Themes,
     Keymaps,
     Account,
@@ -3249,6 +3250,23 @@ pub enum ExecutorCommand {
         id: sift_api_types::SavedQueryId,
         expected_revision: u64,
     },
+    LoadSqlSnippets {
+        tenant_id: i64,
+        workspace_id: Option<i64>,
+    },
+    CreateSqlSnippet {
+        request: sift_protocol::CreateSqlSnippetRequest,
+    },
+    UpdateSqlSnippet {
+        id: sift_protocol::SnippetId,
+        request: sift_protocol::UpdateSqlSnippetRequest,
+    },
+    DeleteSqlSnippet {
+        tenant_id: i64,
+        workspace_id: Option<i64>,
+        id: sift_protocol::SnippetId,
+        expected_revision: u64,
+    },
     PreviewResultEdits {
         item_id: u64,
         edit_set: sift_protocol::EditSet,
@@ -3736,6 +3754,9 @@ pub enum ExecutorEvent {
         id: sift_api_types::SavedQueryId,
         result: Result<(), String>,
     },
+    SqlSnippetsLoaded(Result<Vec<sift_protocol::SqlSnippet>, String>),
+    SqlSnippetSaved(Result<sift_protocol::SqlSnippet, String>),
+    SqlSnippetDeleted(Result<sift_protocol::SnippetId, String>),
     ResultEditsPreviewed {
         item_id: u64,
         edit_set: sift_protocol::EditSet,
@@ -8462,6 +8483,9 @@ pub struct WorkspaceShell {
     query_input: Entity<TextInput>,
     semantic_rename_input: Entity<TextInput>,
     saved_query_name_input: Entity<TextInput>,
+    snippet_trigger_input: Entity<TextInput>,
+    snippet_title_input: Entity<TextInput>,
+    snippet_body_editor: Entity<QueryEditor>,
     result_cell_edit_input: Entity<TextInput>,
     repository_commit_input: Entity<TextInput>,
     repository_root_input: Entity<TextInput>,
@@ -8710,6 +8734,12 @@ pub struct WorkspaceShell {
     running_explains: HashMap<u64, u64>,
     next_explain_id: u64,
     saved_queries: Vec<sift_api_types::SavedQuery>,
+    snippets: Vec<sift_protocol::SqlSnippet>,
+    snippet_index: sift_snippets::SnippetIndex,
+    snippet_selected: usize,
+    snippet_scope: sift_protocol::SnippetScope,
+    snippet_pending: bool,
+    snippet_error: Option<String>,
     saved_queries_tenant: Option<i64>,
     saved_queries_loading: bool,
     saved_queries_error: Option<String>,
@@ -9010,6 +9040,11 @@ impl WorkspaceShell {
         });
         let semantic_rename_input = cx.new(|cx| TextInput::new("", "New symbol name", cx));
         let saved_query_name_input = cx.new(|cx| TextInput::new("", "Saved query name…", cx));
+        let snippet_trigger_input = cx.new(|cx| TextInput::new("", "Trigger", cx));
+        let snippet_title_input = cx.new(|cx| TextInput::new("", "Snippet title", cx));
+        let snippet_body_editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(""), cx).with_keymap(EditorKeymap::Vim)
+        });
         let saved_query_panel_tags_input = cx.new(|cx| {
             TextInput::new("", "finance, reporting", cx).aria_label("Saved query panel tags")
         });
@@ -9505,6 +9540,9 @@ impl WorkspaceShell {
             query_input,
             semantic_rename_input,
             saved_query_name_input,
+            snippet_trigger_input,
+            snippet_title_input,
+            snippet_body_editor,
             result_cell_edit_input,
             repository_commit_input,
             repository_root_input,
@@ -9742,6 +9780,13 @@ impl WorkspaceShell {
             running_explains: HashMap::new(),
             next_explain_id: 1,
             saved_queries: Vec::new(),
+            snippets: sift_snippets::builtins(),
+            snippet_index: sift_snippets::SnippetIndex::build(sift_snippets::builtins())
+                .expect("built-in snippets are valid"),
+            snippet_selected: 0,
+            snippet_scope: sift_protocol::SnippetScope::Personal,
+            snippet_pending: false,
+            snippet_error: None,
             saved_queries_tenant: None,
             saved_queries_loading: false,
             saved_queries_error: None,
@@ -13058,6 +13103,68 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            ExecutorEvent::SqlSnippetsLoaded(result) => {
+                self.snippet_pending = false;
+                match result {
+                    Ok(snippets) => {
+                        self.snippets = snippets;
+                        self.rebuild_snippet_index();
+                        self.snippet_selected = self
+                            .snippet_selected
+                            .min(self.snippets.len().saturating_sub(1));
+                        if !self.snippets.is_empty() {
+                            self.select_snippet(self.snippet_selected, cx);
+                        }
+                        self.snippet_error = None;
+                    }
+                    Err(error) => self.snippet_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::SqlSnippetSaved(result) => {
+                self.snippet_pending = false;
+                match result {
+                    Ok(snippet) => {
+                        if let Some(existing) = self
+                            .snippets
+                            .iter_mut()
+                            .find(|existing| existing.id == snippet.id)
+                        {
+                            *existing = snippet.clone();
+                        } else {
+                            self.snippets.push(snippet.clone());
+                        }
+                        self.rebuild_snippet_index();
+                        self.snippet_selected = self
+                            .snippets
+                            .iter()
+                            .position(|existing| existing.id == snippet.id)
+                            .unwrap_or(0);
+                        self.select_snippet(self.snippet_selected, cx);
+                        self.show_success_toast("Saved SQL snippet".into(), cx);
+                    }
+                    Err(error) => self.snippet_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::SqlSnippetDeleted(result) => {
+                self.snippet_pending = false;
+                match result {
+                    Ok(id) => {
+                        self.snippets.retain(|snippet| snippet.id != Some(id));
+                        self.rebuild_snippet_index();
+                        self.snippet_selected = self
+                            .snippet_selected
+                            .min(self.snippets.len().saturating_sub(1));
+                        if !self.snippets.is_empty() {
+                            self.select_snippet(self.snippet_selected, cx);
+                        }
+                        self.show_success_toast("Deleted SQL snippet".into(), cx);
+                    }
+                    Err(error) => self.snippet_error = Some(error),
+                }
+                cx.notify();
+            }
             ExecutorEvent::SavedQueriesLoaded { tenant_id, result } => {
                 if self.saved_queries_tenant != Some(tenant_id) {
                     return;
@@ -14407,12 +14514,51 @@ impl WorkspaceShell {
         &mut self,
         item_id: u64,
         text_revision: u64,
-        outcome: SemanticOutcome,
+        mut outcome: SemanticOutcome,
         cx: &mut Context<Self>,
     ) {
         let Some(editor) = self.editor_for_item(item_id, cx) else {
             return;
         };
+        if let SemanticOutcome::Completions {
+            replaced,
+            candidates,
+        } = &mut outcome
+        {
+            let document = editor.read(cx).document().text();
+            let range = replaced.start as usize..replaced.end as usize;
+            if range.end <= document.len()
+                && document.is_char_boundary(range.start)
+                && document.is_char_boundary(range.end)
+            {
+                let prefix = &document[range];
+                let dialect = self.active_connection_provider_id().map_or_else(
+                    || sift_protocol::Engine::Postgres.dialect_id(),
+                    |provider| {
+                        if provider.as_str() == "sift/sql-server" {
+                            sift_protocol::Engine::SqlServer.dialect_id()
+                        } else {
+                            sift_protocol::Engine::Postgres.dialect_id()
+                        }
+                    },
+                );
+                let mut snippet_candidates = self
+                    .snippet_index
+                    .matching(prefix, &dialect, 20)
+                    .into_iter()
+                    .map(|snippet| sift_protocol::completion::CompletionCandidate {
+                        label: snippet.trigger.clone().into(),
+                        insert: snippet.body.clone().into(),
+                        kind: sift_protocol::completion::CompletionKind::Snippet,
+                        detail: Some(format!("{} · {:?}", snippet.title, snippet.scope)),
+                        qualified_name: None,
+                        score: 2_000,
+                    })
+                    .collect::<Vec<_>>();
+                snippet_candidates.append(candidates);
+                *candidates = snippet_candidates;
+            }
+        }
         editor.update(cx, |editor, cx| {
             editor.apply_semantic_outcome(text_revision, outcome, cx);
         });
@@ -19003,6 +19149,180 @@ impl WorkspaceShell {
             }
         }
         self.lifecycle.tenants.first().map(|tenant| tenant.id.0)
+    }
+
+    fn rebuild_snippet_index(&mut self) {
+        self.snippet_index = sift_snippets::SnippetIndex::build(self.snippets.clone())
+            .unwrap_or_else(|_| sift_snippets::SnippetIndex::default());
+    }
+
+    fn open_snippets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            self.show_toast("Select a tenant before managing snippets".into(), cx);
+            return;
+        };
+        self.modal = Some(Modal::Snippets);
+        self.snippet_pending = true;
+        self.snippet_error = None;
+        if let Some(sender) = &self.executor_sender {
+            let _ = sender.send(ExecutorCommand::LoadSqlSnippets {
+                tenant_id,
+                workspace_id: self.selected_workspace_id,
+            });
+        }
+        self.snippet_trigger_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    fn select_snippet(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(snippet) = self.snippets.get(index).cloned() else {
+            return;
+        };
+        self.snippet_selected = index;
+        self.snippet_scope = snippet.scope;
+        self.snippet_trigger_input
+            .update(cx, |input, cx| input.set_text(snippet.trigger, cx));
+        self.snippet_title_input
+            .update(cx, |input, cx| input.set_text(snippet.title, cx));
+        self.snippet_body_editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&snippet.body), cx)
+                .with_keymap(EditorKeymap::Vim)
+        });
+        self.snippet_error = None;
+        cx.notify();
+    }
+
+    fn new_snippet(&mut self, cx: &mut Context<Self>) {
+        self.snippet_selected = usize::MAX;
+        self.snippet_scope = sift_protocol::SnippetScope::Personal;
+        self.snippet_trigger_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.snippet_title_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.snippet_body_editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(""), cx).with_keymap(EditorKeymap::Vim)
+        });
+        self.snippet_error = None;
+        cx.notify();
+    }
+
+    fn cycle_snippet_scope(&mut self, cx: &mut Context<Self>) {
+        self.snippet_scope = match self.snippet_scope {
+            sift_protocol::SnippetScope::Personal => sift_protocol::SnippetScope::Workspace,
+            sift_protocol::SnippetScope::Workspace => sift_protocol::SnippetScope::Tenant,
+            _ => sift_protocol::SnippetScope::Personal,
+        };
+        cx.notify();
+    }
+
+    fn save_snippet(&mut self, cx: &mut Context<Self>) {
+        if self.snippet_pending {
+            return;
+        }
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            return;
+        };
+        let trigger = self.snippet_trigger_input.read(cx).text().trim().to_owned();
+        let title = self.snippet_title_input.read(cx).text().trim().to_owned();
+        let body = self
+            .snippet_body_editor
+            .read(cx)
+            .document()
+            .text()
+            .to_owned();
+        let dialects = vec![self.active_connection_provider_id().map_or_else(
+            || sift_protocol::Engine::Postgres.dialect_id(),
+            |provider| {
+                if provider.as_str() == "sift/sql-server" {
+                    sift_protocol::Engine::SqlServer.dialect_id()
+                } else {
+                    sift_protocol::Engine::Postgres.dialect_id()
+                }
+            },
+        )];
+        let candidate = sift_protocol::SqlSnippet {
+            id: None,
+            tenant_id: Some(tenant_id),
+            workspace_id: self.selected_workspace_id,
+            owner_principal_id: None,
+            trigger: trigger.clone(),
+            title: title.clone(),
+            description: String::new(),
+            body: body.clone(),
+            dialects: dialects.clone(),
+            scope: self.snippet_scope,
+            revision: 0,
+        };
+        if let Err(error) = sift_snippets::validate(&candidate) {
+            self.snippet_error = Some(error.to_string());
+            cx.notify();
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            return;
+        };
+        let command = if let Some(snippet) = self
+            .snippets
+            .get(self.snippet_selected)
+            .filter(|snippet| snippet.id.is_some())
+        {
+            ExecutorCommand::UpdateSqlSnippet {
+                id: snippet.id.expect("filtered saved snippet"),
+                request: sift_protocol::UpdateSqlSnippetRequest {
+                    tenant_id,
+                    workspace_id: snippet.workspace_id,
+                    expected_revision: snippet.revision,
+                    trigger,
+                    title,
+                    description: snippet.description.clone(),
+                    body,
+                    dialects,
+                },
+            }
+        } else {
+            ExecutorCommand::CreateSqlSnippet {
+                request: sift_protocol::CreateSqlSnippetRequest {
+                    tenant_id,
+                    workspace_id: (self.snippet_scope == sift_protocol::SnippetScope::Workspace)
+                        .then_some(self.selected_workspace_id)
+                        .flatten(),
+                    scope: self.snippet_scope,
+                    trigger,
+                    title,
+                    description: String::new(),
+                    body,
+                    dialects,
+                },
+            }
+        };
+        self.snippet_pending = sender.send(command).is_ok();
+        cx.notify();
+    }
+
+    fn delete_selected_snippet(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            return;
+        };
+        let Some(snippet) = self.snippets.get(self.snippet_selected) else {
+            return;
+        };
+        let (Some(id), Some(sender)) = (snippet.id, self.executor_sender.as_ref()) else {
+            self.snippet_error = Some("Built-in snippets are immutable".into());
+            cx.notify();
+            return;
+        };
+        self.snippet_pending = sender
+            .send(ExecutorCommand::DeleteSqlSnippet {
+                tenant_id,
+                workspace_id: snippet.workspace_id,
+                id,
+                expected_revision: snippet.revision,
+            })
+            .is_ok();
+        cx.notify();
     }
 
     fn request_room_members(&mut self, cx: &mut Context<Self>) {
@@ -30765,6 +31085,7 @@ impl WorkspaceShell {
             CommandId::OpenSchemaSwitcher => self.open_schema_search(window, cx),
             CommandId::OpenTabSwitcher => self.open_command_palette_with_query("#", window, cx),
             CommandId::OpenSavedQuerySwitcher => self.open_saved_query_search(window, cx),
+            CommandId::ManageSnippets => self.open_snippets(window, cx),
             CommandId::Quit => {
                 if self.transaction_state.transaction().is_some() {
                     self.pending_connection_change = Some(PendingConnectionChange::Quit);
@@ -38678,6 +38999,170 @@ impl WorkspaceShell {
                                     .on_click(cx.listener(|shell, _, _, cx| {
                                         shell.submit_server_connection(cx)
                                     })),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Modal::Snippets => {
+                    let selected = self.snippet_selected;
+                    let immutable = self
+                        .snippets
+                        .get(selected)
+                        .is_some_and(|snippet| snippet.id.is_none());
+                    div()
+                        .w(px(820.))
+                        .h(px(620.))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .h(px(42.))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("SQL snippets"),
+                                )
+                                .child(
+                                    Button::new("new-snippet", "New")
+                                        .tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.new_snippet(cx)
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .flex()
+                                .child(
+                                    div()
+                                        .id("snippet-list")
+                                        .w(px(230.))
+                                        .p_2()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .overflow_y_scroll()
+                                        .border_r_1()
+                                        .border_color(colors.subtle_border)
+                                        .children(self.snippets.iter().enumerate().map(
+                                            |(index, snippet)| {
+                                                div()
+                                                    .id(("snippet-row", index))
+                                                    .px_2()
+                                                    .py_1()
+                                                    .rounded_sm()
+                                                    .when(index == selected, |row| {
+                                                        row.bg(colors.active_surface)
+                                                    })
+                                                    .hover(|row| row.bg(colors.hovered_surface))
+                                                    .on_click(cx.listener(
+                                                        move |shell, _, _, cx| {
+                                                            shell.select_snippet(index, cx)
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .font_family("monospace")
+                                                            .child(snippet.trigger.clone()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(colors.muted_text)
+                                                            .child(format!(
+                                                                "{} · {:?}",
+                                                                snippet.title, snippet.scope
+                                                            )),
+                                                    )
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .p_3()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .w(px(150.))
+                                                        .child(self.snippet_trigger_input.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .child(self.snippet_title_input.clone()),
+                                                )
+                                                .child(
+                                                    Button::new(
+                                                        "snippet-scope",
+                                                        format!("{:?}", self.snippet_scope),
+                                                    )
+                                                    .tone(ButtonTone::Neutral)
+                                                    .disabled(immutable)
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.cycle_snippet_scope(cx)
+                                                    })),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_h_0()
+                                                .border_1()
+                                                .border_color(colors.subtle_border)
+                                                .rounded_sm()
+                                                .child(self.snippet_body_editor.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child("Tabstops: $1, ${1:default}, and final $0"),
+                                        )
+                                        .children(self.snippet_error.as_ref().map(|error| {
+                                            div().text_sm().text_color(colors.danger).child(error.clone())
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .flex()
+                                .justify_between()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
+                                .child(
+                                    Button::new("delete-snippet", "Delete")
+                                        .tone(ButtonTone::DangerGhost)
+                                        .disabled(immutable || self.snippet_pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.delete_selected_snippet(cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("save-snippet", "Save")
+                                        .tone(ButtonTone::Accent)
+                                        .disabled(immutable || self.snippet_pending)
+                                        .loading(self.snippet_pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.save_snippet(cx)
+                                        })),
                                 ),
                         )
                         .into_any_element()

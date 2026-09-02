@@ -531,6 +531,7 @@ pub(crate) const fn completion_kind_badge(kind: CompletionKind) -> &'static str 
         CompletionKind::Alias => "A",
         CompletionKind::Procedure => "P",
         CompletionKind::Type => "Y",
+        CompletionKind::Snippet => "⋯",
     }
 }
 

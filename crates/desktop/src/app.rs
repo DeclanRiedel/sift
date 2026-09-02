@@ -4768,6 +4768,89 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadSqlSnippets {
+                tenant_id,
+                workspace_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .sql_snippets(
+                            TenantId(tenant_id),
+                            workspace_id.map(sift_protocol::WorkspaceId),
+                        )
+                        .await
+                        .map_err(|error| format!("loading SQL snippets failed: {error}"))
+                }
+                .await;
+                if events
+                    .send(ExecutorEvent::SqlSnippetsLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateSqlSnippet { request } => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .create_sql_snippet(request)
+                        .await
+                        .map_err(|error| format!("creating SQL snippet failed: {error}"))
+                }
+                .await;
+                if events.send(ExecutorEvent::SqlSnippetSaved(result)).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::UpdateSqlSnippet { id, request } => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .update_sql_snippet(id, request)
+                        .await
+                        .map_err(|error| format!("updating SQL snippet failed: {error}"))
+                }
+                .await;
+                if events.send(ExecutorEvent::SqlSnippetSaved(result)).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteSqlSnippet {
+                tenant_id,
+                workspace_id,
+                id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .delete_sql_snippet(
+                            TenantId(tenant_id),
+                            workspace_id.map(sift_protocol::WorkspaceId),
+                            id,
+                            expected_revision,
+                        )
+                        .await
+                        .map(|()| id)
+                        .map_err(|error| format!("deleting SQL snippet failed: {error}"))
+                }
+                .await;
+                if events
+                    .send(ExecutorEvent::SqlSnippetDeleted(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::PreviewResultEdits { item_id, edit_set } => {
                 let event = match context.as_ref() {
                     Some(opened) => opened

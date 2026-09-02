@@ -824,6 +824,14 @@ pub fn app(state: AppState) -> Router {
             get_with(get_metadata_saved_query, doc("getMetadataSavedQuery", "")).put_with(update_metadata_saved_query, doc("updateMetadataSavedQuery", "")).delete_with(delete_metadata_saved_query, doc("deleteMetadataSavedQuery", "")),
         )
         .api_route(
+            "/v1/metadata/sql-snippets",
+            get_with(list_sql_snippets, doc("listSqlSnippets", "List dialect-filterable built-in and visible saved SQL snippets")).post_with(create_sql_snippet, doc("createSqlSnippet", "Create a versioned personal, workspace, or tenant SQL snippet")),
+        )
+        .api_route(
+            "/v1/metadata/sql-snippets/:id",
+            put_with(update_sql_snippet, doc("updateSqlSnippet", "Update an owned SQL snippet using optimistic revision checking")).delete_with(delete_sql_snippet, doc("deleteSqlSnippet", "Delete an owned SQL snippet using optimistic revision checking")),
+        )
+        .api_route(
             "/v1/metadata/vaults",
             get_with(list_metadata_vaults, doc("listMetadataVaults", "List personal and shared vaults visible to the caller")).post_with(create_metadata_vault, doc("createMetadataVault", "Create a personal or team vault")),
         )
@@ -950,6 +958,10 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/catalog/graph",
             post_with(post_catalog_graph, doc("getCatalogGraph", "Fetch a revisioned, dependency-aware catalog graph")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/catalog/snippets/prepare",
+            post_with(prepare_catalog_snippet, doc("prepareCatalogSnippet", "Prepare an object template against an exact active catalog revision")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/catalog/diagram",
@@ -14976,6 +14988,260 @@ struct SavedQueryListQuery {
     scope: Option<SavedQueryScope>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SqlSnippetListQuery {
+    tenant: i64,
+    workspace: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SqlSnippetDeleteQuery {
+    tenant: i64,
+    workspace: Option<i64>,
+    expected_revision: u64,
+}
+
+async fn authorize_snippet_workspace(
+    metadata: &MetadataStore,
+    principal: PrincipalId,
+    tenant: TenantId,
+    workspace_id: Option<i64>,
+    writable: bool,
+) -> ApiResult<()> {
+    let Some(workspace_id) = workspace_id else {
+        return Ok(());
+    };
+    let metadata = metadata.clone();
+    let workspace_id = sift_protocol::WorkspaceId(workspace_id);
+    let room_tenant = metadata_blocking(move || {
+        let workspace = metadata.get_workspace_for_principal(workspace_id, principal, writable)?;
+        Ok::<_, ApiError>(metadata.get_room(workspace.room_id)?.tenant_id)
+    })
+    .await?;
+    if room_tenant != tenant {
+        return Err(ApiError::Forbidden(
+            "snippet workspace belongs to another tenant".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn list_sql_snippets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<SqlSnippetListQuery>,
+) -> ApiResult<Json<Vec<sift_protocol::SqlSnippet>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(query.tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    authorize_snippet_workspace(&metadata, auth.principal_id, tenant, query.workspace, false)
+        .await?;
+    let principal = auth.principal_id;
+    let workspace = query.workspace;
+    let mut snippets = metadata_blocking(move || {
+        metadata
+            .list_sql_snippets_visible(tenant, principal, workspace)
+            .map_err(Into::into)
+    })
+    .await?;
+    snippets.splice(0..0, sift_snippets::builtins());
+    state.sessions.push_operation_full(
+        Operation::Snippet {
+            action: sift_protocol::SnippetAction::List,
+            snippet_id: None,
+        },
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        Some(snippets.len() as i64),
+        None,
+    );
+    Ok(Json(snippets))
+}
+
+async fn create_sql_snippet(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<sift_protocol::CreateSqlSnippetRequest>,
+) -> ApiResult<Json<sift_protocol::SqlSnippet>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(request.tenant_id)?;
+    ensure_tenant(&auth, tenant)?;
+    authorize_snippet_workspace(
+        &metadata,
+        auth.principal_id,
+        tenant,
+        request.workspace_id,
+        request.scope == sift_protocol::SnippetScope::Workspace,
+    )
+    .await?;
+    if request.scope == sift_protocol::SnippetScope::Tenant && !is_tenant_admin(&auth, tenant) {
+        return Err(ApiError::Forbidden(
+            "tenant snippets require Owner or Admin role".into(),
+        ));
+    }
+    if request.scope == sift_protocol::SnippetScope::Workspace && request.workspace_id.is_none() {
+        return Err(ApiError::BadRequest(
+            "workspace snippets require workspace_id".into(),
+        ));
+    }
+    if !matches!(
+        request.scope,
+        sift_protocol::SnippetScope::Personal
+            | sift_protocol::SnippetScope::Workspace
+            | sift_protocol::SnippetScope::Tenant
+    ) {
+        return Err(ApiError::BadRequest(
+            "built-in and catalog snippets are immutable".into(),
+        ));
+    }
+    let snippet = sift_protocol::SqlSnippet {
+        id: None,
+        tenant_id: Some(tenant.0),
+        workspace_id: request.workspace_id,
+        owner_principal_id: (request.scope == sift_protocol::SnippetScope::Personal)
+            .then_some(auth.principal_id.0),
+        trigger: request.trigger,
+        title: request.title,
+        description: request.description,
+        body: request.body,
+        dialects: request.dialects,
+        scope: request.scope,
+        revision: 0,
+    };
+    sift_snippets::validate(&snippet).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let actor = auth.principal_id;
+    let created = metadata_blocking(move || {
+        metadata
+            .create_sql_snippet(tenant, actor, snippet)
+            .map_err(Into::into)
+    })
+    .await?;
+    state.sessions.push_operation_full(
+        Operation::Snippet {
+            action: sift_protocol::SnippetAction::Create,
+            snippet_id: created.id,
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(created))
+}
+
+async fn update_sql_snippet(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<sift_protocol::UpdateSqlSnippetRequest>,
+) -> ApiResult<Json<sift_protocol::SqlSnippet>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(request.tenant_id)?;
+    ensure_tenant(&auth, tenant)?;
+    authorize_snippet_workspace(
+        &metadata,
+        auth.principal_id,
+        tenant,
+        request.workspace_id,
+        true,
+    )
+    .await?;
+    let snippet_id = sift_protocol::SnippetId(id);
+    let update = sift_protocol::SqlSnippet {
+        id: Some(snippet_id),
+        tenant_id: Some(tenant.0),
+        workspace_id: request.workspace_id,
+        owner_principal_id: None,
+        trigger: request.trigger,
+        title: request.title,
+        description: request.description,
+        body: request.body,
+        dialects: request.dialects,
+        scope: sift_protocol::SnippetScope::Personal,
+        revision: request.expected_revision,
+    };
+    sift_snippets::validate(&update).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let actor = auth.principal_id;
+    let admin = is_tenant_admin(&auth, tenant);
+    let updated = metadata_blocking(move || {
+        metadata
+            .update_sql_snippet_authorized(
+                snippet_id,
+                sift_metadata::SnippetWriteAuthorization {
+                    tenant,
+                    actor,
+                    tenant_admin: admin,
+                    editable_workspace: request.workspace_id,
+                },
+                request.expected_revision,
+                update,
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    state.sessions.push_operation_full(
+        Operation::Snippet {
+            action: sift_protocol::SnippetAction::Update,
+            snippet_id: Some(snippet_id),
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+    Ok(Json(updated))
+}
+
+async fn delete_sql_snippet(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<SqlSnippetDeleteQuery>,
+) -> ApiResult<StatusCode> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let tenant = tenant_id(query.tenant)?;
+    ensure_tenant(&auth, tenant)?;
+    authorize_snippet_workspace(&metadata, auth.principal_id, tenant, query.workspace, true)
+        .await?;
+    let snippet_id = sift_protocol::SnippetId(id);
+    let actor = auth.principal_id;
+    let admin = is_tenant_admin(&auth, tenant);
+    metadata_blocking(move || {
+        metadata
+            .delete_sql_snippet_authorized(
+                snippet_id,
+                sift_metadata::SnippetWriteAuthorization {
+                    tenant,
+                    actor,
+                    tenant_admin: admin,
+                    editable_workspace: query.workspace,
+                },
+                query.expected_revision,
+            )
+            .map_err(Into::into)
+    })
+    .await?;
+    state.sessions.push_operation_full(
+        Operation::Snippet {
+            action: sift_protocol::SnippetAction::Delete,
+            snippet_id: Some(snippet_id),
+        },
+        OperationStatus::Succeeded,
+        Some(actor.0),
+        None,
+        None,
+        None,
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn list_metadata_saved_queries(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -16496,6 +16762,153 @@ async fn prepare_star_expansion(
         result,
         |preview| Some(preview.columns.len() as i64),
     )?))
+}
+
+async fn prepare_catalog_snippet(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::PrepareCatalogSnippetRequest>,
+) -> ApiResult<Json<sift_protocol::PreparedCatalogSnippet>> {
+    let graph = state
+        .sessions
+        .catalog_graph(
+            session,
+            connection,
+            sift_protocol::CatalogGraphRequest {
+                options: sift_protocol::CatalogGraphOptions {
+                    include_definitions: false,
+                    ..Default::default()
+                },
+                refresh: false,
+            },
+        )
+        .await?;
+    if graph.revision.0 != request.catalog_revision {
+        return Err(ApiError::BadRequest(format!(
+            "stale catalog revision: expected {}, current {}",
+            request.catalog_revision, graph.revision.0
+        )));
+    }
+    if graph.data.coverage.state != sift_protocol::CatalogCoverageState::Complete {
+        return Err(ApiError::BadRequest(
+            "catalog template requires complete catalog coverage".into(),
+        ));
+    }
+    let object = graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.kind,
+                sift_protocol::CatalogNodeKind::Table
+                    | sift_protocol::CatalogNodeKind::View
+                    | sift_protocol::CatalogNodeKind::MaterializedView
+                    | sift_protocol::CatalogNodeKind::ForeignTable
+                    | sift_protocol::CatalogNodeKind::PartitionedTable
+                    | sift_protocol::CatalogNodeKind::TableValuedFunction
+            ) && node.name == request.object.name
+                && request.object.schema.as_ref().map_or(true, |schema| {
+                    node.qualified_name
+                        .split('.')
+                        .rev()
+                        .nth(1)
+                        .is_some_and(|part| part.trim_matches(['"', '[', ']']) == schema)
+                })
+        })
+        .ok_or_else(|| ApiError::BadRequest("catalog object was not found".into()))?;
+    if object.completeness != sift_protocol::CatalogCompleteness::Complete {
+        return Err(ApiError::BadRequest(
+            "catalog object metadata is incomplete".into(),
+        ));
+    }
+    let mut columns = graph
+        .data
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.parent_id.as_ref() == Some(&object.id)
+                && matches!(node.kind, sift_protocol::CatalogNodeKind::Column)
+                && node.completeness == sift_protocol::CatalogCompleteness::Complete
+        })
+        .collect::<Vec<_>>();
+    columns.sort_by_key(|column| column.ordinal.unwrap_or(u32::MAX));
+    if columns.is_empty() || columns.len() > 1_000 {
+        return Err(ApiError::BadRequest(
+            "catalog template requires between 1 and 1000 ordered columns".into(),
+        ));
+    }
+    let engine = if graph.provider.dialect_id.as_str() == "sift/tsql" {
+        sift_protocol::Engine::SqlServer
+    } else {
+        sift_protocol::Engine::Postgres
+    };
+    let quote = |name: &str| crate::ddl::quote_ident(name, engine);
+    let qualified = request.object.schema.as_ref().map_or_else(
+        || quote(&request.object.name),
+        |schema| format!("{}.{}", quote(schema), quote(&request.object.name)),
+    );
+    let names = columns
+        .iter()
+        .map(|column| quote(&column.name))
+        .collect::<Vec<_>>();
+    let body = match request.kind {
+        sift_protocol::CatalogSnippetKind::Select => format!(
+            "SELECT {}\nFROM {qualified}\nWHERE ${{1:condition}};$0",
+            names.join(", ")
+        ),
+        sift_protocol::CatalogSnippetKind::Insert => format!(
+            "INSERT INTO {qualified} ({})\nVALUES ({});$0",
+            names.join(", "),
+            (1..=names.len())
+                .map(|index| format!("${{{index}:value}}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        sift_protocol::CatalogSnippetKind::Update => format!(
+            "UPDATE {qualified}\nSET {} = ${{1:value}}\nWHERE ${{2:condition}};$0",
+            names[0]
+        ),
+    };
+    let object_trigger = request
+        .object
+        .name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect::<String>();
+    let snippet = sift_protocol::SqlSnippet {
+        id: None,
+        tenant_id: None,
+        workspace_id: None,
+        owner_principal_id: None,
+        trigger: format!("{:?}_{object_trigger}", request.kind).to_ascii_lowercase(),
+        title: format!("{:?} {}", request.kind, request.object.name),
+        description: format!("Generated from catalog revision {}", graph.revision.0),
+        body,
+        dialects: vec![graph.provider.dialect_id],
+        scope: sift_protocol::SnippetScope::Catalog,
+        revision: graph.revision.0,
+    };
+    sift_snippets::validate(&snippet).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let prepared = sift_protocol::PreparedCatalogSnippet {
+        snippet,
+        catalog_revision: graph.revision.0,
+    };
+    state.sessions.push_operation(
+        Operation::Snippet {
+            action: sift_protocol::SnippetAction::PrepareCatalog,
+            snippet_id: None,
+        },
+        OperationStatus::Succeeded,
+    );
+    Ok(Json(prepared))
 }
 
 async fn post_edits_preview(

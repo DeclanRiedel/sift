@@ -8,6 +8,7 @@ members = [
     "crates/plugin-host",
     "crates/core",
     "crates/sql-variables",
+    "crates/snippets",
     "crates/driver-api",
     "crates/driver-postgres",
     "crates/driver-sqlserver",
@@ -38,6 +39,7 @@ sift-extension-protocol = { path = "crates/extension-protocol", version = "0.1.0
 sift-plugin-host = { path = "crates/plugin-host", version = "0.1.0" }
 sift-core = { path = "crates/core", version = "0.1.0" }
 sift-sql-variables = { path = "crates/sql-variables", version = "0.1.0" }
+sift-snippets = { path = "crates/snippets", version = "0.1.0" }
 sift-driver-api = { path = "crates/driver-api", version = "0.1.0" }
 sift-driver-postgres = { path = "crates/driver-postgres", version = "0.1.0" }
 sift-driver-sqlserver = { path = "crates/driver-sqlserver", version = "0.1.0" }

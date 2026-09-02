@@ -285,7 +285,7 @@ retry/cancel behavior, and both driver parameter encodings pass.
 
 ### 9. Snippets and templates
 
-- [ ] Add versioned persistence, typed operations, audit, built-ins, cached
+- [x] Add versioned persistence, typed operations, audit, built-ins, cached
   completion index, tabstops, management UI, and catalog-generated templates.
 
 Gate: scope authorization, dialect filtering, conflict revisions, sanitized

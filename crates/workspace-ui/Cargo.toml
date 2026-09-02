@@ -23,6 +23,7 @@ sift-completion = { workspace = true }
 sift-doc = { workspace = true }
 sift-protocol = { workspace = true }
 sift-sql-variables = { workspace = true }
+sift-snippets = { workspace = true }
 sift-ui = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }

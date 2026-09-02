@@ -46,6 +46,16 @@ pub enum PolicyAdminAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+pub enum SnippetAction {
+    List,
+    Create,
+    Update,
+    Delete,
+    PrepareCatalog,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ExtensionAdminAction {
     Validate,
     Install,
@@ -434,6 +444,10 @@ pub enum Operation {
         position: u32,
         catalog_revision: crate::CatalogRevision,
     },
+    Snippet {
+        action: SnippetAction,
+        snippet_id: Option<crate::SnippetId>,
+    },
     OpenSemanticDocument {
         session: SessionId,
         connection: ConnectionId,
@@ -722,6 +736,7 @@ impl Operation {
             Self::CompleteSemanticDocument { .. } => OperationKind::Complete,
             Self::HoverSemanticDocument { .. } => OperationKind::Complete,
             Self::PrepareStarExpansion { .. } => OperationKind::SqlQuickFix,
+            Self::Snippet { .. } => OperationKind::Metadata,
             Self::OpenSemanticDocument { .. } => OperationKind::OpenSemanticDocument,
             Self::UpdateSemanticDocument { .. } => OperationKind::UpdateSemanticDocument,
             Self::CloseSemanticDocument { .. } => OperationKind::CloseSemanticDocument,
@@ -1057,6 +1072,11 @@ impl Operation {
             Operation::PrepareStarExpansion { session, .. } => {
                 summary("expand_star", "semantic_document", Some(session.0 as i64))
             }
+            Operation::Snippet { action, snippet_id } => summary(
+                &format!("snippet.{action:?}").to_ascii_lowercase(),
+                "sql_snippet",
+                snippet_id.map(|id| id.0),
+            ),
             Operation::OpenSemanticDocument { session, .. } => {
                 summary("open", "semantic_document", Some(session.0 as i64))
             }

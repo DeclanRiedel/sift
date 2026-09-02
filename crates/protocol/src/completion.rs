@@ -82,6 +82,7 @@ pub enum CompletionKind {
     Alias,
     Procedure,
     Type,
+    Snippet,
 }
 
 /// The kind of SQL slot the cursor is in. Drives which candidates the
