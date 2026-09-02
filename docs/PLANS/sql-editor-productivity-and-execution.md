@@ -216,10 +216,11 @@ audit, secret storage, and Vim-only interaction rules.
 
 ### 2. Execution v2 wire contract
 
-- [ ] Add typed execution, statement, result-set, command, notice, progress,
+- [x] Add typed execution, statement, result-set, command, notice, progress,
   error, and completion events.
-- [ ] Add ids, summaries, compatibility projection, OpenAPI, and SDK coverage.
-- [ ] Keep protocol free of runtime and driver dependencies.
+- [x] Add ids, summaries, compatibility projection, and OpenAPI components.
+  SDK streaming integration follows the live server path in milestone 3.
+- [x] Keep protocol free of runtime and driver dependencies.
 
 Gate: serde fixtures prove event ordering, forward-additive compatibility,
 bounded fields, and explicit first-result truncation in legacy projection.

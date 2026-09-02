@@ -545,6 +545,9 @@ async fn openapi_is_published() {
     );
     assert!(body["components"]["securitySchemes"]["bearerAuth"].is_object());
     assert!(body["components"]["schemas"]["ExecuteResponse"].is_object());
+    assert!(body["components"]["schemas"]["ExecutionEventV2"].is_object());
+    assert!(body["components"]["schemas"]["ExecutionSummaryV2"].is_object());
+    assert!(body["components"]["schemas"]["LegacyExecutionProjection"].is_object());
     assert!(body["components"]["schemas"]["BulkInsertRequest"].is_object());
     assert!(body["components"]["schemas"]["BulkInsertResponse"].is_object());
     assert!(body["components"]["schemas"]["CreateRoomRequest"].is_object());

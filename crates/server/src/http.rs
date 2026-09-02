@@ -5798,6 +5798,9 @@ fn finalize_openapi(api: OpenApi) -> serde_json::Value {
     // its response type from the handler signature; register it explicitly as
     // part of the public contract clients decode.
     add_component_schema::<sift_protocol::ExecuteResponse>(schemas);
+    add_component_schema::<sift_protocol::ExecutionEventV2>(schemas);
+    add_component_schema::<sift_protocol::ExecutionSummaryV2>(schemas);
+    add_component_schema::<sift_protocol::LegacyExecutionProjection>(schemas);
 
     if let Some(paths) = obj.get_mut("paths").and_then(|p| p.as_object_mut()) {
         for path_item in paths.values_mut() {

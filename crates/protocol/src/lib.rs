@@ -24,6 +24,7 @@ pub mod csv_import;
 pub mod edit;
 pub mod engine;
 pub mod error;
+pub mod execution;
 pub mod extension;
 pub mod handshake;
 pub mod migration;
@@ -88,6 +89,7 @@ pub use edit::{
 };
 pub use engine::Engine;
 pub use error::{Code, DriverError, DriverWarning};
+pub use execution::*;
 pub use extension::*;
 pub use handshake::{
     HandshakeClientKind, HandshakeDeployment, HandshakeRequest, HandshakeResponse,
