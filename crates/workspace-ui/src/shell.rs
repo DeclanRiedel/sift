@@ -32083,6 +32083,7 @@ impl WorkspaceShell {
         } else {
             div()
                 .id("toolbar-title-drag-region")
+                .debug_selector(|| "toolbar-title-drag-region".into())
                 .h_full()
                 .max_w(px(380.))
                 .min_w_0()
@@ -32093,10 +32094,14 @@ impl WorkspaceShell {
                 .window_control_area(WindowControlArea::Drag)
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|shell, _, window, cx| {
+                    cx.listener(|shell, event: &gpui::MouseDownEvent, window, cx| {
                         cx.stop_propagation();
                         shell.dismiss_app_bar_overlays(cx);
-                        window.start_window_move();
+                        if app_bar_click_toggles_window_size(event.click_count) {
+                            window.zoom_window();
+                        } else {
+                            window.start_window_move();
+                        }
                     }),
                 )
                 .text_center()
@@ -32247,15 +32252,20 @@ impl WorkspaceShell {
                     .child(
                         div()
                             .id("toolbar-empty-drag-region")
+                            .debug_selector(|| "toolbar-empty-drag-region".into())
                             .h_full()
                             .flex_1()
                             .window_control_area(WindowControlArea::Drag)
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|shell, _, window, cx| {
+                                cx.listener(|shell, event: &gpui::MouseDownEvent, window, cx| {
                                     cx.stop_propagation();
                                     shell.dismiss_app_bar_overlays(cx);
-                                    window.start_window_move();
+                                    if app_bar_click_toggles_window_size(event.click_count) {
+                                        window.zoom_window();
+                                    } else {
+                                        window.start_window_move();
+                                    }
                                 }),
                             ),
                     ),
@@ -45111,6 +45121,10 @@ fn edge_resize_enabled(is_maximized: bool, is_fullscreen: bool) -> bool {
     !is_maximized && !is_fullscreen
 }
 
+fn app_bar_click_toggles_window_size(click_count: usize) -> bool {
+    click_count >= 2
+}
+
 fn dock_resize_separator(dock: DockId, border: gpui::Hsla) -> gpui::AnyElement {
     let (id, cursor) = match dock {
         DockId::Left => ("resize-left-dock", CursorStyle::ResizeLeftRight),
@@ -52892,6 +52906,13 @@ mod tests {
             Modifiers::default(),
         );
         assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+    }
+
+    #[test]
+    fn app_bar_only_toggles_window_size_on_double_click() {
+        assert!(!app_bar_click_toggles_window_size(1));
+        assert!(app_bar_click_toggles_window_size(2));
+        assert!(app_bar_click_toggles_window_size(3));
     }
 
     #[gpui::test]
