@@ -2855,6 +2855,9 @@ impl QueryEditor {
     fn current_problem_text(&self) -> Option<String> {
         self.semantic
             .diagnostic_at(self.document.cursor())
+            .or_else(|| {
+                (self.semantic.diagnostics().len() == 1).then(|| &self.semantic.diagnostics()[0])
+            })
             .map(|diagnostic| self.format_problem(diagnostic))
     }
 
@@ -3209,7 +3212,7 @@ impl gpui::Render for QueryEditor {
                             .child(
                                 IconButton::new(
                                     "editor-copy-current-problem",
-                                    IconName::Copy,
+                                    IconName::Document,
                                     "Copy current problem",
                                 )
                                 .square(px(20.))
@@ -3217,7 +3220,7 @@ impl gpui::Render for QueryEditor {
                                 .tooltip("Copy current problem with line number")
                                 .on_click(cx.listener(Self::copy_current_problem)),
                             )
-                            .child(
+                            .children((problem_count > 1).then(|| {
                                 IconButton::new(
                                     "editor-copy-all-problems",
                                     IconName::Copy,
@@ -3227,8 +3230,8 @@ impl gpui::Render for QueryEditor {
                                 .badge(problem_count)
                                 .disabled(problem_count == 0)
                                 .tooltip("Copy all problems with line numbers")
-                                .on_click(cx.listener(Self::copy_all_problems)),
-                            ),
+                                .on_click(cx.listener(Self::copy_all_problems))
+                            })),
                     ),
             )
     }
