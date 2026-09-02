@@ -8973,8 +8973,8 @@ const fn shell_completion_priority(
     use sift_protocol::completion::{CompletionContext as Context, CompletionKind as Kind};
     match context {
         Context::Statement => match kind {
-            Kind::Snippet => 0,
-            Kind::Keyword => 1,
+            Kind::Keyword => 0,
+            Kind::Snippet => 1,
             Kind::Function | Kind::Procedure => 2,
             _ => 3,
         },
@@ -8982,8 +8982,8 @@ const fn shell_completion_priority(
             Kind::Table | Kind::View | Kind::MaterializedView | Kind::Alias => 0,
             Kind::Function => 1,
             Kind::Schema => 2,
-            Kind::Snippet => 3,
-            Kind::Keyword => 4,
+            Kind::Keyword => 3,
+            Kind::Snippet => 4,
             _ => 5,
         },
         Context::ExpectingColumn { .. } => match kind {
@@ -45618,29 +45618,38 @@ mod tests {
     }
 
     #[test]
-    fn table_slot_merges_objects_before_snippets_before_keywords() {
+    fn keywords_always_rank_before_snippets() {
         use sift_protocol::completion::{CompletionContext, CompletionKind};
 
         let snippets = sift_snippets::SnippetIndex::build(sift_snippets::builtins()).unwrap();
-        let candidates = vec![
-            ranked_candidate("SELECT", CompletionKind::Keyword, 1_005),
-            ranked_candidate("asset", CompletionKind::Table, 365),
-        ];
-        let merged = merge_sql_snippet_completions(
-            &snippets,
-            "sel",
-            &sift_protocol::Engine::Postgres.dialect_id(),
-            &CompletionContext::ExpectingTable,
-            candidates,
-        );
-        assert_eq!(
-            merged
-                .iter()
-                .take(3)
-                .map(|candidate| candidate.label.as_ref())
-                .collect::<Vec<_>>(),
-            vec!["asset", "sel", "SELECT"]
-        );
+        for (context, expected) in [
+            (CompletionContext::Statement, vec!["SELECT", "sel"]),
+            (
+                CompletionContext::ExpectingTable,
+                vec!["asset", "SELECT", "sel"],
+            ),
+        ] {
+            let candidates = vec![
+                ranked_candidate("SELECT", CompletionKind::Keyword, 1_005),
+                ranked_candidate("asset", CompletionKind::Table, 365),
+            ];
+            let merged = merge_sql_snippet_completions(
+                &snippets,
+                "sel",
+                &sift_protocol::Engine::Postgres.dialect_id(),
+                &context,
+                candidates,
+            );
+            assert_eq!(
+                merged
+                    .iter()
+                    .take(expected.len())
+                    .map(|candidate| candidate.label.as_ref())
+                    .collect::<Vec<_>>(),
+                expected,
+                "unexpected order for {context:?}"
+            );
+        }
     }
 
     #[test]
