@@ -511,8 +511,9 @@ impl PgExt for PgDriver {
 /// Translate tokio-postgres errors into our driver-agnostic [`DriverError`].
 ///
 /// SQLSTATE (5-char code, when present) maps onto our stable [`Code`]. The
-/// raw driver error text is preserved in `message` — the protocol layer is
-/// responsible for not leaking it across the wire if that's a concern.
+/// Structured database errors are projected into an actionable message. The
+/// generic `Display` implementation intentionally reduces these to `db error`,
+/// which is not useful to someone correcting a query.
 pub(crate) fn pg_err(e: tokio_postgres::Error) -> DriverError {
     let sqlstate = e.code().map(|c| c.code().to_string());
     let code = match sqlstate.as_deref() {
@@ -537,11 +538,42 @@ pub(crate) fn pg_err(e: tokio_postgres::Error) -> DriverError {
         }
         _ => Code::DriverInternal,
     };
-    let mut err = DriverError::new(code, e.to_string()).with_engine(Engine::Postgres);
+    let message = e
+        .as_db_error()
+        .map(postgres_db_error_message)
+        .unwrap_or_else(|| e.to_string());
+    let mut err = DriverError::new(code, message).with_engine(Engine::Postgres);
     if let Some(s) = sqlstate {
         err = err.with_sqlstate(s);
     }
     err
+}
+
+fn postgres_db_error_message(error: &tokio_postgres::error::DbError) -> String {
+    let position = error.position().map(|position| match position {
+        tokio_postgres::error::ErrorPosition::Original(position) => *position,
+        tokio_postgres::error::ErrorPosition::Internal { position, .. } => *position,
+    });
+    format_postgres_db_error(error.message(), error.detail(), error.hint(), position)
+}
+
+fn format_postgres_db_error(
+    message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
+    position: Option<u32>,
+) -> String {
+    let mut parts = vec![message.to_string()];
+    if let Some(detail) = detail {
+        parts.push(format!("Detail: {detail}"));
+    }
+    if let Some(hint) = hint {
+        parts.push(format!("Hint: {hint}"));
+    }
+    if let Some(position) = position {
+        parts.push(format!("Position: {position}"));
+    }
+    parts.join("\n")
 }
 
 /// Replace opaque connect/authentication errors with safe, actionable context.
@@ -841,6 +873,22 @@ mod tests {
         assert!(error.message.contains("machine running the Sift server"));
         assert!(!error.message.contains("do-not-leak"));
         assert!(!error.message.contains("connection refused"));
+    }
+
+    #[test]
+    fn database_error_message_keeps_actionable_server_context() {
+        assert_eq!(
+            format_postgres_db_error(
+                "relation \"missing_table\" does not exist",
+                Some("The table was removed by a migration."),
+                Some("Check the active schema."),
+                Some(15),
+            ),
+            "relation \"missing_table\" does not exist\n\
+             Detail: The table was removed by a migration.\n\
+             Hint: Check the active schema.\n\
+             Position: 15"
+        );
     }
 
     #[test]
