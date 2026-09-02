@@ -5406,6 +5406,7 @@ impl Pane {
                             .flex()
                             .items_center()
                             .gap_1()
+                            .child(SectionLabel::new("CONNECTION"))
                             .child(
                                 div()
                                     .relative()
@@ -5420,6 +5421,7 @@ impl Pane {
                                         )
                                         .debug_selector("object-browser-connection-picker")
                                         .tone(ButtonTone::Neutral)
+                                        .start_icon(IconName::Database)
                                         .on_click(cx.listener(
                                             move |pane, _, _, cx| {
                                                 if let Some(browser) =
@@ -17753,16 +17755,7 @@ impl WorkspaceShell {
             });
         }
         self.focus_active_pane(window, cx);
-        if !matches!(
-            self.connection_status,
-            ConnectionStatus::Connected {
-                profile_id: active,
-                ..
-            } | ConnectionStatus::Connecting { profile_id: active }
-                if active == profile_id
-        ) {
-            self.connect(&connection, cx);
-        }
+        self.ensure_object_browser_connection(&connection, loading, cx);
         self.persist(cx);
         cx.notify();
     }
@@ -17904,14 +17897,23 @@ impl WorkspaceShell {
             }
             cx.notify();
         });
-        if !matches!(
-            self.connection_status,
-            ConnectionStatus::Connected {
-                profile_id: active,
-                ..
-            } if active == profile_id
-        ) {
-            self.connect(&connection, cx);
+        self.ensure_object_browser_connection(&connection, loading, cx);
+    }
+
+    fn ensure_object_browser_connection(
+        &mut self,
+        connection: &ConnectionNavEntry,
+        schema_missing: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match &self.connection_status {
+            ConnectionStatus::Connected { profile_id, .. } if *profile_id == connection.id => {
+                if schema_missing {
+                    self.refresh_connection_schema(cx);
+                }
+            }
+            ConnectionStatus::Connecting { profile_id } if *profile_id == connection.id => {}
+            _ => self.connect(connection, cx),
         }
     }
 
@@ -53839,13 +53841,16 @@ mod tests {
                     tags: Vec::new(),
                 }],
             }];
-            shell.connection_status = ConnectionStatus::Disconnected;
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "Primary".into(),
+            };
             shell.connection_schema = ConnectionSchemaState::Unavailable;
             shell.open_active_connection_objects(window, cx);
         });
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::Connect { profile_id: 7, .. })
+            Ok(ExecutorCommand::RefreshSchema)
         ));
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
