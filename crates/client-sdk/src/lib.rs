@@ -2034,6 +2034,22 @@ impl Client {
         .await
     }
 
+    pub async fn hover_semantic_document(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::SemanticHoverRequest,
+    ) -> Result<sift_protocol::SemanticHoverResponse> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}/hover"
+            ),
+            &request,
+        )
+        .await
+    }
+
     pub async fn preview_edits(
         &self,
         session: SessionId,

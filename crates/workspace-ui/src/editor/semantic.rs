@@ -44,6 +44,9 @@ pub enum SemanticRequestKind {
     Complete {
         cursor: u32,
     },
+    Hover {
+        position: u32,
+    },
     Format {
         range: Option<TextRange>,
     },
@@ -82,6 +85,7 @@ pub enum SemanticOutcome {
         replaced: TextRange,
         candidates: Vec<CompletionCandidate>,
     },
+    Hover(sift_protocol::SemanticHoverResponse),
     Edits {
         edits: Vec<TextEdit>,
         warnings: Vec<String>,
@@ -173,6 +177,8 @@ pub struct SemanticState {
     /// Revision a completion request is outstanding for, used to keep the
     /// menu from flickering open on a stale answer.
     pending_completion: Option<u64>,
+    hover: Option<sift_protocol::SemanticHoverResponse>,
+    pending_hover: Option<(u64, u32)>,
     usages: Vec<(Range<usize>, SqlUsageKind)>,
     usages_by_line: Vec<Vec<usize>>,
     usages_revision: Option<u64>,
@@ -192,6 +198,10 @@ impl SemanticState {
 
     pub fn completion(&self) -> Option<&CompletionMenu> {
         self.completion.as_ref()
+    }
+
+    pub fn hover(&self) -> Option<&sift_protocol::SemanticHoverResponse> {
+        self.hover.as_ref()
     }
 
     pub fn usages(&self) -> &[(Range<usize>, SqlUsageKind)] {
@@ -240,6 +250,8 @@ impl SemanticState {
     pub fn invalidate(&mut self) {
         self.completion = None;
         self.pending_completion = None;
+        self.hover = None;
+        self.pending_hover = None;
         self.usages.clear();
         self.usages_by_line.clear();
         self.usages_revision = None;
@@ -255,6 +267,28 @@ impl SemanticState {
     pub fn expect_completion(&mut self, revision: u64) {
         self.pending_completion = Some(revision);
         self.completion = None;
+    }
+
+    pub fn expect_hover(&mut self, revision: u64, position: u32) -> bool {
+        if self.pending_hover == Some((revision, position))
+            || self.hover.as_ref().is_some_and(|hover| {
+                hover.revision == revision
+                    && hover.range.start <= position
+                    && position <= hover.range.end
+            })
+        {
+            return false;
+        }
+        self.pending_hover = Some((revision, position));
+        self.hover = None;
+        true
+    }
+
+    pub fn clear_hover(&mut self) -> bool {
+        let changed = self.hover.is_some() || self.pending_hover.is_some();
+        self.hover = None;
+        self.pending_hover = None;
+        changed
     }
 
     pub fn move_completion_selection(&mut self, delta: isize) -> bool {
@@ -321,6 +355,29 @@ impl SemanticState {
             candidates,
             selected: 0,
         });
+        true
+    }
+
+    pub fn set_hover(
+        &mut self,
+        revision: u64,
+        current_revision: u64,
+        hover: sift_protocol::SemanticHoverResponse,
+    ) -> bool {
+        if revision != current_revision
+            || hover.revision != revision
+            || !self
+                .pending_hover
+                .is_some_and(|(pending_revision, position)| {
+                    pending_revision == revision
+                        && hover.range.start <= position
+                        && position <= hover.range.end
+                })
+        {
+            return false;
+        }
+        self.pending_hover = None;
+        self.hover = Some(hover);
         true
     }
 
@@ -554,6 +611,34 @@ mod tests {
             completion_candidate_metadata(&candidate).as_deref(),
             Some("app.public.users · int4 NOT NULL")
         );
+    }
+
+    #[test]
+    fn hover_requires_matching_revision_and_pending_word() {
+        let mut state = SemanticState::default();
+        let response = sift_protocol::SemanticHoverResponse {
+            document_id: sift_protocol::SemanticDocumentId(
+                "00000000-0000-0000-0000-000000000000".parse().unwrap(),
+            ),
+            revision: 3,
+            range: TextRange { start: 7, end: 12 },
+            kind: sift_protocol::SemanticHoverKind::Object,
+            display_name: "users".into(),
+            qualified_name: Some("app.public.users".into()),
+            type_ref: None,
+            nullability: None,
+            object_kind: Some(sift_protocol::CatalogNodeKind::Table),
+            comment: None,
+            detail: None,
+            uncertain: false,
+            catalog_revision: Some(sift_protocol::CatalogRevision(1)),
+        };
+        assert!(state.expect_hover(3, 7));
+        assert!(!state.set_hover(3, 4, response.clone()));
+        assert!(state.set_hover(3, 3, response));
+        assert_eq!(state.hover().unwrap().display_name, "users");
+        assert!(!state.expect_hover(3, 8));
+        assert!(state.clear_hover());
     }
 
     #[test]

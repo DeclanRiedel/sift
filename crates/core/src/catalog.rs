@@ -62,7 +62,7 @@ pub fn graph_from_trees(
                         object_node_id.clone(),
                     );
                 }
-                nodes.push(node(
+                let mut object_node = node(
                     object_node_id.clone(),
                     kind,
                     &object.name,
@@ -71,7 +71,25 @@ pub fn graph_from_trees(
                     CatalogNodeDetails::Object {
                         routine_args: object.routine_args.clone(),
                     },
-                ));
+                );
+                if let Some(comment) = &object.comment {
+                    object_node
+                        .extra
+                        .insert("comment".into(), serde_json::Value::String(comment.clone()));
+                }
+                if let Some(estimated_rows) = object.estimated_rows {
+                    object_node.extra.insert(
+                        "estimated_rows".into(),
+                        serde_json::Value::Number(estimated_rows.into()),
+                    );
+                }
+                if let Some(modified_at) = &object.modified_at {
+                    object_node.extra.insert(
+                        "modified_at".into(),
+                        serde_json::Value::String(modified_at.clone()),
+                    );
+                }
+                nodes.push(object_node);
                 contain(&mut edges, &schema_id, &object_node_id);
 
                 let mut column_ids = HashMap::new();

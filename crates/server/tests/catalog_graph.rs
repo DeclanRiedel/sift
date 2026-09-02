@@ -5,8 +5,9 @@ use sift_metadata::{
     CredentialMode, MemorySecretStore, MetadataStore, NewConnectionProfile, PrincipalId, TenantId,
 };
 use sift_protocol::{
-    CatalogCoverage, CatalogGraph, CatalogGraphData, CatalogGraphOptions, CatalogTree, Engine,
-    ObjectInfo, ObjectKind, SchemaDepth, SchemaScope, SchemaSnapshot, SchemaTree,
+    CatalogCoverage, CatalogGraph, CatalogGraphData, CatalogGraphOptions, CatalogTree,
+    ColumnMetadata, Engine, Nullability, ObjectInfo, ObjectKind, PrimitiveType, SchemaDepth,
+    SchemaScope, SchemaSnapshot, SchemaTree, TypeRef,
 };
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::registry::DriverRegistry;
@@ -37,7 +38,17 @@ fn get(uri: impl AsRef<str>) -> Request<Body> {
 }
 
 fn graph_snapshot() -> SchemaSnapshot {
-    graph_snapshot_with_objects(vec![ObjectInfo::new("users", ObjectKind::Table)])
+    let mut users = ObjectInfo::new("users", ObjectKind::Table);
+    users.comment = Some("Application users".into());
+    users.columns = vec![ColumnMetadata {
+        name: "id".into(),
+        type_ref: TypeRef::Primitive(PrimitiveType::Int64),
+        nullable: Nullability::NotNullable,
+        auto_increment: false,
+        primary_key: true,
+        facets: Default::default(),
+    }];
+    graph_snapshot_with_objects(vec![users])
 }
 
 fn graph_snapshot_with_objects(objects: Vec<ObjectInfo>) -> SchemaSnapshot {
@@ -147,7 +158,7 @@ async fn catalog_graph_is_revisioned_public_and_audit_safe() {
         .clone()
         .oneshot(post(
             &semantic_base,
-            serde_json::json!({"text": "select * from users; select * from ghosts"}),
+            serde_json::json!({"text": "select users.id from users; select * from ghosts"}),
         ))
         .await
         .unwrap();
@@ -174,6 +185,27 @@ async fn catalog_graph_is_revisioned_public_and_audit_safe() {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "undefined_object"));
+    let hover = router
+        .clone()
+        .oneshot(post(
+            format!("{}/{}/hover", semantic_base, semantic.document_id),
+            serde_json::json!({
+                "revision": semantic.revision,
+                "position": 13,
+                "catalog_revision": first.revision
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(hover.status(), StatusCode::OK);
+    let hover: sift_protocol::SemanticHoverResponse = json(hover.into_body()).await;
+    assert_eq!(hover.kind, sift_protocol::SemanticHoverKind::Column);
+    assert_eq!(
+        hover.type_ref,
+        Some(TypeRef::Primitive(PrimitiveType::Int64))
+    );
+    assert_eq!(hover.nullability, Some(Nullability::NotNullable));
+    assert_eq!(hover.comment.as_deref(), Some("Application users"));
     let fix = diagnostics
         .diagnostics
         .iter()
@@ -215,7 +247,7 @@ async fn catalog_graph_is_revisioned_public_and_audit_safe() {
         .unwrap();
     assert_eq!(usages.status(), StatusCode::OK);
     let usages: sift_protocol::SqlUsagePage = json(usages.into_body()).await;
-    assert_eq!(usages.usages.len(), 1);
+    assert_eq!(usages.usages.len(), 2);
     let refactor = router
         .clone()
         .oneshot(post(
@@ -226,7 +258,7 @@ async fn catalog_graph_is_revisioned_public_and_audit_safe() {
             serde_json::json!({
                 "revision": semantic.revision,
                 "catalog_revision": first.revision,
-                "refactor": {"kind": "qualify_name", "position": 15}
+                "refactor": {"kind": "qualify_name", "position": 22}
             }),
         ))
         .await
@@ -290,6 +322,19 @@ async fn catalog_graph_is_revisioned_public_and_audit_safe() {
         .nodes
         .iter()
         .any(|node| node.name == "events"));
+    let stale_hover = router
+        .clone()
+        .oneshot(post(
+            format!("{}/{}/hover", semantic_base, semantic.document_id),
+            serde_json::json!({
+                "revision": semantic.revision,
+                "position": 13,
+                "catalog_revision": first.revision
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale_hover.status(), StatusCode::BAD_REQUEST);
 
     let stale = router
         .clone()
@@ -356,6 +401,10 @@ async fn catalog_graph_is_revisioned_public_and_audit_safe() {
     assert!(sessions.list_operations().iter().any(|entry| matches!(
         entry.operation,
         sift_protocol::Operation::ReadCatalogGraph { refresh: true, .. }
+    )));
+    assert!(sessions.list_operations().iter().any(|entry| matches!(
+        entry.operation,
+        sift_protocol::Operation::HoverSemanticDocument { .. }
     )));
 }
 

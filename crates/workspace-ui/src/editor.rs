@@ -73,6 +73,42 @@ fn line_indices(text: &str) -> (Vec<usize>, Vec<usize>) {
     (starts, char_starts)
 }
 
+fn identifier_hover_position(text: &str, offset: usize) -> Option<u32> {
+    let mut probe = offset.min(text.len());
+    if probe == text.len() {
+        probe = text[..probe].char_indices().next_back()?.0;
+    } else if !matches!(
+        text[probe..].chars().next(),
+        Some(character) if identifier_character(character)
+    ) {
+        return None;
+    }
+    let character = text[probe..].chars().next()?;
+    if !identifier_character(character) {
+        return None;
+    }
+    while let Some((previous, character)) = text[..probe].char_indices().next_back() {
+        if !identifier_character(character) {
+            break;
+        }
+        probe = previous;
+    }
+    u32::try_from(probe).ok()
+}
+
+fn identifier_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_' || character as u32 >= 0x80
+}
+
+fn hover_type_display(type_ref: &sift_protocol::TypeRef) -> String {
+    match type_ref {
+        sift_protocol::TypeRef::Native { name, .. } => name.clone(),
+        sift_protocol::TypeRef::Primitive(primitive) => {
+            format!("{primitive:?}").to_ascii_lowercase()
+        }
+    }
+}
+
 /// Pixel bounds of the part of `range` that falls on the line starting at
 /// `line_start`, or `None` when the range misses this line entirely.
 fn span_bounds(
@@ -906,6 +942,7 @@ pub struct QueryEditor {
     scroll_handle: ScrollHandle,
     read_only: bool,
     semantic: SemanticState,
+    hover_anchor: Option<(Pixels, Pixels)>,
     json_schema: Option<JsonSchema>,
     find_open: bool,
     find_query: Entity<TextInput>,
@@ -947,6 +984,7 @@ impl QueryEditor {
             scroll_handle: ScrollHandle::new(),
             read_only: false,
             semantic: SemanticState::default(),
+            hover_anchor: None,
             json_schema: None,
             find_open: false,
             find_query,
@@ -1271,6 +1309,7 @@ impl QueryEditor {
                 replaced,
                 candidates,
             ),
+            SemanticOutcome::Hover(hover) => self.semantic.set_hover(revision, current, hover),
             SemanticOutcome::Usages {
                 usages,
                 is_complete,
@@ -1287,6 +1326,7 @@ impl QueryEditor {
             SemanticOutcome::RenamePreview { .. } => false,
             SemanticOutcome::Outline { .. } | SemanticOutcome::OutlineFailed(_) => false,
             SemanticOutcome::Failed(message) => {
+                self.semantic.clear_hover();
                 self.semantic.set_notice(Some(message));
                 true
             }
@@ -1355,6 +1395,46 @@ impl QueryEditor {
         let cursor = self.document.cursor() as u32;
         self.request_semantic(SemanticRequestKind::Complete { cursor }, cx);
         cx.notify();
+    }
+
+    fn request_hover_at(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.semantic_enabled() {
+            return;
+        }
+        let Some(offset) = self.byte_index_for_point(position, cx.theme(), window) else {
+            if self.semantic.clear_hover() {
+                self.hover_anchor = None;
+                cx.notify();
+            }
+            return;
+        };
+        let Some(hover_position) = identifier_hover_position(self.document.text(), offset) else {
+            if self.semantic.clear_hover() {
+                self.hover_anchor = None;
+                cx.notify();
+            }
+            return;
+        };
+        if !self.semantic.expect_hover(self.revision, hover_position) {
+            return;
+        }
+        let viewport = self.scroll_handle.bounds();
+        let scroll = self.scroll_handle.offset();
+        self.hover_anchor = Some((
+            position.x - viewport.left(),
+            position.y - viewport.top() - scroll.y + px(16.),
+        ));
+        self.request_semantic(
+            SemanticRequestKind::Hover {
+                position: hover_position,
+            },
+            cx,
+        );
     }
 
     /// Returns whether a menu was open and consumed the keystroke.
@@ -2199,6 +2279,73 @@ impl QueryEditor {
         )
     }
 
+    fn render_hover_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let hover = self.semantic.hover()?;
+        let (left, top) = self.hover_anchor?;
+        let colors = cx.theme().colors;
+        let type_text = hover.type_ref.as_ref().map(hover_type_display);
+        let nullable = hover.nullability.map(|nullable| match nullable {
+            sift_protocol::Nullability::Nullable => "nullable",
+            sift_protocol::Nullability::NotNullable => "not null",
+            sift_protocol::Nullability::Unknown => "nullability unknown",
+        });
+        Some(
+            div()
+                .absolute()
+                .left(left)
+                .top(top)
+                .w(px(380.))
+                .p_3()
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.elevated_surface)
+                .rounded(cx.theme().metrics.radius)
+                .shadow_md()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(colors.text)
+                        .child(hover.display_name.clone()),
+                )
+                .children(
+                    hover
+                        .qualified_name
+                        .clone()
+                        .map(|name| div().text_xs().text_color(colors.muted_text).child(name)),
+                )
+                .children(type_text.map(|type_text| {
+                    let text = nullable.map_or(type_text.clone(), |nullable| {
+                        format!("{type_text} · {nullable}")
+                    });
+                    div().text_xs().text_color(colors.accent).child(text)
+                }))
+                .children(
+                    hover
+                        .comment
+                        .clone()
+                        .map(|comment| div().text_xs().text_color(colors.text).child(comment)),
+                )
+                .children(
+                    hover
+                        .detail
+                        .clone()
+                        .map(|detail| div().text_xs().text_color(colors.muted_text).child(detail)),
+                )
+                .when(hover.uncertain, |card| {
+                    card.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.warning)
+                            .child("Metadata is incomplete or inferred"),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if !self.find_open {
             return None;
@@ -2537,6 +2684,19 @@ impl gpui::Render for QueryEditor {
             .flex_col()
             .font_family("monospace")
             .text_color(colors.text)
+            .on_hover(cx.listener(|editor, hovered: &bool, _, cx| {
+                if !*hovered && editor.semantic.clear_hover() {
+                    editor.hover_anchor = None;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_move(
+                cx.listener(|editor, event: &gpui::MouseMoveEvent, window, cx| {
+                    if !event.dragging() {
+                        editor.request_hover_at(event.position, window, cx);
+                    }
+                }),
+            )
             // Clicking the editor focuses it directly (synchronously), so the
             // SiftEditor key context is active and editing keys route.
             .on_mouse_down(
@@ -2650,7 +2810,8 @@ impl gpui::Render for QueryEditor {
                             .child(QueryEditorElement {
                                 editor: cx.entity(),
                             })
-                            .children(self.render_completion_menu(cx)),
+                            .children(self.render_completion_menu(cx))
+                            .children(self.render_hover_card(cx)),
                     ),
             )
     }
@@ -3917,6 +4078,14 @@ mod tests {
             qualified_name: None,
             score: 1,
         }
+    }
+
+    #[test]
+    fn hover_pointer_coalesces_to_identifier_start() {
+        let sql = "select café.id";
+        assert_eq!(identifier_hover_position(sql, 9), Some(7));
+        assert_eq!(identifier_hover_position(sql, 12), None);
+        assert_eq!(identifier_hover_position(sql, 6), None);
     }
 
     #[gpui::test]

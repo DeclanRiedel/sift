@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::DialectId;
+use crate::{CatalogNodeKind, CatalogRevision, DialectId, Nullability, TypeRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
@@ -109,6 +109,50 @@ pub struct SemanticCompletionRequest {
     pub cursor: u32,
     #[serde(default)]
     pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticHoverKind {
+    Column,
+    Object,
+    Alias,
+    Cte,
+    Function,
+    Expression,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticHoverRequest {
+    pub revision: u64,
+    pub position: u32,
+    #[serde(default)]
+    pub catalog_revision: Option<CatalogRevision>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SemanticHoverResponse {
+    pub document_id: SemanticDocumentId,
+    pub revision: u64,
+    pub range: TextRange,
+    pub kind: SemanticHoverKind,
+    pub display_name: String,
+    #[serde(default)]
+    pub qualified_name: Option<String>,
+    #[serde(default)]
+    pub type_ref: Option<TypeRef>,
+    #[serde(default)]
+    pub nullability: Option<Nullability>,
+    #[serde(default)]
+    pub object_kind: Option<CatalogNodeKind>,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    pub uncertain: bool,
+    #[serde(default)]
+    pub catalog_revision: Option<CatalogRevision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

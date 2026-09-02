@@ -371,10 +371,15 @@ async fn complete_openapi_registers_completion_schemas() {
     assert!(doc["paths"]
         ["/v1/sessions/{id}/connections/{conn_id}/semantic-documents/{document}/complete"]
         .is_object());
+    assert!(doc["paths"]
+        ["/v1/sessions/{id}/connections/{conn_id}/semantic-documents/{document}/hover"]
+        .is_object());
     assert!(doc["components"]["schemas"]["CompletionRequest"].is_object());
     assert!(doc["components"]["schemas"]["CompletionResponse"].is_object());
     assert!(doc["components"]["schemas"]["CompletionCandidate"].is_object());
     assert!(doc["components"]["schemas"]["SemanticCompletionRequest"].is_object());
+    assert!(doc["components"]["schemas"]["SemanticHoverRequest"].is_object());
+    assert!(doc["components"]["schemas"]["SemanticHoverResponse"].is_object());
 }
 
 #[tokio::test]

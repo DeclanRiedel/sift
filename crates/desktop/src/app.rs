@@ -5917,16 +5917,19 @@ fn admissible_jobs(
     // Walking backwards keeps the last Analyze of a burst, which is the one
     // whose answer matches what the user is now looking at.
     let mut analyzed: HashSet<u64> = HashSet::new();
+    let mut hovered: HashSet<u64> = HashSet::new();
     let mut kept = Vec::with_capacity(jobs.len());
     for job in jobs.drain(..).rev() {
         let current = newest.get(&job.item_id).copied() == Some(job.text_revision);
         let duplicate_analyze =
             job.request == SemanticRequestKind::Analyze && !analyzed.insert(job.item_id);
-        if current && !duplicate_analyze {
+        let duplicate_hover = matches!(job.request, SemanticRequestKind::Hover { .. })
+            && !hovered.insert(job.item_id);
+        if current && !duplicate_analyze && !duplicate_hover {
             kept.push(job);
             continue;
         }
-        if job.request != SemanticRequestKind::Analyze {
+        if job.request != SemanticRequestKind::Analyze && !duplicate_hover {
             let outcome = if matches!(job.request, SemanticRequestKind::Outline { .. }) {
                 SemanticOutcome::OutlineFailed("Buffer changed before the request ran.".into())
             } else {
@@ -6136,6 +6139,29 @@ async fn semantic_outcome(
                     candidates: response.candidates,
                 },
                 Err(error) => SemanticOutcome::Failed(format!("completion failed: {error}")),
+            }
+        }
+        SemanticRequestKind::Hover { position } => {
+            let catalog =
+                current_catalog_revision(client, session, connection, catalog_revision).await;
+            match client
+                .hover_semantic_document(
+                    session,
+                    connection,
+                    document,
+                    sift_protocol::SemanticHoverRequest {
+                        revision,
+                        position,
+                        catalog_revision: catalog,
+                    },
+                )
+                .await
+            {
+                Ok(response) => SemanticOutcome::Hover(response),
+                Err(error) => {
+                    *catalog_revision = None;
+                    SemanticOutcome::Failed(format!("hover failed: {error}"))
+                }
             }
         }
         SemanticRequestKind::Format { range } => {

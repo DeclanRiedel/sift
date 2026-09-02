@@ -74,6 +74,7 @@ pub struct CatalogBindingObject {
     pub qualified_name: String,
     pub kind: sift_protocol::CatalogNodeKind,
     pub complete: bool,
+    pub comment: Option<String>,
     pub columns: Vec<CatalogBindingColumn>,
 }
 
@@ -739,6 +740,25 @@ impl SemanticRegistry {
             (Arc::clone(&document.source), document.dialect_id.clone())
         };
         detect_completion_context(&source, cursor as usize, &dialect_id)
+    }
+
+    pub fn hover(
+        &self,
+        scope: DocumentScope,
+        id: SemanticDocumentId,
+        revision: u64,
+        position: u32,
+        catalog: Option<&CatalogBindingView>,
+    ) -> Result<sift_protocol::SemanticHoverResponse, Error> {
+        let (source, dialect_id) = {
+            let registry = self.inner.lock().unwrap();
+            let document = registry.documents.get(&id).ok_or(Error::NotFound)?;
+            ensure_scope(document, scope)?;
+            ensure_revision(document, revision)?;
+            validate_offset(&document.source, position)?;
+            (Arc::clone(&document.source), document.dialect_id.clone())
+        };
+        semantic_hover(&source, &dialect_id, id, revision, position, catalog)
     }
 
     pub fn select_statement(
@@ -1934,6 +1954,261 @@ fn statement_kind(sql: &str) -> StatementKind {
     }
 }
 
+fn semantic_hover(
+    source: &str,
+    dialect_id: &sift_protocol::DialectId,
+    document_id: SemanticDocumentId,
+    revision: u64,
+    position: u32,
+    catalog: Option<&CatalogBindingView>,
+) -> Result<sift_protocol::SemanticHoverResponse, Error> {
+    let position_usize = position as usize;
+    let tokens = binding_tokens(source);
+    let Some((token_index, token)) = tokens.iter().enumerate().find(|(_, token)| {
+        token.is_word()
+            && (token.range.start as usize <= position_usize)
+            && (position_usize < token.range.end as usize
+                || (position_usize == token.range.end as usize
+                    && token.range.start != token.range.end))
+    }) else {
+        return Err(Error::InvalidRequest);
+    };
+    let flavor = dialect_flavor(dialect_id)?;
+    let dialect: Box<dyn Dialect> = match flavor {
+        Flavor::Postgres => Box::new(PostgreSqlDialect {}),
+        Flavor::Tsql => Box::new(MsSqlDialect {}),
+    };
+    let semantic = semantic_tokens(&*dialect, source);
+    let relations = completion_relations(&semantic);
+    let qualifier = token_index
+        .checked_sub(1)
+        .and_then(|dot| tokens.get(dot))
+        .filter(|token| token.is_dot())
+        .and_then(|_| token_index.checked_sub(2))
+        .and_then(|qualifier| tokens.get(qualifier))
+        .filter(|token| token.is_word());
+    if let (Some(catalog), Some(qualifier)) = (catalog, qualifier) {
+        if let Some(relation) = relations
+            .iter()
+            .find(|relation| relation.name.eq_ignore_ascii_case(&qualifier.text))
+        {
+            let reference = relation.target.as_deref().unwrap_or(&relation.name);
+            if let Some(object) = catalog.resolve(reference) {
+                if let Some(column) = object
+                    .columns
+                    .iter()
+                    .find(|column| identifier_matches(&column.name, &token.text, token.quoted))
+                {
+                    return Ok(column_hover(
+                        document_id,
+                        revision,
+                        token.range,
+                        column,
+                        object,
+                        catalog,
+                    ));
+                }
+            } else if relation.target.is_none() {
+                return Ok(local_hover(
+                    document_id,
+                    revision,
+                    token.range,
+                    &token.text,
+                    sift_protocol::SemanticHoverKind::Expression,
+                    "column type is unknown because its local relation projection is incomplete",
+                ));
+            }
+        }
+    }
+    if let Some(relation) = relations
+        .iter()
+        .find(|relation| relation.name.eq_ignore_ascii_case(&token.text))
+    {
+        if let (Some(catalog), Some(target)) = (catalog, relation.target.as_deref()) {
+            if let Some(object) = catalog.resolve(target) {
+                return Ok(object_hover(
+                    document_id,
+                    revision,
+                    token.range,
+                    object,
+                    catalog,
+                    relation.is_alias,
+                ));
+            }
+        }
+        return Ok(local_hover(
+            document_id,
+            revision,
+            token.range,
+            &token.text,
+            if relation.is_alias {
+                sift_protocol::SemanticHoverKind::Alias
+            } else {
+                sift_protocol::SemanticHoverKind::Cte
+            },
+            "document-local relation; projected type metadata is incomplete",
+        ));
+    }
+    if let Some(catalog) = catalog {
+        if let Some(object) = catalog.resolve(&token.text) {
+            return Ok(object_hover(
+                document_id,
+                revision,
+                token.range,
+                object,
+                catalog,
+                false,
+            ));
+        }
+        let mut columns = relations
+            .iter()
+            .filter(|relation| !relation.is_alias)
+            .filter_map(|relation| {
+                catalog.resolve(relation.target.as_deref().unwrap_or(&relation.name))
+            })
+            .flat_map(|object| {
+                object
+                    .columns
+                    .iter()
+                    .filter(|column| identifier_matches(&column.name, &token.text, token.quoted))
+                    .map(move |column| (column, object))
+            })
+            .collect::<Vec<_>>();
+        columns.dedup_by(|left, right| left.0.id == right.0.id);
+        if columns.len() == 1 {
+            return Ok(column_hover(
+                document_id,
+                revision,
+                token.range,
+                columns[0].0,
+                columns[0].1,
+                catalog,
+            ));
+        }
+        if columns.len() > 1 {
+            let owners = columns
+                .iter()
+                .map(|(_, object)| object.qualified_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(local_hover(
+                document_id,
+                revision,
+                token.range,
+                &token.text,
+                sift_protocol::SemanticHoverKind::Expression,
+                &format!("ambiguous column; possible owners: {owners}"),
+            ));
+        }
+    }
+    let followed_by_call = tokens
+        .get(token_index + 1)
+        .is_some_and(|next| next.kind == BindingTokenKind::LeftParen);
+    Ok(local_hover(
+        document_id,
+        revision,
+        token.range,
+        &token.text,
+        if followed_by_call {
+            sift_protocol::SemanticHoverKind::Function
+        } else {
+            sift_protocol::SemanticHoverKind::Expression
+        },
+        if followed_by_call {
+            "function signature is not proven by the visible catalog"
+        } else {
+            "expression type is not proven by the visible catalog"
+        },
+    ))
+}
+
+fn column_hover(
+    document_id: SemanticDocumentId,
+    revision: u64,
+    range: TextRange,
+    column: &CatalogBindingColumn,
+    object: &CatalogBindingObject,
+    catalog: &CatalogBindingView,
+) -> sift_protocol::SemanticHoverResponse {
+    sift_protocol::SemanticHoverResponse {
+        document_id,
+        revision,
+        range,
+        kind: sift_protocol::SemanticHoverKind::Column,
+        display_name: column.name.clone(),
+        qualified_name: Some(format!("{}.{}", object.qualified_name, column.name)),
+        type_ref: Some(column.type_ref.clone()),
+        nullability: Some(column.nullable),
+        object_kind: Some(object.kind),
+        comment: object.comment.clone(),
+        detail: column
+            .ordinal
+            .map(|ordinal| format!("column ordinal {ordinal}")),
+        uncertain: !catalog.complete || !object.complete,
+        catalog_revision: Some(catalog.revision),
+    }
+}
+
+fn object_hover(
+    document_id: SemanticDocumentId,
+    revision: u64,
+    range: TextRange,
+    object: &CatalogBindingObject,
+    catalog: &CatalogBindingView,
+    alias: bool,
+) -> sift_protocol::SemanticHoverResponse {
+    sift_protocol::SemanticHoverResponse {
+        document_id,
+        revision,
+        range,
+        kind: if alias {
+            sift_protocol::SemanticHoverKind::Alias
+        } else if matches!(
+            object.kind,
+            sift_protocol::CatalogNodeKind::ScalarFunction
+                | sift_protocol::CatalogNodeKind::TableValuedFunction
+        ) {
+            sift_protocol::SemanticHoverKind::Function
+        } else {
+            sift_protocol::SemanticHoverKind::Object
+        },
+        display_name: object.name.clone(),
+        qualified_name: Some(object.qualified_name.clone()),
+        type_ref: None,
+        nullability: None,
+        object_kind: Some(object.kind),
+        comment: object.comment.clone(),
+        detail: alias.then(|| format!("alias for {}", object.qualified_name)),
+        uncertain: !catalog.complete || !object.complete,
+        catalog_revision: Some(catalog.revision),
+    }
+}
+
+fn local_hover(
+    document_id: SemanticDocumentId,
+    revision: u64,
+    range: TextRange,
+    display_name: &str,
+    kind: sift_protocol::SemanticHoverKind,
+    detail: &str,
+) -> sift_protocol::SemanticHoverResponse {
+    sift_protocol::SemanticHoverResponse {
+        document_id,
+        revision,
+        range,
+        kind,
+        display_name: display_name.to_string(),
+        qualified_name: None,
+        type_ref: None,
+        nullability: None,
+        object_kind: None,
+        comment: None,
+        detail: Some(detail.to_string()),
+        uncertain: true,
+        catalog_revision: None,
+    }
+}
+
 /// Detect a completion slot from tolerant tokenization of shared semantic
 /// source. Stateful callers validate the exact revision before reaching here.
 pub fn detect_completion_context(
@@ -2232,6 +2507,51 @@ mod tests {
 
     fn dialect(value: &str) -> sift_protocol::DialectId {
         sift_protocol::DialectId::new(value).unwrap()
+    }
+
+    fn hover_catalog() -> CatalogBindingView {
+        let object = |id: &str, name: &str, columns: &[(&str, sift_protocol::PrimitiveType)]| {
+            CatalogBindingObject {
+                id: sift_protocol::CatalogObjectId(id.into()),
+                catalog: "mock".into(),
+                schema: "public".into(),
+                name: name.into(),
+                qualified_name: format!("mock.public.{name}"),
+                kind: sift_protocol::CatalogNodeKind::Table,
+                complete: true,
+                comment: (name == "users").then(|| "Application users".into()),
+                columns: columns
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, (column, primitive))| CatalogBindingColumn {
+                        id: sift_protocol::CatalogObjectId(format!("{id}-{column}")),
+                        name: (*column).into(),
+                        type_ref: sift_protocol::TypeRef::Primitive(*primitive),
+                        nullable: sift_protocol::Nullability::NotNullable,
+                        ordinal: u32::try_from(ordinal + 1).ok(),
+                    })
+                    .collect(),
+            }
+        };
+        CatalogBindingView::new(
+            sift_protocol::CatalogRevision(9),
+            true,
+            vec![
+                object(
+                    "users",
+                    "users",
+                    &[
+                        ("id", sift_protocol::PrimitiveType::Int64),
+                        ("email", sift_protocol::PrimitiveType::Text),
+                    ],
+                ),
+                object(
+                    "orders",
+                    "orders",
+                    &[("id", sift_protocol::PrimitiveType::Int64)],
+                ),
+            ],
+        )
     }
 
     #[test]
@@ -2580,6 +2900,7 @@ mod tests {
                 qualified_name: "mock.public.users".into(),
                 kind: sift_protocol::CatalogNodeKind::Table,
                 complete: true,
+                comment: Some("Application users".into()),
                 columns: vec![CatalogBindingColumn {
                     id: sift_protocol::CatalogObjectId("users-id-column-id".into()),
                     name: "id".into(),
@@ -2754,5 +3075,126 @@ mod tests {
                 && relation.target.as_deref() == Some("public.users")
                 && !relation.is_alias
         }));
+    }
+
+    #[test]
+    fn hover_resolves_typed_alias_columns_for_both_dialects() {
+        for (dialect_id, source) in [
+            ("sift/postgresql", "select u.email from public.users u"),
+            ("sift/tsql", "select u.email from mock.public.users u"),
+        ] {
+            let registry = SemanticRegistry::default();
+            let scope = DocumentScope {
+                session: 1,
+                connection: 1,
+            };
+            let state = registry
+                .create(
+                    scope,
+                    dialect(dialect_id),
+                    source.into(),
+                    None,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            let position = source.find("email").unwrap() as u32;
+            let hover = registry
+                .hover(
+                    scope,
+                    state.document_id,
+                    state.revision,
+                    position,
+                    Some(&hover_catalog()),
+                )
+                .unwrap();
+            assert_eq!(hover.kind, sift_protocol::SemanticHoverKind::Column);
+            assert_eq!(
+                hover.type_ref,
+                Some(sift_protocol::TypeRef::Primitive(
+                    sift_protocol::PrimitiveType::Text
+                ))
+            );
+            assert_eq!(
+                hover.nullability,
+                Some(sift_protocol::Nullability::NotNullable)
+            );
+            assert_eq!(hover.comment.as_deref(), Some("Application users"));
+            assert!(!hover.uncertain);
+        }
+    }
+
+    #[test]
+    fn hover_marks_local_functions_expressions_and_ambiguity_as_uncertain() {
+        let cases = [
+            (
+                "with recent as (select 1) select * from recent",
+                "recent",
+                sift_protocol::SemanticHoverKind::Cte,
+            ),
+            (
+                "select count(*)",
+                "count",
+                sift_protocol::SemanticHoverKind::Function,
+            ),
+            (
+                "select value + 1",
+                "value",
+                sift_protocol::SemanticHoverKind::Expression,
+            ),
+        ];
+        for (source, needle, expected) in cases {
+            let registry = SemanticRegistry::default();
+            let scope = DocumentScope {
+                session: 1,
+                connection: 1,
+            };
+            let state = registry
+                .create(
+                    scope,
+                    dialect("sift/postgresql"),
+                    source.into(),
+                    None,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            let hover = registry
+                .hover(
+                    scope,
+                    state.document_id,
+                    1,
+                    source.rfind(needle).unwrap() as u32,
+                    Some(&hover_catalog()),
+                )
+                .unwrap();
+            assert_eq!(hover.kind, expected);
+            assert!(hover.uncertain);
+        }
+
+        let source = "select id from users join orders on users.id = orders.id";
+        let registry = SemanticRegistry::default();
+        let scope = DocumentScope {
+            session: 1,
+            connection: 1,
+        };
+        let state = registry
+            .create(
+                scope,
+                dialect("sift/postgresql"),
+                source.into(),
+                None,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let hover = registry
+            .hover(
+                scope,
+                state.document_id,
+                1,
+                source.find("id").unwrap() as u32,
+                Some(&hover_catalog()),
+            )
+            .unwrap();
+        assert_eq!(hover.kind, sift_protocol::SemanticHoverKind::Expression);
+        assert!(hover.detail.unwrap().contains("ambiguous column"));
     }
 }

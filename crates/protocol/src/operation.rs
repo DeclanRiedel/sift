@@ -418,6 +418,14 @@ pub enum Operation {
         cursor: u32,
         limit: Option<u32>,
     },
+    HoverSemanticDocument {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+        revision: u64,
+        position: u32,
+        catalog_bound: bool,
+    },
     OpenSemanticDocument {
         session: SessionId,
         connection: ConnectionId,
@@ -704,6 +712,7 @@ impl Operation {
             Self::ExportQuery { .. } => OperationKind::ExportQuery,
             Self::Complete { .. } => OperationKind::Complete,
             Self::CompleteSemanticDocument { .. } => OperationKind::Complete,
+            Self::HoverSemanticDocument { .. } => OperationKind::Complete,
             Self::OpenSemanticDocument { .. } => OperationKind::OpenSemanticDocument,
             Self::UpdateSemanticDocument { .. } => OperationKind::UpdateSemanticDocument,
             Self::CloseSemanticDocument { .. } => OperationKind::CloseSemanticDocument,
@@ -1032,6 +1041,9 @@ impl Operation {
             }
             Operation::CompleteSemanticDocument { session, .. } => {
                 summary("complete", "semantic_document", Some(session.0 as i64))
+            }
+            Operation::HoverSemanticDocument { session, .. } => {
+                summary("hover", "semantic_document", Some(session.0 as i64))
             }
             Operation::OpenSemanticDocument { session, .. } => {
                 summary("open", "semantic_document", Some(session.0 as i64))

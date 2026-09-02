@@ -4405,6 +4405,49 @@ impl SessionStore {
         .await
     }
 
+    pub async fn hover_semantic_document(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::SemanticHoverRequest,
+    ) -> ApiResult<sift_protocol::SemanticHoverResponse> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::Complete,
+            None,
+            &[],
+        )?;
+        let registry = self.inner.semantic.clone();
+        let scope = semantic_scope(session_id, conn_id);
+        let revision = request.revision;
+        let position = request.position;
+        let catalog = if let Some(expected) = request.catalog_revision {
+            let graph = self
+                .catalog_graph_for_operation(
+                    session_id,
+                    conn_id,
+                    sift_protocol::CatalogGraphRequest::default(),
+                    sift_protocol::OperationKind::Complete,
+                )
+                .await?;
+            if graph.revision != expected {
+                return Err(ApiError::BadRequest(format!(
+                    "stale catalog revision: expected {}, current {}",
+                    expected.0, graph.revision.0
+                )));
+            }
+            Some(catalog_binding_view(&graph))
+        } else {
+            None
+        };
+        self.run_semantic(move |_| {
+            registry.hover(scope, document, revision, position, catalog.as_ref())
+        })
+        .await
+    }
+
     pub async fn open_semantic_document(
         &self,
         session_id: SessionId,
@@ -5908,6 +5951,11 @@ fn catalog_binding_view(graph: &sift_protocol::CatalogGraph) -> sift_semantic::C
                 qualified_name: node.qualified_name.clone(),
                 kind: node.kind,
                 complete: node.completeness == sift_protocol::CatalogCompleteness::Complete,
+                comment: node
+                    .extra
+                    .get("comment")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
                 columns: columns.get(&node.id).cloned().unwrap_or_default(),
             })
         })

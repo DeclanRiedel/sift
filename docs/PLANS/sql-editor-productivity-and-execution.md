@@ -261,7 +261,7 @@ and warm completion without I/O.
 
 ### 6. Hover
 
-- [ ] Add protocol, operation, route, SDK, server orchestration, pack logic,
+- [x] Add protocol, operation, route, SDK, server orchestration, pack logic,
   and GPUI presentation.
 
 Gate: typed columns, objects, aliases, CTEs, functions, expressions,

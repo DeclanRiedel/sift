@@ -1056,6 +1056,10 @@ pub fn app(state: AppState) -> Router {
             post_with(complete_semantic_document, doc("completeSemanticDocument", "Complete SQL from an exact shared semantic document revision")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/semantic-documents/:document/hover",
+            post_with(hover_semantic_document, doc("hoverSemanticDocument", "Describe the typed symbol at a UTF-8 byte position in an exact semantic document revision")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/export",
             post_with(export_query, doc("exportQuery", "Stream a query result as CSV / TSV / JSON Lines / JSON Array. Response is chunked; Content-Type depends on the requested format.")),
         )
@@ -16428,6 +16432,35 @@ async fn complete_semantic_document(
         operation,
         result,
         |response| Some(response.candidates.len() as i64),
+    )?))
+}
+
+async fn hover_semantic_document(
+    State(state): State<AppState>,
+    Path((session, connection, document)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        sift_protocol::SemanticDocumentId,
+    )>,
+    Json(request): Json<sift_protocol::SemanticHoverRequest>,
+) -> ApiResult<Json<sift_protocol::SemanticHoverResponse>> {
+    let operation = Operation::HoverSemanticDocument {
+        session,
+        connection,
+        document,
+        revision: request.revision,
+        position: request.position,
+        catalog_bound: request.catalog_revision.is_some(),
+    };
+    let result = state
+        .sessions
+        .hover_semantic_document(session, connection, document, request)
+        .await;
+    Ok(Json(finish_operation(
+        &state.sessions,
+        operation,
+        result,
+        |_| Some(1),
     )?))
 }
 
