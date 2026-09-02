@@ -2470,31 +2470,50 @@ impl QueryEditor {
             .map(|(index, candidate)| {
                 let active = index == selected;
                 div()
+                    .id(("completion-row", index))
+                    .debug_selector(move || format!("completion-row-{index}"))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap_2()
                     .px_2()
                     .h(COMPLETION_ROW_HEIGHT)
+                    .text_xs()
+                    .line_height(COMPLETION_ROW_HEIGHT)
                     .when(active, |row| row.bg(colors.selected_surface))
                     .child(
                         div()
-                            .w(px(14.))
-                            .text_xs()
+                            .debug_selector(move || format!("completion-kind-{index}"))
+                            .flex_none()
+                            .w(px(18.))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .text_color(colors.accent)
                             .child(completion_kind_badge(candidate.kind)),
                     )
                     .child(
                         div()
+                            .debug_selector(move || format!("completion-label-{index}"))
                             .flex_1()
-                            .text_xs()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .overflow_hidden()
                             .text_color(colors.text)
                             .child(candidate.label.to_string()),
                     )
                     .children(completion_candidate_metadata(candidate).map(|metadata| {
                         div()
+                            .debug_selector(move || format!("completion-metadata-{index}"))
+                            .flex_none()
+                            .h_full()
+                            .flex()
+                            .items_center()
                             .max_w(px(250.))
                             .overflow_hidden()
-                            .text_xs()
                             .text_color(colors.muted_text)
                             .child(metadata)
                     }))
@@ -4513,6 +4532,43 @@ mod tests {
             assert_eq!(editor.document().text(), "select * from users");
             assert!(editor.semantic().completion().is_none());
         });
+    }
+
+    #[gpui::test]
+    fn completion_row_text_and_kind_share_one_vertical_track(cx: &mut TestAppContext) {
+        let (mut cx, editor, spy) = editor_with_spy("select * from us", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.document.set_selection(16..16, false);
+            editor.complete(&Complete, window, cx);
+        });
+        cx.run_until_parked();
+        let revision = spy
+            .read_with(&cx, |spy, _| spy.0.last().map(|(revision, _)| *revision))
+            .expect("completion request");
+        let mut users = candidate("users");
+        users.detail = Some("public".into());
+        editor.update(&mut cx, |editor, cx| {
+            assert!(editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Completions {
+                    replaced: sift_protocol::TextRange { start: 14, end: 16 },
+                    candidates: vec![users],
+                },
+                cx,
+            ));
+        });
+        cx.run_until_parked();
+
+        let row = cx.debug_bounds("completion-row-0").expect("completion row");
+        for selector in [
+            "completion-kind-0",
+            "completion-label-0",
+            "completion-metadata-0",
+        ] {
+            let child = cx.debug_bounds(selector).expect("completion row child");
+            assert_eq!(child.top(), row.top(), "{selector} top");
+            assert_eq!(child.bottom(), row.bottom(), "{selector} bottom");
+        }
     }
 
     #[gpui::test]
