@@ -64,12 +64,33 @@ pub struct DataSettings {
 #[serde(default)]
 pub struct UiSettings {
     pub recent_objects: bool,
+    pub navigation_hints: NavigationHints,
 }
 
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
             recent_objects: true,
+            navigation_hints: NavigationHints::Always,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationHints {
+    #[default]
+    Always,
+    Hold,
+    Hidden,
+}
+
+impl NavigationHints {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::Hold => "hold",
+            Self::Hidden => "hidden",
         }
     }
 }
@@ -714,6 +735,34 @@ impl SettingsStore {
         Ok(settings)
     }
 
+    /// Update navigation-hint visibility while preserving hand-written settings.
+    pub fn save_navigation_hints(&self, mode: NavigationHints) -> Result<UserSettings, String> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "settings write lock poisoned".to_string())?;
+        let source = std::fs::read_to_string(&self.path)
+            .map_err(|error| format!("reading {} failed: {error}", self.path.display()))?;
+        let mut document = source
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("settings.toml is invalid: {error}"))?;
+        if document.get("ui").is_none() {
+            document["ui"] = Item::Table(toml_edit::Table::new());
+        }
+        let decor = document["ui"]["navigation_hints"]
+            .as_value()
+            .map(|value| value.decor().clone());
+        let mut mode_value = Value::from(mode.as_str());
+        if let Some(decor) = decor {
+            *mode_value.decor_mut() = decor;
+        }
+        document["ui"]["navigation_hints"] = Item::Value(mode_value);
+        let updated = document.to_string();
+        let settings = UserSettings::decode(&updated)?;
+        self.write_source(&updated)?;
+        Ok(settings)
+    }
+
     /// Update the selected theme while preserving hand-written settings.
     pub fn save_theme(&self, theme: &str) -> Result<UserSettings, String> {
         self.load_theme(theme)?;
@@ -832,6 +881,7 @@ mod tests {
         assert!(source.contains("selection_aggregates = false"));
         assert!(source.contains("query_results_placement = \"right\""));
         assert!(source.contains("recent_objects = true"));
+        assert!(source.contains("navigation_hints = \"always\""));
         assert_eq!(UserSettings::decode(&source).unwrap(), settings);
     }
 
@@ -929,6 +979,22 @@ mod tests {
             .read_text()
             .unwrap()
             .contains("recent_objects = false"));
+    }
+
+    #[test]
+    fn navigation_hint_update_supports_all_three_states() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.toml"));
+        store.save(&UserSettings::default()).unwrap();
+
+        for mode in [
+            NavigationHints::Always,
+            NavigationHints::Hold,
+            NavigationHints::Hidden,
+        ] {
+            let settings = store.save_navigation_hints(mode).unwrap();
+            assert_eq!(settings.ui.navigation_hints, mode);
+        }
     }
 
     #[test]

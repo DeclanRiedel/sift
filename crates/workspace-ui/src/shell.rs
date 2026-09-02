@@ -29,8 +29,9 @@ use crate::results::{
     StreamCompletion, StreamProgress, StreamUpdate,
 };
 use crate::settings::{
-    EditorMode, KeyboardProfile, KeymapSettings, QueryResultsPlacement, RepositoryGrouping,
-    RepositoryPrimaryAction, RepositorySort, RepositoryView, SettingsStore, UserSettings,
+    EditorMode, KeyboardProfile, KeymapSettings, NavigationHints, QueryResultsPlacement,
+    RepositoryGrouping, RepositoryPrimaryAction, RepositorySort, RepositoryView, SettingsStore,
+    UserSettings,
 };
 use crate::workspace::{child_path, WorkspaceFilesProjection, WorkspaceFilesSnapshot};
 
@@ -8461,6 +8462,7 @@ pub struct WorkspaceShell {
     query_history_scroll_handle: UniformListScrollHandle,
     dark_theme: bool,
     show_frame_metrics: bool,
+    navigation_hint_modifier_held: bool,
     settings: UserSettings,
     settings_store: Option<Arc<SettingsStore>>,
     settings_item: Option<u64>,
@@ -9501,6 +9503,7 @@ impl WorkspaceShell {
             query_history_scroll_handle: UniformListScrollHandle::new(),
             dark_theme: theme.appearance == ThemeAppearance::Dark,
             show_frame_metrics: false,
+            navigation_hint_modifier_held: false,
             next_toast_id: 1,
             settings,
             settings_store,
@@ -23979,6 +23982,42 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn navigation_hints_visible(&self) -> bool {
+        match self.settings.ui.navigation_hints {
+            NavigationHints::Always => true,
+            NavigationHints::Hold => self.navigation_hint_modifier_held,
+            NavigationHints::Hidden => false,
+        }
+    }
+
+    fn set_navigation_hints(&mut self, mode: NavigationHints, cx: &mut Context<Self>) {
+        let settings_is_open = self.settings_item.is_some_and(|item_id| {
+            self.panes
+                .iter()
+                .any(|pane| pane.read(cx).contains_item(item_id))
+        });
+        if settings_is_open {
+            self.show_toast(
+                "Save or close settings.toml before changing this preference here".into(),
+                cx,
+            );
+            return;
+        }
+        let mut settings = self.settings.clone();
+        settings.ui.navigation_hints = mode;
+        if let Some(store) = &self.settings_store {
+            settings = match store.save_navigation_hints(mode) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    self.show_toast(error, cx);
+                    return;
+                }
+            };
+        }
+        self.settings = settings;
+        cx.notify();
+    }
+
     pub fn open_workspace(&mut self, workspace: &WorkspaceNavEntry, cx: &mut Context<Self>) {
         if let Some(current) = self.selected_workspace_id {
             let presentation = self.current_repository_presentation(cx);
@@ -32150,22 +32189,24 @@ impl WorkspaceShell {
                 ResultInspectorView::RowJson => self.render_result_row_json_inspector(results, cx),
                 ResultInspectorView::RelationDefinition => div().into_any_element(),
             })
-            .child(
-                div()
-                    .debug_selector(|| "inspector-keyboard-help".into())
-                    .h(px(28.))
-                    .px_2()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .border_t_1()
-                    .border_color(colors.subtle_border)
-                    .truncate()
-                    .text_xs()
-                    .text_color(colors.muted_text)
-                    .child(keyboard_help),
-            )
+            .when(self.navigation_hints_visible(), |inspector| {
+                inspector.child(
+                    div()
+                        .debug_selector(|| "inspector-keyboard-help".into())
+                        .h(px(28.))
+                        .px_2()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .border_t_1()
+                        .border_color(colors.subtle_border)
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.muted_text)
+                        .child(keyboard_help),
+                )
+            })
             .into_any_element()
     }
 
@@ -35191,7 +35232,7 @@ impl WorkspaceShell {
                                         .children(vault_item_rows),
                                 )
                         })
-                        .child(
+                        .when(self.navigation_hints_visible(), |panel| panel.child(
                             div()
                                 .debug_selector(|| "collaboration-keyboard-hint".into())
                                 .h(px(48.))
@@ -35221,7 +35262,7 @@ impl WorkspaceShell {
                                             .child("/ filter · n new · t team · e edit · r refresh")
                                     },
                                 ),
-                        )
+                        ))
                 },
             )
             .when(
@@ -35544,7 +35585,7 @@ impl WorkspaceShell {
                             .w_full()
                             .track_scroll(&self.query_outline_scroll_handle),
                         )
-                        .child(
+                        .when(self.navigation_hints_visible(), |panel| panel.child(
                             div()
                                 .h(px(40.))
                                 .px_2()
@@ -35559,7 +35600,7 @@ impl WorkspaceShell {
                                 .text_color(colors.muted_text)
                                 .child("j/k navigate · h/l fold · Enter open")
                                 .child("x execute statement · / filter · r refresh"),
-                        )
+                        ))
                 },
             )
             .when(
@@ -35918,7 +35959,7 @@ impl WorkspaceShell {
                                 .w_full()
                                 .track_scroll(&self.saved_queries_scroll_handle),
                         )
-                        .child(
+                        .when(self.navigation_hints_visible(), |panel| panel.child(
                             div()
                                 .debug_selector(|| "saved-queries-keyboard-hint".into())
                                 .h(px(58.))
@@ -35958,7 +35999,7 @@ impl WorkspaceShell {
                                         .text_center()
                                         .child("r rename · t tags · d delete · u update"),
                                 ),
-                        )
+                        ))
                 },
             )
             .when(
@@ -36273,7 +36314,7 @@ impl WorkspaceShell {
                             .w_full()
                             .track_scroll(&self.query_history_scroll_handle),
                         )
-                        .child(
+                        .when(self.navigation_hints_visible(), |panel| panel.child(
                             div()
                                 .h(px(40.))
                                 .px_2()
@@ -36288,7 +36329,7 @@ impl WorkspaceShell {
                                 .text_color(colors.muted_text)
                                 .child("j/k · Enter open · / filter · 1–4 status")
                                 .child("r rerun · s save · L more · R refresh"),
-                        )
+                        ))
                 },
             )
             .when(dock.id == DockId::Inspector, |dock_view| {
@@ -38551,6 +38592,50 @@ impl WorkspaceShell {
                                 },
                             )) as sift_ui::ClickHandler,
                         ))
+                        .child(
+                            div()
+                                .min_h(px(64.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child("Navigation hints")
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child("Show shortcut footers always, while holding Alt, or never."),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .flex()
+                                        .gap_1()
+                                        .children([
+                                            ("settings-navigation-hints-always", "Always", NavigationHints::Always),
+                                            ("settings-navigation-hints-hold", "Hold Alt", NavigationHints::Hold),
+                                            ("settings-navigation-hints-hidden", "Hidden", NavigationHints::Hidden),
+                                        ].map(|(id, label, mode)| {
+                                            Button::new(id, label)
+                                                .tone(if self.settings.ui.navigation_hints == mode {
+                                                    ButtonTone::Accent
+                                                } else {
+                                                    ButtonTone::Neutral
+                                                })
+                                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                                    shell.set_navigation_hints(mode, cx)
+                                                }))
+                                        })),
+                                ),
+                        )
                         .child(
                             div()
                                 .pt_3()
@@ -42382,11 +42467,25 @@ impl WorkspaceShell {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .child(div().flex().items_center().justify_between().child(
-                            div().font_weight(gpui::FontWeight::SEMIBOLD).child(title),
-                        ).child(div().text_xs().text_color(colors.muted_text).child(
-                            "h/l or 1–4 switches sections",
-                        )))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child(title),
+                                )
+                                .when(self.navigation_hints_visible(), |header| {
+                                    header.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .child("h/l or 1–4 switches sections"),
+                                    )
+                                }),
+                        )
                         .child(div().flex().gap_1().children(section_tabs))
                         .children(self.vault_error.as_ref().map(|message| {
                             ErrorBanner::new(message.clone())
@@ -44274,6 +44373,16 @@ impl gpui::Render for WorkspaceShell {
             .role(Role::Application)
             .aria_label("Sift database workspace")
             .track_focus(&self.focus_handle)
+            .on_modifiers_changed(cx.listener(
+                |shell, event: &gpui::ModifiersChangedEvent, _, cx| {
+                    if shell.navigation_hint_modifier_held != event.modifiers.alt {
+                        shell.navigation_hint_modifier_held = event.modifiers.alt;
+                        if shell.settings.ui.navigation_hints == NavigationHints::Hold {
+                            cx.notify();
+                        }
+                    }
+                },
+            ))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|shell, _, _, cx| shell.collapse_app_bar_navigation(cx)),
@@ -45886,6 +45995,26 @@ mod tests {
                 .build_visible_connection_items()
                 .iter()
                 .all(|item| { !matches!(item.action, ConnectionTreeAction::RecentObject(_)) }));
+        });
+    }
+
+    #[gpui::test]
+    fn navigation_hint_visibility_obeys_all_three_modes(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+
+        workspace.update(cx, |shell, _| {
+            shell.settings.ui.navigation_hints = NavigationHints::Always;
+            shell.navigation_hint_modifier_held = false;
+            assert!(shell.navigation_hints_visible());
+
+            shell.settings.ui.navigation_hints = NavigationHints::Hold;
+            assert!(!shell.navigation_hints_visible());
+            shell.navigation_hint_modifier_held = true;
+            assert!(shell.navigation_hints_visible());
+
+            shell.settings.ui.navigation_hints = NavigationHints::Hidden;
+            assert!(!shell.navigation_hints_visible());
         });
     }
 

@@ -809,12 +809,14 @@ pub(super) fn render_bottom_panel(
                         .child(div().flex_1().min_w_0().child("CONFIGURATION"))
                         .child(div().w(px(72.)).child("STEPS"))
                         .child(div().w(px(104.)).child("STATUS"))
-                        .child(
-                            div()
-                                .w(px(224.))
-                                .text_right()
-                                .child("j/k SELECT · DOUBLE-CLICK EDIT"),
-                        ),
+                        .when(shell.navigation_hints_visible(), |header| {
+                            header.child(
+                                div()
+                                    .w(px(224.))
+                                    .text_right()
+                                    .child("j/k SELECT · DOUBLE-CLICK EDIT"),
+                            )
+                        }),
                 )
                 .children(
                     shell.automations_error.as_ref().map(|message| {
