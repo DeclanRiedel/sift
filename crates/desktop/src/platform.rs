@@ -180,6 +180,6 @@ mod tests {
 
     #[test]
     fn keymap_has_stable_action_coverage() {
-        assert_eq!(shell_key_bindings().len(), 21);
+        assert_eq!(shell_key_bindings().len(), 22);
     }
 }

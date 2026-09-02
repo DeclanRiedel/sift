@@ -19,6 +19,7 @@ const OUTLINE_STATEMENTS: usize = 2_000;
 const OUTLINE_SYMBOLS: usize = 4_000;
 const CHANGE_LEDGER_ROWS: usize = 1_000;
 const SCHEMA_OBJECTS: usize = 100_000;
+const VISIBLE_RESULT_SET_TABS: usize = 8;
 
 fn large_sql() -> String {
     (0..LARGE_SQL_LINES)
@@ -443,6 +444,47 @@ fn retained_grid_navigation(cx: &mut BenchAppContext) {
 }
 
 #[gpui::bench(fps = 120)]
+fn result_set_tab_navigation(cx: &mut BenchAppContext) {
+    let mut window = cx.add_empty_window();
+    let results = window
+        .replace_root_view(|_, cx| {
+            let mut view = ResultsView::new(cx);
+            view.begin_stream(cx);
+            for result_set in 0..VISIBLE_RESULT_SET_TABS {
+                view.apply_stream_page(
+                    Page::NextResult {
+                        columns: vec![ColumnMetadata::new(
+                            format!("result_{result_set}"),
+                            TypeRef::Primitive(PrimitiveType::Int64),
+                        )],
+                    },
+                    cx,
+                );
+                view.apply_stream_page(
+                    Page::Rows {
+                        rows: vec![Row::new(vec![Value::Int64(result_set as i64)])],
+                    },
+                    cx,
+                );
+            }
+            view.apply_stream_page(
+                Page::Done {
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                },
+                cx,
+            );
+            view
+        })
+        .unwrap();
+    let mut index = 0usize;
+    cx.bench_renderer(results, move |results, _, cx| {
+        index = (index + 1) % VISIBLE_RESULT_SET_TABS;
+        results.select_result_set_benchmark(index, cx);
+    });
+}
+
+#[gpui::bench(fps = 120)]
 fn git_panel_first_frame(cx: &mut BenchAppContext) {
     let status = repository_status();
     let mut window = cx.add_empty_window();
@@ -492,6 +534,7 @@ gpui::bench_group!(
     vim_typing_large_document,
     first_result_page,
     retained_grid_navigation,
+    result_set_tab_navigation,
     git_panel_first_frame,
     git_panel_steady_refresh,
     command_palette_open,

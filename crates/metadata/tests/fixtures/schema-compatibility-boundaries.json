@@ -81,6 +81,6 @@
     "schema_version": 43,
     "minimum_compatible_version": 19,
     "automatic_migration": "allowed",
-    "current_binary": "accepted"
+    "current_binary": "migration_required"
   }
 ]

@@ -24732,6 +24732,7 @@ impl WorkspaceShell {
                 name: "Large schema".into(),
                 provider_id: sift_protocol::ProviderId::new("sift/postgres")
                     .expect("built-in provider id"),
+                tags: Vec::new(),
             }],
         }];
         self.connection_status = ConnectionStatus::Connected {
@@ -47508,7 +47509,9 @@ mod tests {
             );
         });
         cx.run_until_parked();
-        let data_tab = cx.debug_bounds("result-tab-data").expect("Data result tab");
+        let data_tab = cx
+            .debug_bounds("result-set-tab-1")
+            .expect("first result-set tab");
         let result_row = cx.debug_bounds("result-row-0").expect("result row");
         assert!(
             data_tab.bottom() <= result_row.top(),
@@ -47747,7 +47750,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("result-history-row-0").is_some());
 
-        let data_tab = cx.debug_bounds("result-tab-data").unwrap();
+        let data_tab = cx.debug_bounds("result-set-tab-1").unwrap();
         cx.simulate_click(data_tab.center(), Modifiers::default());
         cx.run_until_parked();
         let expand = cx.debug_bounds("open-result-data-modal").unwrap();

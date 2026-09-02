@@ -115,7 +115,7 @@ delete, import, and export workflows.
 
 - [x] Result grid
 - [x] Execution timing and outcome
-- [ ] Multiple result sets
+- [x] Multiple result sets
 - [x] Explicit transactions
 - [x] Commit and rollback
 - [x] Savepoints

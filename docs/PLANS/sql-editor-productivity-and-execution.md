@@ -311,7 +311,7 @@ both engines; no heuristic edit is presented as exact.
 
 ### 12. Hardening and performance graduation
 
-- [ ] Add golden, mutation, fuzz, resource, live-engine, and UI performance
+- [x] Add golden, mutation, fuzz, resource, live-engine, and UI performance
   corpora; update canonical feature inventory.
 
 Gate: `cargo fmt`, strict workspace clippy, workspace tests, live-driver

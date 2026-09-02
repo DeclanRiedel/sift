@@ -2033,10 +2033,16 @@ impl ResultsView {
     }
 
     fn select_result_set(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index == self.active_result_set
-            || index >= self.result_set_count()
-            || matches!(self.state, ResultState::Streaming(_))
-        {
+        if index >= self.result_set_count() || matches!(self.state, ResultState::Streaming(_)) {
+            return;
+        }
+        if index == self.active_result_set {
+            if self.tab != ResultTab::Data {
+                self.tab = ResultTab::Data;
+                self.messages = Self::messages_for_state(&self.state);
+                self.selected_message = None;
+                cx.notify();
+            }
             return;
         }
         self.store_active_result_set();
@@ -2055,6 +2061,13 @@ impl ResultsView {
         self.column_filter_input
             .update(cx, |input, cx| input.set_text("", cx));
         self.rebuild_display_rows(cx);
+    }
+
+    /// Headless renderer benchmark hook for switching among retained result
+    /// summaries without exposing the internal storage model to product code.
+    #[cfg(feature = "benchmark")]
+    pub fn select_result_set_benchmark(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.select_result_set(index, cx);
     }
 
     /// Consume one server page.

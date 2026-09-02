@@ -39,6 +39,7 @@ renderer submission rather than timing isolated model functions.
 | `query_outline_first_frame` | 2,000 statements + 4,000 symbols | record first materialization separately from navigation |
 | `query_outline_navigation` | j/k through the same outline | p95 draw ≤ 8.3 ms |
 | `change_ledger_first_frame` | 1,000 ledger entries | p95 draw ≤ 16.7 ms |
+| `result_set_tab_navigation` | switch among eight visible retained result sets | p95 draw ≤ 8.3 ms; inactive cells remain unshaped |
 
 Benchmarks are comparison gates, not portable absolute scores. Record CPU, GPU,
 display server, compositor, build revision, and benchmark output when publishing

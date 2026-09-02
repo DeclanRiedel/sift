@@ -985,8 +985,14 @@ fn parse(
         Flavor::Postgres => Box::new(PostgreSqlDialect {}),
         Flavor::Tsql => Box::new(MsSqlDialect {}),
     };
+    // Tokenize once for both the document-wide resource ceiling and the
+    // common valid-document parse path. Invalid documents fall back to
+    // statement parsing below so one error does not hide later statements.
+    let (token_count, whole_document_valid) = validate_document(&source, &spans, flavor);
+    if token_count > MAX_TOKENS {
+        return Err(Error::LimitExceeded);
+    }
     let mut statements = Vec::new();
-    let mut token_count = 0usize;
     for (full, executable) in spans {
         if canceled.load(Ordering::Relaxed) {
             return Err(Error::Canceled);
@@ -995,30 +1001,26 @@ fn parse(
         if flavor == Flavor::Tsql && sql.eq_ignore_ascii_case("go") {
             continue;
         }
-        if let Ok(tokens) = Tokenizer::new(&*dialect, sql).tokenize() {
-            token_count = token_count.saturating_add(tokens.len());
-            if token_count > MAX_TOKENS {
-                return Err(Error::LimitExceeded);
-            }
-        }
         let ordinal = statements.len();
         let before = diagnostics.len();
-        match Parser::parse_sql(&*dialect, sql) {
-            Ok(parsed) if parsed.is_empty() => continue,
-            Ok(_) => {}
-            Err(error) if diagnostics.len() < MAX_DIAGNOSTICS => {
-                diagnostics.push(SemanticDiagnostic {
-                    id: format!("{revision}:parser:{ordinal}"),
-                    severity: DiagnosticSeverity::Error,
-                    code: "syntax_error".into(),
-                    message: error.to_string(),
-                    range: executable,
-                    related_ranges: Vec::new(),
-                    source: "parser".into(),
-                    quick_fix_ids: Vec::new(),
-                });
+        if !whole_document_valid {
+            match Parser::parse_sql(&*dialect, sql) {
+                Ok(parsed) if parsed.is_empty() => continue,
+                Ok(_) => {}
+                Err(error) if diagnostics.len() < MAX_DIAGNOSTICS => {
+                    diagnostics.push(SemanticDiagnostic {
+                        id: format!("{revision}:parser:{ordinal}"),
+                        severity: DiagnosticSeverity::Error,
+                        code: "syntax_error".into(),
+                        message: error.to_string(),
+                        range: executable,
+                        related_ranges: Vec::new(),
+                        source: "parser".into(),
+                        quick_fix_ids: Vec::new(),
+                    });
+                }
+                Err(_) => {}
             }
-            Err(_) => {}
         }
         let recovered = diagnostics[before..]
             .iter()
@@ -1042,6 +1044,59 @@ fn parse(
         statements,
         diagnostics,
     })
+}
+
+fn validate_document(
+    source: &str,
+    spans: &[(TextRange, TextRange)],
+    flavor: Flavor,
+) -> (usize, bool) {
+    const PARALLEL_STATEMENT_THRESHOLD: usize = 512;
+    const MAX_PARSE_WORKERS: usize = 4;
+
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(MAX_PARSE_WORKERS)
+        .min(spans.len().max(1));
+    if spans.len() < PARALLEL_STATEMENT_THRESHOLD || workers == 1 {
+        return tokenize_and_validate(source, flavor);
+    }
+
+    let chunk_size = spans.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let handles = spans
+            .chunks(chunk_size)
+            .map(|chunk| {
+                let start = chunk.first().unwrap().0.start as usize;
+                let end = chunk.last().unwrap().0.end as usize;
+                scope.spawn(move || tokenize_and_validate(&source[start..end], flavor))
+            })
+            .collect::<Vec<_>>();
+        handles.into_iter().fold((0usize, true), |result, handle| {
+            let Ok((tokens, valid)) = handle.join() else {
+                return (result.0, false);
+            };
+            (result.0.saturating_add(tokens), result.1 && valid)
+        })
+    })
+}
+
+fn tokenize_and_validate(source: &str, flavor: Flavor) -> (usize, bool) {
+    let dialect: Box<dyn Dialect> = match flavor {
+        Flavor::Postgres => Box::new(PostgreSqlDialect {}),
+        Flavor::Tsql => Box::new(MsSqlDialect {}),
+    };
+    match Tokenizer::new(&*dialect, source).tokenize_with_location() {
+        Ok(tokens) => {
+            let token_count = tokens.len();
+            let valid = Parser::new(&*dialect)
+                .with_tokens_with_locations(tokens)
+                .parse_statements()
+                .is_ok();
+            (token_count, valid)
+        }
+        Err(_) => (0, false),
+    }
 }
 
 fn source_digest(source: &str) -> String {
@@ -3378,7 +3433,11 @@ fn extract_prefix(sql: &str, cursor: usize, flavor: Flavor) -> (usize, String) {
     let mut start = cursor;
     while start > 0 {
         let byte = bytes[start - 1];
-        if byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80 {
+        if byte.is_ascii_alphanumeric()
+            || byte == b'_'
+            || (flavor == Flavor::Tsql && byte == b'#')
+            || byte >= 0x80
+        {
             start -= 1;
         } else {
             break;
@@ -4554,5 +4613,108 @@ mod tests {
             &source[preview.range.start as usize..preview.range.end as usize],
             "café.*"
         );
+    }
+
+    #[test]
+    fn deterministic_utf8_fuzz_corpus_never_panics_or_returns_invalid_ranges() {
+        let alphabet = [
+            "a", " ", "'", "\"", "[", "]", "(", ")", ";", ",", ".", "-", "/", "*", "$", "é", "東",
+            "🙂", "\n", "\r",
+        ];
+        let mut state = 0x5eed_u64;
+        for case in 0..512 {
+            let mut source = String::new();
+            for _ in 0..(case % 96) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                source.push_str(alphabet[state as usize % alphabet.len()]);
+            }
+            for dialect_id in ["sift/postgresql", "sift/tsql"] {
+                let analysis =
+                    detect_completion_context(&source, source.len(), &dialect(dialect_id)).unwrap();
+                assert!(source.is_char_boundary(analysis.prefix_start));
+                assert!(analysis.prefix_start <= analysis.cursor);
+
+                let registry = SemanticRegistry::default();
+                let scope = DocumentScope {
+                    session: case as u64 + 1,
+                    connection: 1,
+                };
+                if let Ok(document) = registry.create(
+                    scope,
+                    dialect(dialect_id),
+                    source.clone(),
+                    None,
+                    &AtomicBool::new(false),
+                ) {
+                    if !source.is_empty() {
+                        let selection = registry
+                            .select_statement(
+                                scope,
+                                document.document_id,
+                                SelectStatementRequest {
+                                    revision: document.revision,
+                                    cursor: 0,
+                                    selection: Some(TextRange {
+                                        start: 0,
+                                        end: source.len() as u32,
+                                    }),
+                                },
+                            )
+                            .unwrap();
+                        for statement in selection.statements {
+                            assert!(statement.full_range.start <= statement.full_range.end);
+                            assert!(statement.full_range.end as usize <= source.len());
+                            assert!(source.is_char_boundary(statement.full_range.start as usize));
+                            assert!(source.is_char_boundary(statement.full_range.end as usize));
+                        }
+                    }
+                    for diagnostic in registry
+                        .diagnostics(scope, document.document_id, document.revision)
+                        .unwrap()
+                        .diagnostics
+                    {
+                        assert!(diagnostic.range.start <= diagnostic.range.end);
+                        assert!(diagnostic.range.end as usize <= source.len());
+                        assert!(source.is_char_boundary(diagnostic.range.start as usize));
+                        assert!(source.is_char_boundary(diagnostic.range.end as usize));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn single_token_mutation_corpus_keeps_completion_ranges_bounded() {
+        let seeds = [
+            "select u.email from users u",
+            "with x as (select 1 as id) select x.id from x",
+            "update users set email = 'x' output inserted.id",
+            "create temp table t (id int); select t.id from t",
+        ];
+        for seed in seeds {
+            for boundary in seed
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(seed.len()))
+            {
+                for insertion in ["'", ")", "/*", "é"] {
+                    let mut mutated = seed.to_string();
+                    mutated.insert_str(boundary, insertion);
+                    for dialect_id in ["sift/postgresql", "sift/tsql"] {
+                        let analysis = detect_completion_context(
+                            &mutated,
+                            boundary + insertion.len(),
+                            &dialect(dialect_id),
+                        )
+                        .unwrap();
+                        assert!(analysis.prefix_start <= analysis.cursor);
+                        assert!(analysis.cursor <= mutated.len());
+                        assert!(mutated.is_char_boundary(analysis.prefix_start));
+                    }
+                }
+            }
+        }
     }
 }

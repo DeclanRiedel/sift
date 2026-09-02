@@ -615,15 +615,31 @@ async fn durable_catalog_snapshots_are_managed_tenant_scoped_and_revision_guarde
     let mut desired_graph = graph.clone();
     desired_graph.revision = sift_protocol::CatalogRevision(2);
     desired_graph.content_digest = "catfp:desired".into();
+    let mut desired_users = ObjectInfo::new("users", ObjectKind::Table);
+    desired_users.comment = Some("Application users".into());
+    desired_users.columns = vec![ColumnMetadata {
+        name: "id".into(),
+        type_ref: TypeRef::Primitive(PrimitiveType::Int64),
+        nullable: Nullability::NotNullable,
+        auto_increment: false,
+        primary_key: true,
+        facets: Default::default(),
+    }];
+    let mut desired_events = ObjectInfo::new("events", ObjectKind::Table);
+    desired_events.columns = vec![ColumnMetadata {
+        name: "id".into(),
+        type_ref: TypeRef::Primitive(PrimitiveType::Int64),
+        nullable: Nullability::NotNullable,
+        auto_increment: false,
+        primary_key: true,
+        facets: Default::default(),
+    }];
     desired_graph.data = sift_core::catalog::graph_from_trees(
         &[CatalogTree {
             name: "app".into(),
             schemas: vec![SchemaTree {
                 name: "private_customer_data".into(),
-                objects: vec![
-                    ObjectInfo::new("users", ObjectKind::Table),
-                    ObjectInfo::new("events", ObjectKind::Table),
-                ],
+                objects: vec![desired_users, desired_events],
             }],
         }],
         CatalogCoverage::complete(),
@@ -689,7 +705,8 @@ async fn durable_catalog_snapshots_are_managed_tenant_scoped_and_revision_guarde
             ),
             serde_json::json!({
                 "plan_id": plan.id,
-                "plan_digest": plan.digest
+                "plan_digest": plan.digest,
+                "acknowledgements": plan.required_acknowledgements
             }),
         ))
         .await

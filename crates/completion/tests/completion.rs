@@ -9,6 +9,22 @@ use sift_protocol::{
     SchemaScope, SchemaSnapshot, SchemaTree, TypeRef,
 };
 
+#[derive(serde::Deserialize)]
+struct GoldenCompletionCase {
+    name: String,
+    engine: String,
+    dialect_id: String,
+    connection: String,
+    database: String,
+    catalog_revision: u64,
+    sql_with_cursor: String,
+    cursor: usize,
+    expected_context: String,
+    expected_range: [u32; 2],
+    ordered_top_candidates: Vec<String>,
+    forbidden_candidates: Vec<String>,
+}
+
 fn snapshot() -> SchemaSnapshot {
     let users_cols = vec![
         ColumnMetadata {
@@ -363,6 +379,69 @@ fn routine_overloads_remain_distinct_completion_candidates() {
         .collect::<Vec<_>>();
     assert_eq!(overloads.len(), 2);
     assert_ne!(overloads[0].detail, overloads[1].detail);
+}
+
+#[test]
+fn golden_dialect_completion_corpus() {
+    let cases: Vec<GoldenCompletionCase> =
+        serde_json::from_str(include_str!("fixtures/dialect-completion-corpus.json")).unwrap();
+    for case in cases {
+        let engine = match case.engine.as_str() {
+            "postgres" => Engine::Postgres,
+            "sql_server" => Engine::SqlServer,
+            other => panic!("unknown engine {other}"),
+        };
+        assert_eq!(case.dialect_id, engine.dialect_id().as_str());
+        assert!(!case.connection.is_empty() && !case.database.is_empty());
+        assert_eq!(case.catalog_revision, 73);
+        assert_eq!(case.sql_with_cursor.matches('|').count(), 1);
+        let marker = case.sql_with_cursor.find('|').unwrap();
+        assert_eq!(marker, case.cursor, "{} cursor drifted", case.name);
+        let sql = case.sql_with_cursor.replace('|', "");
+        let response = complete(
+            &CompletionRequest {
+                sql,
+                cursor: case.cursor as u32,
+                limit: Some(50),
+            },
+            &snapshot(),
+            engine,
+        );
+        let context = match response.context {
+            CompletionContext::Statement => "statement",
+            CompletionContext::ExpectingTable => "table",
+            CompletionContext::ExpectingColumn { .. } => "column",
+            CompletionContext::ExpectingObjectInSchema { .. } => "object_in_schema",
+            CompletionContext::Unknown => "unknown",
+        };
+        assert_eq!(context, case.expected_context, "{} context", case.name);
+        assert_eq!(
+            [response.replaced_range.start, response.replaced_range.end],
+            case.expected_range,
+            "{} replacement range",
+            case.name
+        );
+        let labels = response
+            .candidates
+            .iter()
+            .map(|candidate| candidate.label.as_ref())
+            .collect::<Vec<_>>();
+        for (index, expected) in case.ordered_top_candidates.iter().enumerate() {
+            assert_eq!(
+                labels.get(index),
+                Some(&expected.as_str()),
+                "{} rank",
+                case.name
+            );
+        }
+        for forbidden in &case.forbidden_candidates {
+            assert!(
+                !labels.contains(&forbidden.as_str()),
+                "{} leaked {forbidden}",
+                case.name
+            );
+        }
+    }
 }
 
 #[test]

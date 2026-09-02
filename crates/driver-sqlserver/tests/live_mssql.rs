@@ -64,6 +64,7 @@ async fn open_ping_execute_close() {
                 ExecuteRequest {
                     sql: "SELECT CAST(@P1 AS int) AS id, CAST(@P2 AS nvarchar(20)) AS name".into(),
                     params: vec![Value::Int32(7), Value::Text("seven".into())],
+                    transform: None,
                 },
             )
             .await
@@ -149,6 +150,7 @@ async fn typed_null_parameters_preserve_sql_server_native_types() {
                             type_name: "int".into(),
                         },
                     ],
+                    transform: None,
                 },
             )
             .await
@@ -251,6 +253,7 @@ async fn cancel_long_query() {
             ExecuteRequest {
                 sql: "WAITFOR DELAY '00:00:05'; SELECT 1 AS done".into(),
                 params: Vec::new(),
+                transform: None,
             },
         )
         .await
@@ -274,6 +277,7 @@ async fn close_mid_query_drops_cursor_and_connection() {
             ExecuteRequest {
                 sql: "WAITFOR DELAY '00:00:05'; SELECT 1 AS done".into(),
                 params: Vec::new(),
+                transform: None,
             },
         )
         .await

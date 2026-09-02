@@ -7510,8 +7510,12 @@ name = "sift-completion"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "criterion",
+ "serde",
+ "serde_json",
  "sift-protocol",
  "sift-semantic",
+ "sift-snippets",
 ]
 
 [[package]]

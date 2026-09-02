@@ -294,6 +294,7 @@ async fn null_parameters_use_the_inferred_postgres_type() {
                         type_name: "integer".into(),
                     },
                 ],
+                transform: None,
             },
         )
         .await
