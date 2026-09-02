@@ -191,25 +191,14 @@ pub(super) fn render_bottom_panel(
                     })
                     .children(savepoints)
             });
-            let processes = Arc::new(database_process_rows(shell.database_monitor.processes()));
-            let process_count = processes.len();
-            let process_details = shell.database_monitor.selected().and_then(|process_id| {
-                shell
-                    .database_monitor
-                    .processes()
-                    .iter()
-                    .find(|process| process.process_id == process_id)
-                    .cloned()
-            });
+            let processes = database_process_rows(shell.database_monitor.processes());
+            let selected_process = shell.database_monitor.selected();
             div()
                 .flex()
                 .flex_1()
                 .min_h_0()
                 .flex_col()
                 .children(transaction)
-                .children(
-                    process_details.map(|process| render_database_process_details(process, cx)),
-                )
                 .child(
                     div()
                         .flex_none()
@@ -221,8 +210,8 @@ pub(super) fn render_bottom_panel(
                         .text_xs()
                         .text_color(colors.disabled_text)
                         .child(div().w(px(72.)).child("PROCESS"))
-                        .child(div().w(px(180.)).child("USER / DATABASE"))
-                        .child(div().w(px(220.)).child("STATE / WAIT"))
+                        .child(div().flex_1().min_w_0().child("USER / DATABASE"))
+                        .child(div().flex_1().min_w_0().child("STATE / WAIT"))
                         .child(
                             div()
                                 .debug_selector(|| "database-process-statement-header".into())
@@ -252,19 +241,15 @@ pub(super) fn render_bottom_panel(
                         ),
                 )
                 .child(
-                    div().id("database-process-list").flex_1().min_h_0().child(
-                        uniform_list(
-                            "database-process-rows",
-                            process_count,
-                            cx.processor(move |_, range: Range<usize>, _, cx| {
-                                range
-                                    .filter_map(|index| processes.get(index).cloned())
-                                    .map(|process| render_database_process_row(process, cx))
-                                    .collect()
-                            }),
-                        )
-                        .size_full(),
-                    ),
+                    div()
+                        .id("database-process-list")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .children(processes.iter().cloned().map(|process| {
+                            let expanded = selected_process == Some(process.process.process_id);
+                            render_database_process_row(process, expanded, cx)
+                        })),
                 )
                 .children(shell.database_monitor.request().error().map(|message| {
                     div()
@@ -936,10 +921,12 @@ fn database_process_rows(processes: &[sift_protocol::DatabaseProcess]) -> Vec<Da
 
 fn render_database_process_row(
     row: DatabaseProcessRow,
+    expanded: bool,
     cx: &mut Context<WorkspaceShell>,
 ) -> gpui::AnyElement {
     let colors = cx.theme().colors;
     let process = row.process;
+    let details_process = process.clone();
     let process_id = process.process_id;
     let user_database = match (process.user, process.database) {
         (Some(user), Some(database)) => format!("{user} @ {database}"),
@@ -973,56 +960,65 @@ fn render_database_process_row(
         .debug_selector(move || format!("database-process-{process_id}"))
         .flex_none()
         .w_full()
-        .min_h(px(30.))
-        .px_3()
-        .flex()
-        .items_center()
-        .gap_3()
+        .flex_col()
+        .min_w_0()
+        .overflow_hidden()
         .border_b_1()
         .border_color(colors.subtle_border)
-        .when(row.block_depth > 0, |row| row.bg(colors.warning_muted))
         .child(
             div()
-                .w(px(72.))
-                .pl(px((row.block_depth.min(4) * 8) as f32))
-                .child(if row.block_depth > 0 {
-                    format!("↳ {process_id}")
-                } else {
-                    process_id.to_string()
-                }),
-        )
-        .child(div().w(px(180.)).truncate().child(user_database))
-        .child(div().w(px(220.)).truncate().child(state))
-        .child(
-            div()
-                .id(("database-process-statement", process_id as usize))
-                .debug_selector(move || format!("database-process-statement-{process_id}"))
-                .flex_1()
-                .min_w_0()
-                .h_full()
+                .id(("database-process-summary", process_id as usize))
+                .h(px(30.))
+                .px_3()
                 .flex()
                 .items_center()
-                .justify_end()
-                .truncate()
-                .text_right()
-                .font_family("monospace")
+                .gap_3()
                 .cursor_pointer()
+                .when(row.block_depth > 0, |row| row.bg(colors.warning_muted))
+                .when(expanded, |row| row.bg(colors.active_surface))
                 .on_click(
                     cx.listener(move |shell, _, _, cx| {
                         shell.select_database_process(process_id, cx)
                     }),
                 )
-                .child(statement),
+                .child(
+                    div()
+                        .w(px(72.))
+                        .pl(px((row.block_depth.min(4) * 8) as f32))
+                        .child(if row.block_depth > 0 {
+                            format!("↳ {process_id}")
+                        } else {
+                            process_id.to_string()
+                        }),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(user_database))
+                .child(div().flex_1().min_w_0().truncate().child(state))
+                .child(
+                    div()
+                        .id(("database-process-statement", process_id as usize))
+                        .debug_selector(move || format!("database-process-statement-{process_id}"))
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .truncate()
+                        .text_right()
+                        .font_family("monospace")
+                        .child(statement),
+                )
+                .child(
+                    div().w(px(84.)).flex().justify_end().child(
+                        Button::new(("terminate-process", process_id as usize), "Terminate")
+                            .tone(ButtonTone::DangerGhost)
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.request_terminate_process(process_id, cx)
+                            })),
+                    ),
+                ),
         )
-        .child(
-            div().w(px(84.)).flex().justify_end().child(
-                Button::new(("terminate-process", process_id as usize), "Terminate")
-                    .tone(ButtonTone::DangerGhost)
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.request_terminate_process(process_id, cx)
-                    })),
-            ),
-        )
+        .children(expanded.then(|| render_database_process_details(details_process, cx)))
         .into_any_element()
 }
 
@@ -1068,7 +1064,7 @@ fn render_database_process_details(
     div()
         .debug_selector(move || format!("database-process-details-{process_id}"))
         .flex_none()
-        .border_b_1()
+        .border_t_1()
         .border_color(colors.subtle_border)
         .bg(colors.elevated_surface)
         .p_3()
@@ -1078,10 +1074,17 @@ fn render_database_process_details(
         .child(
             div()
                 .flex()
-                .items_center()
+                .items_start()
                 .gap_2()
                 .child(SectionLabel::new(format!("PROCESS {process_id}")))
-                .child(div().flex_1().truncate().text_xs().child(metadata))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_xs()
+                        .child(metadata),
+                )
                 .child(
                     Button::new(("copy-process-statement", process_id as usize), "Copy")
                         .debug_selector(format!("copy-process-statement-{process_id}"))

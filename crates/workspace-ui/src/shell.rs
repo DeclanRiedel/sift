@@ -24227,7 +24227,7 @@ impl WorkspaceShell {
     }
 
     fn select_database_process(&mut self, process_id: i64, cx: &mut Context<Self>) {
-        self.database_monitor.select(process_id);
+        self.database_monitor.toggle(process_id);
         cx.notify();
     }
 
@@ -54276,6 +54276,9 @@ mod tests {
             cx.read_from_clipboard().and_then(|item| item.text()),
             Some("select * from events".into())
         );
+        cx.simulate_click(statement.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("database-process-details-42").is_none());
         workspace.update(&mut cx, |shell, cx| {
             shell.request_terminate_process(42, cx);
             assert_eq!(shell.modal, Some(Modal::ConfirmTerminateProcess(42)));

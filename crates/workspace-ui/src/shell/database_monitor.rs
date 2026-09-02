@@ -55,8 +55,8 @@ impl DatabaseMonitorState {
         }
     }
 
-    pub(super) fn select(&mut self, process_id: i64) {
-        self.selected = Some(process_id);
+    pub(super) fn toggle(&mut self, process_id: i64) {
+        self.selected = (self.selected != Some(process_id)).then_some(process_id);
     }
 
     pub(super) fn clear_selection(&mut self) {
