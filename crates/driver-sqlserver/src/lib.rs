@@ -25,6 +25,7 @@ use tiberius::{AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryIte
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 const ROW_BATCH_SIZE: usize = 128;
@@ -43,7 +44,7 @@ struct MssqlInner {
     conn_id: IdCounter,
     tx_id: IdCounter,
     cursor_id: IdCounter,
-    cursors: DashMap<u64, (u64, tokio::task::JoinHandle<()>)>,
+    cursors: DashMap<u64, MssqlCursorEntry>,
     /// Per-spec warm-idle pool. `open` first tries to pop from
     /// the pool before opening a fresh TDS session. Populated
     /// lazily by a background top-up task after each pop.
@@ -53,6 +54,16 @@ struct MssqlInner {
     conn_pool_key: DashMap<u64, String>,
     /// Tombstones for handles intentionally discarded after native cancel.
     invalidated: DashSet<u64>,
+    specs: DashMap<u64, ConnectionSpec>,
+    session_ids: DashMap<u64, i32>,
+    progress_slots: Arc<Semaphore>,
+}
+
+struct MssqlCursorEntry {
+    conn_id: u64,
+    session_id: i32,
+    progress_supported: bool,
+    task: tokio::task::JoinHandle<()>,
 }
 
 struct MssqlPool {
@@ -77,6 +88,9 @@ impl MssqlDriver {
                 pools: DashMap::new(),
                 conn_pool_key: DashMap::new(),
                 invalidated: DashSet::new(),
+                specs: DashMap::new(),
+                session_ids: DashMap::new(),
+                progress_slots: Arc::new(Semaphore::new(4)),
             }),
         }
     }
@@ -213,14 +227,17 @@ impl Driver for MssqlDriver {
         // Try the warm-idle pool first. Fall back to a fresh TDS
         // session on miss.
         let (pool_key, min_size) = pool_config(spec);
-        let conn = if let Some(warm) = self.pop_warm(&pool_key).await {
+        let mut conn = if let Some(warm) = self.pop_warm(&pool_key).await {
             warm
         } else {
             connect_fresh(spec).await?
         };
+        let session_id = current_session_id(&mut conn).await.unwrap_or(0);
         let id = self.inner.conn_id.next();
         self.inner.conns.lock().await.insert(id, conn);
         self.inner.conn_pool_key.insert(id, pool_key.clone());
+        self.inner.specs.insert(id, spec.clone());
+        self.inner.session_ids.insert(id, session_id);
         // Kick off a background top-up so subsequent opens for this
         // spec find a warm entry.
         if min_size > 0 {
@@ -327,6 +344,8 @@ impl Driver for MssqlDriver {
         let inner = Arc::clone(&self.inner);
         let cursor_key = cursor_id.0;
         let conn_id = c.id();
+        let session_id = self.inner.session_ids.get(&conn_id).map_or(0, |id| *id);
+        let progress_supported = progress_supported(&req.sql);
         let task = tokio::spawn(async move {
             // Isolate panics so a wedged decode path produces a `Page::Error`
             // instead of silently dropping the channel. Parity with PG's
@@ -354,7 +373,15 @@ impl Driver for MssqlDriver {
                 cleanup_inner.cursors.remove(&cursor_key);
             }
         });
-        self.inner.cursors.insert(cursor_key, (conn_id, task));
+        self.inner.cursors.insert(
+            cursor_key,
+            MssqlCursorEntry {
+                conn_id,
+                session_id,
+                progress_supported,
+                task,
+            },
+        );
         Ok(ResultSetStream::with_cursor_mode(cursor_id, rx, false))
     }
 
@@ -369,7 +396,7 @@ impl Driver for MssqlDriver {
                 DriverError::new(Code::CursorNotFound, "cursor not active")
                     .with_engine(Engine::SqlServer)
             })?;
-            if entry.value().0 != c.id() {
+            if entry.conn_id != c.id() {
                 return Err(DriverError::new(
                     Code::CursorNotFound,
                     "cursor does not belong to this connection",
@@ -377,13 +404,14 @@ impl Driver for MssqlDriver {
                 .with_engine(Engine::SqlServer));
             }
         }
-        let Some((_, (conn_id, task))) = self.inner.cursors.remove(&cursor.0) else {
+        let Some((_, entry)) = self.inner.cursors.remove(&cursor.0) else {
             return Err(DriverError::new(Code::CursorNotFound, "cursor not active")
                 .with_engine(Engine::SqlServer));
         };
-        self.inner.invalidated.insert(conn_id);
-        task.abort();
-        let _ = task.await;
+        self.inner.invalidated.insert(entry.conn_id);
+        entry.task.abort();
+        let _ = entry.task.await;
+        let conn_id = entry.conn_id;
         // Aborting the task drops the MssqlConn owned by its future, so
         // nothing will ever reinsert into `inner.conns` for this conn_id.
         // Evict any residue so the driver's internal invariant matches the
@@ -397,7 +425,7 @@ impl Driver for MssqlDriver {
             .cursors
             .iter()
             .filter_map(|entry| {
-                if entry.value().0 == conn_id {
+                if entry.conn_id == conn_id {
                     Some(*entry.key())
                 } else {
                     None
@@ -405,8 +433,8 @@ impl Driver for MssqlDriver {
             })
             .collect();
         for cid in stray {
-            if let Some((_, (_, t))) = self.inner.cursors.remove(&cid) {
-                t.abort();
+            if let Some((_, entry)) = self.inner.cursors.remove(&cid) {
+                entry.task.abort();
             }
         }
         Ok(())
@@ -422,7 +450,7 @@ impl Driver for MssqlDriver {
             .cursors
             .iter()
             .filter_map(|entry| {
-                if entry.value().0 == c.id() {
+                if entry.conn_id == c.id() {
                     Some(*entry.key())
                 } else {
                     None
@@ -431,9 +459,9 @@ impl Driver for MssqlDriver {
             .collect();
         let mut aborted = Vec::new();
         for cursor_id in cursors {
-            if let Some((_, (_, task))) = self.inner.cursors.remove(&cursor_id) {
-                task.abort();
-                aborted.push(task);
+            if let Some((_, entry)) = self.inner.cursors.remove(&cursor_id) {
+                entry.task.abort();
+                aborted.push(entry.task);
             }
         }
         // Deterministically join the aborted tasks so any that raced past
@@ -446,6 +474,8 @@ impl Driver for MssqlDriver {
         self.inner.conns.lock().await.remove(&c.id());
         self.inner.conn_pool_key.remove(&c.id());
         self.inner.invalidated.remove(&c.id());
+        self.inner.specs.remove(&c.id());
+        self.inner.session_ids.remove(&c.id());
         Ok(())
     }
 
@@ -456,6 +486,14 @@ impl Driver for MssqlDriver {
 
 #[async_trait]
 impl MssqlExt for MssqlDriver {
+    async fn observe_progress(
+        &self,
+        c: ConnHandle,
+        cursor: CursorId,
+    ) -> Result<Option<sift_driver_api::NativeProgressStream>, DriverError> {
+        observe_progress(self, &c, cursor)
+    }
+
     #[tracing::instrument(skip_all, fields(engine = "sql_server", conn = c.id(), db = %db))]
     async fn use_database(&self, c: ConnHandle, db: &str) -> Result<(), DriverError> {
         validate_ident(db)?;
@@ -601,6 +639,147 @@ async fn run_query(
     inner.cursors.remove(&cursor_id.0);
     inner.conns.lock().await.insert(conn_id, conn);
     tracing::debug!(%cursor_id, conn_id, "sqlserver query finished");
+}
+
+const PROGRESS_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
+const PROGRESS_MONITOR_TIMEOUT: Duration = Duration::from_millis(750);
+
+fn observe_progress(
+    driver: &MssqlDriver,
+    connection: &ConnHandle,
+    cursor: CursorId,
+) -> Result<Option<sift_driver_api::NativeProgressStream>, DriverError> {
+    let Some(entry) = driver.inner.cursors.get(&cursor.0) else {
+        return Ok(None);
+    };
+    if entry.conn_id != connection.id() {
+        return Err(DriverError::new(Code::CursorNotFound, "cursor not active")
+            .with_engine(Engine::SqlServer));
+    }
+    if !entry.progress_supported || entry.session_id <= 0 {
+        return Ok(None);
+    }
+    let session_id = entry.session_id;
+    drop(entry);
+    let Some(spec) = driver
+        .inner
+        .specs
+        .get(&connection.id())
+        .map(|spec| spec.clone())
+    else {
+        return Ok(None);
+    };
+    let Ok(permit) = driver.inner.progress_slots.clone().try_acquire_owned() else {
+        return Ok(None);
+    };
+    let inner = Arc::clone(&driver.inner);
+    let (sender, receiver) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let _permit = permit;
+        let Ok(Ok(monitor)) =
+            tokio::time::timeout(PROGRESS_MONITOR_TIMEOUT, connect_fresh(&spec)).await
+        else {
+            return;
+        };
+        sample_progress(inner, monitor, cursor, session_id, sender).await;
+    });
+    Ok(Some(sift_driver_api::NativeProgressStream {
+        updates: receiver,
+    }))
+}
+
+async fn sample_progress(
+    inner: Arc<MssqlInner>,
+    mut monitor: MssqlConn,
+    cursor: CursorId,
+    session_id: i32,
+    sender: mpsc::Sender<sift_protocol::NativeExecutionProgress>,
+) {
+    const QUERY: &str = "SELECT CONVERT(bigint, CASE WHEN percent_complete < 0 THEN 0 WHEN percent_complete > 100 THEN 10000 ELSE percent_complete * 100 END), CONVERT(nvarchar(256), command), CONVERT(bigint, estimated_completion_time) FROM sys.dm_exec_requests WHERE session_id = @P1";
+    loop {
+        if sender.is_closed() || !inner.cursors.contains_key(&cursor.0) {
+            return;
+        }
+        let sample = tokio::time::timeout(PROGRESS_MONITOR_TIMEOUT, async {
+            monitor
+                .query(QUERY, &[&session_id])
+                .await
+                .map_err(ms_err)?
+                .into_row()
+                .await
+                .map_err(ms_err)
+        })
+        .await;
+        let Ok(Ok(Some(row))) = sample else {
+            return;
+        };
+        let basis_points = row
+            .try_get::<i64, _>(0)
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+            .clamp(0, 10_000) as u16;
+        let phase = row
+            .try_get::<&str, _>(1)
+            .ok()
+            .flatten()
+            .map(|phase| phase.chars().take(256).collect());
+        let estimated_remaining_ms = row
+            .try_get::<i64, _>(2)
+            .ok()
+            .flatten()
+            .and_then(|value| u64::try_from(value).ok());
+        if sender
+            .send(sift_protocol::NativeExecutionProgress {
+                source: sift_protocol::NativeProgressSource::SqlServerRequest,
+                basis_points,
+                phase,
+                estimated_remaining_ms,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        tokio::time::sleep(PROGRESS_SAMPLE_INTERVAL).await;
+    }
+}
+
+async fn current_session_id(conn: &mut MssqlConn) -> Result<i32, DriverError> {
+    let row = conn
+        .query("SELECT CONVERT(int, @@SPID)", &[])
+        .await
+        .map_err(ms_err)?
+        .into_row()
+        .await
+        .map_err(ms_err)?
+        .ok_or_else(|| {
+            DriverError::new(Code::DriverInternal, "session identity returned no row")
+        })?;
+    row.try_get::<i32, _>(0)
+        .map_err(ms_err)?
+        .ok_or_else(|| DriverError::new(Code::DriverInternal, "session identity was null"))
+}
+
+fn progress_supported(sql: &str) -> bool {
+    let normalized = leading_sql(sql).to_ascii_uppercase();
+    normalized.starts_with("BACKUP ")
+        || normalized.starts_with("RESTORE ")
+        || normalized.starts_with("DBCC CHECKDB")
+        || (normalized.starts_with("ALTER INDEX") && normalized.contains(" REORGANIZE"))
+}
+
+fn leading_sql(mut sql: &str) -> &str {
+    loop {
+        sql = sql.trim_start();
+        if let Some(rest) = sql.strip_prefix("--") {
+            sql = rest.split_once('\n').map_or("", |(_, tail)| tail);
+        } else if let Some(rest) = sql.strip_prefix("/*") {
+            sql = rest.split_once("*/").map_or("", |(_, tail)| tail);
+        } else {
+            return sql;
+        }
+    }
 }
 
 /// True when `sql` is a pure DML statement (INSERT/UPDATE/DELETE/MERGE)
@@ -2461,6 +2640,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_progress_is_limited_to_supported_commands() {
+        assert!(progress_supported(
+            "-- job\nBACKUP DATABASE app TO DISK = @P1"
+        ));
+        assert!(progress_supported("RESTORE DATABASE app FROM DISK = @P1"));
+        assert!(progress_supported("DBCC CHECKDB (app)"));
+        assert!(progress_supported("ALTER INDEX ix ON dbo.t REORGANIZE"));
+        assert!(!progress_supported("SELECT WAITFOR DELAY '00:00:01'"));
+        assert!(!progress_supported("UPDATE t SET note = 'BACKUP DATABASE'"));
+    }
+
+    #[test]
     fn quote_qualified_ident_accepts_common_shapes() {
         assert_eq!(quote_qualified_ident("users").unwrap(), "[users]");
         assert_eq!(quote_qualified_ident("dbo.users").unwrap(), "[dbo].[users]");
@@ -2630,5 +2821,65 @@ mod tests {
         driver.inner.invalidated.insert(handle.id());
         let error = driver.take_conn(&handle).await.unwrap_err();
         assert_eq!(error.code, Code::ConnectionInvalidated);
+    }
+
+    #[tokio::test]
+    async fn unsupported_and_monitor_pool_pressure_degrade_to_no_telemetry() {
+        let driver = MssqlDriver::new();
+        let connection = ConnHandle::new(7, Engine::SqlServer);
+        let cursor = CursorId::new(9);
+        let task = tokio::spawn(std::future::pending());
+        driver.inner.cursors.insert(
+            cursor.0,
+            MssqlCursorEntry {
+                conn_id: connection.id(),
+                session_id: 51,
+                progress_supported: false,
+                task,
+            },
+        );
+        assert!(
+            MssqlExt::observe_progress(&driver, connection.clone(), cursor)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        driver
+            .inner
+            .cursors
+            .get_mut(&cursor.0)
+            .unwrap()
+            .progress_supported = true;
+        driver.inner.specs.insert(
+            connection.id(),
+            ConnectionSpec {
+                host: "localhost".into(),
+                port: None,
+                database: None,
+                user: "sa".into(),
+                password: Some("must-not-be-observed".into()),
+                ssl_mode: None,
+                engine_specific: None,
+            },
+        );
+        let permits = (0..4)
+            .map(|_| {
+                driver
+                    .inner
+                    .progress_slots
+                    .clone()
+                    .try_acquire_owned()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(MssqlExt::observe_progress(&driver, connection, cursor)
+            .await
+            .unwrap()
+            .is_none());
+        drop(permits);
+        if let Some((_, entry)) = driver.inner.cursors.remove(&cursor.0) {
+            entry.task.abort();
+        }
     }
 }

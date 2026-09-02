@@ -288,12 +288,13 @@ impl CursorRegistry {
         let (consumer_tx, consumer_rx) = mpsc::channel::<Page>(prefetch);
         let inner_for_pump = Arc::clone(&self.inner);
         let ResultSetStream {
+            cursor_id: _,
             columns,
             rows: driver_rx,
             warnings,
             affected_rows,
             server_side_cursor,
-            ..
+            native_progress,
         } = stream;
         tokio::spawn(supervise_pump_task(
             session_id,
@@ -311,6 +312,7 @@ impl CursorRegistry {
             warnings,
             affected_rows,
             server_side_cursor,
+            native_progress,
         })
     }
 
@@ -1001,6 +1003,33 @@ mod tests {
             }
         }
         assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn pump_preserves_the_independent_native_progress_channel() {
+        let registry = CursorRegistry::new(CursorConfig::default());
+        registry.set_on_evict(Arc::new(|_, _| {}));
+        let mut stream = stream_with_pages(CursorId(91), Vec::new());
+        let (progress_tx, progress_rx) = mpsc::channel(1);
+        stream.native_progress = Some(progress_rx);
+        let mut wrapped = registry.wrap(SessionId(4), stream).unwrap();
+        progress_tx
+            .send(sift_protocol::NativeExecutionProgress {
+                source: sift_protocol::NativeProgressSource::PostgresStatistics,
+                basis_points: 500,
+                phase: Some("scanning heap".into()),
+                estimated_remaining_ms: None,
+            })
+            .await
+            .unwrap();
+        let update = wrapped
+            .native_progress
+            .as_mut()
+            .unwrap()
+            .recv()
+            .await
+            .unwrap();
+        assert_eq!(update.basis_points, 500);
     }
 
     #[tokio::test]

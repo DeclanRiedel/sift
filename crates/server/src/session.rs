@@ -3070,6 +3070,8 @@ impl SessionStore {
         let retained_context = self.retained_byte_context(&entry);
         let driver = entry.driver.clone();
         let handle = entry.handle.clone();
+        let monitor_driver = entry.driver.clone();
+        let monitor_handle = entry.handle.clone();
         let mut task = tokio::spawn(async move { driver.execute(handle, req).await });
         let duration = self.request_timeout();
         let stream = if duration.is_zero() {
@@ -3086,7 +3088,19 @@ impl SessionStore {
                 }
             }
         };
+        let mut stream = stream;
         let cursor_id = stream.cursor_id;
+        // Monitoring is optional and best-effort. Failure, timeout, missing
+        // permissions, or unsupported commands leave the page stream intact.
+        stream.native_progress = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            monitor_driver.observe_progress(&monitor_handle, cursor_id),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .map(|stream| stream.updates);
         // Hand the driver's stream to the registry-owned pump. Wrapping
         // enforces the per-session cap (evicting the LRA cursor of the
         // same session via the installed on_evict callback), spawns

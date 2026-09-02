@@ -51,10 +51,18 @@ pub(crate) async fn execute_query(
     // a conn.
     let conn_id = c.id();
     let cancel_token = conn.cancel_token();
+    let backend_pid = driver
+        .inner
+        .backend_pids
+        .get(&conn_id)
+        .map_or(0, |pid| *pid);
+    let progress_kind = crate::progress::classify(&req.sql);
     driver.inner.cursors.insert(
         cursor_id_num,
         CursorEntry {
             conn_id,
+            backend_pid,
+            progress_kind,
             cancel_token,
             task: std::sync::Mutex::new(None),
         },

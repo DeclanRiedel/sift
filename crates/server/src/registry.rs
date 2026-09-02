@@ -753,6 +753,31 @@ impl RuntimeDriver {
         }
     }
 
+    /// Start optional engine-native progress observation. This is deliberately
+    /// absent for external providers until the provider RPC contract grows an
+    /// equivalent side channel.
+    pub async fn observe_progress(
+        &self,
+        handle: &RuntimeConnectionHandle,
+        cursor: sift_protocol::CursorId,
+    ) -> Result<Option<sift_driver_api::NativeProgressStream>, DriverError> {
+        let (Self::Builtin { driver, .. }, RuntimeConnectionHandle::Builtin(handle)) =
+            (self, handle)
+        else {
+            return Ok(None);
+        };
+        match driver.engine() {
+            Engine::Postgres => match driver.as_pg() {
+                Some(extension) => extension.observe_progress(handle.clone(), cursor).await,
+                None => Ok(None),
+            },
+            Engine::SqlServer => match driver.as_mssql() {
+                Some(extension) => extension.observe_progress(handle.clone(), cursor).await,
+                None => Ok(None),
+            },
+        }
+    }
+
     pub async fn cancel(
         &self,
         handle: RuntimeConnectionHandle,

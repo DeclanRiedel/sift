@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use sift_protocol::{
     CommandSummaryV2, ExecutionEventV2, ExecutionId, ExecutionPhase, ExecutionProgress,
-    ExecutionSummaryV2, Page, ResultSetId, ResultSetSummaryV2,
+    ExecutionSummaryV2, NativeExecutionProgress, Page, ResultSetId, ResultSetSummaryV2,
 };
 
 const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -150,6 +150,51 @@ impl ExecutionEventNormalizer {
         events
     }
 
+    /// Merge optional engine telemetry into the same honest portable counters.
+    /// Invalid samples are discarded and sampling is coalesced globally with
+    /// portable updates.
+    pub fn events_for_native(&mut self, native: NativeExecutionProgress) -> Vec<ExecutionEventV2> {
+        if self.terminal_sent
+            || native.basis_points > 10_000
+            || native
+                .phase
+                .as_ref()
+                .is_some_and(|phase| phase.len() > sift_protocol::MAX_NATIVE_PROGRESS_PHASE_BYTES)
+        {
+            return Vec::new();
+        }
+        let now = Instant::now();
+        if self
+            .last_progress_at
+            .is_some_and(|last| now.duration_since(last) < PROGRESS_INTERVAL)
+        {
+            return Vec::new();
+        }
+        let mut events = Vec::with_capacity(2);
+        if !self.started_sent {
+            self.started_sent = true;
+            events.push(ExecutionEventV2::ExecutionStarted {
+                execution_id: self.execution_id,
+                statement_count: None,
+            });
+        }
+        self.last_progress_at = Some(now);
+        events.push(ExecutionEventV2::Progress {
+            execution_id: self.execution_id,
+            progress: ExecutionProgress {
+                phase: ExecutionPhase::Executing,
+                elapsed_ms: elapsed_ms(self.started_at),
+                statement_ordinal: None,
+                statement_count: None,
+                result_sets_seen: self.result_set_count,
+                rows_received: self.rows_received,
+                bytes_received: self.bytes_received,
+                native: Some(native),
+            },
+        });
+        events
+    }
+
     fn push_progress(&mut self, phase: ExecutionPhase, events: &mut Vec<ExecutionEventV2>) {
         let now = Instant::now();
         if self
@@ -210,7 +255,9 @@ fn sum_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sift_protocol::{ColumnMetadata, DriverWarning, PrimitiveType, Row, TypeRef, Value};
+    use sift_protocol::{
+        ColumnMetadata, DriverWarning, NativeProgressSource, PrimitiveType, Row, TypeRef, Value,
+    };
 
     fn columns(name: &str) -> Vec<ColumnMetadata> {
         vec![ColumnMetadata::new(
@@ -314,5 +361,46 @@ mod tests {
                 && progress.rows_received == 2
                 && progress.bytes_received > 0
         }));
+    }
+
+    #[test]
+    fn native_progress_is_bounded_coalesced_and_non_terminal() {
+        let mut normalizer = ExecutionEventNormalizer::new(ExecutionId(12));
+        let events = normalizer.events_for_native(NativeExecutionProgress {
+            source: NativeProgressSource::PostgresStatistics,
+            basis_points: 4_250,
+            phase: Some("building index".into()),
+            estimated_remaining_ms: None,
+        });
+        assert!(matches!(
+            events[0],
+            ExecutionEventV2::ExecutionStarted { .. }
+        ));
+        assert!(matches!(events[1], ExecutionEventV2::Progress { .. }));
+        assert!(normalizer
+            .events_for_native(NativeExecutionProgress {
+                source: NativeProgressSource::PostgresStatistics,
+                basis_points: 4_500,
+                phase: None,
+                estimated_remaining_ms: None,
+            })
+            .is_empty());
+        normalizer.last_progress_at = Some(Instant::now() - PROGRESS_INTERVAL);
+        let pages = normalizer.events_for_page(Page::Done {
+            affected_rows: None,
+            warnings: Vec::new(),
+        });
+        assert!(matches!(
+            pages.last(),
+            Some(ExecutionEventV2::ExecutionCompleted { .. })
+        ));
+        assert!(normalizer
+            .events_for_native(NativeExecutionProgress {
+                source: NativeProgressSource::PostgresStatistics,
+                basis_points: 5_000,
+                phase: None,
+                estimated_remaining_ms: None,
+            })
+            .is_empty());
     }
 }

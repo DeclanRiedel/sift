@@ -1104,6 +1104,15 @@ impl ResultsView {
             sift_protocol::ExecutionPhase::Cancelling => "Cancelling",
         };
         let mut parts = vec![phase.to_string()];
+        if let Some(native) = &progress.native {
+            parts.push(format!("{:.2}%", f64::from(native.basis_points) / 100.0));
+            if let Some(native_phase) = native.phase.as_deref() {
+                parts.push(native_phase.to_string());
+            }
+            if let Some(remaining) = native.estimated_remaining_ms {
+                parts.push(format!("~{} left", format_duration(remaining)));
+            }
+        }
         if let Some(ordinal) = progress.statement_ordinal {
             parts.push(match progress.statement_count {
                 Some(count) => format!("statement {}/{}", ordinal.saturating_add(1), count),
@@ -6771,6 +6780,36 @@ mod tests {
             assert_eq!(
                 view.execution_status_label(),
                 "Streaming · statement 2/3 · 42 rows · 2.0 KiB · 1.2 s"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn native_progress_status_shows_percentage_phase_and_eta(cx: &mut TestAppContext) {
+        let view = cx.new(ResultsView::new);
+        view.update(cx, |view, cx| {
+            view.begin_stream(cx);
+            view.apply_execution_progress(
+                sift_protocol::ExecutionProgress {
+                    phase: sift_protocol::ExecutionPhase::Executing,
+                    elapsed_ms: 2_000,
+                    statement_ordinal: None,
+                    statement_count: None,
+                    result_sets_seen: 0,
+                    rows_received: 0,
+                    bytes_received: 0,
+                    native: Some(sift_protocol::NativeExecutionProgress {
+                        source: sift_protocol::NativeProgressSource::SqlServerRequest,
+                        basis_points: 4_250,
+                        phase: Some("BACKUP DATABASE".into()),
+                        estimated_remaining_ms: Some(3_000),
+                    }),
+                },
+                cx,
+            );
+            assert_eq!(
+                view.execution_status_label(),
+                "Executing · 42.50% · BACKUP DATABASE · ~3.0 s left · 2.0 s"
             );
         });
     }

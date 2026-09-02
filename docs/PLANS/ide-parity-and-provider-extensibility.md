@@ -128,7 +128,7 @@ delete, import, and export workflows.
 - [x] Affected-row preview
 - [x] Plan-node cost display
 - [x] Plan comparison
-- [ ] Query progress UI
+- [x] Query progress UI
 
 ### Results and data editing
 

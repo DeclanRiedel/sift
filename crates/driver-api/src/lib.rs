@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use sift_protocol::{
     ColumnMetadata, ConnectionSpec, CursorId, DriverError, DriverWarning, Engine, ExecuteRequest,
-    Page, SchemaScope, SchemaSnapshot, ServerInfo, TxId, TxMode,
+    NativeExecutionProgress, Page, SchemaScope, SchemaSnapshot, ServerInfo, TxId, TxMode,
 };
 use tokio::sync::mpsc;
 
@@ -95,6 +95,9 @@ pub struct ResultSetStream {
     /// `false` = small result already buffered; `true` = driver holds a
     /// server-side cursor and pages on demand.
     pub server_side_cursor: bool,
+    /// Optional best-effort engine telemetry. Closing or failure of this
+    /// side channel never changes the page stream or its terminal outcome.
+    pub native_progress: Option<mpsc::Receiver<NativeExecutionProgress>>,
 }
 
 impl ResultSetStream {
@@ -114,6 +117,7 @@ impl ResultSetStream {
             warnings: Vec::new(),
             affected_rows: None,
             server_side_cursor,
+            native_progress: None,
         }
     }
 }
@@ -204,6 +208,17 @@ pub use mock::{MockDriver, MockDriverBuilder};
 /// Postgres-specific operations. Impl lives in `sift-driver-postgres`.
 #[async_trait::async_trait]
 pub trait PgExt: Send + Sync {
+    /// Observe native progress for a supported active command. Implementations
+    /// use a separate bounded monitor connection and return `None` when the
+    /// command or server does not expose trustworthy progress.
+    async fn observe_progress(
+        &self,
+        _c: ConnHandle,
+        _cursor: CursorId,
+    ) -> Result<Option<NativeProgressStream>, DriverError> {
+        Ok(None)
+    }
+
     async fn listen(
         &self,
         c: ConnHandle,
@@ -230,6 +245,16 @@ pub trait PgExt: Send + Sync {
 /// SQL Server-specific operations. Impl lives in `sift-driver-sqlserver`.
 #[async_trait::async_trait]
 pub trait MssqlExt: Send + Sync {
+    /// Observe `sys.dm_exec_requests` for a supported active command without
+    /// sharing the executing TDS session.
+    async fn observe_progress(
+        &self,
+        _c: ConnHandle,
+        _cursor: CursorId,
+    ) -> Result<Option<NativeProgressStream>, DriverError> {
+        Ok(None)
+    }
+
     /// `USE <db>` — switch database without reconnecting. SQL Server only;
     /// Postgres's analogue is opening a new connection.
     async fn use_database(&self, c: ConnHandle, db: &str) -> Result<(), DriverError>;
@@ -341,4 +366,9 @@ impl Default for IdCounter {
     fn default() -> Self {
         Self::new()
     }
+}
+/// Receiver owned by the execution coordinator. Dropping it is the monitor's
+/// disconnect signal; monitor failures are represented by channel closure.
+pub struct NativeProgressStream {
+    pub updates: mpsc::Receiver<NativeExecutionProgress>,
 }

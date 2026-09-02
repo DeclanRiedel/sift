@@ -293,7 +293,7 @@ audit, local expansion latency, import bounds, and one-undo insertion pass.
 
 ### 10. Native progress
 
-- [ ] Add optional PostgreSQL and SQL Server telemetry through extension
+- [x] Add optional PostgreSQL and SQL Server telemetry through extension
   traits and separate monitor connections.
 
 Gate: supported maintenance command, unsupported query, permission failure,

@@ -6,6 +6,7 @@
 
 mod conn;
 mod decode;
+mod progress;
 mod schema;
 mod stream;
 
@@ -40,9 +41,16 @@ impl Driver for PgDriver {
             .open_internal(spec)
             .await
             .map_err(|error| contextualize_open_error(spec, error))?;
+        let backend_pid = conn
+            .query_one("SELECT pg_catalog.pg_backend_pid()", &[])
+            .await
+            .ok()
+            .and_then(|row| row.try_get::<_, i32>(0).ok())
+            .unwrap_or(0);
         let id = self.inner.conn_id.next();
         self.inner.put_free(id, conn).await;
         self.inner.put_spec(id, spec.clone());
+        self.inner.backend_pids.insert(id, backend_pid);
         // Pre-warm additional pool slots when the spec requests it.
         // Prewarming is background work by definition, so spawn it rather
         // than blocking `open` on `pool_min_size - 1` concurrent TCP+TLS+PG
@@ -203,6 +211,7 @@ impl Driver for PgDriver {
     #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id()))]
     async fn close(&self, c: ConnHandle) -> Result<(), DriverError> {
         self.inner.remove_conn(&c).await;
+        self.inner.backend_pids.remove(&c.id());
         Ok(())
     }
 
@@ -213,6 +222,14 @@ impl Driver for PgDriver {
 
 #[async_trait]
 impl PgExt for PgDriver {
+    async fn observe_progress(
+        &self,
+        c: ConnHandle,
+        cursor: CursorId,
+    ) -> Result<Option<sift_driver_api::NativeProgressStream>, DriverError> {
+        progress::observe(self, &c, cursor)
+    }
+
     #[tracing::instrument(skip_all, fields(engine = "postgres", conn = c.id(), channel_count = channels.len()))]
     async fn listen(
         &self,

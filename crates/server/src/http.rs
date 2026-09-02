@@ -19557,15 +19557,18 @@ async fn handle_ws(
                             },
                         )
                         .await?;
+                        let cursor_id = stream.cursor_id;
+                        let native_progress = stream.native_progress;
                         let terminal = stream_pages_with_ack(
                             &mut sender,
                             &mut receiver,
                             stream.rows,
+                            native_progress,
                             WsPageContext {
                                 sessions: &state.sessions,
                                 session_id,
                                 connection,
-                                cursor_id: stream.cursor_id,
+                                cursor_id,
                                 execution_events: event_version.is_some(),
                                 tx_id: tx.as_ref().map(|tx| tx.tx_id),
                                 rate_limiter: &state.auth.rate_limiter,
@@ -19849,6 +19852,9 @@ async fn stream_pages_with_ack(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     mut rows: tokio::sync::mpsc::Receiver<sift_protocol::Page>,
+    mut native_progress: Option<
+        tokio::sync::mpsc::Receiver<sift_protocol::NativeExecutionProgress>,
+    >,
     context: WsPageContext<'_>,
 ) -> ApiResult<StreamTerminal> {
     let WsPageContext {
@@ -19869,7 +19875,63 @@ async fn stream_pages_with_ack(
             cursor_id.0,
         ))
     });
-    while let Some(page) = rows.recv().await {
+    loop {
+        enum StreamInput {
+            Page(sift_protocol::Page),
+            Native(sift_protocol::NativeExecutionProgress),
+            NativeClosed,
+            RowsClosed,
+        }
+        let input = match native_progress.as_mut() {
+            Some(progress) => tokio::select! {
+                page = rows.recv() => page.map_or(StreamInput::RowsClosed, StreamInput::Page),
+                update = progress.recv() => update.map_or(StreamInput::NativeClosed, StreamInput::Native),
+            },
+            None => rows
+                .recv()
+                .await
+                .map_or(StreamInput::RowsClosed, StreamInput::Page),
+        };
+        let page = match input {
+            StreamInput::RowsClosed => break,
+            StreamInput::NativeClosed => {
+                native_progress = None;
+                continue;
+            }
+            StreamInput::Native(native) => {
+                let Some(events) = normalizer
+                    .as_mut()
+                    .map(|normalizer| normalizer.events_for_native(native))
+                    .filter(|events| !events.is_empty())
+                else {
+                    continue;
+                };
+                send_json(
+                    sender,
+                    &WsServerMessage::ExecutionEvents {
+                        cursor_id,
+                        seq,
+                        events,
+                    },
+                )
+                .await?;
+                match wait_for_ack(receiver, sessions, session_id, connection, cursor_id, seq)
+                    .await?
+                {
+                    AckOutcome::Acked => {
+                        sessions.cursor_touch(cursor_id);
+                        seq = seq.saturating_add(1);
+                    }
+                    AckOutcome::Cancelled => {
+                        sessions.cursor_remove(cursor_id);
+                        outcome.outcome = StreamOutcome::Cancelled;
+                        break;
+                    }
+                }
+                continue;
+            }
+            StreamInput::Page(page) => page,
+        };
         sessions.cursor_page_received(cursor_id);
         let normalized = normalizer
             .as_mut()
@@ -19992,7 +20054,7 @@ async fn stream_pages_with_ack(
                 break;
             }
         }
-        seq += 1;
+        seq = seq.saturating_add(1);
     }
     Ok(outcome)
 }

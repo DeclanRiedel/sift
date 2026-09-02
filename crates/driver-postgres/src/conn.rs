@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use sift_driver_api::{ConnHandle, IdCounter};
 use sift_protocol::{Code, ConnectionSpec, DriverError, SslMode, TxId};
 use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use deadpool_postgres::{Pool, Runtime};
@@ -43,9 +44,13 @@ pub(crate) struct PgDriverInner {
     /// capacity. String key avoids silent hash-collision pool reuse.
     pub(crate) pools: DashMap<String, Arc<Pool>>,
     pub(crate) specs: DashMap<u64, ConnectionSpec>,
+    pub(crate) backend_pids: DashMap<u64, i32>,
     pub(crate) conn_id: IdCounter,
     pub(crate) tx_id: IdCounter,
     pub(crate) cursor_id: IdCounter,
+    /// Native telemetry has its own small admission pool, independent of
+    /// query execution capacity.
+    pub(crate) progress_slots: Arc<Semaphore>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +68,8 @@ pub(crate) enum ConnState {
 
 pub(crate) struct CursorEntry {
     pub(crate) conn_id: u64,
+    pub(crate) backend_pid: i32,
+    pub(crate) progress_kind: Option<crate::progress::PgProgressKind>,
     pub(crate) cancel_token: tokio_postgres::CancelToken,
     pub(crate) task: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
@@ -97,9 +104,11 @@ impl PgDriverInner {
             listens: DashMap::new(),
             pools: DashMap::new(),
             specs: DashMap::new(),
+            backend_pids: DashMap::new(),
             conn_id: IdCounter::new(),
             tx_id: IdCounter::new(),
             cursor_id: IdCounter::new(),
+            progress_slots: Arc::new(Semaphore::new(4)),
         }
     }
 
