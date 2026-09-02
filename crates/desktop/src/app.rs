@@ -6205,7 +6205,7 @@ async fn semantic_outcome(
                 Err(error) => SemanticOutcome::Failed(format!("diagnostics failed: {error}")),
             }
         }
-        SemanticRequestKind::Complete { cursor } => {
+        SemanticRequestKind::Complete { cursor } | SemanticRequestKind::AutoComplete { cursor } => {
             match client
                 .complete_semantic_document(
                     session,

@@ -8258,6 +8258,9 @@ fn staged_result_row_index(edits: &[StagedResultEdit], edit_index: usize) -> usi
 /// pause instead of competing with normal typing. Execute and explicit
 /// semantic commands remain immediate.
 const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(650);
+/// Automatic completion is responsive but still coalesces a burst into one
+/// cached server lookup. Manual Ctrl+Space bypasses this delay.
+const SEMANTIC_COMPLETION_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
 
 fn repository_diff_text(
     path: &sift_protocol::WorkspacePath,
@@ -8720,6 +8723,9 @@ pub struct WorkspaceShell {
     /// generation is allowed to dispatch, so a burst of keystrokes costs one
     /// server round trip instead of one per character.
     semantic_analyze_generation: HashMap<u64, u64>,
+    /// Independent cancellation window for automatic completion. Diagnostics
+    /// must never delay the popup and completion must never accelerate errors.
+    semantic_completion_generation: HashMap<u64, u64>,
     query_outline_item_id: Option<u64>,
     query_outline_revision: Option<u64>,
     query_outline_statements: Vec<sift_protocol::SemanticStatement>,
@@ -9767,6 +9773,7 @@ impl WorkspaceShell {
             pending_connection_change: None,
             held_result_pages: HashMap::new(),
             semantic_analyze_generation: HashMap::new(),
+            semantic_completion_generation: HashMap::new(),
             query_outline_item_id: None,
             query_outline_revision: None,
             query_outline_statements: Vec::new(),
@@ -14316,9 +14323,9 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    /// Editor semantic entry point. `Analyze` is debounced because it fires on
-    /// every keystroke; everything else is a direct response to a command the
-    /// user is waiting on and dispatches immediately.
+    /// Editor semantic entry point. Background diagnostics and automatic
+    /// completion have independent debounce windows; explicit commands are
+    /// dispatched immediately.
     fn semantic_requested(
         &mut self,
         item_id: u64,
@@ -14326,6 +14333,38 @@ impl WorkspaceShell {
         request: SemanticRequestKind,
         cx: &mut Context<Self>,
     ) {
+        if let SemanticRequestKind::AutoComplete { cursor } = request {
+            if !matches!(self.connection_status, ConnectionStatus::Connected { .. }) {
+                return;
+            }
+            let generation = self
+                .semantic_completion_generation
+                .entry(item_id)
+                .and_modify(|generation| *generation = generation.wrapping_add(1))
+                .or_insert(1);
+            let generation = *generation;
+            cx.spawn(async move |shell, cx| {
+                cx.background_executor()
+                    .timer(SEMANTIC_COMPLETION_DEBOUNCE)
+                    .await;
+                let _ = shell.update(cx, |shell, cx| {
+                    if shell.semantic_completion_generation.get(&item_id) != Some(&generation) {
+                        return;
+                    }
+                    shell.dispatch_semantic_request(
+                        item_id,
+                        revision,
+                        SemanticRequestKind::Complete { cursor },
+                        cx,
+                    );
+                });
+            })
+            .detach();
+            return;
+        }
+        if matches!(request, SemanticRequestKind::Complete { .. }) {
+            self.semantic_completion_generation.remove(&item_id);
+        }
         if !request.is_debounced() {
             self.dispatch_semantic_request(item_id, revision, request, cx);
             return;
@@ -26561,6 +26600,7 @@ impl WorkspaceShell {
         }
         if let (Some(sender), Some(item_id)) = (&self.executor_sender, removed_item_id) {
             self.semantic_analyze_generation.remove(&item_id);
+            self.semantic_completion_generation.remove(&item_id);
             let _ = sender.send(ExecutorCommand::CloseSemanticDocument { item_id });
         }
         if let (Some(sender), Some(document_id)) = (&self.room_document_sender, removed_document_id)

@@ -100,6 +100,109 @@ fn identifier_character(character: char) -> bool {
     character.is_alphanumeric() || character == '_' || character as u32 >= 0x80
 }
 
+/// Cheap activation guard only. The server parser still owns SQL context and
+/// candidate correctness. Keeping this linear scan local prevents catalog or
+/// parser work for comments, string literals, and punctuation-heavy edits.
+fn should_auto_complete(text: &str, cursor: usize) -> bool {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ScanState {
+        Sql,
+        String,
+        QuotedIdentifier,
+        BracketIdentifier,
+        LineComment,
+        BlockComment,
+    }
+
+    let cursor = cursor.min(text.len());
+    let prefix = &text[..cursor];
+    let mut state = ScanState::Sql;
+    let mut chars = prefix.char_indices().peekable();
+    while let Some((_, character)) = chars.next() {
+        let next = chars.peek().map(|(_, next)| *next);
+        state = match (state, character, next) {
+            (ScanState::Sql, '\'', _) => ScanState::String,
+            (ScanState::Sql, '"', _) => ScanState::QuotedIdentifier,
+            (ScanState::Sql, '[', _) => ScanState::BracketIdentifier,
+            (ScanState::Sql, '-', Some('-')) => {
+                chars.next();
+                ScanState::LineComment
+            }
+            (ScanState::Sql, '/', Some('*')) => {
+                chars.next();
+                ScanState::BlockComment
+            }
+            (ScanState::String, '\'', Some('\'')) => {
+                chars.next();
+                ScanState::String
+            }
+            (ScanState::String, '\'', _) => ScanState::Sql,
+            (ScanState::QuotedIdentifier, '"', Some('"')) => {
+                chars.next();
+                ScanState::QuotedIdentifier
+            }
+            (ScanState::QuotedIdentifier, '"', _) => ScanState::Sql,
+            (ScanState::BracketIdentifier, ']', Some(']')) => {
+                chars.next();
+                ScanState::BracketIdentifier
+            }
+            (ScanState::BracketIdentifier, ']', _) => ScanState::Sql,
+            (ScanState::LineComment, '\n', _) => ScanState::Sql,
+            (ScanState::BlockComment, '*', Some('/')) => {
+                chars.next();
+                ScanState::Sql
+            }
+            _ => state,
+        };
+    }
+    if matches!(
+        state,
+        ScanState::String | ScanState::LineComment | ScanState::BlockComment
+    ) {
+        return false;
+    }
+
+    let Some(last) = prefix.chars().next_back() else {
+        return false;
+    };
+    if last == '.' {
+        return true;
+    }
+    if identifier_character(last) {
+        let typed = prefix
+            .chars()
+            .rev()
+            .take_while(|character| identifier_character(*character))
+            .count();
+        return typed >= 2;
+    }
+    if last.is_whitespace() {
+        let keyword = prefix
+            .trim_end()
+            .chars()
+            .rev()
+            .take_while(|character| identifier_character(*character))
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        return matches!(
+            keyword.to_ascii_lowercase().as_str(),
+            "select"
+                | "from"
+                | "join"
+                | "update"
+                | "into"
+                | "table"
+                | "where"
+                | "on"
+                | "set"
+                | "by"
+        );
+    }
+    false
+}
+
 fn hover_type_display(type_ref: &sift_protocol::TypeRef) -> String {
     match type_ref {
         sift_protocol::TypeRef::Native { name, .. } => name.clone(),
@@ -1803,13 +1906,16 @@ impl QueryEditor {
         } else {
             self.request_semantic(SemanticRequestKind::Analyze, cx);
         }
-        if reopen_completion {
+        let auto_complete = self.keymap == EditorKeymap::Vim
+            && self.vim_mode == VimMode::Insert
+            && should_auto_complete(self.document.text(), self.document.cursor());
+        if reopen_completion || auto_complete {
             if self.language == EditorLanguage::Json {
                 self.open_json_completion(cx);
             } else {
                 self.semantic.expect_completion(self.revision);
                 let cursor = self.document.cursor() as u32;
-                self.request_semantic(SemanticRequestKind::Complete { cursor }, cx);
+                self.request_semantic(SemanticRequestKind::AutoComplete { cursor }, cx);
             }
         }
         cx.notify();
@@ -4202,6 +4308,49 @@ mod tests {
 
     fn doc(text: &str) -> QueryDocument {
         QueryDocument::new(7, text)
+    }
+
+    #[test]
+    fn automatic_completion_activates_only_in_useful_sql_contexts() {
+        for sql in [
+            "SELECT ",
+            "SELECT * FROM ",
+            "SELECT * FROM us",
+            "SELECT u.",
+            "SELECT * FROM [us",
+            "SELECT * FROM \"us",
+        ] {
+            assert!(should_auto_complete(sql, sql.len()), "{sql}");
+        }
+        for sql in [
+            "",
+            "S",
+            "SELECT * FROM u",
+            "SELECT 'users",
+            "SELECT 1 -- users",
+            "SELECT /* users",
+        ] {
+            assert!(!should_auto_complete(sql, sql.len()), "{sql}");
+        }
+    }
+
+    #[gpui::test]
+    fn vim_insert_typing_requests_debounced_completion(cx: &mut TestAppContext) {
+        let (mut cx, editor, spy) = editor_with_spy("SELECT * FROM ", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.set_keymap(EditorKeymap::Vim, cx);
+            assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
+            editor.replace_text_in_range(None, "us", window, cx);
+        });
+        cx.run_until_parked();
+        let requests = spy.read_with(&cx, |spy, _| spy.0.clone());
+        assert!(requests
+            .iter()
+            .any(|(_, request)| matches!(request, SemanticRequestKind::Analyze)));
+        assert!(requests.iter().any(|(_, request)| matches!(
+            request,
+            SemanticRequestKind::AutoComplete { cursor: 16 }
+        )));
     }
 
     /// Collects the semantic intents an editor raises so tests can assert on

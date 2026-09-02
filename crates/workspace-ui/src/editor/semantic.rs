@@ -41,6 +41,11 @@ pub(crate) fn clamp_range(text: &str, range: TextRange) -> Range<usize> {
 pub enum SemanticRequestKind {
     /// Re-parse and re-diagnose. Debounced by the dispatcher.
     Analyze,
+    /// Keystroke-driven completion. The shell coalesces these independently
+    /// from diagnostics; explicit `Complete` remains immediate.
+    AutoComplete {
+        cursor: u32,
+    },
     Complete {
         cursor: u32,
     },
@@ -70,10 +75,9 @@ pub enum SemanticRequestKind {
 }
 
 impl SemanticRequestKind {
-    /// Analyze is the only request the dispatcher may delay; the rest are
-    /// direct responses to a keystroke the user is waiting on.
+    /// Background requests may be delayed; explicit commands are immediate.
     pub const fn is_debounced(&self) -> bool {
-        matches!(self, Self::Analyze)
+        matches!(self, Self::Analyze | Self::AutoComplete { .. })
     }
 }
 
