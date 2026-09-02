@@ -426,6 +426,14 @@ pub enum Operation {
         position: u32,
         catalog_bound: bool,
     },
+    PrepareStarExpansion {
+        session: SessionId,
+        connection: ConnectionId,
+        document: SemanticDocumentId,
+        revision: u64,
+        position: u32,
+        catalog_revision: crate::CatalogRevision,
+    },
     OpenSemanticDocument {
         session: SessionId,
         connection: ConnectionId,
@@ -713,6 +721,7 @@ impl Operation {
             Self::Complete { .. } => OperationKind::Complete,
             Self::CompleteSemanticDocument { .. } => OperationKind::Complete,
             Self::HoverSemanticDocument { .. } => OperationKind::Complete,
+            Self::PrepareStarExpansion { .. } => OperationKind::SqlQuickFix,
             Self::OpenSemanticDocument { .. } => OperationKind::OpenSemanticDocument,
             Self::UpdateSemanticDocument { .. } => OperationKind::UpdateSemanticDocument,
             Self::CloseSemanticDocument { .. } => OperationKind::CloseSemanticDocument,
@@ -1044,6 +1053,9 @@ impl Operation {
             }
             Operation::HoverSemanticDocument { session, .. } => {
                 summary("hover", "semantic_document", Some(session.0 as i64))
+            }
+            Operation::PrepareStarExpansion { session, .. } => {
+                summary("expand_star", "semantic_document", Some(session.0 as i64))
             }
             Operation::OpenSemanticDocument { session, .. } => {
                 summary("open", "semantic_document", Some(session.0 as i64))

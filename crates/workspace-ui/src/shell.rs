@@ -44446,6 +44446,11 @@ impl gpui::Render for WorkspaceShell {
                 }),
             )
             .on_action(
+                cx.listener(|shell, _: &crate::editor::ExpandStar, window, cx| {
+                    shell.dispatch_active_editor_action(&crate::editor::ExpandStar, window, cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|shell, _: &crate::editor::ApplyQuickFix, window, cx| {
                     shell.dispatch_active_editor_action(&crate::editor::ApplyQuickFix, window, cx)
                 }),

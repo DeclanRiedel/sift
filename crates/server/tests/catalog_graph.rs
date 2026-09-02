@@ -206,6 +206,35 @@ async fn catalog_graph_is_revisioned_public_and_audit_safe() {
     );
     assert_eq!(hover.nullability, Some(Nullability::NotNullable));
     assert_eq!(hover.comment.as_deref(), Some("Application users"));
+    let star_document = router
+        .clone()
+        .oneshot(post(
+            &semantic_base,
+            serde_json::json!({"text": "select u.* from users u"}),
+        ))
+        .await
+        .unwrap();
+    let star_document: sift_protocol::SemanticDocumentState = json(star_document.into_body()).await;
+    let star = router
+        .clone()
+        .oneshot(post(
+            format!(
+                "{}/{}/star-expansions/prepare",
+                semantic_base, star_document.document_id
+            ),
+            serde_json::json!({
+                "revision": star_document.revision,
+                "position": 10,
+                "catalog_revision": first.revision
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(star.status(), StatusCode::OK);
+    let star: sift_protocol::StarExpansionPreview = json(star.into_body()).await;
+    assert_eq!(star.range, sift_protocol::TextRange { start: 7, end: 10 });
+    assert_eq!(star.replacement, "u.id");
+    assert!(star.exact);
     let fix = diagnostics
         .diagnostics
         .iter()
@@ -335,6 +364,22 @@ async fn catalog_graph_is_revisioned_public_and_audit_safe() {
         .await
         .unwrap();
     assert_eq!(stale_hover.status(), StatusCode::BAD_REQUEST);
+    let stale_star = router
+        .clone()
+        .oneshot(post(
+            format!(
+                "{}/{}/star-expansions/prepare",
+                semantic_base, star_document.document_id
+            ),
+            serde_json::json!({
+                "revision": star_document.revision,
+                "position": 10,
+                "catalog_revision": first.revision
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale_star.status(), StatusCode::BAD_REQUEST);
 
     let stale = router
         .clone()
@@ -405,6 +450,10 @@ async fn catalog_graph_is_revisioned_public_and_audit_safe() {
     assert!(sessions.list_operations().iter().any(|entry| matches!(
         entry.operation,
         sift_protocol::Operation::HoverSemanticDocument { .. }
+    )));
+    assert!(sessions.list_operations().iter().any(|entry| matches!(
+        entry.operation,
+        sift_protocol::Operation::PrepareStarExpansion { .. }
     )));
 }
 

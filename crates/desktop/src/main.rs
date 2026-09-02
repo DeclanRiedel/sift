@@ -151,6 +151,7 @@ fn main() {
                     MenuItem::action("Cancel Query", CancelExecution),
                     MenuItem::separator(),
                     MenuItem::action("Suggest Completions", ed::Complete),
+                    MenuItem::action("Expand Star", ed::ExpandStar),
                     MenuItem::action("Format Document", ed::FormatDocument),
                     MenuItem::action("Apply Quick Fix", ed::ApplyQuickFix),
                     MenuItem::action("Find Usages", ed::FindUsages),

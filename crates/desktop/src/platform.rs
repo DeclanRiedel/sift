@@ -157,6 +157,11 @@ pub fn shell_key_bindings() -> Vec<KeyBinding> {
             sift_workspace_ui::editor::GoToNextDiagnostic,
             Some("keymap_profile != standard && vim_mode == normal"),
         ),
+        KeyBinding::new(
+            "g *",
+            sift_workspace_ui::editor::ExpandStar,
+            Some("keymap_profile != standard && vim_mode == normal"),
+        ),
     ]);
     bindings
 }

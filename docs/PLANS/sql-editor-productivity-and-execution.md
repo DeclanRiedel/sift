@@ -269,7 +269,7 @@ nullability, comments, uncertainty, and stale responses pass both dialects.
 
 ### 7. Safe star expansion
 
-- [ ] Add exact-binding `alias.*`, single-relation `*`, CTE, and subquery
+- [x] Add exact-binding `alias.*`, single-relation `*`, CTE, and subquery
   expansion with preview and one-undo application.
 
 Gate: ordering, quoting, catalog revision, incomplete coverage, ambiguous

@@ -2050,6 +2050,22 @@ impl Client {
         .await
     }
 
+    pub async fn prepare_star_expansion(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::PrepareStarExpansionRequest,
+    ) -> Result<sift_protocol::StarExpansionPreview> {
+        self.post(
+            &format!(
+                "/v1/sessions/{session}/connections/{connection}/semantic-documents/{document}/star-expansions/prepare"
+            ),
+            &request,
+        )
+        .await
+    }
+
     pub async fn preview_edits(
         &self,
         session: SessionId,

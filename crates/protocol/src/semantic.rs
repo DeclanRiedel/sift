@@ -157,6 +157,36 @@ pub struct SemanticHoverResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct PrepareStarExpansionRequest {
+    pub revision: u64,
+    pub position: u32,
+    pub catalog_revision: CatalogRevision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StarExpansionKind {
+    QualifiedRelation,
+    SingleRelation,
+    Cte,
+    Subquery,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StarExpansionPreview {
+    pub document_id: SemanticDocumentId,
+    pub revision: u64,
+    pub catalog_revision: CatalogRevision,
+    pub range: TextRange,
+    pub replacement: String,
+    pub columns: Vec<String>,
+    pub kind: StarExpansionKind,
+    pub relation: String,
+    pub exact: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SelectStatementRequest {
     pub revision: u64,
     pub cursor: u32,

@@ -1060,6 +1060,10 @@ pub fn app(state: AppState) -> Router {
             post_with(hover_semantic_document, doc("hoverSemanticDocument", "Describe the typed symbol at a UTF-8 byte position in an exact semantic document revision")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/semantic-documents/:document/star-expansions/prepare",
+            post_with(prepare_star_expansion, doc("prepareStarExpansion", "Prepare an exact catalog-revision-bound wildcard replacement without applying it")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/export",
             post_with(export_query, doc("exportQuery", "Stream a query result as CSV / TSV / JSON Lines / JSON Array. Response is chunked; Content-Type depends on the requested format.")),
         )
@@ -16461,6 +16465,35 @@ async fn hover_semantic_document(
         operation,
         result,
         |_| Some(1),
+    )?))
+}
+
+async fn prepare_star_expansion(
+    State(state): State<AppState>,
+    Path((session, connection, document)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        sift_protocol::SemanticDocumentId,
+    )>,
+    Json(request): Json<sift_protocol::PrepareStarExpansionRequest>,
+) -> ApiResult<Json<sift_protocol::StarExpansionPreview>> {
+    let operation = Operation::PrepareStarExpansion {
+        session,
+        connection,
+        document,
+        revision: request.revision,
+        position: request.position,
+        catalog_revision: request.catalog_revision,
+    };
+    let result = state
+        .sessions
+        .prepare_star_expansion(session, connection, document, request)
+        .await;
+    Ok(Json(finish_operation(
+        &state.sessions,
+        operation,
+        result,
+        |preview| Some(preview.columns.len() as i64),
     )?))
 }
 

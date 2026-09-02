@@ -47,6 +47,9 @@ pub enum SemanticRequestKind {
     Hover {
         position: u32,
     },
+    ExpandStar {
+        position: u32,
+    },
     Format {
         range: Option<TextRange>,
     },
@@ -86,6 +89,7 @@ pub enum SemanticOutcome {
         candidates: Vec<CompletionCandidate>,
     },
     Hover(sift_protocol::SemanticHoverResponse),
+    StarExpansion(sift_protocol::StarExpansionPreview),
     Edits {
         edits: Vec<TextEdit>,
         warnings: Vec<String>,
@@ -179,6 +183,8 @@ pub struct SemanticState {
     pending_completion: Option<u64>,
     hover: Option<sift_protocol::SemanticHoverResponse>,
     pending_hover: Option<(u64, u32)>,
+    star_expansion: Option<sift_protocol::StarExpansionPreview>,
+    pending_star_expansion: Option<u64>,
     usages: Vec<(Range<usize>, SqlUsageKind)>,
     usages_by_line: Vec<Vec<usize>>,
     usages_revision: Option<u64>,
@@ -202,6 +208,10 @@ impl SemanticState {
 
     pub fn hover(&self) -> Option<&sift_protocol::SemanticHoverResponse> {
         self.hover.as_ref()
+    }
+
+    pub fn star_expansion(&self) -> Option<&sift_protocol::StarExpansionPreview> {
+        self.star_expansion.as_ref()
     }
 
     pub fn usages(&self) -> &[(Range<usize>, SqlUsageKind)] {
@@ -252,6 +262,8 @@ impl SemanticState {
         self.pending_completion = None;
         self.hover = None;
         self.pending_hover = None;
+        self.star_expansion = None;
+        self.pending_star_expansion = None;
         self.usages.clear();
         self.usages_by_line.clear();
         self.usages_revision = None;
@@ -288,6 +300,18 @@ impl SemanticState {
         let changed = self.hover.is_some() || self.pending_hover.is_some();
         self.hover = None;
         self.pending_hover = None;
+        changed
+    }
+
+    pub fn expect_star_expansion(&mut self, revision: u64) {
+        self.pending_star_expansion = Some(revision);
+        self.star_expansion = None;
+    }
+
+    pub fn clear_star_expansion(&mut self) -> bool {
+        let changed = self.star_expansion.is_some() || self.pending_star_expansion.is_some();
+        self.star_expansion = None;
+        self.pending_star_expansion = None;
         changed
     }
 
@@ -378,6 +402,24 @@ impl SemanticState {
         }
         self.pending_hover = None;
         self.hover = Some(hover);
+        true
+    }
+
+    pub fn set_star_expansion(
+        &mut self,
+        revision: u64,
+        current_revision: u64,
+        preview: sift_protocol::StarExpansionPreview,
+    ) -> bool {
+        if revision != current_revision
+            || preview.revision != revision
+            || self.pending_star_expansion != Some(revision)
+            || !preview.exact
+        {
+            return false;
+        }
+        self.pending_star_expansion = None;
+        self.star_expansion = Some(preview);
         true
     }
 

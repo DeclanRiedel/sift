@@ -13,6 +13,7 @@ use sift_protocol::{
     SemanticStatement, SqlRefactor, SqlSymbolTarget, SqlUsage, SqlUsageKind, SqlUsagePage,
     StatementKind, StatementSelection, TextEdit, TextRange, WorkspaceEdit,
 };
+use sqlparser::ast::{Expr, Query, SelectItem, SetExpr, Statement as SqlStatement, TableFactor};
 use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace, Word};
@@ -759,6 +760,44 @@ impl SemanticRegistry {
             (Arc::clone(&document.source), document.dialect_id.clone())
         };
         semantic_hover(&source, &dialect_id, id, revision, position, catalog)
+    }
+
+    pub fn prepare_star_expansion(
+        &self,
+        scope: DocumentScope,
+        id: SemanticDocumentId,
+        revision: u64,
+        position: u32,
+        catalog: &CatalogBindingView,
+    ) -> Result<sift_protocol::StarExpansionPreview, Error> {
+        let (source, dialect_id, statement_range) = {
+            let registry = self.inner.lock().unwrap();
+            let document = registry.documents.get(&id).ok_or(Error::NotFound)?;
+            ensure_scope(document, scope)?;
+            ensure_revision(document, revision)?;
+            validate_offset(&document.source, position)?;
+            let statement = document
+                .statements
+                .iter()
+                .find(|statement| {
+                    statement.full_range.start <= position && position <= statement.full_range.end
+                })
+                .ok_or(Error::InvalidRequest)?;
+            (
+                Arc::clone(&document.source),
+                document.dialect_id.clone(),
+                statement.full_range,
+            )
+        };
+        prepare_star_expansion(
+            &source,
+            &dialect_id,
+            id,
+            revision,
+            position,
+            statement_range,
+            catalog,
+        )
     }
 
     pub fn select_statement(
@@ -2209,6 +2248,293 @@ fn local_hover(
     }
 }
 
+#[derive(Debug, Clone)]
+enum StarRelationTarget {
+    Catalog(String),
+    Local {
+        name: String,
+        columns: Vec<String>,
+        kind: sift_protocol::StarExpansionKind,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct StarRelation {
+    visible_name: String,
+    target: StarRelationTarget,
+}
+
+fn prepare_star_expansion(
+    source: &str,
+    dialect_id: &sift_protocol::DialectId,
+    document_id: SemanticDocumentId,
+    revision: u64,
+    position: u32,
+    statement_range: TextRange,
+    catalog: &CatalogBindingView,
+) -> Result<sift_protocol::StarExpansionPreview, Error> {
+    if !catalog.complete {
+        return Err(Error::InvalidRequest);
+    }
+    let position = position as usize;
+    let star = if source.as_bytes().get(position) == Some(&b'*') {
+        position
+    } else if position > 0 && source.as_bytes().get(position - 1) == Some(&b'*') {
+        position - 1
+    } else {
+        return Err(Error::InvalidRequest);
+    };
+    if star < statement_range.start as usize || star >= statement_range.end as usize {
+        return Err(Error::InvalidRequest);
+    }
+    let flavor = dialect_flavor(dialect_id)?;
+    let dialect: Box<dyn Dialect> = match flavor {
+        Flavor::Postgres => Box::new(PostgreSqlDialect {}),
+        Flavor::Tsql => Box::new(MsSqlDialect {}),
+    };
+    let statement = &source[statement_range.start as usize..statement_range.end as usize];
+    let relations = star_relations(statement, &*dialect)?;
+    let qualifier = star_qualifier(source, star);
+    let relation = match qualifier.as_ref() {
+        Some((name, _, _)) => relations
+            .iter()
+            .find(|relation| relation.visible_name.eq_ignore_ascii_case(name))
+            .ok_or(Error::InvalidRequest)?,
+        None if relations.len() == 1 => &relations[0],
+        None => return Err(Error::InvalidRequest),
+    };
+    let (columns, relation_name, kind) = match &relation.target {
+        StarRelationTarget::Catalog(reference) => {
+            let object = catalog.resolve(reference).ok_or(Error::InvalidRequest)?;
+            if !object.complete || object.columns.is_empty() {
+                return Err(Error::InvalidRequest);
+            }
+            let mut columns = object.columns.iter().collect::<Vec<_>>();
+            columns.sort_by_key(|column| column.ordinal.unwrap_or(u32::MAX));
+            (
+                columns
+                    .into_iter()
+                    .map(|column| column.name.clone())
+                    .collect(),
+                object.qualified_name.clone(),
+                if qualifier.is_some() {
+                    sift_protocol::StarExpansionKind::QualifiedRelation
+                } else {
+                    sift_protocol::StarExpansionKind::SingleRelation
+                },
+            )
+        }
+        StarRelationTarget::Local {
+            name,
+            columns,
+            kind,
+        } if !columns.is_empty() => (columns.clone(), name.clone(), *kind),
+        StarRelationTarget::Local { .. } => return Err(Error::InvalidRequest),
+    };
+    let rendered = columns
+        .iter()
+        .map(|column| {
+            let column = quote_semantic_identifier(column, flavor);
+            qualifier
+                .as_ref()
+                .map_or(column.clone(), |(_, qualifier, _)| {
+                    format!("{qualifier}.{column}")
+                })
+        })
+        .collect::<Vec<_>>();
+    let range = TextRange {
+        start: u32::try_from(
+            qualifier
+                .as_ref()
+                .map_or(star, |(_, _, qualifier_start)| *qualifier_start),
+        )
+        .map_err(|_| Error::InvalidRange)?,
+        end: u32::try_from(star + 1).map_err(|_| Error::InvalidRange)?,
+    };
+    if !source[range.start as usize..range.end as usize].ends_with('*') {
+        return Err(Error::InvalidRequest);
+    }
+    Ok(sift_protocol::StarExpansionPreview {
+        document_id,
+        revision,
+        catalog_revision: catalog.revision,
+        range,
+        replacement: rendered.join(", "),
+        columns,
+        kind,
+        relation: relation_name,
+        exact: true,
+    })
+}
+
+fn star_qualifier(source: &str, star: usize) -> Option<(String, String, usize)> {
+    let bytes = source.as_bytes();
+    let mut end = star;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if end == 0 || bytes[end - 1] != b'.' {
+        return None;
+    }
+    end -= 1;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 {
+        let byte = bytes[start - 1];
+        if byte.is_ascii_alphanumeric()
+            || byte == b'_'
+            || byte >= 0x80
+            || matches!(byte, b'"' | b'[' | b']')
+        {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if start == end || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+        return None;
+    }
+    let rendered = source[start..end].to_string();
+    let name = rendered
+        .trim_matches('"')
+        .trim_matches('[')
+        .trim_matches(']')
+        .to_string();
+    (!name.is_empty()).then_some((name, rendered, start))
+}
+
+fn star_relations(statement: &str, dialect: &dyn Dialect) -> Result<Vec<StarRelation>, Error> {
+    let parsed = Parser::parse_sql(dialect, statement).map_err(|_| Error::InvalidRequest)?;
+    let [SqlStatement::Query(query)] = parsed.as_slice() else {
+        return Err(Error::InvalidRequest);
+    };
+    let mut locals = HashMap::<String, (Vec<String>, sift_protocol::StarExpansionKind)>::new();
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            let columns = if cte.alias.columns.is_empty() {
+                query_projection_columns(&cte.query)?
+            } else {
+                cte.alias.columns.iter().map(ToString::to_string).collect()
+            };
+            locals.insert(
+                cte.alias.name.value.to_ascii_lowercase(),
+                (columns, sift_protocol::StarExpansionKind::Cte),
+            );
+        }
+    }
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Err(Error::InvalidRequest);
+    };
+    let mut relations = Vec::new();
+    for table in &select.from {
+        push_star_table_factor(&table.relation, &locals, &mut relations)?;
+        for join in &table.joins {
+            push_star_table_factor(&join.relation, &locals, &mut relations)?;
+        }
+    }
+    (!relations.is_empty())
+        .then_some(relations)
+        .ok_or(Error::InvalidRequest)
+}
+
+fn push_star_table_factor(
+    factor: &TableFactor,
+    locals: &HashMap<String, (Vec<String>, sift_protocol::StarExpansionKind)>,
+    relations: &mut Vec<StarRelation>,
+) -> Result<(), Error> {
+    match factor {
+        TableFactor::Table { name, alias, .. } => {
+            let target = normalize_sql_reference(&name.to_string());
+            let base_name = target.rsplit('.').next().unwrap_or(&target);
+            let visible_name = alias
+                .as_ref()
+                .map_or_else(|| base_name.to_string(), |alias| alias.name.value.clone());
+            let target = locals.get(&base_name.to_ascii_lowercase()).map_or_else(
+                || StarRelationTarget::Catalog(target.clone()),
+                |(columns, kind)| StarRelationTarget::Local {
+                    name: base_name.to_string(),
+                    columns: columns.clone(),
+                    kind: *kind,
+                },
+            );
+            relations.push(StarRelation {
+                visible_name,
+                target,
+            });
+            Ok(())
+        }
+        TableFactor::Derived {
+            subquery, alias, ..
+        } => {
+            let alias = alias.as_ref().ok_or(Error::InvalidRequest)?;
+            let columns = if alias.columns.is_empty() {
+                query_projection_columns(subquery)?
+            } else {
+                alias.columns.iter().map(ToString::to_string).collect()
+            };
+            relations.push(StarRelation {
+                visible_name: alias.name.value.clone(),
+                target: StarRelationTarget::Local {
+                    name: alias.name.value.clone(),
+                    columns,
+                    kind: sift_protocol::StarExpansionKind::Subquery,
+                },
+            });
+            Ok(())
+        }
+        _ => Err(Error::InvalidRequest),
+    }
+}
+
+fn query_projection_columns(query: &Query) -> Result<Vec<String>, Error> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Err(Error::InvalidRequest);
+    };
+    select
+        .projection
+        .iter()
+        .map(|item| match item {
+            SelectItem::ExprWithAlias { alias, .. } => Ok(alias.value.clone()),
+            SelectItem::UnnamedExpr(Expr::Identifier(identifier)) => Ok(identifier.value.clone()),
+            SelectItem::UnnamedExpr(Expr::CompoundIdentifier(identifiers)) => identifiers
+                .last()
+                .map(|identifier| identifier.value.clone())
+                .ok_or(Error::InvalidRequest),
+            _ => Err(Error::InvalidRequest),
+        })
+        .collect()
+}
+
+fn normalize_sql_reference(reference: &str) -> String {
+    reference
+        .split('.')
+        .map(|part| {
+            part.trim()
+                .trim_matches('"')
+                .trim_matches('[')
+                .trim_matches(']')
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn quote_semantic_identifier(identifier: &str, flavor: Flavor) -> String {
+    let simple = !identifier.is_empty()
+        && !identifier.starts_with(|character: char| character.is_ascii_digit())
+        && identifier.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        });
+    if simple {
+        return identifier.to_string();
+    }
+    match flavor {
+        Flavor::Postgres => format!("\"{}\"", identifier.replace('"', "\"\"")),
+        Flavor::Tsql => format!("[{}]", identifier.replace(']', "]]")),
+    }
+}
+
 /// Detect a completion slot from tolerant tokenization of shared semantic
 /// source. Stateful callers validate the exact revision before reaching here.
 pub fn detect_completion_context(
@@ -2543,6 +2869,7 @@ mod tests {
                     &[
                         ("id", sift_protocol::PrimitiveType::Int64),
                         ("email", sift_protocol::PrimitiveType::Text),
+                        ("Display Name", sift_protocol::PrimitiveType::Text),
                     ],
                 ),
                 object(
@@ -3196,5 +3523,178 @@ mod tests {
             .unwrap();
         assert_eq!(hover.kind, sift_protocol::SemanticHoverKind::Expression);
         assert!(hover.detail.unwrap().contains("ambiguous column"));
+    }
+
+    #[test]
+    fn star_expansion_is_exact_and_dialect_quoted() {
+        for (dialect_id, source, expected) in [
+            (
+                "sift/postgresql",
+                "select u.* from public.users u",
+                "u.id, u.email, u.\"Display Name\"",
+            ),
+            (
+                "sift/tsql",
+                "select u.* from mock.public.users u",
+                "u.id, u.email, u.[Display Name]",
+            ),
+        ] {
+            let registry = SemanticRegistry::default();
+            let scope = DocumentScope {
+                session: 1,
+                connection: 1,
+            };
+            let state = registry
+                .create(
+                    scope,
+                    dialect(dialect_id),
+                    source.into(),
+                    None,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            let preview = registry
+                .prepare_star_expansion(
+                    scope,
+                    state.document_id,
+                    1,
+                    source.find('*').unwrap() as u32,
+                    &hover_catalog(),
+                )
+                .unwrap();
+            assert_eq!(preview.replacement, expected);
+            assert_eq!(
+                &source[preview.range.start as usize..preview.range.end as usize],
+                "u.*"
+            );
+            assert_eq!(
+                preview.kind,
+                sift_protocol::StarExpansionKind::QualifiedRelation
+            );
+            assert!(preview.exact);
+        }
+    }
+
+    #[test]
+    fn star_expansion_supports_single_relations_ctes_and_subqueries() {
+        let cases = [
+            (
+                "select * from users",
+                "id, email, \"Display Name\"",
+                sift_protocol::StarExpansionKind::SingleRelation,
+            ),
+            (
+                "with recent as (select id, email from users) select recent.* from recent",
+                "recent.id, recent.email",
+                sift_protocol::StarExpansionKind::Cte,
+            ),
+            (
+                "select s.* from (select id, email from users) s",
+                "s.id, s.email",
+                sift_protocol::StarExpansionKind::Subquery,
+            ),
+        ];
+        for (source, replacement, kind) in cases {
+            let registry = SemanticRegistry::default();
+            let scope = DocumentScope {
+                session: 1,
+                connection: 1,
+            };
+            let state = registry
+                .create(
+                    scope,
+                    dialect("sift/postgresql"),
+                    source.into(),
+                    None,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            let preview = registry
+                .prepare_star_expansion(
+                    scope,
+                    state.document_id,
+                    1,
+                    source.find('*').unwrap() as u32,
+                    &hover_catalog(),
+                )
+                .unwrap();
+            assert_eq!(preview.replacement, replacement);
+            assert_eq!(preview.kind, kind);
+        }
+    }
+
+    #[test]
+    fn star_expansion_fails_closed_for_ambiguity_and_incomplete_catalogs() {
+        let source = "select * from users join orders on users.id = orders.id";
+        let registry = SemanticRegistry::default();
+        let scope = DocumentScope {
+            session: 1,
+            connection: 1,
+        };
+        let state = registry
+            .create(
+                scope,
+                dialect("sift/postgresql"),
+                source.into(),
+                None,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(matches!(
+            registry.prepare_star_expansion(
+                scope,
+                state.document_id,
+                1,
+                source.find('*').unwrap() as u32,
+                &hover_catalog(),
+            ),
+            Err(Error::InvalidRequest)
+        ));
+        let complete = hover_catalog();
+        let partial = CatalogBindingView::new(complete.revision, false, complete.objects.clone());
+        assert!(matches!(
+            registry.prepare_star_expansion(
+                scope,
+                state.document_id,
+                1,
+                source.find('*').unwrap() as u32,
+                &partial,
+            ),
+            Err(Error::InvalidRequest)
+        ));
+    }
+
+    #[test]
+    fn star_expansion_ranges_remain_utf8_boundaries() {
+        let source = "select café.* from users as café";
+        let registry = SemanticRegistry::default();
+        let scope = DocumentScope {
+            session: 1,
+            connection: 1,
+        };
+        let state = registry
+            .create(
+                scope,
+                dialect("sift/postgresql"),
+                source.into(),
+                None,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let preview = registry
+            .prepare_star_expansion(
+                scope,
+                state.document_id,
+                1,
+                source.find('*').unwrap() as u32,
+                &hover_catalog(),
+            )
+            .unwrap();
+        assert!(source.is_char_boundary(preview.range.start as usize));
+        assert!(source.is_char_boundary(preview.range.end as usize));
+        assert_eq!(
+            &source[preview.range.start as usize..preview.range.end as usize],
+            "café.*"
+        );
     }
 }

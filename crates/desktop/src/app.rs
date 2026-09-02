@@ -6164,6 +6164,34 @@ async fn semantic_outcome(
                 }
             }
         }
+        SemanticRequestKind::ExpandStar { position } => {
+            let Some(catalog) =
+                current_catalog_revision(client, session, connection, catalog_revision).await
+            else {
+                return SemanticOutcome::Failed(
+                    "Star expansion needs complete catalog metadata.".into(),
+                );
+            };
+            match client
+                .prepare_star_expansion(
+                    session,
+                    connection,
+                    document,
+                    sift_protocol::PrepareStarExpansionRequest {
+                        revision,
+                        position,
+                        catalog_revision: catalog,
+                    },
+                )
+                .await
+            {
+                Ok(preview) => SemanticOutcome::StarExpansion(preview),
+                Err(error) => {
+                    *catalog_revision = None;
+                    SemanticOutcome::Failed(format!("star expansion failed: {error}"))
+                }
+            }
+        }
         SemanticRequestKind::Format { range } => {
             match client
                 .format_semantic_document(

@@ -109,6 +109,25 @@ fn hover_type_display(type_ref: &sift_protocol::TypeRef) -> String {
     }
 }
 
+fn valid_star_expansion_source(source: &str) -> bool {
+    let source = source.trim();
+    let Some(prefix) = source.strip_suffix('*') else {
+        return false;
+    };
+    let prefix = prefix.trim_end();
+    if prefix.is_empty() {
+        return true;
+    }
+    let Some(qualifier) = prefix.strip_suffix('.') else {
+        return false;
+    };
+    let qualifier = qualifier.trim();
+    !qualifier.is_empty()
+        && qualifier.chars().all(|character| {
+            identifier_character(character) || matches!(character, '"' | '[' | ']')
+        })
+}
+
 /// Pixel bounds of the part of `range` that falls on the line starting at
 /// `line_start`, or `None` when the range misses this line entirely.
 fn span_bounds(
@@ -828,6 +847,7 @@ actions!(
         Redo,
         ExitInsertMode,
         Complete,
+        ExpandStar,
         FormatDocument,
         ApplyQuickFix,
         FindUsages,
@@ -1310,6 +1330,9 @@ impl QueryEditor {
                 candidates,
             ),
             SemanticOutcome::Hover(hover) => self.semantic.set_hover(revision, current, hover),
+            SemanticOutcome::StarExpansion(preview) => {
+                self.semantic.set_star_expansion(revision, current, preview)
+            }
             SemanticOutcome::Usages {
                 usages,
                 is_complete,
@@ -1327,6 +1350,7 @@ impl QueryEditor {
             SemanticOutcome::Outline { .. } | SemanticOutcome::OutlineFailed(_) => false,
             SemanticOutcome::Failed(message) => {
                 self.semantic.clear_hover();
+                self.semantic.clear_star_expansion();
                 self.semantic.set_notice(Some(message));
                 true
             }
@@ -1368,6 +1392,7 @@ impl QueryEditor {
         for (range, new_text) in ordered {
             self.document.replace_range(range, &new_text);
         }
+        self.resync_keymap_after_external_change(cx);
         self.semantic.set_notice(warnings.first().cloned());
         self.edited(cx);
         true
@@ -1394,6 +1419,20 @@ impl QueryEditor {
         self.semantic.expect_completion(self.revision);
         let cursor = self.document.cursor() as u32;
         self.request_semantic(SemanticRequestKind::Complete { cursor }, cx);
+        cx.notify();
+    }
+
+    fn expand_star(&mut self, _: &ExpandStar, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.semantic_enabled() {
+            return;
+        }
+        self.semantic.expect_star_expansion(self.revision);
+        self.request_semantic(
+            SemanticRequestKind::ExpandStar {
+                position: self.document.cursor() as u32,
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -1453,6 +1492,27 @@ impl QueryEditor {
         let replace = menu.replace.clone();
         self.semantic.cancel_completion();
         self.document.replace_range(replace, &insert);
+        self.resync_keymap_after_external_change(cx);
+        self.edited(cx);
+        true
+    }
+
+    fn accept_star_expansion(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(preview) = self.semantic.star_expansion().cloned() else {
+            return false;
+        };
+        let range = preview.range.start as usize..preview.range.end as usize;
+        if range.end > self.document.text().len()
+            || !self.document.text().is_char_boundary(range.start)
+            || !self.document.text().is_char_boundary(range.end)
+            || !valid_star_expansion_source(&self.document.text()[range.clone()])
+        {
+            self.semantic.clear_star_expansion();
+            return false;
+        }
+        self.semantic.clear_star_expansion();
+        self.document.replace_range(range, &preview.replacement);
+        self.resync_keymap_after_external_change(cx);
         self.edited(cx);
         true
     }
@@ -1904,6 +1964,9 @@ impl QueryEditor {
         if self.accept_active_completion(cx) {
             return;
         }
+        if self.accept_star_expansion(cx) {
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Enter, cx) {
             return;
         }
@@ -1925,6 +1988,9 @@ impl QueryEditor {
             return;
         }
         if self.accept_active_completion(cx) {
+            return;
+        }
+        if self.accept_star_expansion(cx) {
             return;
         }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Tab, cx) {
@@ -2051,8 +2117,8 @@ impl QueryEditor {
         if self.read_only {
             return;
         }
-        if !self.vim_key(modalkit::crossterm::event::KeyCode::Char('u'), cx) && self.document.undo()
-        {
+        if self.document.undo() {
+            self.resync_keymap_after_external_change(cx);
             self.edited(cx);
         }
     }
@@ -2069,7 +2135,7 @@ impl QueryEditor {
     fn exit_insert_mode(&mut self, _: &ExitInsertMode, _: &mut Window, cx: &mut Context<Self>) {
         // Escape dismisses the completion menu before it reaches Vim, so one
         // press never both closes the menu and leaves insert mode.
-        if self.semantic.cancel_completion() {
+        if self.semantic.cancel_completion() || self.semantic.clear_star_expansion() {
             cx.notify();
             return;
         }
@@ -2342,6 +2408,54 @@ impl QueryEditor {
                             .child("Metadata is incomplete or inferred"),
                     )
                 })
+                .into_any_element(),
+        )
+    }
+
+    fn render_star_expansion_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let preview = self.semantic.star_expansion()?;
+        let (left, top) = self.caret_content_origin()?;
+        let colors = cx.theme().colors;
+        let replacement = if preview.replacement.chars().count() > 240 {
+            format!(
+                "{}…",
+                preview.replacement.chars().take(240).collect::<String>()
+            )
+        } else {
+            preview.replacement.clone()
+        };
+        Some(
+            div()
+                .absolute()
+                .left(left)
+                .top(top)
+                .w(px(440.))
+                .p_3()
+                .border_1()
+                .border_color(colors.accent)
+                .bg(colors.elevated_surface)
+                .rounded(cx.theme().metrics.radius)
+                .shadow_md()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_sm().text_color(colors.text).child(format!(
+                    "Expand {} columns from {}",
+                    preview.columns.len(),
+                    preview.relation
+                )))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted_text)
+                        .child(replacement),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.accent)
+                        .child("Enter or Tab to apply · Esc to dismiss"),
+                )
                 .into_any_element(),
         )
     }
@@ -2745,6 +2859,7 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::execute_statement))
             .on_action(cx.listener(Self::execute_document))
             .on_action(cx.listener(Self::complete))
+            .on_action(cx.listener(Self::expand_star))
             .on_action(cx.listener(Self::format_document))
             .on_action(cx.listener(Self::apply_quick_fix))
             .on_action(cx.listener(Self::find_usages))
@@ -2811,7 +2926,8 @@ impl gpui::Render for QueryEditor {
                                 editor: cx.entity(),
                             })
                             .children(self.render_completion_menu(cx))
-                            .children(self.render_hover_card(cx)),
+                            .children(self.render_hover_card(cx))
+                            .children(self.render_star_expansion_card(cx)),
                     ),
             )
     }
@@ -4086,6 +4202,9 @@ mod tests {
         assert_eq!(identifier_hover_position(sql, 9), Some(7));
         assert_eq!(identifier_hover_position(sql, 12), None);
         assert_eq!(identifier_hover_position(sql, 6), None);
+        assert!(valid_star_expansion_source("café.*"));
+        assert!(valid_star_expansion_source("*"));
+        assert!(!valid_star_expansion_source("users; drop table audit; *"));
     }
 
     #[gpui::test]
@@ -4158,6 +4277,56 @@ mod tests {
         editor.read_with(&cx, |editor, _| {
             assert_eq!(editor.document().text(), "select * from users");
             assert!(editor.semantic().completion().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn star_expansion_previews_then_applies_as_one_vim_undo(cx: &mut TestAppContext) {
+        let source = "select u.* from users u";
+        let (mut cx, editor, spy) = editor_with_spy(source, cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.set_keymap(EditorKeymap::Vim, cx);
+            editor.document.set_selection(10..10, false);
+            editor.expand_star(&ExpandStar, window, cx);
+        });
+        let (revision, request) = spy
+            .read_with(&cx, |spy, _| spy.0.last().cloned())
+            .expect("star expansion request raised");
+        assert_eq!(request, SemanticRequestKind::ExpandStar { position: 10 });
+        editor.update(&mut cx, |editor, cx| {
+            assert!(editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::StarExpansion(sift_protocol::StarExpansionPreview {
+                    document_id: sift_protocol::SemanticDocumentId(
+                        "00000000-0000-0000-0000-000000000000".parse().unwrap(),
+                    ),
+                    revision,
+                    catalog_revision: sift_protocol::CatalogRevision(1),
+                    range: sift_protocol::TextRange { start: 7, end: 10 },
+                    replacement: "u.id, u.email".into(),
+                    columns: vec!["id".into(), "email".into()],
+                    kind: sift_protocol::StarExpansionKind::QualifiedRelation,
+                    relation: "app.public.users".into(),
+                    exact: true,
+                }),
+                cx,
+            ));
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.indent(&Indent, window, cx);
+        });
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(
+                editor.document().text(),
+                "select u.id, u.email from users u"
+            );
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.vim_undo(&VimUndo, window, cx);
+        });
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.document().text(), source);
+            assert_eq!(editor.keymap(), EditorKeymap::Vim);
         });
     }
 

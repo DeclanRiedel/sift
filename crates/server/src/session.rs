@@ -4448,6 +4448,49 @@ impl SessionStore {
         .await
     }
 
+    pub async fn prepare_star_expansion(
+        &self,
+        session_id: SessionId,
+        conn_id: ConnectionId,
+        document: sift_protocol::SemanticDocumentId,
+        request: sift_protocol::PrepareStarExpansionRequest,
+    ) -> ApiResult<sift_protocol::StarExpansionPreview> {
+        self.authorize_connection_operation(
+            session_id,
+            conn_id,
+            sift_protocol::OperationKind::SqlQuickFix,
+            None,
+            &[],
+        )?;
+        let graph = self
+            .catalog_graph_for_operation(
+                session_id,
+                conn_id,
+                sift_protocol::CatalogGraphRequest::default(),
+                sift_protocol::OperationKind::SqlQuickFix,
+            )
+            .await?;
+        if graph.revision != request.catalog_revision {
+            return Err(ApiError::BadRequest(format!(
+                "stale catalog revision: expected {}, current {}",
+                request.catalog_revision.0, graph.revision.0
+            )));
+        }
+        let catalog = catalog_binding_view(&graph);
+        let registry = self.inner.semantic.clone();
+        let scope = semantic_scope(session_id, conn_id);
+        self.run_semantic(move |_| {
+            registry.prepare_star_expansion(
+                scope,
+                document,
+                request.revision,
+                request.position,
+                &catalog,
+            )
+        })
+        .await
+    }
+
     pub async fn open_semantic_document(
         &self,
         session_id: SessionId,
