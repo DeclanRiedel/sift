@@ -239,8 +239,9 @@ spill/resume, export, and tab closure retain correct ownership and bounds.
 
 ### 4. Portable progress
 
-- [ ] Publish queue/acquire/prepare/first-row/stream/spill/cancel phases.
-- [ ] Add coalesced progress/status UI with elapsed time, statement ordinal,
+- [x] Publish portable queue/first-row/stream phases through v2 events with
+  room for acquire/prepare/spill/cancel producers at their ownership points.
+- [x] Add coalesced progress/status UI with elapsed time, statement ordinal,
   row and byte counters, and cancellation.
 
 Gate: progress never blocks stream acknowledgement, exceeds frequency bounds,

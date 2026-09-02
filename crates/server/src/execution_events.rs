@@ -3,9 +3,11 @@
 use std::time::Instant;
 
 use sift_protocol::{
-    CommandSummaryV2, ExecutionEventV2, ExecutionId, ExecutionSummaryV2, Page, ResultSetId,
-    ResultSetSummaryV2,
+    CommandSummaryV2, ExecutionEventV2, ExecutionId, ExecutionPhase, ExecutionProgress,
+    ExecutionSummaryV2, Page, ResultSetId, ResultSetSummaryV2,
 };
+
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub struct ExecutionEventNormalizer {
     execution_id: ExecutionId,
@@ -16,11 +18,13 @@ pub struct ExecutionEventNormalizer {
     result_set_count: u32,
     command_count: u32,
     rows_received: u64,
+    bytes_received: u64,
     current_result_rows: u64,
     affected_rows: Option<u64>,
     warning_count: u32,
     started_sent: bool,
     terminal_sent: bool,
+    last_progress_at: Option<Instant>,
 }
 
 impl ExecutionEventNormalizer {
@@ -34,11 +38,13 @@ impl ExecutionEventNormalizer {
             result_set_count: 0,
             command_count: 0,
             rows_received: 0,
+            bytes_received: 0,
             current_result_rows: 0,
             affected_rows: None,
             warning_count: 0,
             started_sent: false,
             terminal_sent: false,
+            last_progress_at: None,
         }
     }
 
@@ -47,6 +53,12 @@ impl ExecutionEventNormalizer {
             return Vec::new();
         }
         let mut events = Vec::with_capacity(4);
+        self.bytes_received = self.bytes_received.saturating_add(
+            serde_json::to_vec(&page)
+                .ok()
+                .and_then(|bytes| u64::try_from(bytes.len()).ok())
+                .unwrap_or(0),
+        );
         if !self.started_sent {
             self.started_sent = true;
             events.push(ExecutionEventV2::ExecutionStarted {
@@ -70,6 +82,7 @@ impl ExecutionEventNormalizer {
                     statement_ordinal: None,
                     columns,
                 });
+                self.push_progress(ExecutionPhase::WaitingForFirstRow, &mut events);
             }
             Page::Rows { rows } => {
                 let Some(result_set_id) = self.open_result else {
@@ -86,6 +99,7 @@ impl ExecutionEventNormalizer {
                     result_set_id,
                     rows,
                 });
+                self.push_progress(ExecutionPhase::Streaming, &mut events);
             }
             Page::Done {
                 affected_rows,
@@ -134,6 +148,30 @@ impl ExecutionEventNormalizer {
             }
         }
         events
+    }
+
+    fn push_progress(&mut self, phase: ExecutionPhase, events: &mut Vec<ExecutionEventV2>) {
+        let now = Instant::now();
+        if self
+            .last_progress_at
+            .is_some_and(|last| now.duration_since(last) < PROGRESS_INTERVAL)
+        {
+            return;
+        }
+        self.last_progress_at = Some(now);
+        events.push(ExecutionEventV2::Progress {
+            execution_id: self.execution_id,
+            progress: ExecutionProgress {
+                phase,
+                elapsed_ms: elapsed_ms(self.started_at),
+                statement_ordinal: None,
+                statement_count: None,
+                result_sets_seen: self.result_set_count,
+                rows_received: self.rows_received,
+                bytes_received: self.bytes_received,
+                native: None,
+            },
+        });
     }
 
     fn complete_open_result(
@@ -195,6 +233,7 @@ mod tests {
             first[1],
             ExecutionEventV2::ResultSetStarted { .. }
         ));
+        assert!(matches!(first[2], ExecutionEventV2::Progress { .. }));
 
         let rows = normalizer.events_for_page(Page::Rows {
             rows: vec![Row::new(vec![Value::Int64(1)])],
@@ -240,5 +279,40 @@ mod tests {
                 ExecutionEventV2::ExecutionCompleted { .. }
             ]
         ));
+    }
+
+    #[test]
+    fn progress_is_coalesced_to_four_updates_per_second() {
+        let mut normalizer = ExecutionEventNormalizer::new(ExecutionId(11));
+        let first = normalizer.events_for_page(Page::NextResult {
+            columns: columns("a"),
+        });
+        assert_eq!(
+            first
+                .iter()
+                .filter(|event| matches!(event, ExecutionEventV2::Progress { .. }))
+                .count(),
+            1
+        );
+        let immediate = normalizer.events_for_page(Page::Rows {
+            rows: vec![Row::new(vec![Value::Int64(1)])],
+        });
+        assert!(!immediate
+            .iter()
+            .any(|event| matches!(event, ExecutionEventV2::Progress { .. })));
+
+        normalizer.last_progress_at = Some(Instant::now() - PROGRESS_INTERVAL);
+        let later = normalizer.events_for_page(Page::Rows {
+            rows: vec![Row::new(vec![Value::Int64(2)])],
+        });
+        let progress = later.iter().find_map(|event| match event {
+            ExecutionEventV2::Progress { progress, .. } => Some(progress),
+            _ => None,
+        });
+        assert!(progress.is_some_and(|progress| {
+            progress.phase == ExecutionPhase::Streaming
+                && progress.rows_received == 2
+                && progress.bytes_received > 0
+        }));
     }
 }

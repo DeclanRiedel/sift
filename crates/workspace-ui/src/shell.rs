@@ -3335,6 +3335,11 @@ pub enum ExecutorEvent {
         execution_id: u64,
         cursor_id: sift_protocol::CursorId,
     },
+    ExecutionProgress {
+        item_id: u64,
+        execution_id: u64,
+        progress: sift_protocol::ExecutionProgress,
+    },
     ExecutionPage {
         item_id: u64,
         execution_id: u64,
@@ -4257,6 +4262,19 @@ impl Pane {
         Some(result.update(cx, |result, cx| {
             let progress = result.apply_stream_page(page, cx);
             result.stream_update(progress)
+        }))
+    }
+
+    fn apply_execution_progress(
+        &mut self,
+        item_id: u64,
+        progress: sift_protocol::ExecutionProgress,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let result = self.results.get(&item_id)?;
+        Some(result.update(cx, |result, cx| {
+            result.apply_execution_progress(progress, cx);
+            result.execution_status_label()
         }))
     }
 
@@ -11288,6 +11306,24 @@ impl WorkspaceShell {
                 self.status.execution = "Running…".into();
                 for pane in &self.panes {
                     if pane.update(cx, |pane, cx| pane.begin_result_stream(item_id, cx)) {
+                        break;
+                    }
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ExecutionProgress {
+                item_id,
+                execution_id,
+                progress,
+            } => {
+                if self.running_queries.get(&item_id) != Some(&execution_id) {
+                    return;
+                }
+                for pane in &self.panes {
+                    if let Some(status) = pane.update(cx, |pane, cx| {
+                        pane.apply_execution_progress(item_id, progress.clone(), cx)
+                    }) {
+                        self.status.execution = status;
                         break;
                     }
                 }

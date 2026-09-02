@@ -575,6 +575,24 @@ pub fn render_value(value: &Value) -> CellRender {
     CellRender { text, class }
 }
 
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn format_duration(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        format!("{milliseconds} ms")
+    } else {
+        format!("{:.1} s", milliseconds as f64 / 1_000.0)
+    }
+}
+
 fn single_line_text(text: &SharedString) -> SharedString {
     if !text.contains('\n') && !text.contains('\r') {
         return text.clone();
@@ -914,6 +932,7 @@ pub struct ResultsView {
     export_bytes: Option<u64>,
     restore_grid_focus: bool,
     query_started_at: Option<std::time::Instant>,
+    execution_progress: Option<sift_protocol::ExecutionProgress>,
     row_json_filter_input: Entity<TextInput>,
     _row_json_filter_subscription: Subscription,
     row_json_folded: bool,
@@ -1024,6 +1043,7 @@ impl ResultsView {
             export_bytes: None,
             restore_grid_focus: false,
             query_started_at: None,
+            execution_progress: None,
             row_json_filter_input,
             _row_json_filter_subscription: row_json_filter_subscription,
             row_json_folded: false,
@@ -1054,6 +1074,50 @@ impl ResultsView {
     pub fn set_export_progress(&mut self, bytes: Option<u64>, cx: &mut Context<Self>) {
         self.export_bytes = bytes;
         cx.notify();
+    }
+
+    pub fn apply_execution_progress(
+        &mut self,
+        progress: sift_protocol::ExecutionProgress,
+        cx: &mut Context<Self>,
+    ) {
+        self.execution_progress = Some(progress);
+        cx.notify();
+    }
+
+    pub fn execution_status_label(&self) -> String {
+        let Some(progress) = self
+            .execution_progress
+            .as_ref()
+            .filter(|_| matches!(self.state, ResultState::Pending | ResultState::Streaming(_)))
+        else {
+            return self.state.status_label();
+        };
+        let phase = match progress.phase {
+            sift_protocol::ExecutionPhase::Queued => "Queued",
+            sift_protocol::ExecutionPhase::WaitingForConnection => "Waiting for connection",
+            sift_protocol::ExecutionPhase::Preparing => "Preparing",
+            sift_protocol::ExecutionPhase::Executing => "Executing",
+            sift_protocol::ExecutionPhase::WaitingForFirstRow => "Waiting for first row",
+            sift_protocol::ExecutionPhase::Streaming => "Streaming",
+            sift_protocol::ExecutionPhase::Spilling => "Spilling",
+            sift_protocol::ExecutionPhase::Cancelling => "Cancelling",
+        };
+        let mut parts = vec![phase.to_string()];
+        if let Some(ordinal) = progress.statement_ordinal {
+            parts.push(match progress.statement_count {
+                Some(count) => format!("statement {}/{}", ordinal.saturating_add(1), count),
+                None => format!("statement {}", ordinal.saturating_add(1)),
+            });
+        }
+        if progress.rows_received > 0 {
+            parts.push(format!("{} rows", progress.rows_received));
+        }
+        if progress.bytes_received > 0 {
+            parts.push(format_bytes(progress.bytes_received));
+        }
+        parts.push(format_duration(progress.elapsed_ms));
+        parts.join(" · ")
     }
 
     pub(crate) fn export_in_progress(&self) -> bool {
@@ -1752,6 +1816,7 @@ impl ResultsView {
             ResultTab::Data
         };
         self.state = state;
+        self.execution_progress = None;
         self.stream_result_seen = false;
         self.stored_result_sets.clear();
         self.active_result_set = 0;
@@ -1845,6 +1910,16 @@ impl ResultsView {
     pub fn set_pending(&mut self, cx: &mut Context<Self>) {
         self.query_started_at = Some(std::time::Instant::now());
         self.state = ResultState::Pending;
+        self.execution_progress = Some(sift_protocol::ExecutionProgress {
+            phase: sift_protocol::ExecutionPhase::Queued,
+            elapsed_ms: 0,
+            statement_ordinal: None,
+            statement_count: None,
+            result_sets_seen: 0,
+            rows_received: 0,
+            bytes_received: 0,
+            native: None,
+        });
         self.messages.clear();
         self.selected_message = None;
         self.stream_result_seen = false;
@@ -1861,6 +1936,16 @@ impl ResultsView {
         self.query_started_at
             .get_or_insert_with(std::time::Instant::now);
         self.state = ResultState::Streaming(ResultData::default());
+        self.execution_progress = Some(sift_protocol::ExecutionProgress {
+            phase: sift_protocol::ExecutionPhase::WaitingForFirstRow,
+            elapsed_ms: 0,
+            statement_ordinal: None,
+            statement_count: None,
+            result_sets_seen: 0,
+            rows_received: 0,
+            bytes_received: 0,
+            native: None,
+        });
         self.rendered_rows.clear();
         self.display_rows = Arc::new(Vec::new());
         self.messages.clear();
@@ -2132,7 +2217,7 @@ impl ResultsView {
         });
         StreamUpdate {
             progress,
-            status_label: self.state.status_label(),
+            status_label: self.execution_status_label(),
             completion,
         }
     }
@@ -3802,7 +3887,7 @@ impl ResultsView {
                     .text_color(colors.muted_text)
                     .children(
                         (!Self::is_error_state(&self.state))
-                            .then(|| Badge::new(self.state.status_label())),
+                            .then(|| Badge::new(self.execution_status_label())),
                     )
                     .children((self.tab == ResultTab::Data).then(|| {
                         div()
@@ -4374,7 +4459,7 @@ impl ResultsView {
                 .p_4()
                 .text_center()
                 .text_color(colors.muted_text)
-                .child(self.state.status_label())
+                .child(self.execution_status_label())
                 .into_any_element();
         };
         if self.rendered_columns.is_empty() {
@@ -4386,7 +4471,7 @@ impl ResultsView {
                 .p_4()
                 .text_center()
                 .text_color(colors.muted_text)
-                .child(self.state.status_label())
+                .child(self.execution_status_label())
                 .into_any_element();
         }
         let visible_columns = self.visible_column_indices();
@@ -6661,6 +6746,31 @@ mod tests {
                 panic!("terminal page should complete the result")
             };
             assert!(data.duration_ms.is_some_and(|duration| duration >= 12));
+        });
+    }
+
+    #[gpui::test]
+    fn execution_progress_status_is_phase_and_counter_based(cx: &mut TestAppContext) {
+        let view = cx.new(ResultsView::new);
+        view.update(cx, |view, cx| {
+            view.begin_stream(cx);
+            view.apply_execution_progress(
+                sift_protocol::ExecutionProgress {
+                    phase: sift_protocol::ExecutionPhase::Streaming,
+                    elapsed_ms: 1_250,
+                    statement_ordinal: Some(1),
+                    statement_count: Some(3),
+                    result_sets_seen: 1,
+                    rows_received: 42,
+                    bytes_received: 2_048,
+                    native: None,
+                },
+                cx,
+            );
+            assert_eq!(
+                view.execution_status_label(),
+                "Streaming · statement 2/3 · 42 rows · 2.0 KiB · 1.2 s"
+            );
         });
     }
 

@@ -5606,9 +5606,16 @@ async fn run_streamed_query_inner(
                     terminal = true;
                     Some(sift_protocol::Page::Error { error })
                 }
+                sift_protocol::ExecutionEventV2::Progress { progress, .. } => {
+                    let _ = events.send(ExecutorEvent::ExecutionProgress {
+                        item_id,
+                        execution_id,
+                        progress,
+                    });
+                    None
+                }
                 sift_protocol::ExecutionEventV2::ExecutionStarted { .. }
-                | sift_protocol::ExecutionEventV2::StatementStarted { .. }
-                | sift_protocol::ExecutionEventV2::Progress { .. } => None,
+                | sift_protocol::ExecutionEventV2::StatementStarted { .. } => None,
             };
             let Some(page) = page else { continue };
             let (acknowledge, consumed) = tokio::sync::oneshot::channel();
