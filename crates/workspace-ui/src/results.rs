@@ -10,10 +10,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    actions, anchored, canvas, deferred, div, prelude::*, px, uniform_list, App, ClipboardItem,
-    Context, CursorStyle, Div, DragMoveEvent, Entity, FocusHandle, Focusable, IntoElement,
-    ListHorizontalSizingBehavior, MouseButton, Pixels, Point, ScrollStrategy, ShapedLine,
-    SharedString, Stateful, Subscription, TextAlign, TextRun, UniformListScrollHandle, Window,
+    actions, anchored, canvas, deferred, div, prelude::*, px, rems, uniform_list, App,
+    ClipboardItem, ContentMask, Context, CursorStyle, Div, DragMoveEvent, Entity, FocusHandle,
+    Focusable, IntoElement, ListHorizontalSizingBehavior, MouseButton, Pixels, Point,
+    ScrollStrategy, ShapedLine, SharedString, Stateful, Subscription, TextAlign, TextRun,
+    UniformListScrollHandle, Window,
 };
 use sift_api_types::QueryHistory;
 use sift_protocol::{
@@ -3768,6 +3769,10 @@ impl ResultsView {
     ) -> (ShapedLine, bool) {
         let mut text_style = window.text_style();
         text_style.color = color;
+        // The result grid has compact, fixed-height rows. Shape cell text at
+        // the same size as the surrounding grid chrome so a large inherited
+        // editor font cannot make glyphs bleed into adjacent rows.
+        text_style.font_size = rems(0.75).into();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
         let run = text_style.to_run(cell.paint_text.len());
         let cache_matches = cell
@@ -4995,13 +5000,18 @@ impl ResultsView {
                                                 } else {
                                                     TextAlign::Left
                                                 };
-                                                let _ = line.paint(
-                                                    bounds.origin,
-                                                    bounds.size.height,
-                                                    align,
-                                                    Some(bounds.size.width),
-                                                    window,
-                                                    cx,
+                                                window.with_content_mask(
+                                                    Some(ContentMask { bounds }),
+                                                    |window| {
+                                                        let _ = line.paint(
+                                                            bounds.origin,
+                                                            bounds.size.height,
+                                                            align,
+                                                            Some(bounds.size.width),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
                                                 );
                                             },
                                         )
