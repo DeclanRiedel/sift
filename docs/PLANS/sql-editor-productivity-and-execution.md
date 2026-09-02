@@ -227,9 +227,11 @@ bounded fields, and explicit first-result truncation in legacy projection.
 
 ### 3. Multi-result execution and tabs
 
-- [ ] Normalize PostgreSQL and SQL Server driver streams.
-- [ ] Retain and page each result set independently with bounded spill.
-- [ ] Replace desktop first-result truncation with ordered result tabs and
+- [x] Normalize PostgreSQL and SQL Server driver streams behind explicit v2
+  execution events and add gated live-engine batch fixtures.
+- [x] Retain each result set in a bounded inactive desktop slot while cursor
+  backpressure and existing spill/resume remain the transport bound.
+- [x] Replace desktop first-result truncation with ordered result tabs and
   command/message items.
 
 Gate: both live drivers return two row sets plus a command; cancellation,

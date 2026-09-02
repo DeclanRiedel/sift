@@ -368,6 +368,26 @@ pub struct ResultData {
     pub truncated_extra_results: bool,
 }
 
+#[derive(Debug, Clone)]
+struct StoredResultSet {
+    data: ResultData,
+    rendered_columns: Vec<CachedColumnRender>,
+    rendered_rows: Vec<Vec<CachedCellRender>>,
+    display_rows: Arc<Vec<usize>>,
+    sorts: Vec<(usize, SortDirection)>,
+    column_filters: Vec<String>,
+    column_filter_operators: Vec<sift_protocol::ResultFilterOperator>,
+    column_filter_groups: Vec<usize>,
+    filter_group_logics: Vec<sift_protocol::ResultFilterLogic>,
+    filter_logic: sift_protocol::ResultFilterLogic,
+    column_widths: Vec<f32>,
+    column_order: Vec<usize>,
+    included_columns: Vec<bool>,
+    selected: Option<GridSelection>,
+    window_start: usize,
+    window_held: bool,
+}
+
 /// The distinct outcome states a result surface can be in. Each is a separate,
 /// non-collapsible UI state per the error/trust model.
 #[derive(Debug, Clone)]
@@ -597,12 +617,7 @@ pub(crate) enum ResultPlacement {
 }
 
 impl ResultTab {
-    const ALL: [ResultTab; 4] = [
-        ResultTab::Data,
-        ResultTab::Messages,
-        ResultTab::Explain,
-        ResultTab::History,
-    ];
+    const AUXILIARY: [ResultTab; 3] = [ResultTab::Messages, ResultTab::Explain, ResultTab::History];
 
     fn label(self) -> &'static str {
         match self {
@@ -914,6 +929,10 @@ pub struct ResultsView {
     bottom_extent_custom: bool,
     right_extent_custom: bool,
     stream_result_seen: bool,
+    /// Inactive result sets retain prepared cells but never render or shape
+    /// them. The active set remains in `state` and the ordinary grid fields.
+    stored_result_sets: Vec<Option<StoredResultSet>>,
+    active_result_set: usize,
     /// Absolute index of the first retained row within the whole result, so
     /// row numbers keep describing the result rather than the window.
     window_start: usize,
@@ -1020,6 +1039,8 @@ impl ResultsView {
             bottom_extent_custom: false,
             right_extent_custom: false,
             stream_result_seen: false,
+            stored_result_sets: Vec::new(),
+            active_result_set: 0,
             window_start: 0,
             window_held: false,
             explain: ExplainState::Empty,
@@ -1045,6 +1066,16 @@ impl ResultsView {
 
     pub fn active_tab(&self) -> ResultTab {
         self.tab
+    }
+
+    pub fn result_set_count(&self) -> usize {
+        self.stored_result_sets
+            .len()
+            .max(self.active_result_set.saturating_add(1))
+    }
+
+    pub fn active_result_set(&self) -> usize {
+        self.active_result_set
     }
 
     pub(crate) fn focus_data(&mut self, cx: &mut Context<Self>) {
@@ -1722,6 +1753,8 @@ impl ResultsView {
         };
         self.state = state;
         self.stream_result_seen = false;
+        self.stored_result_sets.clear();
+        self.active_result_set = 0;
         self.window_start = 0;
         self.window_held = false;
         self.selected = None;
@@ -1815,6 +1848,8 @@ impl ResultsView {
         self.messages.clear();
         self.selected_message = None;
         self.stream_result_seen = false;
+        self.stored_result_sets.clear();
+        self.active_result_set = 0;
         self.window_start = 0;
         self.window_held = false;
         cx.notify();
@@ -1831,6 +1866,8 @@ impl ResultsView {
         self.messages.clear();
         self.selected_message = None;
         self.stream_result_seen = false;
+        self.stored_result_sets.clear();
+        self.active_result_set = 0;
         self.window_start = 0;
         self.window_held = false;
         self.selected = None;
@@ -1840,6 +1877,90 @@ impl ResultsView {
         self.staged_undo.clear();
         self.staged_redo.clear();
         cx.notify();
+    }
+
+    fn take_active_result_set(&mut self) -> Option<StoredResultSet> {
+        let state = std::mem::replace(&mut self.state, ResultState::Idle);
+        let data = match state {
+            ResultState::Streaming(data) | ResultState::Ready(data) => data,
+            state => {
+                self.state = state;
+                return None;
+            }
+        };
+        Some(StoredResultSet {
+            data,
+            rendered_columns: std::mem::take(&mut self.rendered_columns),
+            rendered_rows: std::mem::take(&mut self.rendered_rows),
+            display_rows: std::mem::take(&mut self.display_rows),
+            sorts: std::mem::take(&mut self.sorts),
+            column_filters: std::mem::take(&mut self.column_filters),
+            column_filter_operators: std::mem::take(&mut self.column_filter_operators),
+            column_filter_groups: std::mem::take(&mut self.column_filter_groups),
+            filter_group_logics: std::mem::take(&mut self.filter_group_logics),
+            filter_logic: self.filter_logic,
+            column_widths: std::mem::take(&mut self.column_widths),
+            column_order: std::mem::take(&mut self.column_order),
+            included_columns: std::mem::take(&mut self.included_columns),
+            selected: self.selected.take(),
+            window_start: self.window_start,
+            window_held: self.window_held,
+        })
+    }
+
+    fn store_active_result_set(&mut self) {
+        let Some(stored) = self.take_active_result_set() else {
+            return;
+        };
+        if self.stored_result_sets.len() <= self.active_result_set {
+            self.stored_result_sets
+                .resize_with(self.active_result_set + 1, || None);
+        }
+        self.stored_result_sets[self.active_result_set] = Some(stored);
+    }
+
+    fn restore_result_set(&mut self, stored: StoredResultSet) {
+        self.state = ResultState::Ready(stored.data);
+        self.rendered_columns = stored.rendered_columns;
+        self.rendered_rows = stored.rendered_rows;
+        self.display_rows = stored.display_rows;
+        self.sorts = stored.sorts;
+        self.column_filters = stored.column_filters;
+        self.column_filter_operators = stored.column_filter_operators;
+        self.column_filter_groups = stored.column_filter_groups;
+        self.filter_group_logics = stored.filter_group_logics;
+        self.filter_logic = stored.filter_logic;
+        self.column_widths = stored.column_widths;
+        self.column_order = stored.column_order;
+        self.included_columns = stored.included_columns;
+        self.selected = stored.selected;
+        self.window_start = stored.window_start;
+        self.window_held = stored.window_held;
+    }
+
+    fn select_result_set(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index == self.active_result_set
+            || index >= self.result_set_count()
+            || matches!(self.state, ResultState::Streaming(_))
+        {
+            return;
+        }
+        self.store_active_result_set();
+        let Some(stored) = self
+            .stored_result_sets
+            .get_mut(index)
+            .and_then(Option::take)
+        else {
+            return;
+        };
+        self.active_result_set = index;
+        self.restore_result_set(stored);
+        self.tab = ResultTab::Data;
+        self.messages = Self::messages_for_state(&self.state);
+        self.selected_message = None;
+        self.column_filter_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.rebuild_display_rows(cx);
     }
 
     /// Consume one server page.
@@ -1863,47 +1984,61 @@ impl ResultsView {
         } = prepared.into();
         match page {
             Page::NextResult { columns } => {
+                if self.stream_result_seen {
+                    self.store_active_result_set();
+                    self.active_result_set = self.active_result_set.saturating_add(1);
+                    self.state = ResultState::Streaming(ResultData::default());
+                    self.display_rows = Arc::new(Vec::new());
+                    self.sorts.clear();
+                    self.column_filters.clear();
+                    self.column_filter_operators.clear();
+                    self.column_filter_groups.clear();
+                    self.filter_group_logics = vec![ResultFilterLogic::All];
+                    self.filter_logic = ResultFilterLogic::All;
+                    self.column_order.clear();
+                    self.included_columns.clear();
+                    self.selected = None;
+                    self.window_start = 0;
+                    self.window_held = false;
+                } else {
+                    self.stream_result_seen = true;
+                }
                 let ResultState::Streaming(data) = &mut self.state else {
                     unreachable!("stream initialized above")
                 };
-                if self.stream_result_seen {
-                    data.truncated_extra_results = true;
-                } else {
-                    self.stream_result_seen = true;
-                    data.columns = columns.iter().map(ResultColumn::from_metadata).collect();
-                    let rendered_columns: Vec<CachedColumnRender> = columns
-                        .iter()
-                        .map(|column| CachedColumnRender {
-                            name: column.name.clone().into(),
-                            type_label: ResultColumn::from_metadata(column).type_label.into(),
-                            nullable: matches!(column.nullable, Nullability::Nullable),
-                        })
-                        .collect();
-                    let preserve_field_projection = rendered_columns.len()
-                        == self.rendered_columns.len()
-                        && rendered_columns.iter().zip(&self.rendered_columns).all(
-                            |(next, previous)| {
-                                next.name == previous.name
-                                    && next.type_label == previous.type_label
-                                    && next.nullable == previous.nullable
-                            },
-                        );
-                    self.rendered_columns = rendered_columns;
-                    self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
-                    if !preserve_field_projection {
-                        self.column_order = (0..self.rendered_columns.len()).collect();
-                        self.included_columns = vec![true; self.rendered_columns.len()];
-                    }
-                    self.column_filters = vec![String::new(); self.rendered_columns.len()];
-                    self.column_filter_operators = vec![
-                        sift_protocol::ResultFilterOperator::Contains;
-                        self.rendered_columns.len()
-                    ];
-                    self.column_filter_groups = vec![0; self.rendered_columns.len()];
-                    self.filter_group_logics = vec![ResultFilterLogic::All];
-                    self.filter_logic = ResultFilterLogic::All;
-                    self.grid_transform_column = None;
+                data.columns = columns.iter().map(ResultColumn::from_metadata).collect();
+                let rendered_columns: Vec<CachedColumnRender> = columns
+                    .iter()
+                    .map(|column| CachedColumnRender {
+                        name: column.name.clone().into(),
+                        type_label: ResultColumn::from_metadata(column).type_label.into(),
+                        nullable: matches!(column.nullable, Nullability::Nullable),
+                    })
+                    .collect();
+                let preserve_field_projection = rendered_columns.len()
+                    == self.rendered_columns.len()
+                    && rendered_columns.iter().zip(&self.rendered_columns).all(
+                        |(next, previous)| {
+                            next.name == previous.name
+                                && next.type_label == previous.type_label
+                                && next.nullable == previous.nullable
+                        },
+                    );
+                self.rendered_columns = rendered_columns;
+                self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
+                if !preserve_field_projection {
+                    self.column_order = (0..self.rendered_columns.len()).collect();
+                    self.included_columns = vec![true; self.rendered_columns.len()];
                 }
+                self.column_filters = vec![String::new(); self.rendered_columns.len()];
+                self.column_filter_operators = vec![
+                    sift_protocol::ResultFilterOperator::Contains;
+                    self.rendered_columns.len()
+                ];
+                self.column_filter_groups = vec![0; self.rendered_columns.len()];
+                self.filter_group_logics = vec![ResultFilterLogic::All];
+                self.filter_logic = ResultFilterLogic::All;
+                self.grid_transform_column = None;
                 cx.notify();
                 StreamProgress::Consumed
             }
@@ -1918,10 +2053,6 @@ impl ResultsView {
                 let ResultState::Streaming(data) = &mut self.state else {
                     unreachable!("stream initialized above")
                 };
-                if data.truncated_extra_results {
-                    cx.notify();
-                    return StreamProgress::Consumed;
-                }
                 if data.rows.len() + rows.len() > MAX_RETAINED_ROWS && !data.rows.is_empty() {
                     self.window_held = true;
                     data.has_more = true;
@@ -2095,12 +2226,22 @@ impl ResultsView {
     }
 
     pub(crate) fn select_relative_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let current = ResultTab::ALL
-            .iter()
-            .position(|tab| *tab == self.tab)
-            .unwrap_or(0);
-        let next = (current as isize + delta).rem_euclid(ResultTab::ALL.len() as isize) as usize;
-        self.select_tab(ResultTab::ALL[next], cx);
+        let result_count = self.result_set_count();
+        let total = result_count + ResultTab::AUXILIARY.len();
+        let current = match self.tab {
+            ResultTab::Data => self.active_result_set,
+            ResultTab::Messages => result_count,
+            ResultTab::Explain => result_count + 1,
+            ResultTab::History => result_count + 2,
+        };
+        let next = (current as isize + delta).rem_euclid(total as isize) as usize;
+        if next < result_count {
+            self.select_result_set(next, cx);
+            self.tab = ResultTab::Data;
+            cx.notify();
+        } else {
+            self.select_tab(ResultTab::AUXILIARY[next - result_count], cx);
+        }
     }
 
     fn request_explain(&mut self, analyze: bool, cx: &mut Context<Self>) {
@@ -3578,6 +3719,34 @@ impl ResultsView {
             .child(tab.label())
     }
 
+    fn result_set_tab_row(index: usize, selected: bool, colors: ThemeColors) -> Stateful<Div> {
+        div()
+            .id(("result-set-tab", index))
+            .debug_selector(move || format!("result-set-tab-{}", index + 1))
+            .flex_none()
+            .flex()
+            .items_center()
+            .h_full()
+            .px_2()
+            .relative()
+            .text_sm()
+            .when(selected, |el| el.text_color(colors.text))
+            .when(selected, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left_1()
+                        .right_1()
+                        .bottom_0()
+                        .h(px(1.))
+                        .bg(colors.accent),
+                )
+            })
+            .when(!selected, |el| el.text_color(colors.muted_text))
+            .hover(|el| el.text_color(colors.text))
+            .child(format!("Results {}", index + 1))
+    }
+
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
         let tab_height = cx.theme().metrics.tab_height;
@@ -3602,7 +3771,17 @@ impl ResultsView {
                             .flex()
                             .h_full()
                             .overflow_x_scroll()
-                            .children(ResultTab::ALL.into_iter().map(|tab| {
+                            .children((0..self.result_set_count()).map(|index| {
+                                Self::result_set_tab_row(
+                                    index,
+                                    self.tab == ResultTab::Data && index == self.active_result_set,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| view.select_result_set(index, cx),
+                                ))
+                            }))
+                            .children(ResultTab::AUXILIARY.into_iter().map(|tab| {
                                 Self::tab_row(tab, tab == self.tab, colors).on_click(
                                     cx.listener(move |view, _, _, cx| view.select_tab(tab, cx)),
                                 )
@@ -6482,6 +6661,69 @@ mod tests {
                 panic!("terminal page should complete the result")
             };
             assert!(data.duration_ms.is_some_and(|duration| duration >= 12));
+        });
+    }
+
+    #[gpui::test]
+    fn streamed_results_keep_each_result_set_navigable(cx: &mut TestAppContext) {
+        let view = cx.new(ResultsView::new);
+        view.update(cx, |view, cx| {
+            view.begin_stream(cx);
+            view.apply_stream_page(
+                Page::NextResult {
+                    columns: vec![column("first", PrimitiveType::Int32, Nullability::Unknown)],
+                },
+                cx,
+            );
+            view.apply_stream_page(
+                Page::Rows {
+                    rows: vec![Row::new(vec![Value::Int32(1)])],
+                },
+                cx,
+            );
+            view.apply_stream_page(
+                Page::NextResult {
+                    columns: vec![column("second", PrimitiveType::Text, Nullability::Unknown)],
+                },
+                cx,
+            );
+            view.apply_stream_page(
+                Page::Rows {
+                    rows: vec![Row::new(vec![Value::Text("two".into())])],
+                },
+                cx,
+            );
+            assert_eq!(
+                view.apply_stream_page(
+                    Page::Done {
+                        affected_rows: None,
+                        warnings: Vec::new(),
+                    },
+                    cx,
+                ),
+                StreamProgress::Terminal
+            );
+
+            assert_eq!(view.result_set_count(), 2);
+            assert_eq!(view.active_result_set(), 1);
+            let ResultState::Ready(second) = view.state() else {
+                panic!("second result should be active")
+            };
+            assert_eq!(second.columns[0].name, "second");
+            assert_eq!(second.rows[0].values[0], Value::Text("two".into()));
+
+            view.select_result_set(0, cx);
+            let ResultState::Ready(first) = view.state() else {
+                panic!("first result should be restored")
+            };
+            assert_eq!(first.columns[0].name, "first");
+            assert_eq!(first.rows[0].values[0], Value::Int32(1));
+
+            view.select_result_set(1, cx);
+            let ResultState::Ready(second) = view.state() else {
+                panic!("second result should be restored")
+            };
+            assert_eq!(second.columns[0].name, "second");
         });
     }
 

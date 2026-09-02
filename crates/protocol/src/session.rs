@@ -311,6 +311,11 @@ pub enum WsClientMessage {
         request_id: String,
         connection: ConnectionId,
         sql: String,
+        /// Select explicit execution events instead of protocol-v1 pages.
+        /// The only supported non-legacy value is
+        /// [`crate::EXECUTION_EVENT_VERSION`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_version: Option<u16>,
         #[serde(default)]
         params: Vec<Value>,
         /// Optional transaction to run under. Mirrors HTTP execute; omitted
@@ -355,6 +360,11 @@ pub enum WsServerMessage {
         cursor_id: CursorId,
         seq: u64,
         page: Page,
+    },
+    ExecutionEvents {
+        cursor_id: CursorId,
+        seq: u64,
+        events: Vec<crate::ExecutionEventV2>,
     },
     Notification {
         request_id: String,

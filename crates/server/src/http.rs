@@ -4311,7 +4311,7 @@ async fn handshake(
             RuntimeMode::Daemon => HandshakeRuntimeMode::Daemon,
             RuntimeMode::Container => HandshakeRuntimeMode::Container,
         },
-        capabilities: vec!["protocol_handshake".into()],
+        capabilities: vec!["protocol_handshake".into(), "execution.events@2".into()],
     }))
 }
 
@@ -18895,11 +18895,27 @@ async fn handle_ws(
                         request_id,
                         connection,
                         sql,
+                        event_version,
                         params,
                         tx,
                         transform,
                         source,
                     } => {
+                        if event_version.is_some_and(|version| {
+                            version != sift_protocol::EXECUTION_EVENT_VERSION
+                        }) {
+                            send_json(
+                                &mut sender,
+                                &WsServerMessage::Error {
+                                    request_id: Some(request_id),
+                                    code: Some(sift_protocol::Code::UnsupportedResultShape),
+                                    retry_after_ms: None,
+                                    message: "unsupported execution event version".into(),
+                                },
+                            )
+                            .await?;
+                            continue;
+                        }
                         if let Err(retry_after_secs) = ws_rate_admit(
                             &state,
                             auth.as_ref(),
@@ -19040,6 +19056,7 @@ async fn handle_ws(
                                 session_id,
                                 connection,
                                 cursor_id: stream.cursor_id,
+                                execution_events: event_version.is_some(),
                                 tx_id: tx.as_ref().map(|tx| tx.tx_id),
                                 rate_limiter: &state.auth.rate_limiter,
                                 auth: auth.as_ref(),
@@ -19283,6 +19300,7 @@ async fn stream_pages_with_ack(
         session_id,
         connection,
         cursor_id,
+        execution_events,
         rate_limiter,
         auth,
         shutdown,
@@ -19290,11 +19308,22 @@ async fn stream_pages_with_ack(
     } = context;
     let mut seq = 0_u64;
     let mut outcome = StreamTerminal::default();
+    let mut normalizer = execution_events.then(|| {
+        crate::execution_events::ExecutionEventNormalizer::new(sift_protocol::ExecutionId(
+            cursor_id.0,
+        ))
+    });
     while let Some(page) = rows.recv().await {
         sessions.cursor_page_received(cursor_id);
-        let page_bytes = serde_json::to_vec(&page)
-            .map_err(|error| ApiError::Internal(error.to_string()))?
-            .len();
+        let normalized = normalizer
+            .as_mut()
+            .map(|normalizer| normalizer.events_for_page(page.clone()));
+        let page_bytes = match &normalized {
+            Some(events) => serde_json::to_vec(events),
+            None => serde_json::to_vec(&page),
+        }
+        .map_err(|error| ApiError::Internal(error.to_string()))?
+        .len();
         if let Some(auth) = auth {
             let tenant = sessions
                 .managed_tenant_for_session(session_id)
@@ -19364,15 +19393,30 @@ async fn stream_pages_with_ack(
                 return Err(error);
             }
         };
-        send_json(
-            sender,
-            &WsServerMessage::Page {
-                cursor_id,
-                seq,
-                page,
-            },
-        )
-        .await?;
+        match normalized {
+            Some(events) => {
+                send_json(
+                    sender,
+                    &WsServerMessage::ExecutionEvents {
+                        cursor_id,
+                        seq,
+                        events,
+                    },
+                )
+                .await?;
+            }
+            None => {
+                send_json(
+                    sender,
+                    &WsServerMessage::Page {
+                        cursor_id,
+                        seq,
+                        page,
+                    },
+                )
+                .await?;
+            }
+        }
         if terminal {
             // Terminal page delivered: cursor is done. Drop the
             // registry entry so the per-session slot frees up.
@@ -19402,6 +19446,7 @@ struct WsPageContext<'a> {
     session_id: sift_protocol::SessionId,
     connection: sift_protocol::ConnectionId,
     cursor_id: sift_protocol::CursorId,
+    execution_events: bool,
     tx_id: Option<sift_protocol::TxId>,
     rate_limiter: &'a crate::rate_limit::RateLimiter,
     auth: Option<&'a AuthContext>,

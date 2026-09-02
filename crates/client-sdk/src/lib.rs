@@ -539,6 +539,13 @@ pub struct QueryStream {
     cursor_id: CursorId,
 }
 
+/// Explicit execution-v2 events carried over one acknowledged server cursor.
+pub struct QueryEventStream {
+    socket: SessionWebSocket,
+    connection: ConnectionId,
+    cursor_id: CursorId,
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct SpilledCursorPages {
     pub cursor_id: CursorId,
@@ -558,6 +565,44 @@ impl QueryStream {
                 seq,
                 page,
             } if cursor_id == self.cursor_id => Ok((seq, page)),
+            WsServerMessage::Error { message, .. } => Err(Error::Protocol(message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected websocket message: {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn acknowledge(&mut self, seq: u64) -> Result<()> {
+        self.socket
+            .send(WsClientMessage::Ack {
+                cursor_id: self.cursor_id,
+                seq,
+            })
+            .await
+    }
+
+    pub async fn cancel(&mut self) -> Result<()> {
+        self.socket
+            .send(WsClientMessage::Cancel {
+                connection: self.connection,
+                cursor_id: self.cursor_id,
+            })
+            .await
+    }
+}
+
+impl QueryEventStream {
+    pub const fn cursor_id(&self) -> CursorId {
+        self.cursor_id
+    }
+
+    pub async fn next_events(&mut self) -> Result<(u64, Vec<sift_protocol::ExecutionEventV2>)> {
+        match self.socket.next().await? {
+            WsServerMessage::ExecutionEvents {
+                cursor_id,
+                seq,
+                events,
+            } if cursor_id == self.cursor_id => Ok((seq, events)),
             WsServerMessage::Error { message, .. } => Err(Error::Protocol(message)),
             other => Err(Error::Protocol(format!(
                 "unexpected websocket message: {other:?}"
@@ -4446,6 +4491,7 @@ impl Client {
                 request_id: request_id.clone(),
                 connection,
                 sql: sql.into(),
+                event_version: None,
                 params,
                 tx,
                 transform,
@@ -4466,6 +4512,53 @@ impl Client {
             }
         };
         Ok(QueryStream {
+            socket,
+            connection,
+            cursor_id,
+        })
+    }
+
+    /// Start an execution using ADR-053 event lifecycle. Each returned vector
+    /// corresponds to one driver page and must be acknowledged as a unit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_query_event_stream_versioned(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        sql: impl Into<String>,
+        params: Vec<Value>,
+        tx: Option<TxHandleRef>,
+        transform: Option<sift_protocol::ResultTransform>,
+        source: Option<sift_protocol::VersionedExecutionContext>,
+    ) -> Result<QueryEventStream> {
+        let mut socket = self.connect_session_websocket(session).await?;
+        let request_id = "sdk-stream-execution-v2".to_string();
+        socket
+            .send(WsClientMessage::Execute {
+                request_id: request_id.clone(),
+                connection,
+                sql: sql.into(),
+                event_version: Some(sift_protocol::EXECUTION_EVENT_VERSION),
+                params,
+                tx,
+                transform,
+                source: source.map(Box::new),
+            })
+            .await?;
+
+        let first = socket.next().await?;
+        let cursor_id = match first {
+            WsServerMessage::Started {
+                request_id: got,
+                cursor_id,
+            } if got == request_id => cursor_id,
+            other => {
+                return Err(Error::Protocol(format!(
+                    "expected started message, got {other:?}"
+                )));
+            }
+        };
+        Ok(QueryEventStream {
             socket,
             connection,
             cursor_id,

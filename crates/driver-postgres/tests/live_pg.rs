@@ -132,6 +132,40 @@ async fn open_and_ping() {
 }
 
 #[tokio::test]
+async fn execute_batch_streams_each_result_set() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    let pages = drain(
+        driver
+            .execute(
+                conn.clone(),
+                sift_protocol::ExecuteRequest::new(
+                    "SELECT 1 AS first_value; SELECT 'two' AS second_value",
+                ),
+            )
+            .await
+            .expect("execute batch"),
+    )
+    .await;
+    let columns: Vec<_> = pages
+        .iter()
+        .filter_map(|page| match page {
+            Page::NextResult { columns } => Some(columns[0].name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(columns, ["first_value", "second_value"]);
+    assert_eq!(
+        pages
+            .iter()
+            .filter(|page| matches!(page, Page::Done { .. }))
+            .count(),
+        1
+    );
+    driver.close(conn).await.unwrap();
+}
+
+#[tokio::test]
 async fn execute_select_decodes_types() {
     let driver = PgDriver::new();
     let conn = driver.open(&spec()).await.unwrap();

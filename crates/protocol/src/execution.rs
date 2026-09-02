@@ -26,6 +26,7 @@ impl std::fmt::Display for ExecutionId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
+/// Opaque result-set ordinal scoped to one [`ExecutionId`].
 pub struct ResultSetId(pub u64);
 
 impl std::fmt::Display for ResultSetId {

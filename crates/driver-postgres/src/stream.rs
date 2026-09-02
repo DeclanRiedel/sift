@@ -128,7 +128,8 @@ async fn run_query_inner(job: QueryJob) {
     // utility) goes through `simple_query`, which gives us the affected-row
     // count via `CommandComplete` at the cost of materialising text-format
     // rows — acceptable because these statements rarely return large rowsets.
-    if !job.params.is_empty() || is_row_producing(&job.sql) {
+    if !job.params.is_empty() || (is_row_producing(&job.sql) && !has_multiple_statements(&job.sql))
+    {
         run_streaming(job).await;
     } else {
         run_simple(job).await;
@@ -246,7 +247,7 @@ async fn run_simple(job: QueryJob) {
         params: _,
     } = job;
 
-    let messages = match conn.simple_query(&sql).await {
+    let messages = match conn.simple_query_raw(&sql).await {
         Ok(m) => m,
         Err(e) => {
             let err = pg_err(e);
@@ -260,8 +261,34 @@ async fn run_simple(job: QueryJob) {
     let mut columns_sent = false;
     let mut affected_rows: Option<u64> = None;
 
-    for msg in messages {
+    tokio::pin!(messages);
+    while let Some(message) = messages.next().await {
+        let msg = match message {
+            Ok(message) => message,
+            Err(error) => {
+                let _ = page_tx
+                    .send(Page::Error {
+                        error: pg_err(error),
+                    })
+                    .await;
+                finish(&inner, conn_id, slot_kind, conn, cursor_id_num).await;
+                return;
+            }
+        };
         match msg {
+            SimpleQueryMessage::RowDescription(columns) => {
+                let columns = columns
+                    .iter()
+                    .map(|column| {
+                        sift_protocol::ColumnMetadata::new(
+                            column.name(),
+                            sift_protocol::TypeRef::Primitive(sift_protocol::PrimitiveType::Text),
+                        )
+                    })
+                    .collect();
+                let _ = page_tx.send(Page::NextResult { columns }).await;
+                columns_sent = true;
+            }
             SimpleQueryMessage::Row(row) => {
                 if !columns_sent {
                     let cols = crate::decode::simple_query_columns(&row);
@@ -284,7 +311,11 @@ async fn run_simple(job: QueryJob) {
                     .await;
             }
             SimpleQueryMessage::CommandComplete(n) => {
-                affected_rows = Some(n);
+                if columns_sent {
+                    columns_sent = false;
+                } else {
+                    affected_rows = Some(affected_rows.unwrap_or(0).saturating_add(n));
+                }
             }
             _ => {}
         }
@@ -483,6 +514,142 @@ fn is_row_producing(sql: &str) -> bool {
     )
 }
 
+/// Detect more than one PostgreSQL statement without treating semicolons in
+/// strings, quoted identifiers, comments, or dollar-quoted bodies as batch
+/// boundaries. Drivers need this only to choose simple versus extended wire
+/// protocol; semantic statement identity remains server-owned.
+fn has_multiple_statements(sql: &str) -> bool {
+    #[derive(Clone, Copy)]
+    enum State<'a> {
+        Normal,
+        SingleQuoted,
+        DoubleQuoted,
+        LineComment,
+        BlockComment(u32),
+        DollarQuoted(&'a [u8]),
+    }
+
+    let bytes = sql.as_bytes();
+    let mut state = State::Normal;
+    let mut index = 0;
+    let mut statements = 0_u8;
+    let mut has_content = false;
+    while index < bytes.len() {
+        match state {
+            State::Normal => match bytes[index] {
+                b'\'' => {
+                    state = State::SingleQuoted;
+                    has_content = true;
+                    index += 1;
+                }
+                b'"' => {
+                    state = State::DoubleQuoted;
+                    has_content = true;
+                    index += 1;
+                }
+                b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                    state = State::LineComment;
+                    index += 2;
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    state = State::BlockComment(1);
+                    index += 2;
+                }
+                b'$' => {
+                    let tag_end = bytes[index + 1..]
+                        .iter()
+                        .position(|byte| *byte == b'$')
+                        .map(|offset| index + 1 + offset);
+                    if let Some(tag_end) = tag_end.filter(|tag_end| {
+                        bytes[index + 1..*tag_end]
+                            .iter()
+                            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                    }) {
+                        let delimiter = &bytes[index..=tag_end];
+                        state = State::DollarQuoted(delimiter);
+                        has_content = true;
+                        index = tag_end + 1;
+                    } else {
+                        has_content = true;
+                        index += 1;
+                    }
+                }
+                b';' => {
+                    if has_content {
+                        statements = statements.saturating_add(1);
+                        has_content = false;
+                    }
+                    index += 1;
+                }
+                byte if byte.is_ascii_whitespace() => index += 1,
+                _ => {
+                    has_content = true;
+                    index += 1;
+                }
+            },
+            State::SingleQuoted => {
+                if bytes[index] == b'\\' {
+                    index = (index + 2).min(bytes.len());
+                } else if bytes[index] == b'\'' {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 2;
+                    } else {
+                        state = State::Normal;
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            State::DoubleQuoted => {
+                if bytes[index] == b'"' {
+                    if bytes.get(index + 1) == Some(&b'"') {
+                        index += 2;
+                    } else {
+                        state = State::Normal;
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            State::LineComment => {
+                if bytes[index] == b'\n' {
+                    state = State::Normal;
+                }
+                index += 1;
+            }
+            State::BlockComment(depth) => {
+                if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                    state = State::BlockComment(depth.saturating_add(1));
+                    index += 2;
+                } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    state = if depth == 1 {
+                        State::Normal
+                    } else {
+                        State::BlockComment(depth - 1)
+                    };
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            State::DollarQuoted(delimiter) => {
+                if bytes[index..].starts_with(delimiter) {
+                    state = State::Normal;
+                    index += delimiter.len();
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        if statements > 0 && has_content && matches!(state, State::Normal) {
+            return true;
+        }
+    }
+    statements.saturating_add(u8::from(has_content)) > 1
+}
+
 async fn finish(
     inner: &Arc<PgDriverInner>,
     conn_id: u64,
@@ -557,6 +724,18 @@ mod tests {
         ));
         assert_eq!(&bytes[..], b"10.20.0.1");
         assert!(matches!(params[0].encode_format(&Type::INET), Format::Text));
+    }
+
+    #[test]
+    fn batch_detection_ignores_semicolons_inside_postgres_trivia() {
+        assert!(!has_multiple_statements("SELECT ';'"));
+        assert!(!has_multiple_statements("SELECT $$a;b$$;"));
+        assert!(!has_multiple_statements("SELECT 1; -- trailing ;\n"));
+        assert!(!has_multiple_statements("SELECT /* nested /* ; */ */ 1"));
+        assert!(has_multiple_statements("SELECT 1; SELECT 2"));
+        assert!(has_multiple_statements(
+            "CREATE FUNCTION f() RETURNS void AS $$ BEGIN NULL; END $$ LANGUAGE plpgsql; SELECT 1"
+        ));
     }
 
     #[test]

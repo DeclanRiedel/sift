@@ -21,6 +21,7 @@ pub mod document_actor;
 pub mod document_registry;
 pub mod edit;
 pub mod error;
+pub mod execution_events;
 pub mod export;
 pub mod extension_dispatch;
 pub mod extension_runtime;

@@ -336,6 +336,10 @@ async fn handshake_selects_protocol_and_identifies_server_generation() {
     );
     assert_eq!(body.instance_id, expected_instance);
     assert_eq!(body.daemon_generation, expected_generation);
+    assert!(body
+        .capabilities
+        .iter()
+        .any(|capability| capability == "execution.events@2"));
 }
 
 #[tokio::test]
@@ -1145,6 +1149,7 @@ async fn websocket_mid_stream_cancel_stops_paging() {
             request_id: "req".into(),
             connection: conn.id,
             sql: "SELECT * FROM big".into(),
+            event_version: None,
             params: Vec::new(),
             tx: None,
             transform: None,
@@ -1206,6 +1211,100 @@ async fn websocket_mid_stream_cancel_stops_paging() {
 }
 
 #[tokio::test]
+async fn websocket_execution_v2_keeps_multiple_result_boundaries() {
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .execute_ok(vec![
+            Page::NextResult {
+                columns: vec![ColumnMetadata::new(
+                    "first",
+                    TypeRef::Primitive(PrimitiveType::Int32),
+                )],
+            },
+            Page::Rows {
+                rows: vec![Row::new(vec![Value::Int32(1)])],
+            },
+            Page::NextResult {
+                columns: vec![ColumnMetadata::new(
+                    "second",
+                    TypeRef::Primitive(PrimitiveType::Text),
+                )],
+            },
+            Page::Rows {
+                rows: vec![Row::new(vec![Value::Text("two".into())])],
+            },
+            Page::Done {
+                affected_rows: None,
+                warnings: Vec::new(),
+            },
+        ])
+        .build();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_driver(driver)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let session = client
+        .open_session(Some("sdk-execution-v2".into()))
+        .await
+        .unwrap();
+    let connection = client
+        .open_connection(
+            session.id,
+            sift_protocol::OpenConnectionRequest {
+                provider_id: Engine::Postgres.provider_id(),
+                spec: pg_spec(),
+            },
+        )
+        .await
+        .unwrap();
+    let mut stream = client
+        .start_query_event_stream_versioned(
+            session.id,
+            connection.id,
+            "SELECT 1; SELECT 'two'",
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut started = 0;
+    let mut result_sets = 0;
+    let mut completed = false;
+    while !completed {
+        let (sequence, events) = stream.next_events().await.unwrap();
+        for event in &events {
+            match event {
+                sift_protocol::ExecutionEventV2::ExecutionStarted { .. } => started += 1,
+                sift_protocol::ExecutionEventV2::ResultSetStarted { .. } => result_sets += 1,
+                sift_protocol::ExecutionEventV2::ExecutionCompleted { summary, .. } => {
+                    completed = true;
+                    assert_eq!(summary.result_set_count, 2);
+                    assert_eq!(summary.rows_received, 2);
+                }
+                _ => {}
+            }
+        }
+        if !completed {
+            stream.acknowledge(sequence).await.unwrap();
+        }
+    }
+    assert_eq!(started, 1);
+    assert_eq!(result_sets, 2);
+    server.abort();
+}
+
+#[tokio::test]
 async fn websocket_execute_requires_active_tx_ref() {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -1244,6 +1343,7 @@ async fn websocket_execute_requires_active_tx_ref() {
             request_id: "no-tx".into(),
             connection: conn.id,
             sql: "SELECT id, name FROM users".into(),
+            event_version: None,
             params: Vec::new(),
             tx: None,
             transform: None,

@@ -5493,7 +5493,7 @@ async fn run_streamed_query_inner(
         source,
     } = run;
     let started = tokio::select! {
-        stream = client.start_query_stream_versioned(
+        stream = client.start_query_event_stream_versioned(
             session,
             connection,
             sql,
@@ -5539,7 +5539,7 @@ async fn run_streamed_query_inner(
 
     loop {
         let next = tokio::select! {
-            page = stream.next_page() => page,
+            page = stream.next_events() => page,
             control = controls.recv() => {
                 if matches!(control, Some(QueryControl::Cancel)) {
                     let _ = stream.cancel().await;
@@ -5552,54 +5552,107 @@ async fn run_streamed_query_inner(
                 return;
             }
         };
-        let (seq, page) = match next {
+        let (seq, execution_events) = match next {
             Ok(page) => page,
             Err(error) => {
                 send_execution_error(item_id, execution_id, error, &events);
                 return;
             }
         };
-        if matches!(
-            &page,
-            sift_protocol::Page::Error { error }
-                if error.code == sift_protocol::Code::CursorEvicted
-                    && error.resume_url.is_some()
-        ) {
-            resume_spilled_query(
-                &client,
-                cursor_id,
-                item_id,
-                execution_id,
-                &mut controls,
-                &events,
-            )
-            .await;
-            return;
-        }
-        let terminal = matches!(
-            page,
-            sift_protocol::Page::Done { .. } | sift_protocol::Page::Error { .. }
-        );
-        let (acknowledge, consumed) = tokio::sync::oneshot::channel();
-        if events
-            .send(ExecutorEvent::ExecutionPage {
-                item_id,
-                execution_id,
-                cursor_id,
-                page: sift_workspace_ui::results::PreparedResultPage::new(page),
-                acknowledge,
-            })
-            .is_err()
-        {
-            let _ = stream.cancel().await;
-            return;
+        let mut terminal = false;
+        let mut batch_warnings = Vec::new();
+        for event in execution_events {
+            let page = match event {
+                sift_protocol::ExecutionEventV2::ResultSetStarted { columns, .. } => {
+                    Some(sift_protocol::Page::NextResult { columns })
+                }
+                sift_protocol::ExecutionEventV2::Rows { rows, .. } => {
+                    Some(sift_protocol::Page::Rows { rows })
+                }
+                sift_protocol::ExecutionEventV2::ResultSetCompleted { summary, .. } => {
+                    batch_warnings.extend(summary.warnings);
+                    None
+                }
+                sift_protocol::ExecutionEventV2::CommandCompleted { summary, .. } => {
+                    batch_warnings.extend(summary.warnings);
+                    None
+                }
+                sift_protocol::ExecutionEventV2::Notice { message, .. } => {
+                    batch_warnings.push(sift_protocol::DriverWarning::new(message));
+                    None
+                }
+                sift_protocol::ExecutionEventV2::ExecutionCompleted { summary, .. } => {
+                    terminal = true;
+                    Some(sift_protocol::Page::Done {
+                        affected_rows: summary.affected_rows,
+                        warnings: std::mem::take(&mut batch_warnings),
+                    })
+                }
+                sift_protocol::ExecutionEventV2::Error { error, .. } => {
+                    if error.code == sift_protocol::Code::CursorEvicted
+                        && error.resume_url.is_some()
+                    {
+                        resume_spilled_query(
+                            &client,
+                            cursor_id,
+                            item_id,
+                            execution_id,
+                            &mut controls,
+                            &events,
+                        )
+                        .await;
+                        return;
+                    }
+                    terminal = true;
+                    Some(sift_protocol::Page::Error { error })
+                }
+                sift_protocol::ExecutionEventV2::ExecutionStarted { .. }
+                | sift_protocol::ExecutionEventV2::StatementStarted { .. }
+                | sift_protocol::ExecutionEventV2::Progress { .. } => None,
+            };
+            let Some(page) = page else { continue };
+            let (acknowledge, consumed) = tokio::sync::oneshot::channel();
+            if events
+                .send(ExecutorEvent::ExecutionPage {
+                    item_id,
+                    execution_id,
+                    cursor_id,
+                    page: sift_workspace_ui::results::PreparedResultPage::new(page),
+                    acknowledge,
+                })
+                .is_err()
+            {
+                let _ = stream.cancel().await;
+                return;
+            }
+            if terminal {
+                return;
+            }
+            let consumed = tokio::select! {
+                consumed = consumed => consumed.is_ok(),
+                control = controls.recv() => {
+                    if matches!(control, Some(QueryControl::Cancel)) {
+                        let _ = stream.cancel().await;
+                        let _ = events.send(ExecutorEvent::Execution {
+                            item_id,
+                            execution_id,
+                            state: ResultState::Cancelled,
+                        });
+                    }
+                    return;
+                }
+            };
+            if !consumed {
+                let _ = stream.cancel().await;
+                return;
+            }
         }
         if terminal {
             return;
         }
         tokio::select! {
-            acknowledged = consumed => {
-                if acknowledged.is_err() || stream.acknowledge(seq).await.is_err() {
+            acknowledged = stream.acknowledge(seq) => {
+                if acknowledged.is_err() {
                     let _ = stream.cancel().await;
                     return;
                 }
