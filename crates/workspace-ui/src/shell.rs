@@ -8925,6 +8925,82 @@ impl WorkspaceSession {
     }
 }
 
+fn merge_sql_snippet_completions(
+    snippet_index: &sift_snippets::SnippetIndex,
+    prefix: &str,
+    dialect: &sift_protocol::DialectId,
+    context: &sift_protocol::completion::CompletionContext,
+    mut candidates: Vec<sift_protocol::completion::CompletionCandidate>,
+) -> Vec<sift_protocol::completion::CompletionCandidate> {
+    let snippets_belong_here = match context {
+        sift_protocol::completion::CompletionContext::Statement => true,
+        sift_protocol::completion::CompletionContext::ExpectingTable => !prefix.is_empty(),
+        sift_protocol::completion::CompletionContext::ExpectingColumn { .. }
+        | sift_protocol::completion::CompletionContext::ExpectingObjectInSchema { .. }
+        | sift_protocol::completion::CompletionContext::Unknown => false,
+    };
+    if snippets_belong_here {
+        candidates.extend(
+            snippet_index
+                .matching(prefix, dialect, 20)
+                .into_iter()
+                .enumerate()
+                .map(
+                    |(index, snippet)| sift_protocol::completion::CompletionCandidate {
+                        label: snippet.trigger.clone().into(),
+                        insert: snippet.body.clone().into(),
+                        kind: sift_protocol::completion::CompletionKind::Snippet,
+                        detail: Some(format!("{} · {:?}", snippet.title, snippet.scope)),
+                        qualified_name: None,
+                        score: 1_200 - i32::try_from(index).unwrap_or(1_200),
+                    },
+                ),
+        );
+    }
+    candidates.sort_by(|left, right| {
+        shell_completion_priority(context, left.kind)
+            .cmp(&shell_completion_priority(context, right.kind))
+            .then_with(|| right.score.cmp(&left.score))
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    candidates
+}
+
+const fn shell_completion_priority(
+    context: &sift_protocol::completion::CompletionContext,
+    kind: sift_protocol::completion::CompletionKind,
+) -> u8 {
+    use sift_protocol::completion::{CompletionContext as Context, CompletionKind as Kind};
+    match context {
+        Context::Statement => match kind {
+            Kind::Snippet => 0,
+            Kind::Keyword => 1,
+            Kind::Function | Kind::Procedure => 2,
+            _ => 3,
+        },
+        Context::ExpectingTable => match kind {
+            Kind::Table | Kind::View | Kind::MaterializedView | Kind::Alias => 0,
+            Kind::Function => 1,
+            Kind::Schema => 2,
+            Kind::Snippet => 3,
+            Kind::Keyword => 4,
+            _ => 5,
+        },
+        Context::ExpectingColumn { .. } => match kind {
+            Kind::Column | Kind::Alias => 0,
+            Kind::Function => 1,
+            Kind::Keyword => 2,
+            _ => 3,
+        },
+        Context::ExpectingObjectInSchema { .. } => match kind {
+            Kind::Table | Kind::View | Kind::MaterializedView => 0,
+            Kind::Function => 1,
+            _ => 2,
+        },
+        Context::Unknown => 0,
+    }
+}
+
 impl WorkspaceShell {
     fn sync_pane_layout_view(&mut self, cx: &mut Context<Self>) {
         if self
@@ -14712,32 +14788,26 @@ impl WorkspaceShell {
                 && document.is_char_boundary(range.start)
                 && document.is_char_boundary(range.end)
             {
+                let cursor = range.end;
                 let prefix = &document[range];
-                let dialect = self.active_connection_provider_id().map_or_else(
-                    || sift_protocol::Engine::Postgres.dialect_id(),
+                let engine = self.active_connection_provider_id().map_or(
+                    sift_protocol::Engine::Postgres,
                     |provider| {
                         if provider.as_str() == "sift/sql-server" {
-                            sift_protocol::Engine::SqlServer.dialect_id()
+                            sift_protocol::Engine::SqlServer
                         } else {
-                            sift_protocol::Engine::Postgres.dialect_id()
+                            sift_protocol::Engine::Postgres
                         }
                     },
                 );
-                let mut snippet_candidates = self
-                    .snippet_index
-                    .matching(prefix, &dialect, 20)
-                    .into_iter()
-                    .map(|snippet| sift_protocol::completion::CompletionCandidate {
-                        label: snippet.trigger.clone().into(),
-                        insert: snippet.body.clone().into(),
-                        kind: sift_protocol::completion::CompletionKind::Snippet,
-                        detail: Some(format!("{} · {:?}", snippet.title, snippet.scope)),
-                        qualified_name: None,
-                        score: 2_000,
-                    })
-                    .collect::<Vec<_>>();
-                snippet_candidates.append(candidates);
-                *candidates = snippet_candidates;
+                let analysis = sift_completion::detect_context(document, cursor, engine);
+                *candidates = merge_sql_snippet_completions(
+                    &self.snippet_index,
+                    prefix,
+                    &engine.dialect_id(),
+                    &analysis.context,
+                    std::mem::take(candidates),
+                );
             }
         }
         editor.update(cx, |editor, cx| {
@@ -45531,6 +45601,74 @@ fn highlight_fuzzy_ranges(
 mod tests {
     use super::*;
     use gpui::{point, EntityInputHandler, Modifiers, TestAppContext, VisualTestContext};
+
+    fn ranked_candidate(
+        label: &str,
+        kind: sift_protocol::completion::CompletionKind,
+        score: i32,
+    ) -> sift_protocol::completion::CompletionCandidate {
+        sift_protocol::completion::CompletionCandidate {
+            label: label.to_string().into(),
+            insert: label.to_string().into(),
+            kind,
+            detail: None,
+            qualified_name: None,
+            score,
+        }
+    }
+
+    #[test]
+    fn table_slot_merges_objects_before_snippets_before_keywords() {
+        use sift_protocol::completion::{CompletionContext, CompletionKind};
+
+        let snippets = sift_snippets::SnippetIndex::build(sift_snippets::builtins()).unwrap();
+        let candidates = vec![
+            ranked_candidate("SELECT", CompletionKind::Keyword, 1_005),
+            ranked_candidate("asset", CompletionKind::Table, 365),
+        ];
+        let merged = merge_sql_snippet_completions(
+            &snippets,
+            "sel",
+            &sift_protocol::Engine::Postgres.dialect_id(),
+            &CompletionContext::ExpectingTable,
+            candidates,
+        );
+        assert_eq!(
+            merged
+                .iter()
+                .take(3)
+                .map(|candidate| candidate.label.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["asset", "sel", "SELECT"]
+        );
+    }
+
+    #[test]
+    fn qualified_object_and_column_slots_suppress_statement_snippets() {
+        use sift_protocol::completion::{CompletionContext, CompletionKind};
+
+        let snippets = sift_snippets::SnippetIndex::build(sift_snippets::builtins()).unwrap();
+        for context in [
+            CompletionContext::ExpectingObjectInSchema {
+                schema: "public".into(),
+            },
+            CompletionContext::ExpectingColumn { qualifier: None },
+        ] {
+            let merged = merge_sql_snippet_completions(
+                &snippets,
+                "",
+                &sift_protocol::Engine::Postgres.dialect_id(),
+                &context,
+                vec![ranked_candidate("users", CompletionKind::Table, 500)],
+            );
+            assert!(
+                merged
+                    .iter()
+                    .all(|candidate| candidate.kind != CompletionKind::Snippet),
+                "unexpected snippet in {context:?}"
+            );
+        }
+    }
 
     #[test]
     fn command_palette_uses_commands_by_default_and_routes_resource_prefixes() {

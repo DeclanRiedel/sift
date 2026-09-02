@@ -78,14 +78,15 @@ pub fn rank(
         }
         CompletionContext::ExpectingObjectInSchema { schema } => {
             for obj in &dict.objects {
-                if obj
-                    .schema
-                    .as_deref()
-                    .is_some_and(|obj_schema| obj_schema.eq_ignore_ascii_case(schema))
-                    || obj
-                        .catalog
+                if is_table_source(obj.kind)
+                    && (obj
+                        .schema
                         .as_deref()
-                        .is_some_and(|catalog| catalog.eq_ignore_ascii_case(schema))
+                        .is_some_and(|obj_schema| obj_schema.eq_ignore_ascii_case(schema))
+                        || obj
+                            .catalog
+                            .as_deref()
+                            .is_some_and(|catalog| catalog.eq_ignore_ascii_case(schema)))
                 {
                     if let Some(cand) = object_candidate(obj, dict, prefix, engine, 80, true) {
                         out.push(cand);
@@ -101,8 +102,15 @@ pub fn rank(
         }
     }
 
-    // Sort: score desc, then label alpha for stable order.
-    out.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.label.cmp(&b.label)));
+    // Syntax relevance is categorical, not a tiny score bonus. In a FROM
+    // slot, an imperfect table-name match must still beat a perfect keyword;
+    // match quality only orders candidates inside the relevant category.
+    out.sort_by(|a, b| {
+        context_kind_priority(&ctx.context, a.kind)
+            .cmp(&context_kind_priority(&ctx.context, b.kind))
+            .then_with(|| b.score.cmp(&a.score))
+            .then_with(|| a.label.cmp(&b.label))
+    });
     out.dedup_by(|left, right| {
         left.kind == right.kind
             && left.insert == right.insert
@@ -253,20 +261,58 @@ fn push_tables_and_views(
     bonus: i32,
 ) {
     for obj in table_view_candidates(dict, prefix) {
-        if !matches!(
-            obj.kind,
-            ObjectKind::Table
-                | ObjectKind::View
-                | ObjectKind::MaterializedView
-                | ObjectKind::PartitionedTable
-                | ObjectKind::ForeignTable
-                | ObjectKind::TableValuedFunction
-        ) {
+        if !is_table_source(obj.kind) {
             continue;
         }
         if let Some(cand) = object_candidate(obj, dict, prefix, engine, bonus, false) {
             out.push(cand);
         }
+    }
+}
+
+const fn is_table_source(kind: ObjectKind) -> bool {
+    matches!(
+        kind,
+        ObjectKind::Table
+            | ObjectKind::View
+            | ObjectKind::MaterializedView
+            | ObjectKind::PartitionedTable
+            | ObjectKind::ForeignTable
+            | ObjectKind::TableValuedFunction
+    )
+}
+
+const fn context_kind_priority(context: &CompletionContext, kind: CompletionKind) -> u8 {
+    match context {
+        CompletionContext::Statement => match kind {
+            CompletionKind::Keyword => 0,
+            CompletionKind::Snippet => 1,
+            CompletionKind::Function | CompletionKind::Procedure => 2,
+            _ => 3,
+        },
+        CompletionContext::ExpectingTable => match kind {
+            CompletionKind::Table
+            | CompletionKind::View
+            | CompletionKind::MaterializedView
+            | CompletionKind::Alias => 0,
+            CompletionKind::Function => 1,
+            CompletionKind::Schema => 2,
+            CompletionKind::Snippet => 3,
+            CompletionKind::Keyword => 4,
+            _ => 5,
+        },
+        CompletionContext::ExpectingColumn { .. } => match kind {
+            CompletionKind::Column | CompletionKind::Alias => 0,
+            CompletionKind::Function => 1,
+            CompletionKind::Keyword => 2,
+            _ => 3,
+        },
+        CompletionContext::ExpectingObjectInSchema { .. } => match kind {
+            CompletionKind::Table | CompletionKind::View | CompletionKind::MaterializedView => 0,
+            CompletionKind::Function => 1,
+            _ => 2,
+        },
+        CompletionContext::Unknown => 0,
     }
 }
 

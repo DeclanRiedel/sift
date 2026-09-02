@@ -116,6 +116,72 @@ fn after_from_returns_tables_first() {
 }
 
 #[test]
+fn table_slot_category_stays_ahead_of_keywords() {
+    let mut catalog = snapshot();
+    catalog.trees[0].schemas[0]
+        .objects
+        .push(ObjectInfo::new("server_events", ObjectKind::Table));
+    let response = complete(
+        &CompletionRequest {
+            sql: "SELECT * FROM se".into(),
+            cursor: 16,
+            limit: None,
+        },
+        &catalog,
+        Engine::Postgres,
+    );
+    let table = response
+        .candidates
+        .iter()
+        .position(|candidate| candidate.label == "server_events")
+        .expect("prefix-matched table");
+    let keyword = response
+        .candidates
+        .iter()
+        .position(|candidate| candidate.label == "SELECT")
+        .expect("prefix-matched keyword");
+    assert!(table < keyword, "FROM context must rank tables first");
+}
+
+#[test]
+fn qualified_from_slot_filters_out_non_relation_objects() {
+    let mut catalog = snapshot();
+    catalog.trees[0].schemas[0]
+        .objects
+        .push(ObjectInfo::new("account_status", ObjectKind::Type));
+    let sql = "SELECT * FROM public.";
+    let response = complete(
+        &CompletionRequest {
+            sql: sql.into(),
+            cursor: sql.len() as u32,
+            limit: None,
+        },
+        &catalog,
+        Engine::Postgres,
+    );
+    assert!(matches!(
+        response.context,
+        CompletionContext::ExpectingObjectInSchema { .. }
+    ));
+    assert!(response
+        .candidates
+        .iter()
+        .any(|candidate| candidate.label == "users"));
+    assert!(response
+        .candidates
+        .iter()
+        .any(|candidate| candidate.label == "find_users"));
+    assert!(!response
+        .candidates
+        .iter()
+        .any(|candidate| candidate.label == "calculate"));
+    assert!(!response
+        .candidates
+        .iter()
+        .any(|candidate| candidate.label == "account_status"));
+}
+
+#[test]
 fn duplicate_table_names_insert_the_minimum_safe_qualifier() {
     let mut catalog = snapshot();
     catalog.trees[0].schemas.push(SchemaTree {
