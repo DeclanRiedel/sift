@@ -15275,6 +15275,19 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_explorer_bookmark(
+        &mut self,
+        bookmark: crate::presentation::DatabaseObjectBookmark,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.explorer_view_menu_open = false;
+        match self.target_for_database_object_bookmark(&bookmark) {
+            Some(target) => self.open_schema_search_target(target, window, cx),
+            None => self.show_toast("Connect to this bookmark's database to open it".into(), cx),
+        }
+    }
+
     fn apply_explorer_view(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(view) = self.explorer_views.get(index) else {
             return;
@@ -15341,6 +15354,8 @@ impl WorkspaceShell {
         let mut menu = div()
             .id("explorer-view-menu")
             .w(px(240.))
+            .max_h(px(560.))
+            .overflow_y_scroll()
             .p_2()
             .flex()
             .flex_col()
@@ -15398,6 +15413,58 @@ impl WorkspaceShell {
                     }))
                     .child(group.label()),
             );
+        }
+        if !self.favorite_database_objects.is_empty() {
+            menu = menu.child(SectionLabel::new("FAVORITES"));
+        }
+        for (index, bookmark) in self.favorite_database_objects.iter().cloned().enumerate() {
+            let label = format!("{}.{}", bookmark.schema, bookmark.object);
+            let kind = bookmark.object_kind;
+            menu = menu.child(
+                div()
+                    .id(("explorer-favorite-object", index))
+                    .debug_selector(move || format!("explorer-favorite-object-{index}"))
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .role(Role::MenuItem)
+                    .hover(|row| row.bg(colors.hovered_surface))
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.open_explorer_bookmark(bookmark.clone(), window, cx)
+                    }))
+                    .child(icon(schema_object_kind_icon(kind), colors.muted_text, 11.))
+                    .child(div().min_w_0().truncate().child(label)),
+            );
+        }
+        if self.settings.ui.recent_objects && !self.recent_database_objects.is_empty() {
+            menu = menu.child(SectionLabel::new("RECENTS"));
+        }
+        if self.settings.ui.recent_objects {
+            for (index, bookmark) in self.recent_database_objects.iter().cloned().enumerate() {
+                let label = format!("{}.{}", bookmark.schema, bookmark.object);
+                let kind = bookmark.object_kind;
+                menu = menu.child(
+                    div()
+                        .id(("explorer-recent-object", index))
+                        .debug_selector(move || format!("explorer-recent-object-{index}"))
+                        .h(px(28.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_sm()
+                        .role(Role::MenuItem)
+                        .hover(|row| row.bg(colors.hovered_surface))
+                        .on_click(cx.listener(move |shell, _, window, cx| {
+                            shell.open_explorer_bookmark(bookmark.clone(), window, cx)
+                        }))
+                        .child(icon(schema_object_kind_icon(kind), colors.muted_text, 11.))
+                        .child(div().min_w_0().truncate().child(label)),
+                );
+            }
         }
         if !self.explorer_views.is_empty() {
             menu = menu.child(SectionLabel::new("SAVED VIEWS"));
@@ -47056,6 +47123,34 @@ mod tests {
                 .iter()
                 .all(|item| { !matches!(item.action, ConnectionTreeAction::RecentObject(_)) }));
         });
+    }
+
+    #[gpui::test]
+    fn connections_object_menu_lists_favorites_and_recents(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let bookmark = crate::presentation::DatabaseObjectBookmark {
+            instance_id: "local".into(),
+            profile_id: 2,
+            catalog: "warehouse".into(),
+            schema: "public".into(),
+            object: "orders".into(),
+            object_kind: sift_protocol::ObjectKind::Table,
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Warehouse".into(),
+            };
+            shell.favorite_database_objects = vec![bookmark.clone()];
+            shell.recent_database_objects = vec![bookmark];
+            shell.explorer_view_menu_open = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("explorer-favorite-object-0").is_some());
+        assert!(cx.debug_bounds("explorer-recent-object-0").is_some());
     }
 
     #[gpui::test]
