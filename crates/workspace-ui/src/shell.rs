@@ -6120,7 +6120,7 @@ impl Pane {
                                 "New run configuration"
                             }),
                     )
-                    .child(KeyBinding::new("Ctrl+S"))
+                    .child(KeyBinding::new(":w"))
                     .child(
                         Button::new(
                             ("save-run-configuration", item_id as usize),
@@ -54237,7 +54237,7 @@ mod tests {
                     transfer_recipe_id: None,
                 });
             });
-            shell.save_run_configuration(item_id, cx);
+            shell.save_active_item(&SaveActiveItem, window, cx);
         });
         match receiver.try_recv().unwrap() {
             ExecutorCommand::SaveRunConfiguration {
