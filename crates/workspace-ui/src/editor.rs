@@ -2817,6 +2817,54 @@ impl QueryEditor {
         Some((format!("{counts}{incomplete}"), errors > 0))
     }
 
+    fn format_problem(&self, diagnostic: &EditorDiagnostic) -> String {
+        let line = self.document.line_of_offset(diagnostic.range.start) + 1;
+        let severity = match diagnostic.severity {
+            sift_protocol::DiagnosticSeverity::Error => "error",
+            sift_protocol::DiagnosticSeverity::Warning => "warning",
+            sift_protocol::DiagnosticSeverity::Information => "info",
+            sift_protocol::DiagnosticSeverity::Hint => "hint",
+        };
+        format!(
+            "Line {line} [{severity}] {}: {}",
+            diagnostic.code, diagnostic.message
+        )
+    }
+
+    fn current_problem_text(&self) -> Option<String> {
+        self.semantic
+            .diagnostic_at(self.document.cursor())
+            .map(|diagnostic| self.format_problem(diagnostic))
+    }
+
+    fn all_problems_text(&self) -> Option<String> {
+        (!self.semantic.diagnostics().is_empty()).then(|| {
+            self.semantic
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| self.format_problem(diagnostic))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
+    fn copy_current_problem(
+        &mut self,
+        _: &gpui::ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(problem) = self.current_problem_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(problem));
+        }
+    }
+
+    fn copy_all_problems(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(problems) = self.all_problems_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(problems));
+        }
+    }
+
     /// Line index and byte offset of a caret within its line.
     fn line_of(&self, offset: usize) -> (usize, usize) {
         let text = self.document.text();
@@ -2966,6 +3014,8 @@ impl gpui::Render for QueryEditor {
             | EditorLanguage::PlainText => self.semantic_status(),
         };
         let focused = self.focus_handle.is_focused(window);
+        let has_current_problem = self.current_problem_text().is_some();
+        let problem_count = self.semantic.diagnostics().len();
         let blink_enabled = self.cursor_blink.read(cx).enabled;
         if focused != blink_enabled {
             if focused {
@@ -3122,7 +3172,43 @@ impl gpui::Render for QueryEditor {
                     } else {
                         colors.muted_text
                     })
-                    .children(status.map(|(message, _)| message)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .children(status.map(|(message, _)| message)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                IconButton::new(
+                                    "editor-copy-current-problem",
+                                    IconName::Copy,
+                                    "Copy current problem",
+                                )
+                                .square(px(20.))
+                                .disabled(!has_current_problem)
+                                .tooltip("Copy current problem with line number")
+                                .on_click(cx.listener(Self::copy_current_problem)),
+                            )
+                            .child(
+                                IconButton::new(
+                                    "editor-copy-all-problems",
+                                    IconName::Copy,
+                                    "Copy all problems",
+                                )
+                                .square(px(20.))
+                                .badge(problem_count)
+                                .disabled(problem_count == 0)
+                                .tooltip("Copy all problems with line numbers")
+                                .on_click(cx.listener(Self::copy_all_problems)),
+                            ),
+                    ),
             )
     }
 }
@@ -4509,6 +4595,39 @@ mod tests {
 
         assert_eq!(cx.debug_bounds("editor-scroll"), Some(before));
         assert_eq!(cx.debug_bounds("editor-status-line"), Some(status_before));
+    }
+
+    #[gpui::test]
+    fn copied_problems_include_one_based_line_numbers(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("select 1;\nfrom missing", cx);
+        editor.update(&mut cx, |editor, cx| {
+            let mut warning = diagnostic(15, 22, Vec::new());
+            warning.id = "d2".into();
+            warning.severity = sift_protocol::DiagnosticSeverity::Warning;
+            warning.code = "SQL002".into();
+            warning.message = "unqualified object".into();
+            let revision = editor.text_revision();
+            assert!(editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Diagnostics {
+                    diagnostics: vec![diagnostic(0, 6, Vec::new()), warning],
+                    incomplete: false,
+                },
+                cx,
+            ));
+            editor.document.set_selection(16..16, false);
+            assert_eq!(
+                editor.current_problem_text().as_deref(),
+                Some("Line 2 [warning] SQL002: unqualified object")
+            );
+            assert_eq!(
+                editor.all_problems_text().as_deref(),
+                Some(
+                    "Line 1 [error] SQL001: unknown table\n\
+                     Line 2 [warning] SQL002: unqualified object"
+                )
+            );
+        });
     }
 
     #[gpui::test]
