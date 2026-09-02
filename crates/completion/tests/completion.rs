@@ -108,9 +108,53 @@ fn after_from_returns_tables_first() {
     // Prefix `us` matches users, user_events. Both are prefix-matches;
     // tables outrank views inside ExpectingTable, so `users` wins.
     assert_eq!(top.label, "users");
+    assert_eq!(top.insert, "users");
+    assert_eq!(top.qualified_name.as_deref(), Some("mock.public.users"));
     assert_eq!(top.kind, CompletionKind::Table);
     assert_eq!(resp.replaced_range.start, 14);
     assert_eq!(resp.replaced_range.end, 16);
+}
+
+#[test]
+fn duplicate_table_names_insert_the_minimum_safe_qualifier() {
+    let mut catalog = snapshot();
+    catalog.trees[0].schemas.push(SchemaTree {
+        name: "archive".into(),
+        objects: vec![ObjectInfo::new("users", ObjectKind::Table)],
+    });
+    let response = complete(
+        &CompletionRequest {
+            sql: "SELECT * FROM us".into(),
+            cursor: 16,
+            limit: None,
+        },
+        &catalog,
+        Engine::Postgres,
+    );
+    let inserts = response
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.label == "users")
+        .map(|candidate| candidate.insert.as_ref())
+        .collect::<Vec<_>>();
+    assert!(inserts.contains(&"public.users"));
+    assert!(inserts.contains(&"archive.users"));
+
+    let qualified = complete(
+        &CompletionRequest {
+            sql: "SELECT * FROM archive.us".into(),
+            cursor: 24,
+            limit: None,
+        },
+        &catalog,
+        Engine::Postgres,
+    );
+    let users = qualified
+        .candidates
+        .iter()
+        .find(|candidate| candidate.label == "users")
+        .expect("archive users completion");
+    assert_eq!(users.insert, "users", "the qualifier is already in the SQL");
 }
 
 #[test]

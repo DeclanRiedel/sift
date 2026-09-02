@@ -87,7 +87,7 @@ pub fn rank(
                         .as_deref()
                         .is_some_and(|catalog| catalog.eq_ignore_ascii_case(schema))
                 {
-                    if let Some(cand) = object_candidate(obj, prefix, engine, 80) {
+                    if let Some(cand) = object_candidate(obj, dict, prefix, engine, 80, true) {
                         out.push(cand);
                     }
                 }
@@ -264,7 +264,7 @@ fn push_tables_and_views(
         ) {
             continue;
         }
-        if let Some(cand) = object_candidate(obj, prefix, engine, bonus) {
+        if let Some(cand) = object_candidate(obj, dict, prefix, engine, bonus, false) {
             out.push(cand);
         }
     }
@@ -282,7 +282,7 @@ fn push_routines(
             object.kind,
             ObjectKind::Procedure | ObjectKind::ScalarFunction | ObjectKind::TableValuedFunction
         ) {
-            if let Some(candidate) = object_candidate(object, prefix, engine, bonus) {
+            if let Some(candidate) = object_candidate(object, dict, prefix, engine, bonus, false) {
                 out.push(candidate);
             }
         }
@@ -327,9 +327,11 @@ fn column_candidate(c: &ColumnEntry, owner: &ObjectEntry, score: i32) -> Complet
 
 fn object_candidate(
     obj: &ObjectEntry,
+    dict: &Dictionary,
     prefix: &str,
     engine: Engine,
     bonus: i32,
+    qualifier_already_typed: bool,
 ) -> Option<CompletionCandidate> {
     let match_score = score_match_with_lower(&obj.name, &obj.name_lower, prefix)?;
     let kind = match obj.kind {
@@ -356,12 +358,13 @@ fn object_candidate(
         Some(format!(
             "({}) · {}",
             arguments.join(", "),
-            obj.schema.as_deref().unwrap_or("routine")
+            object_location(obj, dict).as_deref().unwrap_or("routine")
         ))
     } else {
-        match (&obj.schema, &obj.comment) {
-            (Some(schema), Some(comment)) => Some(format!("{schema} — {comment}")),
-            (Some(schema), None) => Some(schema.clone()),
+        let location = object_location(obj, dict);
+        match (location, &obj.comment) {
+            (Some(location), Some(comment)) => Some(format!("{location} — {comment}")),
+            (Some(location), None) => Some(location),
             (None, Some(comment)) => Some(comment.clone()),
             (None, None) => None,
         }
@@ -375,12 +378,97 @@ fn object_candidate(
     });
     Some(CompletionCandidate {
         label: obj.name.clone().into(),
-        insert: quote_ident_if_needed(&obj.name, engine).into(),
+        insert: object_insert(obj, dict, engine, qualifier_already_typed).into(),
         kind,
         detail,
         qualified_name,
         score: match_score + bonus + kind_bonus,
     })
+}
+
+/// Insert the shortest name that is safe in the connected catalog. Most
+/// objects are unique and stay pleasantly unqualified. Collisions receive a
+/// schema prefix (or catalog + schema when even the schema collides). When the
+/// user already typed `schema.`, only the final identifier is replaced.
+fn object_insert(
+    obj: &ObjectEntry,
+    dict: &Dictionary,
+    engine: Engine,
+    qualifier_already_typed: bool,
+) -> String {
+    let name = quote_ident_if_needed(&obj.name, engine);
+    if qualifier_already_typed {
+        return name;
+    }
+    let Some(matches) = dict.by_name.get(&obj.name_lower) else {
+        return name;
+    };
+    let is_other_location = |candidate: &ObjectEntry| !same_object_location(candidate, obj);
+    let candidates = || matches.iter().map(|index| &dict.objects[*index]);
+    if !candidates().any(is_other_location) {
+        return name;
+    }
+    let Some(schema_name) = obj.schema.as_deref() else {
+        return name;
+    };
+    let same_schema_in_another_catalog = candidates()
+        .filter(|candidate| is_other_location(candidate))
+        .any(|candidate| {
+            candidate
+                .schema
+                .as_deref()
+                .is_some_and(|other| other.eq_ignore_ascii_case(schema_name))
+        });
+    let schema = quote_ident_if_needed(schema_name, engine);
+    if same_schema_in_another_catalog {
+        if let Some(catalog) = obj.catalog.as_deref() {
+            return format!(
+                "{}.{}.{}",
+                quote_ident_if_needed(catalog, engine),
+                schema,
+                name
+            );
+        }
+    }
+    format!("{schema}.{name}")
+}
+
+fn object_location(obj: &ObjectEntry, dict: &Dictionary) -> Option<String> {
+    let schema = obj.schema.as_deref()?;
+    let same_schema_in_another_catalog = dict
+        .by_name
+        .get(&obj.name_lower)
+        .into_iter()
+        .flatten()
+        .map(|index| &dict.objects[*index])
+        .filter(|candidate| !same_object_location(candidate, obj))
+        .any(|candidate| {
+            candidate
+                .schema
+                .as_deref()
+                .is_some_and(|other| other.eq_ignore_ascii_case(schema))
+        });
+    if same_schema_in_another_catalog {
+        obj.catalog
+            .as_deref()
+            .map(|catalog| format!("{catalog}.{schema}"))
+            .or_else(|| Some(schema.to_string()))
+    } else {
+        Some(schema.to_string())
+    }
+}
+
+fn same_object_location(left: &ObjectEntry, right: &ObjectEntry) -> bool {
+    optional_identifier_eq(left.catalog.as_deref(), right.catalog.as_deref())
+        && optional_identifier_eq(left.schema.as_deref(), right.schema.as_deref())
+}
+
+fn optional_identifier_eq(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 fn table_view_candidates<'a>(

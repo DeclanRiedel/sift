@@ -545,6 +545,23 @@ pub(crate) const fn completion_kind_badge(kind: CompletionKind) -> &'static str 
 }
 
 pub(crate) fn completion_candidate_metadata(candidate: &CompletionCandidate) -> Option<String> {
+    // Object rows already use a concise label and a collision-safe insertion.
+    // Keep the fully qualified path on the wire for identity/hover, but show
+    // the compact schema/detail in the popup like database-native editors do.
+    if matches!(
+        candidate.kind,
+        CompletionKind::Table
+            | CompletionKind::View
+            | CompletionKind::MaterializedView
+            | CompletionKind::Procedure
+            | CompletionKind::Function
+            | CompletionKind::Type
+    ) {
+        return candidate
+            .detail
+            .clone()
+            .or_else(|| candidate.qualified_name.clone());
+    }
     match (&candidate.qualified_name, &candidate.detail) {
         (Some(qualified), Some(detail))
             if qualified
@@ -682,6 +699,22 @@ mod tests {
         assert_eq!(
             completion_candidate_metadata(&candidate).as_deref(),
             Some("app.public.users · int4 NOT NULL")
+        );
+    }
+
+    #[test]
+    fn object_completion_metadata_prefers_concise_schema_context() {
+        let candidate = CompletionCandidate {
+            label: "audit_events".into(),
+            insert: "audit_events".into(),
+            kind: CompletionKind::Table,
+            detail: Some("public".into()),
+            qualified_name: Some("labs.public.audit_events".into()),
+            score: 1,
+        };
+        assert_eq!(
+            completion_candidate_metadata(&candidate).as_deref(),
+            Some("public")
         );
     }
 
