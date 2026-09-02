@@ -5840,44 +5840,83 @@ fn comparison_edit_set(
 }
 
 fn catalog_binding_view(graph: &sift_protocol::CatalogGraph) -> sift_semantic::CatalogBindingView {
-    let schemas = graph
+    let nodes = graph
         .data
         .nodes
         .iter()
-        .filter(|node| node.kind == sift_protocol::CatalogNodeKind::Schema)
-        .map(|node| (node.id.clone(), node.name.clone()))
+        .map(|node| (node.id.clone(), node))
         .collect::<std::collections::HashMap<_, _>>();
     let columns = graph
         .data
         .nodes
         .iter()
         .filter(|node| node.kind == sift_protocol::CatalogNodeKind::Column)
-        .filter_map(|node| Some((node.parent_id.clone()?, node.name.clone())))
+        .filter_map(|node| {
+            let sift_protocol::CatalogNodeDetails::Column { column } = &node.details else {
+                return None;
+            };
+            Some((
+                node.parent_id.clone()?,
+                sift_semantic::CatalogBindingColumn {
+                    id: node.id.clone(),
+                    name: node.name.clone(),
+                    type_ref: column.type_ref.clone(),
+                    nullable: column.nullable,
+                    ordinal: node.ordinal,
+                },
+            ))
+        })
         .fold(
             std::collections::HashMap::<_, Vec<_>>::new(),
-            |mut columns, (parent, name)| {
-                columns.entry(parent).or_default().push(name);
+            |mut columns, (parent, column)| {
+                columns.entry(parent).or_default().push(column);
                 columns
             },
         );
-    sift_semantic::CatalogBindingView {
-        revision: graph.revision,
-        complete: graph.data.coverage.state == sift_protocol::CatalogCoverageState::Complete,
-        objects: graph
-            .data
-            .nodes
-            .iter()
-            .filter_map(|node| {
-                let schema = schemas.get(node.parent_id.as_ref()?)?;
-                Some(sift_semantic::CatalogBindingObject {
-                    id: node.id.clone(),
-                    schema: schema.clone(),
-                    name: node.name.clone(),
-                    columns: columns.get(&node.id).cloned().unwrap_or_default(),
-                })
+    let objects = graph
+        .data
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            if !matches!(
+                node.kind,
+                sift_protocol::CatalogNodeKind::Table
+                    | sift_protocol::CatalogNodeKind::View
+                    | sift_protocol::CatalogNodeKind::MaterializedView
+                    | sift_protocol::CatalogNodeKind::ForeignTable
+                    | sift_protocol::CatalogNodeKind::PartitionedTable
+                    | sift_protocol::CatalogNodeKind::TableValuedFunction
+                    | sift_protocol::CatalogNodeKind::ScalarFunction
+                    | sift_protocol::CatalogNodeKind::Procedure
+                    | sift_protocol::CatalogNodeKind::Synonym
+                    | sift_protocol::CatalogNodeKind::Sequence
+                    | sift_protocol::CatalogNodeKind::Type
+            ) {
+                return None;
+            }
+            let schema = nodes.get(node.parent_id.as_ref()?)?;
+            let catalog = schema
+                .parent_id
+                .as_ref()
+                .and_then(|parent| nodes.get(parent))
+                .map_or_else(String::new, |catalog| catalog.name.clone());
+            Some(sift_semantic::CatalogBindingObject {
+                id: node.id.clone(),
+                catalog,
+                schema: schema.name.clone(),
+                name: node.name.clone(),
+                qualified_name: node.qualified_name.clone(),
+                kind: node.kind,
+                complete: node.completeness == sift_protocol::CatalogCompleteness::Complete,
+                columns: columns.get(&node.id).cloned().unwrap_or_default(),
             })
-            .collect(),
-    }
+        })
+        .collect();
+    sift_semantic::CatalogBindingView::new(
+        graph.revision,
+        graph.data.coverage.state == sift_protocol::CatalogCoverageState::Complete,
+        objects,
+    )
 }
 
 fn semantic_error(error: sift_semantic::Error) -> ApiError {

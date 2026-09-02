@@ -30,15 +30,34 @@ fn snapshot() -> SchemaSnapshot {
     ];
     let mut users = ObjectInfo::new("users", ObjectKind::Table);
     users.columns = users_cols;
-    let orders = ObjectInfo::new("orders", ObjectKind::Table);
+    let mut orders = ObjectInfo::new("orders", ObjectKind::Table);
+    orders.columns = vec![
+        ColumnMetadata {
+            name: "id".into(),
+            type_ref: TypeRef::Primitive(PrimitiveType::Int64),
+            nullable: Nullability::NotNullable,
+            auto_increment: false,
+            primary_key: true,
+            facets: Default::default(),
+        },
+        ColumnMetadata {
+            name: "total".into(),
+            type_ref: TypeRef::Primitive(PrimitiveType::Decimal),
+            nullable: Nullability::Nullable,
+            auto_increment: false,
+            primary_key: false,
+            facets: Default::default(),
+        },
+    ];
     let user_events = ObjectInfo::new("user_events", ObjectKind::View);
     let quoted = ObjectInfo::new("MyTable", ObjectKind::Table);
+    let routine = ObjectInfo::new("find_users", ObjectKind::TableValuedFunction);
     SchemaSnapshot {
         trees: vec![CatalogTree {
             name: "mock".into(),
             schemas: vec![SchemaTree {
                 name: "public".into(),
-                objects: vec![users, orders, user_events, quoted],
+                objects: vec![users, orders, user_events, quoted, routine],
             }],
         }],
         fetched_at: chrono::Utc::now(),
@@ -110,6 +129,69 @@ fn dotted_alias_returns_columns_of_bound_table() {
 }
 
 #[test]
+fn unqualified_columns_are_limited_to_relations_in_scope() {
+    let sql = "SELECT e FROM users";
+    let response = complete(
+        &CompletionRequest {
+            sql: sql.into(),
+            cursor: 8,
+            limit: None,
+        },
+        &snapshot(),
+        Engine::Postgres,
+    );
+    assert!(response
+        .candidates
+        .iter()
+        .any(|candidate| candidate.label == "email"));
+    assert!(!response
+        .candidates
+        .iter()
+        .any(|candidate| candidate.label == "total"));
+}
+
+#[test]
+fn ambiguous_columns_keep_both_qualified_owners() {
+    let sql = "SELECT i FROM users u JOIN orders o ON u.id = o.id";
+    let response = complete(
+        &CompletionRequest {
+            sql: sql.into(),
+            cursor: 8,
+            limit: None,
+        },
+        &snapshot(),
+        Engine::Postgres,
+    );
+    let owners = response
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.label == "id")
+        .filter_map(|candidate| candidate.qualified_name.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(owners.len(), 2, "expected both owners, got {owners:?}");
+    assert!(owners.iter().any(|owner| owner.ends_with(".users")));
+    assert!(owners.iter().any(|owner| owner.ends_with(".orders")));
+}
+
+#[test]
+fn tsql_three_part_alias_resolves_fields() {
+    let sql = "SELECT u. FROM mock.public.users u";
+    let response = complete(
+        &CompletionRequest {
+            sql: sql.into(),
+            cursor: 9,
+            limit: None,
+        },
+        &snapshot(),
+        Engine::SqlServer,
+    );
+    assert!(response
+        .candidates
+        .iter()
+        .any(|candidate| candidate.label == "email"));
+}
+
+#[test]
 fn prefix_beats_substring() {
     let req = CompletionRequest {
         sql: "SELECT * FROM user".into(),
@@ -169,6 +251,44 @@ fn statement_lead_shows_keywords() {
 }
 
 #[test]
+fn local_ctes_and_temp_tables_share_the_object_pipeline() {
+    for sql in [
+        "WITH recent AS (SELECT 1) SELECT * FROM rec",
+        "CREATE TEMP TABLE scratch (id int); SELECT * FROM scr",
+    ] {
+        let response = complete(
+            &CompletionRequest {
+                sql: sql.into(),
+                cursor: sql.len() as u32,
+                limit: None,
+            },
+            &snapshot(),
+            Engine::Postgres,
+        );
+        assert!(response.candidates.first().is_some_and(|candidate| {
+            candidate.detail.as_deref() == Some("document-local relation")
+        }));
+    }
+}
+
+#[test]
+fn table_valued_functions_are_available_in_from_slots() {
+    let sql = "SELECT * FROM find";
+    let response = complete(
+        &CompletionRequest {
+            sql: sql.into(),
+            cursor: sql.len() as u32,
+            limit: None,
+        },
+        &snapshot(),
+        Engine::SqlServer,
+    );
+    assert!(response.candidates.iter().any(|candidate| {
+        candidate.label == "find_users" && candidate.kind == CompletionKind::Function
+    }));
+}
+
+#[test]
 fn unresolved_cte_qualifier_falls_back_to_available_columns() {
     let sql = "WITH recent AS (SELECT 1) SELECT recent.e";
     let response = complete(
@@ -193,11 +313,14 @@ fn dictionary_deduplicates_schema_names_case_insensitively() {
         name: "other".into(),
         schemas: vec![SchemaTree {
             name: "PUBLIC".into(),
-            objects: Vec::new(),
+            objects: vec![ObjectInfo::new("users", ObjectKind::Table)],
         }],
     });
     let dictionary = Dictionary::from_snapshot(&snapshot);
     assert_eq!(dictionary.schemas, vec!["public"]);
+    assert!(dictionary.resolve_qualified("public", "users").is_none());
+    assert!(dictionary.resolve_reference("mock.public.users").is_some());
+    assert!(dictionary.resolve_reference("other.public.users").is_some());
 }
 
 #[test]

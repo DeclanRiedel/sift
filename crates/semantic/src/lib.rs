@@ -61,14 +61,100 @@ pub struct CatalogBindingView {
     pub revision: sift_protocol::CatalogRevision,
     pub complete: bool,
     pub objects: Vec<CatalogBindingObject>,
+    by_name: HashMap<String, Vec<usize>>,
+    by_qualified_name: HashMap<String, Vec<usize>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CatalogBindingObject {
     pub id: sift_protocol::CatalogObjectId,
+    pub catalog: String,
     pub schema: String,
     pub name: String,
-    pub columns: Vec<String>,
+    pub qualified_name: String,
+    pub kind: sift_protocol::CatalogNodeKind,
+    pub complete: bool,
+    pub columns: Vec<CatalogBindingColumn>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogBindingColumn {
+    pub id: sift_protocol::CatalogObjectId,
+    pub name: String,
+    pub type_ref: sift_protocol::TypeRef,
+    pub nullable: sift_protocol::Nullability,
+    pub ordinal: Option<u32>,
+}
+
+impl CatalogBindingView {
+    pub fn new(
+        revision: sift_protocol::CatalogRevision,
+        complete: bool,
+        objects: Vec<CatalogBindingObject>,
+    ) -> Self {
+        let mut by_name = HashMap::<String, Vec<usize>>::new();
+        let mut by_qualified_name = HashMap::<String, Vec<usize>>::new();
+        for (index, object) in objects.iter().enumerate() {
+            by_name
+                .entry(object.name.to_ascii_lowercase())
+                .or_default()
+                .push(index);
+            for key in [
+                format!("{}.{}", object.schema, object.name),
+                format!("{}.{}.{}", object.catalog, object.schema, object.name),
+                object.qualified_name.clone(),
+            ] {
+                let matches = by_qualified_name
+                    .entry(key.to_ascii_lowercase())
+                    .or_default();
+                if matches.last() != Some(&index) {
+                    matches.push(index);
+                }
+            }
+        }
+        Self {
+            revision,
+            complete,
+            objects,
+            by_name,
+            by_qualified_name,
+        }
+    }
+
+    pub fn resolve(&self, reference: &str) -> Option<&CatalogBindingObject> {
+        let key = reference.to_ascii_lowercase();
+        if key.contains('.') {
+            let matches = self.by_qualified_name.get(&key)?;
+            return (matches.len() == 1).then(|| &self.objects[matches[0]]);
+        }
+        let matches = self.by_name.get(&key)?;
+        (matches.len() == 1).then(|| &self.objects[matches[0]])
+    }
+
+    fn matching_objects(
+        &self,
+        schema: Option<(&str, bool)>,
+        object: (&str, bool),
+    ) -> Vec<&CatalogBindingObject> {
+        if !object.1 && schema.is_none() {
+            return self
+                .by_name
+                .get(&object.0.to_ascii_lowercase())
+                .into_iter()
+                .flatten()
+                .map(|index| &self.objects[*index])
+                .collect();
+        }
+        self.objects
+            .iter()
+            .filter(|candidate| {
+                identifier_matches(&candidate.name, object.0, object.1)
+                    && schema.map_or(true, |(schema, quoted)| {
+                        identifier_matches(&candidate.schema, schema, quoted)
+                    })
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1208,16 +1294,7 @@ fn bind_catalog_references(
                     false,
                 )
             };
-        let matches = catalog
-            .objects
-            .iter()
-            .filter(|candidate| {
-                identifier_matches(&candidate.name, object.0, object.1)
-                    && schema.map_or(true, |(schema, quoted)| {
-                        identifier_matches(&candidate.schema, schema, quoted)
-                    })
-            })
-            .collect::<Vec<_>>();
+        let matches = catalog.matching_objects(schema, object);
         let ordinal = diagnostics.len();
         if matches.is_empty() {
             if catalog.complete {
@@ -1940,14 +2017,17 @@ fn completion_relations(tokens: &[Token]) -> Vec<CompletionRelation> {
                 index += 1;
                 continue;
             };
-            let mut object = word_value(&tokens[object_index]).unwrap_or_default();
+            let mut object_parts = vec![word_value(&tokens[object_index]).unwrap_or_default()];
             while matches!(tokens.get(object_index + 1), Some(Token::Period)) {
                 let Some(next) = tokens.get(object_index + 2).and_then(word_value) else {
                     break;
                 };
-                object = next;
+                object_parts.push(next);
                 object_index += 2;
             }
+            let object = object_parts.join(".");
+            let relation_name = object_parts.last().copied().unwrap_or_default();
+            push_relation(&mut relations, relation_name, Some(object.as_str()), false);
             let mut alias_index = next_word_index(tokens, object_index + 1);
             if alias_index.is_some_and(|candidate| {
                 word_value(&tokens[candidate]).is_some_and(|value| value.eq_ignore_ascii_case("AS"))
@@ -1957,7 +2037,7 @@ fn completion_relations(tokens: &[Token]) -> Vec<CompletionRelation> {
             }
             if let Some(alias) = alias_index.and_then(|candidate| word_value(&tokens[candidate])) {
                 if !is_alias_stop(alias) {
-                    push_relation(&mut relations, alias, Some(object), true);
+                    push_relation(&mut relations, alias, Some(&object), true);
                 }
             }
         }
@@ -2489,20 +2569,38 @@ mod tests {
 
     #[test]
     fn catalog_binding_is_conservative_and_offers_qualification() {
-        let catalog = CatalogBindingView {
-            revision: sift_protocol::CatalogRevision(7),
-            complete: true,
-            objects: vec![CatalogBindingObject {
+        let catalog = CatalogBindingView::new(
+            sift_protocol::CatalogRevision(7),
+            true,
+            vec![CatalogBindingObject {
                 id: sift_protocol::CatalogObjectId("users-id".into()),
+                catalog: "mock".into(),
                 schema: "public".into(),
                 name: "users".into(),
-                columns: vec!["id".into()],
+                qualified_name: "mock.public.users".into(),
+                kind: sift_protocol::CatalogNodeKind::Table,
+                complete: true,
+                columns: vec![CatalogBindingColumn {
+                    id: sift_protocol::CatalogObjectId("users-id-column-id".into()),
+                    name: "id".into(),
+                    type_ref: sift_protocol::TypeRef::Primitive(
+                        sift_protocol::PrimitiveType::Int64,
+                    ),
+                    nullable: sift_protocol::Nullability::NotNullable,
+                    ordinal: Some(1),
+                }],
             }],
-        };
+        );
         let diagnostics = bind_catalog_references(
             "select * from users; select * from missing; -- from ignored\nselect $$from hidden$$",
             1,
             &catalog,
+        );
+        let users = catalog.resolve("mock.public.users").unwrap();
+        assert_eq!(users.columns[0].name, "id");
+        assert_eq!(
+            users.columns[0].type_ref,
+            sift_protocol::TypeRef::Primitive(sift_protocol::PrimitiveType::Int64)
         );
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "unqualified_object" && !diagnostic.quick_fix_ids.is_empty()
@@ -2521,11 +2619,7 @@ mod tests {
         let diagnostics = bind_catalog_references(
             "select * from maybe_hidden",
             1,
-            &CatalogBindingView {
-                revision: sift_protocol::CatalogRevision(1),
-                complete: false,
-                objects: Vec::new(),
-            },
+            &CatalogBindingView::new(sift_protocol::CatalogRevision(1), false, Vec::new()),
         );
         assert!(diagnostics.is_empty());
     }
@@ -2651,7 +2745,14 @@ mod tests {
                 if qualifier.as_deref() == Some("u")
         ));
         assert!(analysis.relations.iter().any(|relation| {
-            relation.name == "u" && relation.target.as_deref() == Some("users") && relation.is_alias
+            relation.name == "u"
+                && relation.target.as_deref() == Some("public.users")
+                && relation.is_alias
+        }));
+        assert!(analysis.relations.iter().any(|relation| {
+            relation.name == "users"
+                && relation.target.as_deref() == Some("public.users")
+                && !relation.is_alias
         }));
     }
 }

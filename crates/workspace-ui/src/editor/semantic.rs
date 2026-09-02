@@ -435,6 +435,22 @@ pub(crate) const fn completion_kind_badge(kind: CompletionKind) -> &'static str 
     }
 }
 
+pub(crate) fn completion_candidate_metadata(candidate: &CompletionCandidate) -> Option<String> {
+    match (&candidate.qualified_name, &candidate.detail) {
+        (Some(qualified), Some(detail))
+            if qualified
+                .split('.')
+                .any(|part| part.eq_ignore_ascii_case(detail)) =>
+        {
+            Some(qualified.clone())
+        }
+        (Some(qualified), Some(detail)) => Some(format!("{qualified} · {detail}")),
+        (Some(qualified), None) => Some(qualified.clone()),
+        (None, Some(detail)) => Some(detail.clone()),
+        (None, None) => None,
+    }
+}
+
 pub(crate) const fn usage_kind_label(kind: SqlUsageKind) -> &'static str {
     match kind {
         SqlUsageKind::Definition => "definition",
@@ -521,6 +537,22 @@ mod tests {
         assert_eq!(
             state.completion().map(|menu| menu.candidates.len()),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn completion_metadata_combines_owner_and_type() {
+        let candidate = CompletionCandidate {
+            label: "id".into(),
+            insert: "id".into(),
+            kind: CompletionKind::Column,
+            detail: Some("int4 NOT NULL".into()),
+            qualified_name: Some("app.public.users".into()),
+            score: 1,
+        };
+        assert_eq!(
+            completion_candidate_metadata(&candidate).as_deref(),
+            Some("app.public.users · int4 NOT NULL")
         );
     }
 

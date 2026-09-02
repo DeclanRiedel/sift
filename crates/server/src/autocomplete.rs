@@ -20,7 +20,7 @@
 //! `SchemaCache` philosophy: never let a slow / failed metadata query
 //! stall a completion.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sift_protocol::completion::{CompletionContext, CompletionResponse};
 use sift_protocol::{ConnectionId, Engine, SchemaDepth, SchemaScope, SchemaSnapshot, SessionId};
@@ -52,26 +52,43 @@ async fn generate_completion_from_analysis(
     ctx: sift_semantic::CompletionAnalysis,
     shallow: crate::schema_cache::CachedSchema,
 ) -> ApiResult<CompletionResponse> {
-    let deep_qualifier = match &ctx.context {
+    let deep_references = match &ctx.context {
         CompletionContext::ExpectingColumn {
             qualifier: Some(qualifier),
-        } => Some(
-            ctx.relations
-                .iter()
-                .find(|relation| relation.name.eq_ignore_ascii_case(qualifier))
-                .and_then(|relation| relation.target.as_deref())
-                .unwrap_or(qualifier)
-                .to_owned(),
-        ),
-        _ => None,
+        } => vec![ctx
+            .relations
+            .iter()
+            .find(|relation| relation.name.eq_ignore_ascii_case(qualifier))
+            .and_then(|relation| relation.target.as_deref())
+            .unwrap_or(qualifier)
+            .to_owned()],
+        CompletionContext::ExpectingColumn { qualifier: None } => ctx
+            .relations
+            .iter()
+            .filter(|relation| !relation.is_alias)
+            .map(|relation| {
+                relation
+                    .target
+                    .clone()
+                    .unwrap_or_else(|| relation.name.clone())
+            })
+            .take(8)
+            .collect(),
+        _ => Vec::new(),
     };
     let shallow_response =
         sift_completion::complete_with_analysis(limit, &ctx, &shallow.dictionary, engine);
 
     // If we're expecting a column and the qualifier resolves to a
     // shallow-known table, upgrade to a deep snapshot for that object.
-    if let Some(qualifier) = deep_qualifier {
-        if let Some(path) = shallow.dictionary.resolve_object_path(&qualifier) {
+    let mut merged = (*shallow.snapshot).clone();
+    let mut hydrated = false;
+    let mut seen = HashSet::new();
+    for reference in deep_references {
+        if !seen.insert(reference.to_ascii_lowercase()) {
+            continue;
+        }
+        if let Some(path) = shallow.dictionary.resolve_object_path(&reference) {
             let deep_scope = SchemaScope {
                 depth: SchemaDepth::Deep { object: path },
                 filter: None,
@@ -80,14 +97,16 @@ async fn generate_completion_from_analysis(
                 .schema_cached(session_id, conn_id, deep_scope)
                 .await
             {
-                let merged =
-                    merge_deep_into_shallow((*shallow.snapshot).clone(), (*deep.snapshot).clone());
-                let dict = sift_completion::Dictionary::from_snapshot(&merged);
-                return Ok(sift_completion::complete_with_analysis(
-                    limit, &ctx, &dict, engine,
-                ));
+                merged = merge_deep_into_shallow(merged, (*deep.snapshot).clone());
+                hydrated = true;
             }
         }
+    }
+    if hydrated {
+        let dict = sift_completion::Dictionary::from_snapshot(&merged);
+        return Ok(sift_completion::complete_with_analysis(
+            limit, &ctx, &dict, engine,
+        ));
     }
     Ok(shallow_response)
 }

@@ -36,6 +36,7 @@ pub fn rank(
         CompletionContext::Statement => {
             push_keywords(&mut out, engine, prefix, /*context_bonus=*/ 40);
             push_tables_and_views(&mut out, dict, prefix, engine, /*bonus=*/ 10);
+            push_routines(&mut out, dict, prefix, engine, /*bonus=*/ 10);
         }
         CompletionContext::ExpectingTable => {
             push_tables_and_views(&mut out, dict, prefix, engine, /*bonus=*/ 60);
@@ -52,7 +53,7 @@ pub fn rank(
                         .find(|relation| relation.name.eq_ignore_ascii_case(q))
                         .and_then(|relation| relation.target.as_deref())
                         .unwrap_or(q);
-                    if let Some(obj) = dict.resolve_by_name(target) {
+                    if let Some(obj) = dict.resolve_reference(target) {
                         push_columns(&mut out, obj, prefix, /*bonus=*/ 80);
                     } else {
                         // CTEs, temporary relations, and incomplete shallow
@@ -63,19 +64,24 @@ pub fn rank(
                     }
                 }
                 None => {
-                    push_all_columns(&mut out, dict, prefix, /*bonus=*/ 40);
+                    if !push_relation_columns(&mut out, ctx, dict, prefix, /*bonus=*/ 70) {
+                        push_all_columns(&mut out, dict, prefix, /*bonus=*/ 20);
+                    }
                     push_functions(&mut out, engine, prefix, /*bonus=*/ 30);
                     push_keywords(&mut out, engine, prefix, /*bonus=*/ 5);
                 }
             }
         }
         CompletionContext::ExpectingObjectInSchema { schema } => {
-            let schema_l = schema.to_ascii_lowercase();
             for obj in &dict.objects {
                 if obj
                     .schema
                     .as_deref()
-                    .is_some_and(|obj_schema| obj_schema.eq_ignore_ascii_case(&schema_l))
+                    .is_some_and(|obj_schema| obj_schema.eq_ignore_ascii_case(schema))
+                    || obj
+                        .catalog
+                        .as_deref()
+                        .is_some_and(|catalog| catalog.eq_ignore_ascii_case(schema))
                 {
                     if let Some(cand) = object_candidate(obj, prefix, engine, 80) {
                         out.push(cand);
@@ -86,14 +92,47 @@ pub fn rank(
         CompletionContext::Unknown => {
             push_keywords(&mut out, engine, prefix, /*bonus=*/ 20);
             push_tables_and_views(&mut out, dict, prefix, engine, /*bonus=*/ 20);
+            push_routines(&mut out, dict, prefix, engine, /*bonus=*/ 20);
             push_all_columns(&mut out, dict, prefix, /*bonus=*/ 20);
         }
     }
 
     // Sort: score desc, then label alpha for stable order.
     out.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.label.cmp(&b.label)));
+    out.dedup_by(|left, right| {
+        left.kind == right.kind
+            && left.insert == right.insert
+            && left.qualified_name == right.qualified_name
+    });
     out.truncate(limit);
     out
+}
+
+fn push_relation_columns(
+    out: &mut Vec<CompletionCandidate>,
+    ctx: &ContextResult,
+    dict: &Dictionary,
+    prefix: &str,
+    bonus: i32,
+) -> bool {
+    let mut resolved = Vec::<&ObjectEntry>::new();
+    for relation in ctx.relations.iter().filter(|relation| !relation.is_alias) {
+        let reference = relation.target.as_deref().unwrap_or(&relation.name);
+        let Some(object) = dict.resolve_reference(reference) else {
+            continue;
+        };
+        if !resolved.iter().any(|candidate| {
+            candidate.catalog == object.catalog
+                && candidate.schema == object.schema
+                && candidate.name.eq_ignore_ascii_case(&object.name)
+        }) {
+            resolved.push(object);
+        }
+    }
+    for object in &resolved {
+        push_columns(out, object, prefix, bonus);
+    }
+    !resolved.is_empty()
 }
 
 fn push_local_relations(
@@ -102,7 +141,11 @@ fn push_local_relations(
     prefix: &str,
     bonus: i32,
 ) {
-    for relation in ctx.relations.iter().filter(|relation| !relation.is_alias) {
+    for relation in ctx
+        .relations
+        .iter()
+        .filter(|relation| !relation.is_alias && relation.target.is_none())
+    {
         let Some(match_score) = score_match(&relation.name, prefix) else {
             continue;
         };
@@ -186,11 +229,31 @@ fn push_tables_and_views(
                 | ObjectKind::MaterializedView
                 | ObjectKind::PartitionedTable
                 | ObjectKind::ForeignTable
+                | ObjectKind::TableValuedFunction
         ) {
             continue;
         }
         if let Some(cand) = object_candidate(obj, prefix, engine, bonus) {
             out.push(cand);
+        }
+    }
+}
+
+fn push_routines(
+    out: &mut Vec<CompletionCandidate>,
+    dict: &Dictionary,
+    prefix: &str,
+    engine: Engine,
+    bonus: i32,
+) {
+    for object in &dict.objects {
+        if matches!(
+            object.kind,
+            ObjectKind::Procedure | ObjectKind::ScalarFunction | ObjectKind::TableValuedFunction
+        ) {
+            if let Some(candidate) = object_candidate(object, prefix, engine, bonus) {
+                out.push(candidate);
+            }
         }
     }
 }
@@ -258,11 +321,17 @@ fn object_candidate(
         CompletionKind::MaterializedView => 2,
         _ => 0,
     };
+    let detail = match (&obj.schema, &obj.comment) {
+        (Some(schema), Some(comment)) => Some(format!("{schema} — {comment}")),
+        (Some(schema), None) => Some(schema.clone()),
+        (None, Some(comment)) => Some(comment.clone()),
+        (None, None) => None,
+    };
     Some(CompletionCandidate {
         label: obj.name.clone().into(),
         insert: quote_ident_if_needed(&obj.name, engine).into(),
         kind,
-        detail: obj.schema.clone(),
+        detail,
         qualified_name: qualified_name(obj),
         score: match_score + bonus + kind_bonus,
     })
@@ -288,7 +357,11 @@ fn table_view_candidates<'a>(
 }
 
 fn qualified_name(obj: &ObjectEntry) -> Option<String> {
-    obj.schema.as_ref().map(|s| format!("{}.{}", s, obj.name))
+    match (&obj.catalog, &obj.schema) {
+        (Some(catalog), Some(schema)) => Some(format!("{catalog}.{schema}.{}", obj.name)),
+        (None, Some(schema)) => Some(format!("{schema}.{}", obj.name)),
+        _ => None,
+    }
 }
 
 // ----------------------------------------------------------------------------

@@ -20,7 +20,9 @@ use sift_ui::{
 
 mod semantic;
 mod vim;
-use self::semantic::{completion_kind_badge, ordered_edits, usage_kind_label};
+use self::semantic::{
+    completion_candidate_metadata, completion_kind_badge, ordered_edits, usage_kind_label,
+};
 pub use self::semantic::{
     CompletionMenu, EditorDiagnostic, SemanticOutcome, SemanticRequestKind, SemanticState,
 };
@@ -48,7 +50,7 @@ const DIAGNOSTIC_UNDERLINE_HEIGHT: Pixels = px(2.);
 /// Zero-width server ranges (end-of-statement errors) still need a visible
 /// mark, so they paint as a narrow stub rather than nothing.
 const EMPTY_SPAN_WIDTH: Pixels = px(6.);
-const COMPLETION_MENU_WIDTH: Pixels = px(340.);
+const COMPLETION_MENU_WIDTH: Pixels = px(440.);
 const COMPLETION_ROW_HEIGHT: Pixels = px(22.);
 const COMPLETION_VISIBLE_ROWS: usize = 9;
 
@@ -2140,40 +2142,45 @@ impl QueryEditor {
         let (left, top) = self.caret_content_origin()?;
         let colors = cx.theme().colors;
         let selected = menu.selected;
-        let rows =
-            menu.candidates
-                .iter()
-                .enumerate()
-                .skip(selected.saturating_sub(COMPLETION_VISIBLE_ROWS - 1))
-                .take(COMPLETION_VISIBLE_ROWS)
-                .map(|(index, candidate)| {
-                    let active = index == selected;
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .h(COMPLETION_ROW_HEIGHT)
-                        .when(active, |row| row.bg(colors.selected_surface))
-                        .child(
-                            div()
-                                .w(px(14.))
-                                .text_xs()
-                                .text_color(colors.accent)
-                                .child(completion_kind_badge(candidate.kind)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_xs()
-                                .text_color(colors.text)
-                                .child(candidate.label.to_string()),
-                        )
-                        .children(candidate.detail.clone().map(|detail| {
-                            div().text_xs().text_color(colors.muted_text).child(detail)
-                        }))
-                })
-                .collect::<Vec<_>>();
+        let rows = menu
+            .candidates
+            .iter()
+            .enumerate()
+            .skip(selected.saturating_sub(COMPLETION_VISIBLE_ROWS - 1))
+            .take(COMPLETION_VISIBLE_ROWS)
+            .map(|(index, candidate)| {
+                let active = index == selected;
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .h(COMPLETION_ROW_HEIGHT)
+                    .when(active, |row| row.bg(colors.selected_surface))
+                    .child(
+                        div()
+                            .w(px(14.))
+                            .text_xs()
+                            .text_color(colors.accent)
+                            .child(completion_kind_badge(candidate.kind)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(colors.text)
+                            .child(candidate.label.to_string()),
+                    )
+                    .children(completion_candidate_metadata(candidate).map(|metadata| {
+                        div()
+                            .max_w(px(250.))
+                            .overflow_hidden()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child(metadata)
+                    }))
+            })
+            .collect::<Vec<_>>();
         Some(
             div()
                 .absolute()
@@ -3975,9 +3982,9 @@ mod tests {
                 cx,
             ));
         });
-        // Enter accepts the highlighted candidate instead of breaking the line.
+        // Tab accepts the highlighted candidate instead of indenting.
         editor.update_in(&mut cx, |editor, window, cx| {
-            editor.newline(&Newline, window, cx);
+            editor.indent(&Indent, window, cx);
         });
         editor.read_with(&cx, |editor, _| {
             assert_eq!(editor.document().text(), "select * from users");

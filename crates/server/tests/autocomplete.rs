@@ -77,6 +77,22 @@ fn shallow_snapshot() -> SchemaSnapshot {
     }
 }
 
+fn single_table_snapshot(catalog: &str, table: &str) -> SchemaSnapshot {
+    SchemaSnapshot {
+        trees: vec![CatalogTree {
+            name: catalog.into(),
+            schemas: vec![SchemaTree {
+                name: "dbo".into(),
+                objects: vec![ObjectInfo::new(table, ObjectKind::Table)],
+            }],
+        }],
+        fetched_at: chrono::Utc::now(),
+        scope: SchemaScope::shallow(),
+        incomplete: false,
+        graph: None,
+    }
+}
+
 fn mock_driver() -> MockDriver {
     MockDriver::builder()
         .engine(Engine::Postgres)
@@ -359,4 +375,92 @@ async fn complete_openapi_registers_completion_schemas() {
     assert!(doc["components"]["schemas"]["CompletionResponse"].is_object());
     assert!(doc["components"]["schemas"]["CompletionCandidate"].is_object());
     assert!(doc["components"]["schemas"]["SemanticCompletionRequest"].is_object());
+}
+
+#[tokio::test]
+async fn completion_catalogs_do_not_leak_between_connections() {
+    let server = |database: &str| ServerInfo {
+        provider: Engine::Postgres.provider_ref("test"),
+        server_version: "MockDB 0.1".into(),
+        current_database: database.into(),
+        current_user: "mock".into(),
+        pool_warm_slots: None,
+    };
+    let driver = MockDriver::builder()
+        .engine(Engine::Postgres)
+        .ping_ok(server("alpha"))
+        .ping_ok(server("beta"))
+        .schema_ok(single_table_snapshot("alpha", "alpha_accounts"))
+        .schema_ok(single_table_snapshot("beta", "beta_accounts"))
+        .build();
+    let router = app(state_with_registry(
+        DriverRegistry::builder().register(driver).build(),
+    ));
+    let session: sift_protocol::SessionInfo = body_json(
+        router
+            .clone()
+            .oneshot(
+                Request::post("/v1/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+    )
+    .await;
+    let mut connection_ids = Vec::new();
+    for database in ["alpha", "beta"] {
+        let response = router
+            .clone()
+            .oneshot(post_json(
+                format!("/v1/sessions/{}/connections", session.id),
+                serde_json::json!({
+                    "provider_id": "sift/postgres",
+                    "host": "mock.invalid",
+                    "port": 5432,
+                    "database": database,
+                    "user": "mock",
+                    "ssl_mode": "disable"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let connection: sift_protocol::ConnectionInfo = body_json(response.into_body()).await;
+        connection_ids.push(connection.id);
+    }
+    for (connection, expected, forbidden) in [
+        (connection_ids[0], "alpha_accounts", "beta_accounts"),
+        (connection_ids[1], "beta_accounts", "alpha_accounts"),
+    ] {
+        let response: CompletionResponse = body_json(
+            router
+                .clone()
+                .oneshot(post_json(
+                    format!(
+                        "/v1/sessions/{}/connections/{connection}/complete",
+                        session.id
+                    ),
+                    CompletionRequest {
+                        sql: "SELECT * FROM ".into(),
+                        cursor: 14,
+                        limit: Some(20),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_body(),
+        )
+        .await;
+        assert!(response
+            .candidates
+            .iter()
+            .any(|candidate| candidate.label == expected));
+        assert!(!response
+            .candidates
+            .iter()
+            .any(|candidate| candidate.label == forbidden));
+    }
 }

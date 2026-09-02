@@ -249,11 +249,11 @@ or reports terminal success before execution completion.
 
 ### 5. Rich binding and contextual completion
 
-- [ ] Add typed indexed catalog binding view and bound semantic scopes.
-- [ ] Rank tables and fields from the active connection/database context.
-- [ ] Resolve aliases, CTEs, temporary objects, qualified fields, routines,
+- [x] Add typed indexed catalog binding view and bound semantic scopes.
+- [x] Rank tables and fields from the active connection/database context.
+- [x] Resolve aliases, CTEs, temporary objects, qualified fields, routines,
   functions, schemas, and keywords through one pipeline.
-- [ ] Preserve Vim `Tab` acceptance and completion navigation.
+- [x] Preserve Vim `Tab` acceptance and completion navigation.
 
 Gate: PostgreSQL and T-SQL corpora prove no cross-connection/catalog leakage,
 alias-qualified fields, ambiguous-column handling, stale revision rejection,

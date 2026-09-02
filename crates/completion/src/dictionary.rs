@@ -18,6 +18,7 @@ pub struct ObjectEntry {
     pub name_lower: String,
     pub kind: ObjectKind,
     pub routine_args: Option<Vec<String>>,
+    pub comment: Option<String>,
     /// Populated only if the snapshot was fetched with `SchemaDepth::Deep`
     /// for this object. Empty otherwise.
     pub columns: Vec<ColumnEntry>,
@@ -30,6 +31,9 @@ pub struct ColumnEntry {
     /// Rendered type text — engine-native when known, otherwise a
     /// primitive-to-SQL mapping.
     pub type_display: String,
+    pub type_ref: sift_protocol::TypeRef,
+    pub nullable: sift_protocol::Nullability,
+    pub ordinal: usize,
     pub not_null: bool,
     pub primary_key: bool,
 }
@@ -42,7 +46,10 @@ pub struct Dictionary {
     pub objects: Vec<ObjectEntry>,
     /// `(schema.lower, name.lower) -> index into objects`. Enables O(1)
     /// alias resolution when the parser reports a qualifier.
-    pub by_qualified: HashMap<(String, String), usize>,
+    pub by_qualified: HashMap<(String, String), Vec<usize>>,
+    /// `(catalog.lower, schema.lower, name.lower) -> object` for SQL Server
+    /// three-part names and cross-catalog snapshots.
+    pub by_catalog_qualified: HashMap<(String, String, String), usize>,
     /// Case-insensitive name → all object indices with that name. Used
     /// when a qualifier is unqualified (e.g. `SELECT u.foo FROM users u`
     /// after the alias resolves to `users` — we look `users` up here
@@ -69,12 +76,14 @@ impl Dictionary {
             }
         }
         let by_qualified = build_qualified_index(&objects);
+        let by_catalog_qualified = build_catalog_qualified_index(&objects);
         let by_name = build_name_index(&objects);
         let objects_by_name = build_sorted_name_index(&objects);
         Self {
             schemas,
             objects,
             by_qualified,
+            by_catalog_qualified,
             by_name,
             objects_by_name,
         }
@@ -95,13 +104,33 @@ impl Dictionary {
     /// Resolve `schema.name` (case-insensitive) to an object.
     pub fn resolve_qualified(&self, schema: &str, name: &str) -> Option<&ObjectEntry> {
         let key = (schema.to_ascii_lowercase(), name.to_ascii_lowercase());
-        self.by_qualified.get(&key).map(|i| &self.objects[*i])
+        let matches = self.by_qualified.get(&key)?;
+        (matches.len() == 1).then(|| &self.objects[matches[0]])
+    }
+
+    /// Resolve one-, two-, or three-part catalog references. Unqualified
+    /// references resolve only when unique, preventing cross-schema leakage.
+    pub fn resolve_reference(&self, reference: &str) -> Option<&ObjectEntry> {
+        let parts = reference.split('.').collect::<Vec<_>>();
+        match parts.as_slice() {
+            [name] => self.resolve_by_name(name),
+            [schema, name] => self.resolve_qualified(schema, name),
+            [catalog, schema, name] => self
+                .by_catalog_qualified
+                .get(&(
+                    catalog.to_ascii_lowercase(),
+                    schema.to_ascii_lowercase(),
+                    name.to_ascii_lowercase(),
+                ))
+                .map(|index| &self.objects[*index]),
+            _ => None,
+        }
     }
 
     /// Resolve an unqualified object name to the fully qualified path needed
     /// for a deep schema fetch. Returns `None` when absent or ambiguous.
     pub fn resolve_object_path(&self, name: &str) -> Option<ObjectPath> {
-        let obj = self.resolve_by_name(name)?;
+        let obj = self.resolve_reference(name)?;
         Some(ObjectPath {
             catalog: obj.catalog.clone(),
             schema: obj.schema.clone(),
@@ -116,10 +145,14 @@ fn object_entry(obj: &ObjectInfo, catalog: Option<&str>, schema: Option<&str>) -
     let columns = obj
         .columns
         .iter()
-        .map(|c| ColumnEntry {
+        .enumerate()
+        .map(|(ordinal, c)| ColumnEntry {
             name: c.name.clone(),
             name_lower: c.name.to_ascii_lowercase(),
             type_display: type_display(&c.type_ref),
+            type_ref: c.type_ref.clone(),
+            nullable: c.nullable,
+            ordinal,
             not_null: matches!(c.nullable, sift_protocol::Nullability::NotNullable),
             primary_key: c.primary_key,
         })
@@ -131,6 +164,7 @@ fn object_entry(obj: &ObjectInfo, catalog: Option<&str>, schema: Option<&str>) -
         name_lower: obj.name.to_ascii_lowercase(),
         kind: obj.kind,
         routine_args: obj.routine_args.clone(),
+        comment: obj.comment.clone(),
         columns,
     }
 }
@@ -153,11 +187,32 @@ fn type_display(t: &sift_protocol::TypeRef) -> String {
     }
 }
 
-fn build_qualified_index(objects: &[ObjectEntry]) -> HashMap<(String, String), usize> {
-    let mut out = HashMap::new();
+fn build_qualified_index(objects: &[ObjectEntry]) -> HashMap<(String, String), Vec<usize>> {
+    let mut out = HashMap::<_, Vec<_>>::new();
     for (i, o) in objects.iter().enumerate() {
         if let Some(s) = &o.schema {
-            out.insert((s.to_ascii_lowercase(), o.name.to_ascii_lowercase()), i);
+            out.entry((s.to_ascii_lowercase(), o.name.to_ascii_lowercase()))
+                .or_default()
+                .push(i);
+        }
+    }
+    out
+}
+
+fn build_catalog_qualified_index(
+    objects: &[ObjectEntry],
+) -> HashMap<(String, String, String), usize> {
+    let mut out = HashMap::new();
+    for (index, object) in objects.iter().enumerate() {
+        if let (Some(catalog), Some(schema)) = (&object.catalog, &object.schema) {
+            out.insert(
+                (
+                    catalog.to_ascii_lowercase(),
+                    schema.to_ascii_lowercase(),
+                    object.name.to_ascii_lowercase(),
+                ),
+                index,
+            );
         }
     }
     out
