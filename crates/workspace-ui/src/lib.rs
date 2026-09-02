@@ -37,8 +37,8 @@ pub use shell::{
     Modal, OpenCommandPalette, OpenSchemaSearch, OpenServerConnection, PaletteConfirm, PaletteDown,
     PaletteUp, Pane, PaneEvent, PaneNavigateBack, PaneNavigateForward, ResultEditApplyFailure,
     RoomDocumentCommand, RoomDocumentEvent, SaveActiveItem, SavedInstanceRoot, SavedServerKind,
-    SavedServerProfile, SplitDirection, SplitPane, StageJsonResultEdit, StatusBar, Toast,
-    ToastTone, ToggleBottomDock, ToggleFrameMetrics, ToggleLeftDock, ToggleRightDock,
-    WorkspaceShell,
+    SavedServerProfile, SemanticConnectionTarget, SplitDirection, SplitPane, StageJsonResultEdit,
+    StatusBar, Toast, ToastTone, ToggleBottomDock, ToggleFrameMetrics, ToggleLeftDock,
+    ToggleRightDock, WorkspaceShell,
 };
 pub use workspace::{WorkspaceFileRow, WorkspaceFilesProjection, WorkspaceFilesSnapshot};

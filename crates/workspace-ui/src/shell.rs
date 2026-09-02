@@ -2340,6 +2340,19 @@ pub enum ConnectionStatus {
     Failed { profile_id: i64, reason: String },
 }
 
+/// Public, credential-free identity of the database catalog a query tab uses
+/// for completion and diagnostics. The executor validates it before allowing
+/// semantic work onto its active connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticConnectionTarget {
+    pub instance_id: String,
+    pub tenant_id: i64,
+    pub profile_id: i64,
+    pub profile_name: String,
+    pub provider_id: sift_protocol::ProviderId,
+    pub database: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionHealthFailure {
     Server(String),
@@ -3313,6 +3326,7 @@ pub enum ExecutorCommand {
         item_id: u64,
         text_revision: u64,
         text: String,
+        target: Option<SemanticConnectionTarget>,
         request: SemanticRequestKind,
     },
     /// Release the server semantic document backing a closed tab.
@@ -8726,6 +8740,11 @@ pub struct WorkspaceShell {
     /// Independent cancellation window for automatic completion. Diagnostics
     /// must never delay the popup and completion must never accelerate errors.
     semantic_completion_generation: HashMap<u64, u64>,
+    /// Stable catalog identity per live query tab. Scratch tabs bind when
+    /// created on a connection (or on their first semantic request); sourced
+    /// database tabs retain their own profile instead of following global UI
+    /// selection accidentally.
+    query_semantic_targets: HashMap<u64, SemanticConnectionTarget>,
     query_outline_item_id: Option<u64>,
     query_outline_revision: Option<u64>,
     query_outline_statements: Vec<sift_protocol::SemanticStatement>,
@@ -9774,6 +9793,7 @@ impl WorkspaceShell {
             held_result_pages: HashMap::new(),
             semantic_analyze_generation: HashMap::new(),
             semantic_completion_generation: HashMap::new(),
+            query_semantic_targets: HashMap::new(),
             query_outline_item_id: None,
             query_outline_revision: None,
             query_outline_statements: Vec::new(),
@@ -11359,6 +11379,13 @@ impl WorkspaceShell {
                     }
                 }
                 self.sync_object_browser_rows(profile_id, &snapshot, cx);
+                if let Some(database) = snapshot.trees.first().map(|tree| tree.name.clone()) {
+                    for target in self.query_semantic_targets.values_mut() {
+                        if target.profile_id == profile_id {
+                            target.database = Some(database.clone());
+                        }
+                    }
+                }
                 self.connection_schema = ConnectionSchemaState::Ready {
                     profile_id,
                     snapshot,
@@ -13619,6 +13646,39 @@ impl WorkspaceShell {
             );
         }
         self.fail_running_explains("Explain interrupted by connection change", cx);
+        // Choosing a connection while an unsourced scratch query is active is
+        // the query-tab connection picker. Sourced tabs (saved queries,
+        // database objects, rooms) retain their declared identity.
+        let scratch_item = self.panes.get(self.active_pane).and_then(|pane| {
+            pane.read(cx).active_item().and_then(|item| {
+                (item.kind == ItemKind::Query && item.source.is_none()).then_some(item.id)
+            })
+        });
+        if let Some(item_id) = scratch_item {
+            let database = match &self.connection_schema {
+                ConnectionSchemaState::Ready {
+                    profile_id,
+                    snapshot,
+                } if *profile_id == entry.id => {
+                    snapshot.trees.first().map(|tree| tree.name.clone())
+                }
+                _ => None,
+            };
+            self.query_semantic_targets.insert(
+                item_id,
+                SemanticConnectionTarget {
+                    instance_id: self
+                        .selected_instance_id
+                        .clone()
+                        .unwrap_or_else(|| "local".into()),
+                    tenant_id: entry.tenant_id,
+                    profile_id: entry.id,
+                    profile_name: entry.name.clone(),
+                    provider_id: entry.provider_id.clone(),
+                    database,
+                },
+            );
+        }
         if sender
             .send(ExecutorCommand::Connect {
                 tenant_id: entry.tenant_id,
@@ -13786,6 +13846,83 @@ impl WorkspaceShell {
             .flat_map(|tenant| tenant.connections.iter())
             .find(|connection| connection.id == profile_id)
             .map(|connection| &connection.provider_id)
+    }
+
+    fn semantic_target_for_profile(&self, profile_id: i64) -> Option<SemanticConnectionTarget> {
+        let connection = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| {
+                tenant
+                    .connections
+                    .iter()
+                    .map(move |connection| (tenant.id.0, connection))
+            })
+            .find(|(_, connection)| connection.id == profile_id)?;
+        let database = match &self.connection_schema {
+            ConnectionSchemaState::Ready {
+                profile_id: schema_profile,
+                snapshot,
+            } if *schema_profile == profile_id => {
+                snapshot.trees.first().map(|tree| tree.name.clone())
+            }
+            _ => None,
+        };
+        Some(SemanticConnectionTarget {
+            instance_id: self
+                .selected_instance_id
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            tenant_id: connection.0,
+            profile_id,
+            profile_name: connection.1.name.clone(),
+            provider_id: connection.1.provider_id.clone(),
+            database,
+        })
+    }
+
+    fn active_semantic_target(&self) -> Option<SemanticConnectionTarget> {
+        let ConnectionStatus::Connected { profile_id, .. } = self.connection_status else {
+            return None;
+        };
+        self.semantic_target_for_profile(profile_id)
+    }
+
+    fn sourced_semantic_target(&self, item_id: u64, cx: &App) -> Option<SemanticConnectionTarget> {
+        let source = self.panes.iter().find_map(|pane| {
+            pane.read(cx)
+                .items
+                .iter()
+                .find(|item| item.id == item_id)
+                .and_then(|item| item.source.clone())
+        })?;
+        match source {
+            ItemSource::DatabaseObject(source) => Some(SemanticConnectionTarget {
+                instance_id: source.instance_id,
+                tenant_id: source.tenant_id,
+                profile_id: source.profile_id,
+                profile_name: source.profile_name,
+                provider_id: source.provider_id,
+                database: source.catalog,
+            }),
+            ItemSource::SavedQuery(source) => source
+                .connection_profile_id
+                .and_then(|profile_id| self.semantic_target_for_profile(profile_id)),
+            ItemSource::RoomDocument(_) => None,
+        }
+    }
+
+    fn bind_semantic_target_if_needed(&mut self, item_id: u64, cx: &App) {
+        if self.query_semantic_targets.contains_key(&item_id) {
+            return;
+        }
+        if let Some(target) = self
+            .sourced_semantic_target(item_id, cx)
+            .or_else(|| self.active_semantic_target())
+        {
+            self.query_semantic_targets.insert(item_id, target);
+        }
     }
 
     fn remembered_query_params(&self, sql: &str) -> Result<Vec<sift_protocol::Value>, String> {
@@ -14333,10 +14470,13 @@ impl WorkspaceShell {
         request: SemanticRequestKind,
         cx: &mut Context<Self>,
     ) {
+        self.bind_semantic_target_if_needed(item_id, cx);
+        if request.is_debounced()
+            && !matches!(self.connection_status, ConnectionStatus::Connected { .. })
+        {
+            return;
+        }
         if let SemanticRequestKind::AutoComplete { cursor } = request {
-            if !matches!(self.connection_status, ConnectionStatus::Connected { .. }) {
-                return;
-            }
             let generation = self
                 .semantic_completion_generation
                 .entry(item_id)
@@ -14432,6 +14572,7 @@ impl WorkspaceShell {
             item_id,
             text_revision: revision,
             text,
+            target: self.query_semantic_targets.get(&item_id).cloned(),
             request,
         });
     }
@@ -26601,6 +26742,7 @@ impl WorkspaceShell {
         if let (Some(sender), Some(item_id)) = (&self.executor_sender, removed_item_id) {
             self.semantic_analyze_generation.remove(&item_id);
             self.semantic_completion_generation.remove(&item_id);
+            self.query_semantic_targets.remove(&item_id);
             let _ = sender.send(ExecutorCommand::CloseSemanticDocument { item_id });
         }
         if let (Some(sender), Some(document_id)) = (&self.room_document_sender, removed_document_id)
@@ -29989,6 +30131,12 @@ impl WorkspaceShell {
                 item_id,
                 text_revision: revision,
                 text,
+                target: self
+                    .query_semantic_targets
+                    .get(&item_id)
+                    .cloned()
+                    .or_else(|| self.sourced_semantic_target(item_id, cx))
+                    .or_else(|| self.active_semantic_target()),
                 request: SemanticRequestKind::Outline { end },
             })
             .is_ok()
@@ -31203,6 +31351,12 @@ impl WorkspaceShell {
             item_id,
             text_revision: revision,
             text: editor.read(cx).document().text().to_owned(),
+            target: self
+                .query_semantic_targets
+                .get(&item_id)
+                .cloned()
+                .or_else(|| self.sourced_semantic_target(item_id, cx))
+                .or_else(|| self.active_semantic_target()),
             request: SemanticRequestKind::Rename { position, new_name },
         };
         let pending = self
@@ -52847,6 +53001,18 @@ mod tests {
                 profile_id: 2,
                 name: "Warehouse".into(),
             };
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(7),
+                name: "Team".into(),
+                rooms: Vec::new(),
+                connections: vec![crate::ConnectionNavEntry {
+                    id: 2,
+                    tenant_id: 7,
+                    name: "Warehouse".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    tags: Vec::new(),
+                }],
+            }];
             shell.select_left_panel(LeftPanel::QueryOutline, window, cx);
             (item_id, revision)
         });
@@ -52856,15 +53022,20 @@ mod tests {
                     item_id: requested_item,
                     text_revision,
                     text,
+                    target,
                     request: SemanticRequestKind::Outline { end },
-                } => Some((requested_item, text_revision, text, end)),
+                } => Some((requested_item, text_revision, text, target, end)),
                 _ => None,
             })
             .expect("query outline request");
         assert_eq!(outline.0, item_id);
         assert_eq!(outline.1, revision);
         assert_eq!(outline.2, sql);
-        assert_eq!(outline.3, sql.len() as u32);
+        let target = outline.3.expect("query target");
+        assert_eq!(target.tenant_id, 7);
+        assert_eq!(target.profile_id, 2);
+        assert_eq!(target.profile_name, "Warehouse");
+        assert_eq!(outline.4, sql.len() as u32);
 
         let statements = vec![
             sift_protocol::SemanticStatement {

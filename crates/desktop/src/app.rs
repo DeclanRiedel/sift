@@ -30,8 +30,8 @@ use sift_protocol::{ConnectionId, SessionId};
 use sift_workspace_ui::{
     ConnectionHealthFailure, ConnectionHealthReport, ConnectionStatus, EditorMode, ExecutorCommand,
     ExecutorEvent, PresentationState, PresentationStore, Rect, ResultState, RoomDocumentCommand,
-    RoomDocumentEvent, SemanticOutcome, SemanticRequestKind, SettingsStore, UserSettings,
-    WorkspaceFilesSnapshot, WorkspaceShell,
+    RoomDocumentEvent, SemanticConnectionTarget, SemanticOutcome, SemanticRequestKind,
+    SettingsStore, UserSettings, WorkspaceFilesSnapshot, WorkspaceShell,
 };
 
 use crate::config::DesktopConfig;
@@ -562,6 +562,7 @@ fn prepare_state_for_instance(
 /// query holds its driver connection until the terminal page, so catalog and
 /// migration work must not share that physical connection.
 struct QueryContext {
+    instance_id: String,
     client: Client,
     session: SessionId,
     connection: ConnectionId,
@@ -581,6 +582,17 @@ struct QueryContext {
     /// Semantic work runs on its own task; dropping this sender ends it and
     /// releases every server document it owns with the connection.
     semantic: tokio::sync::mpsc::UnboundedSender<SemanticControl>,
+}
+
+fn semantic_target_matches(
+    instance_id: &str,
+    tenant_id: i64,
+    connection_profile_id: Option<i64>,
+    target: &SemanticConnectionTarget,
+) -> bool {
+    instance_id == target.instance_id
+        && tenant_id == target.tenant_id
+        && connection_profile_id == Some(target.profile_id)
 }
 
 fn spawn_notification_stream(
@@ -5122,6 +5134,7 @@ async fn run_query_executor(
                 item_id,
                 text_revision,
                 text,
+                target,
                 request,
             } => {
                 let outline = matches!(request, SemanticRequestKind::Outline { .. });
@@ -5131,15 +5144,43 @@ async fn run_query_executor(
                     text,
                     request,
                 };
-                let delivered = context
-                    .as_ref()
-                    .is_some_and(|opened| opened.semantic.send(SemanticControl::Run(job)).is_ok());
+                let delivered = context.as_ref().is_some_and(|opened| {
+                    target.as_ref().is_none_or(|target| {
+                        semantic_target_matches(
+                            &opened.instance_id,
+                            opened.tenant_id,
+                            opened.connection_profile_id,
+                            target,
+                        )
+                    }) && opened.semantic.send(SemanticControl::Run(job)).is_ok()
+                });
                 if !delivered
                     && events
                         .send(ExecutorEvent::Semantic {
                             item_id,
                             text_revision,
-                            outcome: Box::new(if outline {
+                            outcome: Box::new(if let Some(target) = target.as_ref().filter(|target| {
+                                context
+                                    .as_ref()
+                                    .is_none_or(|opened| {
+                                        !semantic_target_matches(
+                                            &opened.instance_id,
+                                            opened.tenant_id,
+                                            opened.connection_profile_id,
+                                            target,
+                                        )
+                                    })
+                            }) {
+                                SemanticOutcome::Failed(format!(
+                                    "Query tab uses {}{}; connect that database to enable SQL intelligence.",
+                                    target.profile_name,
+                                    target
+                                        .database
+                                        .as_deref()
+                                        .map(|database| format!(" / {database}"))
+                                        .unwrap_or_default()
+                                ))
+                            } else if outline {
                                 SemanticOutcome::OutlineFailed(
                                     "Not connected — query outline needs a connection.".into(),
                                 )
@@ -6518,6 +6559,7 @@ async fn open_query_context(
         events.clone(),
     )));
     Ok(QueryContext {
+        instance_id: server.instance().id,
         client,
         session,
         connection,
@@ -6589,6 +6631,7 @@ async fn open_ad_hoc_query_context(
         events.clone(),
     )));
     Ok(QueryContext {
+        instance_id: server.instance().id,
         client,
         session,
         connection,
@@ -7253,6 +7296,29 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn semantic_work_cannot_cross_tenant_or_connection_profile() {
+        let target = SemanticConnectionTarget {
+            instance_id: "local".into(),
+            tenant_id: 7,
+            profile_id: 42,
+            profile_name: "Warehouse".into(),
+            provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+            database: Some("analytics".into()),
+        };
+
+        assert!(semantic_target_matches("local", 7, Some(42), &target));
+        assert!(!semantic_target_matches(
+            "hosted:other",
+            7,
+            Some(42),
+            &target
+        ));
+        assert!(!semantic_target_matches("local", 8, Some(42), &target));
+        assert!(!semantic_target_matches("local", 7, Some(41), &target));
+        assert!(!semantic_target_matches("local", 7, None, &target));
     }
 
     #[test]

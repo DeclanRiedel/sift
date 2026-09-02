@@ -2020,6 +2020,16 @@ qualifiers, CTEs, temporary objects, and current-scope columns outrank global
 catalog candidates. An unqualified field is never offered as unambiguous when
 multiple visible relations provide it.
 
+The desktop owns activation policy, not completion correctness. In Vim insert
+mode it applies a bounded lexical guard, coalesces automatic requests for 180
+ms, and retains immediate Ctrl+Space completion. Diagnostics use an independent
+650 ms idle window and disappear when their document revision becomes stale.
+Every live query tab records a credential-free instance, tenant, profile,
+provider, and database target; the executor rejects semantic work when that
+target does not match the opened connection. The shallow schema loaded during
+connection setup warms the spec-keyed, single-flight cache shared by metadata
+and semantic physical connections, so warm completion performs no driver I/O.
+
 Execution v2 uses an explicit ordered event lifecycle: execution start,
 statement start, result-set start, rows addressed to a result-set id,
 result-set completion, command completion, notices, progress, terminal error,

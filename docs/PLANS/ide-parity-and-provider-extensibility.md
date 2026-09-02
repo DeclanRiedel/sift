@@ -96,9 +96,12 @@ delete, import, and export workflows.
 - [x] Context-sensitive completion
 - [x] Alias-aware completion
 - [x] CTE and temporary-object completion
+- [x] Automatic Vim-insert completion with manual Ctrl+Space fallback
+- [x] Live query-tab connection/database binding for SQL intelligence
 - [~] Foreign-key JOIN completion
 - [x] Syntax diagnostics
 - [x] Semantic diagnostics
+- [x] Idle-debounced diagnostics with stale markers hidden while typing
 - [x] Quick fixes
 - [x] Go to definition
 - [x] Find usages
