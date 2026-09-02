@@ -291,12 +291,12 @@ const fn context_kind_priority(context: &CompletionContext, kind: CompletionKind
             _ => 3,
         },
         CompletionContext::ExpectingTable => match kind {
+            CompletionKind::Schema => 0,
             CompletionKind::Table
             | CompletionKind::View
             | CompletionKind::MaterializedView
-            | CompletionKind::Alias => 0,
-            CompletionKind::Function => 1,
-            CompletionKind::Schema => 2,
+            | CompletionKind::Alias => 1,
+            CompletionKind::Function => 2,
             CompletionKind::Snippet => 3,
             CompletionKind::Keyword => 4,
             _ => 5,
@@ -432,10 +432,10 @@ fn object_candidate(
     })
 }
 
-/// Insert the shortest name that is safe in the connected catalog. Most
-/// objects are unique and stay pleasantly unqualified. Collisions receive a
-/// schema prefix (or catalog + schema when even the schema collides). When the
-/// user already typed `schema.`, only the final identifier is replaced.
+/// Insert a source-qualified relation. The editor deliberately teaches and
+/// preserves `schema.object` instead of relying on a mutable search path.
+/// Cross-catalog collisions receive `catalog.schema.object`. When the user
+/// already typed `schema.`, only the final identifier is replaced.
 fn object_insert(
     obj: &ObjectEntry,
     dict: &Dictionary,
@@ -446,17 +446,15 @@ fn object_insert(
     if qualifier_already_typed {
         return name;
     }
-    let Some(matches) = dict.by_name.get(&obj.name_lower) else {
-        return name;
-    };
-    let is_other_location = |candidate: &ObjectEntry| !same_object_location(candidate, obj);
-    let candidates = || matches.iter().map(|index| &dict.objects[*index]);
-    if !candidates().any(is_other_location) {
-        return name;
-    }
     let Some(schema_name) = obj.schema.as_deref() else {
         return name;
     };
+    let schema = quote_ident_if_needed(schema_name, engine);
+    let Some(matches) = dict.by_name.get(&obj.name_lower) else {
+        return format!("{schema}.{name}");
+    };
+    let is_other_location = |candidate: &ObjectEntry| !same_object_location(candidate, obj);
+    let candidates = || matches.iter().map(|index| &dict.objects[*index]);
     let same_schema_in_another_catalog = candidates()
         .filter(|candidate| is_other_location(candidate))
         .any(|candidate| {
@@ -465,7 +463,6 @@ fn object_insert(
                 .as_deref()
                 .is_some_and(|other| other.eq_ignore_ascii_case(schema_name))
         });
-    let schema = quote_ident_if_needed(schema_name, engine);
     if same_schema_in_another_catalog {
         if let Some(catalog) = obj.catalog.as_deref() {
             return format!(

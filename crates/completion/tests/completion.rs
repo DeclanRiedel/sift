@@ -108,7 +108,7 @@ fn after_from_returns_tables_first() {
     // Prefix `us` matches users, user_events. Both are prefix-matches;
     // tables outrank views inside ExpectingTable, so `users` wins.
     assert_eq!(top.label, "users");
-    assert_eq!(top.insert, "users");
+    assert_eq!(top.insert, "public.users");
     assert_eq!(top.qualified_name.as_deref(), Some("mock.public.users"));
     assert_eq!(top.kind, CompletionKind::Table);
     assert_eq!(resp.replaced_range.start, 14);
@@ -141,6 +141,35 @@ fn table_slot_category_stays_ahead_of_keywords() {
         .position(|candidate| candidate.label == "SELECT")
         .expect("prefix-matched keyword");
     assert!(table < keyword, "FROM context must rank tables first");
+}
+
+#[test]
+fn source_schema_stays_ahead_of_tables_in_from_slots() {
+    let mut catalog = snapshot();
+    catalog.trees[0].schemas[0]
+        .objects
+        .push(ObjectInfo::new("projects", ObjectKind::Table));
+    let response = complete(
+        &CompletionRequest {
+            sql: "SELECT * FROM p".into(),
+            cursor: 15,
+            limit: None,
+        },
+        &catalog,
+        Engine::Postgres,
+    );
+    let source = response
+        .candidates
+        .iter()
+        .position(|candidate| candidate.kind == CompletionKind::Schema)
+        .expect("source schema");
+    let table = response
+        .candidates
+        .iter()
+        .position(|candidate| candidate.label == "projects")
+        .expect("table");
+    assert!(source < table, "source must rank before table");
+    assert_eq!(response.candidates[table].insert, "public.projects");
 }
 
 #[test]
@@ -368,8 +397,8 @@ fn identifier_with_capitals_is_quoted_per_engine() {
         .iter()
         .find(|c| c.label == "MyTable")
         .expect("mssql has MyTable candidate");
-    assert_eq!(pg_entry.insert, "\"MyTable\"");
-    assert_eq!(mssql_entry.insert, "[MyTable]");
+    assert_eq!(pg_entry.insert, "public.\"MyTable\"");
+    assert_eq!(mssql_entry.insert, "public.[MyTable]");
 }
 
 #[test]

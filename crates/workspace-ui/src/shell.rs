@@ -8979,9 +8979,9 @@ const fn shell_completion_priority(
             _ => 3,
         },
         Context::ExpectingTable => match kind {
-            Kind::Table | Kind::View | Kind::MaterializedView | Kind::Alias => 0,
-            Kind::Function => 1,
-            Kind::Schema => 2,
+            Kind::Schema => 0,
+            Kind::Table | Kind::View | Kind::MaterializedView | Kind::Alias => 1,
+            Kind::Function => 2,
             Kind::Keyword => 3,
             Kind::Snippet => 4,
             _ => 5,
