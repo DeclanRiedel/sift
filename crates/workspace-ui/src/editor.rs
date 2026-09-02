@@ -2741,18 +2741,19 @@ impl QueryEditor {
     /// one, else the last notice, else the aggregate counts. Never blocks
     /// editing and never claims freshness it does not have.
     fn semantic_status(&self) -> Option<(String, bool)> {
+        let errors = self.semantic.error_count();
+        let warnings = self.semantic.warning_count();
+        let counts = format!("{errors} errors, {warnings} warnings");
         if let Some(diagnostic) = self.semantic.diagnostic_at(self.document.cursor()) {
-            let stale = self.semantic.diagnostics_stale(self.revision);
             let suffix = if diagnostic.quick_fix_ids.is_empty() {
                 String::new()
             } else {
                 " · quick fix available".into()
             };
-            let prefix = if stale { "(stale) " } else { "" };
             return Some((
                 format!(
-                    "{prefix}{}: {}{suffix}",
-                    diagnostic.code, diagnostic.message
+                    "{}: {}{suffix} · {counts}",
+                    diagnostic.code, diagnostic.message,
                 ),
                 diagnostic.severity == sift_protocol::DiagnosticSeverity::Error,
             ));
@@ -2777,8 +2778,6 @@ impl QueryEditor {
                 false,
             ));
         }
-        let errors = self.semantic.error_count();
-        let warnings = self.semantic.warning_count();
         if errors == 0 && warnings == 0 {
             return None;
         }
@@ -2787,10 +2786,7 @@ impl QueryEditor {
         } else {
             ""
         };
-        Some((
-            format!("{errors} error(s), {warnings} warning(s){incomplete}"),
-            errors > 0,
-        ))
+        Some((format!("{counts}{incomplete}"), errors > 0))
     }
 
     /// Line index and byte offset of a caret within its line.
@@ -2932,6 +2928,15 @@ impl EntityInputHandler for QueryEditor {
 impl gpui::Render for QueryEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
+        let status = match self.language {
+            EditorLanguage::Toml => {
+                toml_diagnostic(self.document.text()).map(|message| (message, true))
+            }
+            EditorLanguage::Json
+            | EditorLanguage::Sql
+            | EditorLanguage::Markdown
+            | EditorLanguage::PlainText => self.semantic_status(),
+        };
         let focused = self.focus_handle.is_focused(window);
         let blink_enabled = self.cursor_blink.read(cx).enabled;
         if focused != blink_enabled {
@@ -3043,46 +3048,11 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::replace_next))
             .on_action(cx.listener(Self::replace_all))
             .on_action(cx.listener(Self::close_find))
-            .children(
-                match self.language {
-                    EditorLanguage::Toml => toml_diagnostic(self.document.text()),
-                    EditorLanguage::Json
-                    | EditorLanguage::Sql
-                    | EditorLanguage::Markdown
-                    | EditorLanguage::PlainText => None,
-                }
-                .map(|diagnostic| {
-                    div()
-                        .px_3()
-                        .py_1()
-                        .border_b_1()
-                        .border_color(colors.danger)
-                        .bg(colors.danger_muted)
-                        .text_xs()
-                        .text_color(colors.danger)
-                        .child(diagnostic)
-                }),
-            )
-            .children(self.semantic_status().map(|(message, is_error)| {
-                let (text, background) = if is_error {
-                    (colors.danger, colors.danger_muted)
-                } else {
-                    (colors.muted_text, colors.surface)
-                };
-                div()
-                    .px_3()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(colors.subtle_border)
-                    .bg(background)
-                    .text_xs()
-                    .text_color(text)
-                    .child(message)
-            }))
             .children(self.render_find_bar(cx))
             .child(
                 div()
                     .id("editor-scroll")
+                    .debug_selector(|| "editor-scroll".to_string())
                     .flex_1()
                     .min_h_0()
                     .bg(colors.background)
@@ -3102,6 +3072,29 @@ impl gpui::Render for QueryEditor {
                             .children(self.render_hover_card(cx))
                             .children(self.render_star_expansion_card(cx)),
                     ),
+            )
+            // This row is permanent: diagnostics update its content without
+            // inserting chrome above the buffer and shifting every line.
+            .child(
+                div()
+                    .id("editor-status-line")
+                    .debug_selector(|| "editor-status-line".to_string())
+                    .flex_none()
+                    .h(px(24.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .border_t_1()
+                    .border_color(colors.subtle_border)
+                    .bg(colors.surface)
+                    .text_xs()
+                    .text_color(if status.as_ref().is_some_and(|(_, error)| *error) {
+                        colors.danger
+                    } else {
+                        colors.muted_text
+                    })
+                    .children(status.map(|(message, _)| message)),
             )
     }
 }
@@ -4462,6 +4455,32 @@ mod tests {
             ));
             assert_eq!(editor.semantic().error_count(), 1);
         });
+    }
+
+    #[gpui::test]
+    fn diagnostics_update_a_fixed_status_line_without_shifting_the_buffer(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("select from", cx);
+        cx.run_until_parked();
+        let before = cx.debug_bounds("editor-scroll").expect("editor viewport");
+        let status_before = cx
+            .debug_bounds("editor-status-line")
+            .expect("fixed editor status line");
+
+        editor.update(&mut cx, |editor, cx| {
+            let revision = editor.text_revision();
+            assert!(editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Diagnostics {
+                    diagnostics: vec![diagnostic(7, 11, Vec::new())],
+                    incomplete: false,
+                },
+                cx,
+            ));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(cx.debug_bounds("editor-scroll"), Some(before));
+        assert_eq!(cx.debug_bounds("editor-status-line"), Some(status_before));
     }
 
     #[gpui::test]
