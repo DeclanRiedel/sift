@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::{Arc, LazyLock};
 
 use gpui::KeyBinding;
 use sift_workspace_ui::{
@@ -6,6 +7,28 @@ use sift_workspace_ui::{
     PaletteDown, PaletteUp, PaneNavigateBack, PaneNavigateForward, SaveActiveItem, SplitPane,
     StageJsonResultEdit, ToggleBottomDock, ToggleFrameMetrics, ToggleLeftDock, ToggleRightDock,
 };
+
+pub const APP_ID: &str = "dev.sift.Sift";
+
+/// Native window icon used by GPUI's X11 backend. Wayland shells associate
+/// the same `APP_ID` with the desktop entry installed by the Nix launcher.
+pub fn app_icon() -> Option<Arc<image::RgbaImage>> {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        static APP_ICON: LazyLock<Arc<image::RgbaImage>> = LazyLock::new(|| {
+            let image = image::load_from_memory(include_bytes!("../assets/sift-icon.png"))
+                .expect("embedded Sift icon is a valid PNG")
+                .resize_exact(512, 512, image::imageops::FilterType::Lanczos3)
+                .into_rgba8();
+            Arc::new(image)
+        });
+        Some(APP_ICON.clone())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformKind {
@@ -176,6 +199,13 @@ mod tests {
             current_platform(),
             PlatformKind::Linux | PlatformKind::MacOS | PlatformKind::Windows
         ));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn embedded_application_icon_is_square_and_nonempty() {
+        let icon = app_icon().expect("Linux application icon");
+        assert_eq!(icon.dimensions(), (512, 512));
     }
 
     #[test]

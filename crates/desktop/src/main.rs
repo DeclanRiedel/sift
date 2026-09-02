@@ -12,7 +12,7 @@ use sift_ui::{
 
 use crate::app::{display_rects, SiftApp, SiftWindow};
 use crate::config::DesktopConfig;
-use crate::platform::{primary_modifier, shell_key_bindings};
+use crate::platform::{app_icon, primary_modifier, shell_key_bindings, APP_ID};
 use sift_workspace_ui::{
     editor as ed, results as res, CancelExecution, CloseActiveItem, CloseActivePane, FocusNextPane,
     OpenCommandPalette, OpenServerConnection, SaveActiveItem, SplitPane, ToggleBottomDock,
@@ -114,6 +114,7 @@ fn main() {
     application()
         .with_assets(sift_ui::SiftAssets)
         .run(move |cx| {
+            cx.set_app_identity(APP_ID, "Sift");
             cx.bind_keys(shell_key_bindings());
             cx.set_menus([
                 Menu::new("File").items([
@@ -209,6 +210,8 @@ fn main() {
                         title: Some(format!("Sift · {platform}").into()),
                         ..Default::default()
                     }),
+                    app_id: Some(APP_ID.into()),
+                    icon: app_icon(),
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| SiftWindow::new(state, services, window, cx)),

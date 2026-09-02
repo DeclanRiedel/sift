@@ -524,6 +524,8 @@ impl SiftWindow {
                     title: Some(format!("Sift · {platform}").into()),
                     ..Default::default()
                 }),
+                app_id: Some(crate::platform::APP_ID.into()),
+                icon: crate::platform::app_icon(),
                 ..Default::default()
             },
             |window, cx| cx.new(|cx| SiftWindow::new(state, services, window, cx)),

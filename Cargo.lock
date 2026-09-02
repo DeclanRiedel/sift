@@ -7539,6 +7539,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
+ "image",
  "keyring",
  "reqwest",
  "serde",

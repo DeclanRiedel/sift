@@ -421,12 +421,43 @@
           text = devCommand ''cargo check --workspace --all-targets'';
         };
 
-        desktop = pkgs.writeShellApplication {
-          name = "sift-desktop";
+        desktopRunner = pkgs.writeShellApplication {
+          name = "sift-desktop-runner";
           runtimeInputs = [ pkgs.nix ];
           text = devCommand ''
             cargo build --profile release-dev -p sift-server --bin sift-launcher
             cargo run --profile release-dev -p sift-desktop -- "$@"
+          '';
+        };
+
+        desktopItem = pkgs.makeDesktopItem {
+          name = "dev.sift.Sift";
+          desktopName = "Sift";
+          genericName = "Database IDE";
+          comment = "Native database IDE for PostgreSQL and SQL Server";
+          exec = "${desktopRunner}/bin/sift-desktop-runner";
+          icon = "${./crates/desktop/assets/sift-icon.png}";
+          terminal = false;
+          categories = [ "Development" "Database" ];
+          startupNotify = true;
+          startupWMClass = "dev.sift.Sift";
+        };
+
+        installDesktopItem = ''
+          data_home="''${XDG_DATA_HOME:-$HOME/.local/share}"
+          ${pkgs.coreutils}/bin/mkdir -p "$data_home/applications"
+          ${pkgs.coreutils}/bin/install -m 0644 \
+            "${desktopItem}/share/applications/dev.sift.Sift.desktop" \
+            "$data_home/applications/dev.sift.Sift.desktop"
+          ${pkgs.desktop-file-utils}/bin/update-desktop-database \
+            "$data_home/applications" >/dev/null 2>&1 || true
+        '';
+
+        desktop = pkgs.writeShellApplication {
+          name = "sift-desktop";
+          text = ''
+            ${installDesktopItem}
+            exec "${desktopRunner}/bin/sift-desktop-runner" "$@"
           '';
         };
 
@@ -438,6 +469,8 @@
           runtimeInputs = with pkgs; [ coreutils curl git gnugrep gnused jq nix openssl postgresql util-linux ];
           text = ''
             set -Eeuo pipefail
+
+            ${installDesktopItem}
 
             phase_name="launcher validation"
             phase() {

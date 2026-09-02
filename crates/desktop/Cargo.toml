@@ -9,6 +9,7 @@ repository.workspace = true
 futures = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
+image = { workspace = true }
 keyring = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
