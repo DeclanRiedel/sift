@@ -13,7 +13,10 @@ use sift_protocol::{
     SemanticStatement, SqlRefactor, SqlSymbolTarget, SqlUsage, SqlUsageKind, SqlUsagePage,
     StatementKind, StatementSelection, TextEdit, TextRange, WorkspaceEdit,
 };
-use sqlparser::ast::{Expr, Query, SelectItem, SetExpr, Statement as SqlStatement, TableFactor};
+use sqlparser::ast::{
+    Expr, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, Statement as SqlStatement,
+    TableFactor,
+};
 use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace, Word};
@@ -48,6 +51,9 @@ pub struct CompletionRelation {
     pub name: String,
     pub target: Option<String>,
     pub is_alias: bool,
+    /// Ordered document-local projection. Empty when the relation must be
+    /// resolved through the catalog.
+    pub columns: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +82,8 @@ pub struct CatalogBindingObject {
     pub kind: sift_protocol::CatalogNodeKind,
     pub complete: bool,
     pub comment: Option<String>,
+    pub routine_args: Option<Vec<String>>,
+    pub return_type: Option<sift_protocol::TypeRef>,
     pub columns: Vec<CatalogBindingColumn>,
 }
 
@@ -2058,6 +2066,22 @@ fn semantic_hover(
                 ));
             }
         }
+        if let Some((field, composite)) = composite_field(
+            catalog,
+            &relations,
+            &qualifier.text,
+            &token.text,
+            token.quoted,
+        ) {
+            return Ok(column_hover(
+                document_id,
+                revision,
+                token.range,
+                field,
+                composite,
+                catalog,
+            ));
+        }
     }
     if let Some(relation) = relations
         .iter()
@@ -2143,6 +2167,39 @@ fn semantic_hover(
     let followed_by_call = tokens
         .get(token_index + 1)
         .is_some_and(|next| next.kind == BindingTokenKind::LeftParen);
+    if followed_by_call {
+        if let (Some(catalog), Some(arity)) = (
+            catalog,
+            call_arity(source, tokens[token_index + 1].range.start as usize),
+        ) {
+            let matches = catalog
+                .objects
+                .iter()
+                .filter(|object| {
+                    matches!(
+                        object.kind,
+                        sift_protocol::CatalogNodeKind::ScalarFunction
+                            | sift_protocol::CatalogNodeKind::TableValuedFunction
+                            | sift_protocol::CatalogNodeKind::Procedure
+                    ) && object.name.eq_ignore_ascii_case(&token.text)
+                        && object
+                            .routine_args
+                            .as_ref()
+                            .is_some_and(|arguments| arguments.len() == arity)
+                })
+                .collect::<Vec<_>>();
+            if matches.len() == 1 {
+                return Ok(object_hover(
+                    document_id,
+                    revision,
+                    token.range,
+                    matches[0],
+                    catalog,
+                    false,
+                ));
+            }
+        }
+    }
     Ok(local_hover(
         document_id,
         revision,
@@ -2159,6 +2216,98 @@ fn semantic_hover(
             "expression type is not proven by the visible catalog"
         },
     ))
+}
+
+fn composite_field<'a>(
+    catalog: &'a CatalogBindingView,
+    relations: &[CompletionRelation],
+    record: &str,
+    field: &str,
+    field_quoted: bool,
+) -> Option<(&'a CatalogBindingColumn, &'a CatalogBindingObject)> {
+    let mut matches = Vec::new();
+    for relation in relations {
+        let Some(object) = catalog.resolve(relation.target.as_deref().unwrap_or(&relation.name))
+        else {
+            continue;
+        };
+        for column in object
+            .columns
+            .iter()
+            .filter(|column| column.name.eq_ignore_ascii_case(record))
+        {
+            let sift_protocol::TypeRef::Native { name, .. } = &column.type_ref else {
+                continue;
+            };
+            let composite = catalog
+                .resolve(name)
+                .or_else(|| catalog.resolve(name.rsplit('.').next()?));
+            if let Some(composite) = composite {
+                if composite.kind == sift_protocol::CatalogNodeKind::Type {
+                    matches.extend(
+                        composite
+                            .columns
+                            .iter()
+                            .filter(|candidate| {
+                                identifier_matches(&candidate.name, field, field_quoted)
+                            })
+                            .map(|candidate| (candidate, composite)),
+                    );
+                }
+            }
+        }
+    }
+    matches.sort_by(|left, right| left.0.id.0.cmp(&right.0.id.0));
+    matches.dedup_by(|left, right| left.0.id == right.0.id);
+    (matches.len() == 1).then(|| matches[0])
+}
+
+fn call_arity(source: &str, left_paren: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if bytes.get(left_paren) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut commas = 0usize;
+    let mut has_argument = false;
+    let mut quote = None;
+    let mut index = left_paren + 1;
+    while index < bytes.len() {
+        if let Some(active) = quote {
+            has_argument = true;
+            if bytes[index] == active {
+                if bytes.get(index + 1) == Some(&active) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match bytes[index] {
+            b'\'' | b'"' => {
+                quote = Some(bytes[index]);
+                has_argument = true;
+            }
+            b'(' => {
+                depth += 1;
+                has_argument = true;
+            }
+            b')' if depth == 0 => {
+                return Some(if has_argument { commas + 1 } else { 0 });
+            }
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                commas += 1;
+                has_argument = true;
+            }
+            byte if !byte.is_ascii_whitespace() => has_argument = true,
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 fn column_hover(
@@ -2196,6 +2345,14 @@ fn object_hover(
     catalog: &CatalogBindingView,
     alias: bool,
 ) -> sift_protocol::SemanticHoverResponse {
+    let routine_detail = object.routine_args.as_ref().map(|arguments| {
+        let returns = object
+            .return_type
+            .as_ref()
+            .map(|type_ref| format!(" -> {}", semantic_type_display(type_ref)))
+            .unwrap_or_default();
+        format!("({}){returns}", arguments.join(", "))
+    });
     sift_protocol::SemanticHoverResponse {
         document_id,
         revision,
@@ -2217,9 +2374,20 @@ fn object_hover(
         nullability: None,
         object_kind: Some(object.kind),
         comment: object.comment.clone(),
-        detail: alias.then(|| format!("alias for {}", object.qualified_name)),
+        detail: alias
+            .then(|| format!("alias for {}", object.qualified_name))
+            .or(routine_detail),
         uncertain: !catalog.complete || !object.complete,
         catalog_revision: Some(catalog.revision),
+    }
+}
+
+fn semantic_type_display(type_ref: &sift_protocol::TypeRef) -> String {
+    match type_ref {
+        sift_protocol::TypeRef::Native { name, .. } => name.clone(),
+        sift_protocol::TypeRef::Primitive(primitive) => {
+            format!("{primitive:?}").to_ascii_lowercase()
+        }
     }
 }
 
@@ -2264,6 +2432,32 @@ struct StarRelation {
     target: StarRelationTarget,
 }
 
+#[derive(Debug, Clone)]
+enum StarJoinRule {
+    Using {
+        columns: Vec<String>,
+        left: Vec<usize>,
+        right: usize,
+    },
+    Natural {
+        left: Vec<usize>,
+        right: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct StarScope {
+    relations: Vec<StarRelation>,
+    join_rules: Vec<StarJoinRule>,
+}
+
+struct ResolvedStarRelation {
+    visible_name: String,
+    relation_name: String,
+    columns: Vec<String>,
+    kind: sift_protocol::StarExpansionKind,
+}
+
 fn prepare_star_expansion(
     source: &str,
     dialect_id: &sift_protocol::DialectId,
@@ -2293,55 +2487,91 @@ fn prepare_star_expansion(
         Flavor::Tsql => Box::new(MsSqlDialect {}),
     };
     let statement = &source[statement_range.start as usize..statement_range.end as usize];
-    let relations = star_relations(statement, &*dialect)?;
     let qualifier = star_qualifier(source, star);
-    let relation = match qualifier.as_ref() {
-        Some((name, _, _)) => relations
+    let (columns, rendered, relation_name, kind) = if flavor == Flavor::Tsql
+        && qualifier.as_ref().is_some_and(|(name, _, _)| {
+            name.eq_ignore_ascii_case("inserted") || name.eq_ignore_ascii_case("deleted")
+        }) {
+        let target = tsql_dml_target(statement)
+            .or_else(|| tsql_trigger_target(statement))
+            .ok_or(Error::InvalidRequest)?;
+        let object = catalog.resolve(&target).ok_or(Error::InvalidRequest)?;
+        let columns = ordered_catalog_columns(object)?;
+        let qualifier = &qualifier.as_ref().expect("checked above").1;
+        let rendered = columns
             .iter()
-            .find(|relation| relation.visible_name.eq_ignore_ascii_case(name))
-            .ok_or(Error::InvalidRequest)?,
-        None if relations.len() == 1 => &relations[0],
-        None => return Err(Error::InvalidRequest),
-    };
-    let (columns, relation_name, kind) = match &relation.target {
-        StarRelationTarget::Catalog(reference) => {
-            let object = catalog.resolve(reference).ok_or(Error::InvalidRequest)?;
-            if !object.complete || object.columns.is_empty() {
-                return Err(Error::InvalidRequest);
-            }
-            let mut columns = object.columns.iter().collect::<Vec<_>>();
-            columns.sort_by_key(|column| column.ordinal.unwrap_or(u32::MAX));
-            (
-                columns
-                    .into_iter()
-                    .map(|column| column.name.clone())
-                    .collect(),
-                object.qualified_name.clone(),
-                if qualifier.is_some() {
-                    sift_protocol::StarExpansionKind::QualifiedRelation
-                } else {
-                    sift_protocol::StarExpansionKind::SingleRelation
-                },
-            )
-        }
-        StarRelationTarget::Local {
-            name,
+            .map(|column| format!("{qualifier}.{}", quote_semantic_identifier(column, flavor)))
+            .collect();
+        (
             columns,
-            kind,
-        } if !columns.is_empty() => (columns.clone(), name.clone(), *kind),
-        StarRelationTarget::Local { .. } => return Err(Error::InvalidRequest),
+            rendered,
+            object.qualified_name.clone(),
+            sift_protocol::StarExpansionKind::PseudoTable,
+        )
+    } else {
+        let locals = temporary_star_relations(&source[..statement_range.start as usize], &*dialect);
+        let scope = star_relations(statement, &*dialect, locals)?;
+        let resolved = scope
+            .relations
+            .iter()
+            .map(|relation| resolve_star_relation(relation, catalog))
+            .collect::<Result<Vec<_>, _>>()?;
+        match qualifier.as_ref() {
+            Some((name, rendered_qualifier, _)) => {
+                let relation = resolved
+                    .iter()
+                    .find(|relation| relation.visible_name.eq_ignore_ascii_case(name))
+                    .ok_or(Error::InvalidRequest)?;
+                let rendered = relation
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        format!(
+                            "{rendered_qualifier}.{}",
+                            quote_semantic_identifier(column, flavor)
+                        )
+                    })
+                    .collect();
+                (
+                    relation.columns.clone(),
+                    rendered,
+                    relation.relation_name.clone(),
+                    if matches!(
+                        relation.kind,
+                        sift_protocol::StarExpansionKind::Cte
+                            | sift_protocol::StarExpansionKind::Subquery
+                            | sift_protocol::StarExpansionKind::TemporaryRelation
+                            | sift_protocol::StarExpansionKind::TableValuedFunction
+                    ) {
+                        relation.kind
+                    } else {
+                        sift_protocol::StarExpansionKind::QualifiedRelation
+                    },
+                )
+            }
+            None if resolved.len() == 1 => {
+                let relation = &resolved[0];
+                let rendered = relation
+                    .columns
+                    .iter()
+                    .map(|column| quote_semantic_identifier(column, flavor))
+                    .collect();
+                (
+                    relation.columns.clone(),
+                    rendered,
+                    relation.relation_name.clone(),
+                    match relation.kind {
+                        sift_protocol::StarExpansionKind::Cte
+                        | sift_protocol::StarExpansionKind::Subquery
+                        | sift_protocol::StarExpansionKind::TemporaryRelation
+                        | sift_protocol::StarExpansionKind::TableValuedFunction => relation.kind,
+                        _ => sift_protocol::StarExpansionKind::SingleRelation,
+                    },
+                )
+            }
+            None => expand_multiple_relations(&resolved, &scope.join_rules, flavor)?,
+        }
     };
-    let rendered = columns
-        .iter()
-        .map(|column| {
-            let column = quote_semantic_identifier(column, flavor);
-            qualifier
-                .as_ref()
-                .map_or(column.clone(), |(_, qualifier, _)| {
-                    format!("{qualifier}.{column}")
-                })
-        })
-        .collect::<Vec<_>>();
     let range = TextRange {
         start: u32::try_from(
             qualifier
@@ -2405,12 +2635,15 @@ fn star_qualifier(source: &str, star: usize) -> Option<(String, String, usize)> 
     (!name.is_empty()).then_some((name, rendered, start))
 }
 
-fn star_relations(statement: &str, dialect: &dyn Dialect) -> Result<Vec<StarRelation>, Error> {
+fn star_relations(
+    statement: &str,
+    dialect: &dyn Dialect,
+    mut locals: HashMap<String, (Vec<String>, sift_protocol::StarExpansionKind)>,
+) -> Result<StarScope, Error> {
     let parsed = Parser::parse_sql(dialect, statement).map_err(|_| Error::InvalidRequest)?;
     let [SqlStatement::Query(query)] = parsed.as_slice() else {
         return Err(Error::InvalidRequest);
     };
-    let mut locals = HashMap::<String, (Vec<String>, sift_protocol::StarExpansionKind)>::new();
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
             let columns = if cte.alias.columns.is_empty() {
@@ -2428,15 +2661,50 @@ fn star_relations(statement: &str, dialect: &dyn Dialect) -> Result<Vec<StarRela
         return Err(Error::InvalidRequest);
     };
     let mut relations = Vec::new();
+    let mut join_rules = Vec::new();
     for table in &select.from {
+        let group_start = relations.len();
         push_star_table_factor(&table.relation, &locals, &mut relations)?;
         for join in &table.joins {
             push_star_table_factor(&join.relation, &locals, &mut relations)?;
+            let right = relations.len() - 1;
+            match join_constraint(&join.join_operator) {
+                Some(JoinConstraint::Using(columns)) => {
+                    join_rules.push(StarJoinRule::Using {
+                        columns: columns.iter().map(|column| column.value.clone()).collect(),
+                        left: (group_start..right).collect(),
+                        right,
+                    });
+                }
+                Some(JoinConstraint::Natural) => join_rules.push(StarJoinRule::Natural {
+                    left: (group_start..right).collect(),
+                    right,
+                }),
+                _ => {}
+            }
         }
     }
     (!relations.is_empty())
-        .then_some(relations)
+        .then_some(StarScope {
+            relations,
+            join_rules,
+        })
         .ok_or(Error::InvalidRequest)
+}
+
+fn join_constraint(operator: &JoinOperator) -> Option<&JoinConstraint> {
+    match operator {
+        JoinOperator::Inner(constraint)
+        | JoinOperator::LeftOuter(constraint)
+        | JoinOperator::RightOuter(constraint)
+        | JoinOperator::FullOuter(constraint)
+        | JoinOperator::LeftSemi(constraint)
+        | JoinOperator::RightSemi(constraint)
+        | JoinOperator::LeftAnti(constraint)
+        | JoinOperator::RightAnti(constraint) => Some(constraint),
+        JoinOperator::AsOf { constraint, .. } => Some(constraint),
+        JoinOperator::CrossJoin | JoinOperator::CrossApply | JoinOperator::OuterApply => None,
+    }
 }
 
 fn push_star_table_factor(
@@ -2486,6 +2754,214 @@ fn push_star_table_factor(
         }
         _ => Err(Error::InvalidRequest),
     }
+}
+
+fn ordered_catalog_columns(object: &CatalogBindingObject) -> Result<Vec<String>, Error> {
+    if !object.complete || object.columns.is_empty() {
+        return Err(Error::InvalidRequest);
+    }
+    let mut columns = object.columns.iter().collect::<Vec<_>>();
+    columns.sort_by_key(|column| column.ordinal.unwrap_or(u32::MAX));
+    Ok(columns
+        .into_iter()
+        .map(|column| column.name.clone())
+        .collect())
+}
+
+fn resolve_star_relation(
+    relation: &StarRelation,
+    catalog: &CatalogBindingView,
+) -> Result<ResolvedStarRelation, Error> {
+    match &relation.target {
+        StarRelationTarget::Catalog(reference) => {
+            let object = catalog.resolve(reference).ok_or(Error::InvalidRequest)?;
+            Ok(ResolvedStarRelation {
+                visible_name: relation.visible_name.clone(),
+                relation_name: object.qualified_name.clone(),
+                columns: ordered_catalog_columns(object)?,
+                kind: if object.kind == sift_protocol::CatalogNodeKind::TableValuedFunction {
+                    sift_protocol::StarExpansionKind::TableValuedFunction
+                } else {
+                    sift_protocol::StarExpansionKind::QualifiedRelation
+                },
+            })
+        }
+        StarRelationTarget::Local {
+            name,
+            columns,
+            kind,
+        } if !columns.is_empty() => Ok(ResolvedStarRelation {
+            visible_name: relation.visible_name.clone(),
+            relation_name: name.clone(),
+            columns: columns.clone(),
+            kind: *kind,
+        }),
+        StarRelationTarget::Local { .. } => Err(Error::InvalidRequest),
+    }
+}
+
+fn expand_multiple_relations(
+    relations: &[ResolvedStarRelation],
+    rules: &[StarJoinRule],
+    flavor: Flavor,
+) -> Result<
+    (
+        Vec<String>,
+        Vec<String>,
+        String,
+        sift_protocol::StarExpansionKind,
+    ),
+    Error,
+> {
+    let mut coalesced = Vec::<String>::new();
+    for rule in rules {
+        let columns = match rule {
+            StarJoinRule::Using {
+                columns,
+                left,
+                right,
+            } => {
+                let right = relations.get(*right).ok_or(Error::InvalidRequest)?;
+                for column in columns {
+                    let left_has_column = left
+                        .iter()
+                        .filter_map(|index| relations.get(*index))
+                        .any(|relation| {
+                            relation
+                                .columns
+                                .iter()
+                                .any(|candidate| candidate.eq_ignore_ascii_case(column))
+                        });
+                    let right_has_column = right
+                        .columns
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(column));
+                    if !left_has_column || !right_has_column {
+                        return Err(Error::InvalidRequest);
+                    }
+                }
+                columns.clone()
+            }
+            StarJoinRule::Natural { left, right } => {
+                let right = relations.get(*right).ok_or(Error::InvalidRequest)?;
+                left.iter()
+                    .filter_map(|index| relations.get(*index))
+                    .flat_map(|relation| relation.columns.iter())
+                    .filter(|column| {
+                        right
+                            .columns
+                            .iter()
+                            .any(|candidate| candidate.eq_ignore_ascii_case(column))
+                    })
+                    .cloned()
+                    .collect()
+            }
+        };
+        for column in columns {
+            if !coalesced
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(&column))
+            {
+                coalesced.push(column);
+            }
+        }
+    }
+    let mut columns = coalesced.clone();
+    let mut rendered = coalesced
+        .iter()
+        .map(|column| quote_semantic_identifier(column, flavor))
+        .collect::<Vec<_>>();
+    for relation in relations {
+        for column in &relation.columns {
+            if coalesced
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(column))
+            {
+                continue;
+            }
+            columns.push(column.clone());
+            rendered.push(format!(
+                "{}.{}",
+                quote_semantic_identifier(&relation.visible_name, flavor),
+                quote_semantic_identifier(column, flavor)
+            ));
+        }
+    }
+    Ok((
+        columns,
+        rendered,
+        relations
+            .iter()
+            .map(|relation| relation.relation_name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        sift_protocol::StarExpansionKind::MultipleRelations,
+    ))
+}
+
+fn temporary_star_relations(
+    source: &str,
+    dialect: &dyn Dialect,
+) -> HashMap<String, (Vec<String>, sift_protocol::StarExpansionKind)> {
+    Parser::parse_sql(dialect, source)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|statement| match statement {
+            SqlStatement::CreateTable(table)
+                if table.temporary
+                    || table
+                        .name
+                        .0
+                        .last()
+                        .is_some_and(|name| name.value.starts_with('#')) =>
+            {
+                let name = table.name.0.last()?.value.clone();
+                let columns = table
+                    .columns
+                    .iter()
+                    .map(|column| column.name.value.clone())
+                    .collect::<Vec<_>>();
+                Some((
+                    name.to_ascii_lowercase(),
+                    (columns, sift_protocol::StarExpansionKind::TemporaryRelation),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn tsql_dml_target(statement: &str) -> Option<String> {
+    let tokens = binding_tokens(statement);
+    let tokens = tokens.iter().collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
+        if !token.is_word() {
+            continue;
+        }
+        let start = if token.text.eq_ignore_ascii_case("UPDATE") {
+            Some(index + 1)
+        } else if token.text.eq_ignore_ascii_case("INSERT")
+            || token.text.eq_ignore_ascii_case("MERGE")
+        {
+            tokens
+                .get(index + 1)
+                .filter(|next| next.text.eq_ignore_ascii_case("INTO"))
+                .map(|_| index + 2)
+        } else if token.text.eq_ignore_ascii_case("DELETE") {
+            tokens
+                .get(index + 1)
+                .filter(|next| next.text.eq_ignore_ascii_case("FROM"))
+                .map(|_| index + 2)
+        } else {
+            None
+        };
+        if let Some((target, _, _, _)) =
+            start.and_then(|start| outline_relation_target(&tokens, start))
+        {
+            return Some(target);
+        }
+    }
+    None
 }
 
 fn query_projection_columns(query: &Query) -> Result<Vec<String>, Error> {
@@ -2560,13 +3036,18 @@ pub fn detect_completion_context(
     // so relation discovery consumes the whole revision while slot
     // classification consumes only the text preceding the replacement range.
     let relations = semantic_tokens(&*dialect, sql);
+    let mut relations = completion_relations(&relations);
+    enrich_local_completion_relations(sql, &*dialect, flavor, &mut relations);
+    if flavor == Flavor::Tsql {
+        enrich_tsql_pseudo_relations(sql, &mut relations);
+    }
     Ok(CompletionAnalysis {
         context: classify_completion(&tokens),
         cursor,
         prefix_start,
         prefix_lower: prefix.to_ascii_lowercase(),
         prefix,
-        relations: completion_relations(&relations),
+        relations,
     })
 }
 
@@ -2647,6 +3128,137 @@ fn completion_relations(tokens: &[Token]) -> Vec<CompletionRelation> {
     relations
 }
 
+fn enrich_local_completion_relations(
+    sql: &str,
+    dialect: &dyn Dialect,
+    _flavor: Flavor,
+    relations: &mut Vec<CompletionRelation>,
+) {
+    let Ok(statements) = Parser::parse_sql(dialect, sql) else {
+        return;
+    };
+    for statement in statements {
+        match statement {
+            SqlStatement::CreateTable(table)
+                if table.temporary
+                    || table
+                        .name
+                        .0
+                        .last()
+                        .is_some_and(|name| name.value.starts_with('#')) =>
+            {
+                if let Some(name) = table.name.0.last() {
+                    set_local_completion_relation(
+                        relations,
+                        &name.value,
+                        table
+                            .columns
+                            .iter()
+                            .map(|column| column.name.value.clone())
+                            .collect(),
+                    );
+                }
+            }
+            SqlStatement::Query(query) => enrich_query_locals(&query, relations),
+            _ => {}
+        }
+    }
+}
+
+fn enrich_query_locals(query: &Query, relations: &mut Vec<CompletionRelation>) {
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            let columns = if cte.alias.columns.is_empty() {
+                query_projection_columns(&cte.query).unwrap_or_default()
+            } else {
+                cte.alias
+                    .columns
+                    .iter()
+                    .map(|column| column.value.clone())
+                    .collect()
+            };
+            set_local_completion_relation(relations, &cte.alias.name.value, columns);
+        }
+    }
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return;
+    };
+    for from in &select.from {
+        for factor in
+            std::iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation))
+        {
+            if let TableFactor::Derived {
+                subquery,
+                alias: Some(alias),
+                ..
+            } = factor
+            {
+                let columns = if alias.columns.is_empty() {
+                    query_projection_columns(subquery).unwrap_or_default()
+                } else {
+                    alias
+                        .columns
+                        .iter()
+                        .map(|column| column.value.clone())
+                        .collect()
+                };
+                set_local_completion_relation(relations, &alias.name.value, columns);
+            }
+        }
+    }
+}
+
+fn set_local_completion_relation(
+    relations: &mut Vec<CompletionRelation>,
+    name: &str,
+    columns: Vec<String>,
+) {
+    if let Some(relation) = relations
+        .iter_mut()
+        .find(|relation| relation.name.eq_ignore_ascii_case(name) && relation.target.is_none())
+    {
+        relation.columns = columns;
+    } else {
+        relations.push(CompletionRelation {
+            name: name.to_string(),
+            target: None,
+            is_alias: false,
+            columns,
+        });
+    }
+}
+
+fn enrich_tsql_pseudo_relations(sql: &str, relations: &mut Vec<CompletionRelation>) {
+    let statement = sql.rsplit(';').next().unwrap_or(sql);
+    let Some(target) = tsql_dml_target(statement).or_else(|| tsql_trigger_target(statement)) else {
+        return;
+    };
+    let upper = statement.trim_start().to_ascii_uppercase();
+    let insert = upper.starts_with("INSERT")
+        || upper.starts_with("UPDATE")
+        || upper.starts_with("MERGE")
+        || upper.starts_with("CREATE TRIGGER");
+    let delete = upper.starts_with("DELETE")
+        || upper.starts_with("UPDATE")
+        || upper.starts_with("MERGE")
+        || upper.starts_with("CREATE TRIGGER");
+    if insert {
+        push_relation(relations, "inserted", Some(&target), true);
+    }
+    if delete {
+        push_relation(relations, "deleted", Some(&target), true);
+    }
+}
+
+fn tsql_trigger_target(statement: &str) -> Option<String> {
+    let tokens = binding_tokens(statement);
+    let tokens = tokens.iter().collect::<Vec<_>>();
+    let on = tokens
+        .iter()
+        .position(|token| token.is_word() && token.text.eq_ignore_ascii_case("ON"))?;
+    outline_relation_target(&tokens, on + 1).map(|(target, _, _, _)| target)
+}
+
 fn push_relation(
     relations: &mut Vec<CompletionRelation>,
     name: &str,
@@ -2661,6 +3273,7 @@ fn push_relation(
             name: name.to_string(),
             target: target.map(str::to_string),
             is_alias,
+            columns: Vec::new(),
         });
     }
 }
@@ -2846,6 +3459,8 @@ mod tests {
                 kind: sift_protocol::CatalogNodeKind::Table,
                 complete: true,
                 comment: (name == "users").then(|| "Application users".into()),
+                routine_args: None,
+                return_type: None,
                 columns: columns
                     .iter()
                     .enumerate()
@@ -2879,6 +3494,94 @@ mod tests {
                 ),
             ],
         )
+    }
+
+    fn advanced_catalog() -> CatalogBindingView {
+        let base = hover_catalog();
+        let mut objects = base.objects;
+        let columns = |id: &str, names: &[&str]| {
+            names
+                .iter()
+                .enumerate()
+                .map(|(ordinal, name)| CatalogBindingColumn {
+                    id: sift_protocol::CatalogObjectId(format!("{id}-{name}")),
+                    name: (*name).into(),
+                    type_ref: sift_protocol::TypeRef::Primitive(sift_protocol::PrimitiveType::Text),
+                    nullable: sift_protocol::Nullability::Nullable,
+                    ordinal: Some(ordinal as u32 + 1),
+                })
+                .collect::<Vec<_>>()
+        };
+        objects.push(CatalogBindingObject {
+            id: sift_protocol::CatalogObjectId("find-users".into()),
+            catalog: "mock".into(),
+            schema: "public".into(),
+            name: "find_users".into(),
+            qualified_name: "mock.public.find_users".into(),
+            kind: sift_protocol::CatalogNodeKind::TableValuedFunction,
+            complete: true,
+            comment: None,
+            routine_args: Some(vec!["bigint".into()]),
+            return_type: None,
+            columns: columns("find-users", &["id", "email"]),
+        });
+        objects.push(CatalogBindingObject {
+            id: sift_protocol::CatalogObjectId("address".into()),
+            catalog: "mock".into(),
+            schema: "public".into(),
+            name: "address".into(),
+            qualified_name: "mock.public.address".into(),
+            kind: sift_protocol::CatalogNodeKind::Type,
+            complete: true,
+            comment: None,
+            routine_args: None,
+            return_type: None,
+            columns: columns("address", &["city", "postal_code"]),
+        });
+        objects.push(CatalogBindingObject {
+            id: sift_protocol::CatalogObjectId("profiles".into()),
+            catalog: "mock".into(),
+            schema: "public".into(),
+            name: "profiles".into(),
+            qualified_name: "mock.public.profiles".into(),
+            kind: sift_protocol::CatalogNodeKind::Table,
+            complete: true,
+            comment: None,
+            routine_args: None,
+            return_type: None,
+            columns: vec![CatalogBindingColumn {
+                id: sift_protocol::CatalogObjectId("profiles-address".into()),
+                name: "profile".into(),
+                type_ref: sift_protocol::TypeRef::Native {
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    name: "public.address".into(),
+                    category: sift_protocol::TypeCategory::Composite,
+                },
+                nullable: sift_protocol::Nullability::Nullable,
+                ordinal: Some(1),
+            }],
+        });
+        for (id, arguments) in [
+            ("calculate-one", vec!["int"]),
+            ("calculate-two", vec!["int", "int"]),
+        ] {
+            objects.push(CatalogBindingObject {
+                id: sift_protocol::CatalogObjectId(id.into()),
+                catalog: "mock".into(),
+                schema: "public".into(),
+                name: "calculate".into(),
+                qualified_name: format!("mock.public.calculate({})", arguments.join(",")),
+                kind: sift_protocol::CatalogNodeKind::ScalarFunction,
+                complete: true,
+                comment: None,
+                routine_args: Some(arguments.into_iter().map(str::to_string).collect()),
+                return_type: Some(sift_protocol::TypeRef::Primitive(
+                    sift_protocol::PrimitiveType::Int64,
+                )),
+                columns: Vec::new(),
+            });
+        }
+        CatalogBindingView::new(base.revision, true, objects)
     }
 
     #[test]
@@ -3228,6 +3931,8 @@ mod tests {
                 kind: sift_protocol::CatalogNodeKind::Table,
                 complete: true,
                 comment: Some("Application users".into()),
+                routine_args: None,
+                return_type: None,
                 columns: vec![CatalogBindingColumn {
                     id: sift_protocol::CatalogObjectId("users-id-column-id".into()),
                     name: "id".into(),
@@ -3624,8 +4329,161 @@ mod tests {
     }
 
     #[test]
-    fn star_expansion_fails_closed_for_ambiguity_and_incomplete_catalogs() {
-        let source = "select * from users join orders on users.id = orders.id";
+    fn star_expansion_preserves_multi_relation_using_and_natural_projection() {
+        let cases = [
+            (
+                "select * from users u join orders o on u.id = o.id",
+                "u.id, u.email, u.\"Display Name\", o.id",
+            ),
+            (
+                "select * from users u join orders o using (id)",
+                "id, u.email, u.\"Display Name\"",
+            ),
+            (
+                "select * from users u natural join orders o",
+                "id, u.email, u.\"Display Name\"",
+            ),
+        ];
+        for (source, expected) in cases {
+            let registry = SemanticRegistry::default();
+            let scope = DocumentScope {
+                session: 1,
+                connection: 1,
+            };
+            let state = registry
+                .create(
+                    scope,
+                    dialect("sift/postgresql"),
+                    source.into(),
+                    None,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            let preview = registry
+                .prepare_star_expansion(
+                    scope,
+                    state.document_id,
+                    1,
+                    source.find('*').unwrap() as u32,
+                    &hover_catalog(),
+                )
+                .unwrap();
+            assert_eq!(preview.replacement, expected);
+            assert_eq!(
+                preview.kind,
+                sift_protocol::StarExpansionKind::MultipleRelations
+            );
+            assert!(preview.exact);
+        }
+    }
+
+    #[test]
+    fn star_expansion_supports_temp_tvf_and_tsql_pseudo_relations() {
+        let cases = [
+            (
+                "sift/postgresql",
+                "create temp table scratch (id int, note text); select * from scratch",
+                "id, note",
+                sift_protocol::StarExpansionKind::TemporaryRelation,
+            ),
+            (
+                "sift/postgresql",
+                "select f.* from find_users(1) f",
+                "f.id, f.email",
+                sift_protocol::StarExpansionKind::TableValuedFunction,
+            ),
+            (
+                "sift/tsql",
+                "create table #scratch (id int, note nvarchar(20)); select * from #scratch",
+                "id, note",
+                sift_protocol::StarExpansionKind::TemporaryRelation,
+            ),
+            (
+                "sift/tsql",
+                "update users set email = 'x' output inserted.* where id = 1",
+                "inserted.id, inserted.email, inserted.[Display Name]",
+                sift_protocol::StarExpansionKind::PseudoTable,
+            ),
+        ];
+        for (dialect_id, source, expected, kind) in cases {
+            let registry = SemanticRegistry::default();
+            let scope = DocumentScope {
+                session: 1,
+                connection: 1,
+            };
+            let state = registry
+                .create(
+                    scope,
+                    dialect(dialect_id),
+                    source.into(),
+                    None,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            let preview = registry
+                .prepare_star_expansion(
+                    scope,
+                    state.document_id,
+                    1,
+                    source.find('*').unwrap() as u32,
+                    &advanced_catalog(),
+                )
+                .unwrap();
+            assert_eq!(preview.replacement, expected);
+            assert_eq!(preview.kind, kind);
+            assert!(preview.exact);
+        }
+    }
+
+    #[test]
+    fn hover_resolves_postgres_composite_fields_and_function_overloads() {
+        let cases = [
+            (
+                "select p.profile.city from profiles p",
+                "city",
+                sift_protocol::SemanticHoverKind::Column,
+            ),
+            (
+                "select calculate(1, 'two')",
+                "calculate",
+                sift_protocol::SemanticHoverKind::Function,
+            ),
+        ];
+        for (source, needle, kind) in cases {
+            let registry = SemanticRegistry::default();
+            let scope = DocumentScope {
+                session: 1,
+                connection: 1,
+            };
+            let state = registry
+                .create(
+                    scope,
+                    dialect("sift/postgresql"),
+                    source.into(),
+                    None,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            let hover = registry
+                .hover(
+                    scope,
+                    state.document_id,
+                    1,
+                    source.find(needle).unwrap() as u32,
+                    Some(&advanced_catalog()),
+                )
+                .unwrap();
+            assert_eq!(hover.kind, kind);
+            assert!(!hover.uncertain);
+            if needle == "calculate" {
+                assert_eq!(hover.detail.as_deref(), Some("(int, int) -> int64"));
+            }
+        }
+    }
+
+    #[test]
+    fn star_expansion_fails_closed_for_unproven_using_and_incomplete_catalogs() {
+        let source = "select * from users join orders using (missing)";
         let registry = SemanticRegistry::default();
         let scope = DocumentScope {
             session: 1,

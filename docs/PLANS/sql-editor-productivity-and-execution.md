@@ -302,7 +302,7 @@ pass without changing execution outcome.
 
 ### 11. Advanced dialect depth
 
-- [ ] Add multi-relation/`USING`/natural star projection, temp objects,
+- [x] Add multi-relation/`USING`/natural star projection, temp objects,
   table-valued functions, composite records, pseudo tables, overloads, and
   deeper dialect completion/type rules.
 

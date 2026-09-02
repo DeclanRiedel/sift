@@ -6013,6 +6013,22 @@ fn catalog_binding_view(graph: &sift_protocol::CatalogGraph) -> sift_semantic::C
                     .get("comment")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned),
+                routine_args: match &node.details {
+                    sift_protocol::CatalogNodeDetails::Routine { arguments, .. } => {
+                        Some(arguments.clone())
+                    }
+                    sift_protocol::CatalogNodeDetails::Object { routine_args } => {
+                        routine_args.clone()
+                    }
+                    _ => None,
+                },
+                return_type: match &node.details {
+                    sift_protocol::CatalogNodeDetails::Routine { return_type, .. } => {
+                        return_type.clone()
+                    }
+                    sift_protocol::CatalogNodeDetails::Type { base_type } => base_type.clone(),
+                    _ => None,
+                },
                 columns: columns.get(&node.id).cloned().unwrap_or_default(),
             })
         })

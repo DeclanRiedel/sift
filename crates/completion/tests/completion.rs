@@ -52,12 +52,24 @@ fn snapshot() -> SchemaSnapshot {
     let user_events = ObjectInfo::new("user_events", ObjectKind::View);
     let quoted = ObjectInfo::new("MyTable", ObjectKind::Table);
     let routine = ObjectInfo::new("find_users", ObjectKind::TableValuedFunction);
+    let mut calculate_one = ObjectInfo::new("calculate", ObjectKind::ScalarFunction);
+    calculate_one.routine_args = Some(vec!["int".into()]);
+    let mut calculate_two = ObjectInfo::new("calculate", ObjectKind::ScalarFunction);
+    calculate_two.routine_args = Some(vec!["int".into(), "int".into()]);
     SchemaSnapshot {
         trees: vec![CatalogTree {
             name: "mock".into(),
             schemas: vec![SchemaTree {
                 name: "public".into(),
-                objects: vec![users, orders, user_events, quoted, routine],
+                objects: vec![
+                    users,
+                    orders,
+                    user_events,
+                    quoted,
+                    routine,
+                    calculate_one,
+                    calculate_two,
+                ],
             }],
         }],
         fetched_at: chrono::Utc::now(),
@@ -286,6 +298,71 @@ fn table_valued_functions_are_available_in_from_slots() {
     assert!(response.candidates.iter().any(|candidate| {
         candidate.label == "find_users" && candidate.kind == CompletionKind::Function
     }));
+}
+
+#[test]
+fn temp_and_tsql_pseudo_relations_offer_only_their_bound_columns() {
+    let cases = [
+        (
+            Engine::Postgres,
+            "CREATE TEMP TABLE scratch (local_id int, note text); SELECT scratch. FROM scratch",
+            &["local_id", "note"][..],
+        ),
+        (
+            Engine::SqlServer,
+            "UPDATE users SET email = 'x' OUTPUT inserted.",
+            &["id", "email"][..],
+        ),
+    ];
+    for (engine, sql, expected) in cases {
+        let qualifier = if engine == Engine::Postgres {
+            "scratch."
+        } else {
+            "inserted."
+        };
+        let cursor = sql.find(qualifier).unwrap() + qualifier.len();
+        let response = complete(
+            &CompletionRequest {
+                sql: sql.into(),
+                cursor: cursor as u32,
+                limit: None,
+            },
+            &snapshot(),
+            engine,
+        );
+        let labels = response
+            .candidates
+            .iter()
+            .map(|candidate| candidate.label.as_ref())
+            .collect::<Vec<_>>();
+        for expected in expected {
+            assert!(
+                labels.contains(expected),
+                "{expected} missing from {labels:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn routine_overloads_remain_distinct_completion_candidates() {
+    let sql = "cal";
+    let response = complete(
+        &CompletionRequest {
+            sql: sql.into(),
+            cursor: sql.len() as u32,
+            limit: None,
+        },
+        &snapshot(),
+        Engine::Postgres,
+    );
+    let overloads = response
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.label == "calculate")
+        .collect::<Vec<_>>();
+    assert_eq!(overloads.len(), 2);
+    assert_ne!(overloads[0].detail, overloads[1].detail);
 }
 
 #[test]

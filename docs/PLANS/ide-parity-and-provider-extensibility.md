@@ -85,7 +85,7 @@ delete, import, and export workflows.
 - [x] Split editor panes
 - [x] Scratch SQL query tabs
 - [x] Snippets and templates
-- [ ] SQL variables
+- [x] SQL variables
 - [ ] Multi-cursor editing
 - [ ] Code folding
 - [ ] Configurable formatting rules
@@ -95,7 +95,7 @@ delete, import, and export workflows.
 - [x] Keyword, table, and column completion
 - [x] Context-sensitive completion
 - [x] Alias-aware completion
-- [~] CTE and temporary-object completion
+- [x] CTE and temporary-object completion
 - [~] Foreign-key JOIN completion
 - [x] Syntax diagnostics
 - [x] Semantic diagnostics
@@ -105,9 +105,9 @@ delete, import, and export workflows.
 - [x] Rename refactoring
 - [x] Statement selection
 - [x] Catalog-aware binding
-- [ ] Hover types and object metadata
+- [x] Hover types and object metadata
 - [ ] Multi-hop JOIN suggestions
-- [ ] Star expansion
+- [x] Star expansion
 - [ ] Unsafe UPDATE/DELETE inspection UI
 - [ ] Cartesian JOIN inspection UI
 

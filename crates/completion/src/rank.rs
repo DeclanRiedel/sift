@@ -47,13 +47,17 @@ pub fn rank(
         CompletionContext::ExpectingColumn { qualifier } => {
             match qualifier {
                 Some(q) => {
-                    let target = ctx
+                    let relation = ctx
                         .relations
                         .iter()
-                        .find(|relation| relation.name.eq_ignore_ascii_case(q))
+                        .find(|relation| relation.name.eq_ignore_ascii_case(q));
+                    let target = relation
                         .and_then(|relation| relation.target.as_deref())
                         .unwrap_or(q);
-                    if let Some(obj) = dict.resolve_reference(target) {
+                    if let Some(relation) = relation.filter(|relation| !relation.columns.is_empty())
+                    {
+                        push_local_columns(&mut out, &relation.columns, prefix, 85);
+                    } else if let Some(obj) = dict.resolve_reference(target) {
                         push_columns(&mut out, obj, prefix, /*bonus=*/ 80);
                     } else {
                         // CTEs, temporary relations, and incomplete shallow
@@ -116,7 +120,13 @@ fn push_relation_columns(
     bonus: i32,
 ) -> bool {
     let mut resolved = Vec::<&ObjectEntry>::new();
+    let mut found = false;
     for relation in ctx.relations.iter().filter(|relation| !relation.is_alias) {
+        if !relation.columns.is_empty() {
+            push_local_columns(out, &relation.columns, prefix, bonus + 5);
+            found = true;
+            continue;
+        }
         let reference = relation.target.as_deref().unwrap_or(&relation.name);
         let Some(object) = dict.resolve_reference(reference) else {
             continue;
@@ -132,7 +142,28 @@ fn push_relation_columns(
     for object in &resolved {
         push_columns(out, object, prefix, bonus);
     }
-    !resolved.is_empty()
+    found || !resolved.is_empty()
+}
+
+fn push_local_columns(
+    out: &mut Vec<CompletionCandidate>,
+    columns: &[String],
+    prefix: &str,
+    bonus: i32,
+) {
+    for column in columns {
+        let Some(match_score) = score_match(column, prefix) else {
+            continue;
+        };
+        out.push(CompletionCandidate {
+            label: column.clone().into(),
+            insert: column.clone().into(),
+            kind: CompletionKind::Column,
+            detail: Some("document-local column".into()),
+            qualified_name: None,
+            score: match_score + bonus,
+        });
+    }
 }
 
 fn push_local_relations(
@@ -321,18 +352,33 @@ fn object_candidate(
         CompletionKind::MaterializedView => 2,
         _ => 0,
     };
-    let detail = match (&obj.schema, &obj.comment) {
-        (Some(schema), Some(comment)) => Some(format!("{schema} — {comment}")),
-        (Some(schema), None) => Some(schema.clone()),
-        (None, Some(comment)) => Some(comment.clone()),
-        (None, None) => None,
+    let detail = if let Some(arguments) = &obj.routine_args {
+        Some(format!(
+            "({}) · {}",
+            arguments.join(", "),
+            obj.schema.as_deref().unwrap_or("routine")
+        ))
+    } else {
+        match (&obj.schema, &obj.comment) {
+            (Some(schema), Some(comment)) => Some(format!("{schema} — {comment}")),
+            (Some(schema), None) => Some(schema.clone()),
+            (None, Some(comment)) => Some(comment.clone()),
+            (None, None) => None,
+        }
     };
+    let qualified_name = qualified_name(obj).map(|qualified| {
+        obj.routine_args
+            .as_ref()
+            .map_or(qualified.clone(), |arguments| {
+                format!("{qualified}({})", arguments.join(","))
+            })
+    });
     Some(CompletionCandidate {
         label: obj.name.clone().into(),
         insert: quote_ident_if_needed(&obj.name, engine).into(),
         kind,
         detail,
-        qualified_name: qualified_name(obj),
+        qualified_name,
         score: match_score + bonus + kind_bonus,
     })
 }

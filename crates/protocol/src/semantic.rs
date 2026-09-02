@@ -168,8 +168,12 @@ pub struct PrepareStarExpansionRequest {
 pub enum StarExpansionKind {
     QualifiedRelation,
     SingleRelation,
+    MultipleRelations,
     Cte,
     Subquery,
+    TemporaryRelation,
+    TableValuedFunction,
+    PseudoTable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
