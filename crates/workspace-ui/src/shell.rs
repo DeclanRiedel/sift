@@ -8253,10 +8253,11 @@ fn staged_result_row_index(edits: &[StagedResultEdit], edit_index: usize) -> usi
     0
 }
 
-/// One coalescing window for keystroke-driven reanalysis. Long enough that a
-/// fast typist produces one request per pause, short enough that diagnostics
-/// feel attached to the edit that caused them.
-const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(160);
+/// One coalescing window for keystroke-driven reanalysis. SQL is routinely
+/// invalid while a clause is being entered, so analysis waits for a deliberate
+/// pause instead of competing with normal typing. Execute and explicit
+/// semantic commands remain immediate.
+const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(650);
 
 fn repository_diff_text(
     path: &sift_protocol::WorkspacePath,

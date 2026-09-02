@@ -254,10 +254,15 @@ impl SemanticState {
             .min_by_key(|diagnostic| severity_rank(diagnostic.severity))
     }
 
-    /// Drop everything that describes an older buffer. Diagnostics are kept
-    /// (greyed, not moved) so the editor does not flash empty on every
-    /// keystroke; positions become approximate until the next answer lands.
+    /// Drop everything that describes an older buffer. Diagnostics disappear
+    /// immediately: retaining ranges from the previous revision makes normal
+    /// statement construction look broken and can paint markers over unrelated
+    /// text until the debounced analysis catches up.
     pub fn invalidate(&mut self) {
+        self.diagnostics.clear();
+        self.diagnostics_by_line.clear();
+        self.diagnostics_revision = None;
+        self.diagnostics_incomplete = false;
         self.completion = None;
         self.pending_completion = None;
         self.hover = None;
@@ -597,6 +602,26 @@ mod tests {
             false,
         ));
         assert_eq!(state.error_count(), 1);
+    }
+
+    #[test]
+    fn editing_hides_diagnostics_until_fresh_analysis_arrives() {
+        let mut state = SemanticState::default();
+        assert!(state.set_diagnostics(
+            "select",
+            4,
+            4,
+            vec![diagnostic(0, 6, DiagnosticSeverity::Error)],
+            true,
+        ));
+        assert_eq!(state.error_count(), 1);
+
+        state.invalidate();
+
+        assert!(state.diagnostics().is_empty());
+        assert_eq!(state.error_count(), 0);
+        assert!(!state.diagnostics_incomplete());
+        assert!(!state.diagnostics_stale(5));
     }
 
     #[test]
