@@ -1538,6 +1538,164 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadRoomAdministration { tenant_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .rooms(sift_api_types::TenantId(tenant_id))
+                        .await
+                        .map_err(|error| format!("loading rooms failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RoomAdministrationLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateRoom { tenant_id, name } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .create_room(sift_api_types::CreateRoomRequest {
+                            tenant_id,
+                            name,
+                            kind: sift_api_types::RoomKind::Shared,
+                        })
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("creating room failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RoomAdministrationChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteRoom { room_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_room(sift_api_types::RoomId(room_id))
+                        .await
+                        .map_err(|error| format!("deleting room failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RoomAdministrationChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadRoomDetails { room_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => {
+                        match client.room_members(sift_api_types::RoomId(room_id)).await {
+                            Ok(members) => client
+                                .room_results(sift_api_types::RoomId(room_id))
+                                .await
+                                .map(|results| (members, results))
+                                .map_err(|error| format!("loading shared results failed: {error}")),
+                            Err(error) => Err(format!("loading room members failed: {error}")),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RoomDetailsLoaded { room_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::BindRoomConnection {
+                room_id,
+                profile_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => if let Some(profile_id) = profile_id {
+                        client
+                            .bind_room_connection(sift_api_types::RoomId(room_id), profile_id)
+                            .await
+                            .map(|_| ())
+                    } else {
+                        client
+                            .unbind_room_connection(sift_api_types::RoomId(room_id))
+                            .await
+                    }
+                    .map_err(|error| format!("updating room connection failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RoomAdministrationChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::AddRoomMember {
+                room_id,
+                principal_id,
+                role,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .add_room_member(
+                            sift_api_types::RoomId(room_id),
+                            sift_api_types::AddRoomMemberRequest { principal_id, role },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("adding room member failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RoomAdministrationChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::JoinRoom { room_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .join_room(sift_api_types::RoomId(room_id))
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("joining room failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RoomAdministrationChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LeaveRoom { room_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .leave_room(sift_api_types::RoomId(room_id))
+                        .await
+                        .map_err(|error| format!("leaving room failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RoomAdministrationChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()

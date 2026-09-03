@@ -1731,6 +1731,7 @@ pub enum Modal {
     CatalogDiagram,
     CatalogMigration,
     DdlSources,
+    RoomAdministration,
     CatalogSnapshots,
     CsvImport,
     TransferRecipes,
@@ -2880,6 +2881,34 @@ pub enum ExecutorCommand {
         source_id: i64,
         expected_revision: u64,
     },
+    LoadRoomAdministration {
+        tenant_id: i64,
+    },
+    CreateRoom {
+        tenant_id: i64,
+        name: String,
+    },
+    DeleteRoom {
+        room_id: i64,
+    },
+    LoadRoomDetails {
+        room_id: i64,
+    },
+    BindRoomConnection {
+        room_id: i64,
+        profile_id: Option<i64>,
+    },
+    AddRoomMember {
+        room_id: i64,
+        principal_id: i64,
+        role: sift_api_types::RoomRole,
+    },
+    JoinRoom {
+        room_id: i64,
+    },
+    LeaveRoom {
+        room_id: i64,
+    },
     CloseSession {
         session_id: sift_protocol::SessionId,
     },
@@ -3648,6 +3677,18 @@ pub enum ExecutorEvent {
     DdlSourcesLoaded(Result<Vec<sift_protocol::DdlSource>, String>),
     DdlSourceModelLoaded(Result<sift_protocol::DdlSourceModel, String>),
     DdlSourceChanged(Result<(), String>),
+    RoomAdministrationLoaded(Result<Vec<sift_api_types::Room>, String>),
+    RoomDetailsLoaded {
+        room_id: i64,
+        result: Result<
+            (
+                Vec<sift_api_types::RoomMember>,
+                Vec<sift_protocol::RoomQueryResult>,
+            ),
+            String,
+        >,
+    },
+    RoomAdministrationChanged(Result<(), String>),
     SessionResourceClosed {
         result: Result<(), String>,
         active_connection_closed: bool,
@@ -9161,6 +9202,7 @@ pub struct WorkspaceShell {
     tenant_member_input: Entity<TextInput>,
     principal_key_inputs: Vec<Entity<TextInput>>,
     ddl_source_inputs: Vec<Entity<TextInput>>,
+    room_admin_inputs: Vec<Entity<TextInput>>,
     connection_url_input: Entity<TextInput>,
     database_name_input: Entity<TextInput>,
     database_host_input: Entity<TextInput>,
@@ -9494,6 +9536,12 @@ pub struct WorkspaceShell {
     selected_ddl_source_mappings: Vec<sift_protocol::DdlSourceMapping>,
     ddl_sources_pending: bool,
     ddl_sources_error: Option<String>,
+    administered_rooms: Vec<sift_api_types::Room>,
+    selected_admin_room: Option<i64>,
+    room_admin_results: Vec<sift_protocol::RoomQueryResult>,
+    room_admin_pending: bool,
+    room_admin_error: Option<String>,
+    room_admin_member_role: sift_api_types::RoomRole,
     connection_policy_profile: Option<i64>,
     connection_policy: Option<sift_protocol::ConnectionPolicy>,
     connection_policy_pending: bool,
@@ -10004,6 +10052,16 @@ impl WorkspaceShell {
                     .aria_label("DDL source root nodes")
             }),
         ];
+        let room_admin_inputs = vec![
+            cx.new(|cx| TextInput::new("", "New room name", cx).aria_label("New room name")),
+            cx.new(|cx| {
+                TextInput::new("", "Connection profile ID", cx)
+                    .aria_label("Room connection profile ID")
+            }),
+            cx.new(|cx| {
+                TextInput::new("", "Member principal ID", cx).aria_label("Room member principal ID")
+            }),
+        ];
         let connection_policy_schemas_input = cx.new(|cx| {
             TextInput::new("", "public, catalog.schema", cx).aria_label("Allowed database schemas")
         });
@@ -10426,6 +10484,7 @@ impl WorkspaceShell {
             tenant_member_input,
             principal_key_inputs,
             ddl_source_inputs,
+            room_admin_inputs,
             connection_url_input,
             database_name_input,
             database_host_input,
@@ -10745,6 +10804,12 @@ impl WorkspaceShell {
             selected_ddl_source_mappings: Vec::new(),
             ddl_sources_pending: false,
             ddl_sources_error: None,
+            administered_rooms: Vec::new(),
+            selected_admin_room: None,
+            room_admin_results: Vec::new(),
+            room_admin_pending: false,
+            room_admin_error: None,
+            room_admin_member_role: sift_api_types::RoomRole::Editor,
             connection_policy_profile: None,
             connection_policy: None,
             connection_policy_pending: false,
@@ -12164,6 +12229,46 @@ impl WorkspaceShell {
                         self.open_ddl_sources(cx);
                     }
                     Err(error) => self.ddl_sources_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::RoomAdministrationLoaded(result) => {
+                self.room_admin_pending = false;
+                match result {
+                    Ok(rooms) => {
+                        self.administered_rooms = rooms;
+                        self.room_admin_error = None;
+                    }
+                    Err(error) => self.room_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::RoomDetailsLoaded { room_id, result } => {
+                if self.selected_admin_room != Some(room_id) {
+                    return;
+                }
+                self.room_admin_pending = false;
+                match result {
+                    Ok((members, results)) => {
+                        self.room_members = members;
+                        self.room_admin_results = results;
+                        self.room_admin_error = None;
+                    }
+                    Err(error) => self.room_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::RoomAdministrationChanged(result) => {
+                self.room_admin_pending = false;
+                match result {
+                    Ok(()) => {
+                        if let Some(room_id) = self.selected_admin_room {
+                            self.select_admin_room(room_id, cx);
+                        } else {
+                            self.open_room_administration(cx);
+                        }
+                    }
+                    Err(error) => self.room_admin_error = Some(error),
                 }
                 cx.notify();
             }
@@ -31403,6 +31508,118 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn send_room_admin_command(&mut self, command: ExecutorCommand, cx: &mut Context<Self>) {
+        self.room_admin_pending = true;
+        self.room_admin_error = None;
+        if self
+            .executor_sender
+            .as_ref()
+            .is_none_or(|sender| sender.send(command).is_err())
+        {
+            self.room_admin_pending = false;
+            self.room_admin_error = Some("Room administration is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn open_room_administration(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            self.show_error_toast("Select a tenant first".into(), cx);
+            return;
+        };
+        self.modal = Some(Modal::RoomAdministration);
+        self.send_room_admin_command(ExecutorCommand::LoadRoomAdministration { tenant_id }, cx);
+    }
+
+    fn create_admin_room(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            return;
+        };
+        let name = self.room_admin_inputs[0].read(cx).text().trim().to_owned();
+        if name.is_empty() {
+            self.room_admin_error = Some("Room name is required".into());
+            cx.notify();
+            return;
+        }
+        self.send_room_admin_command(ExecutorCommand::CreateRoom { tenant_id, name }, cx);
+    }
+
+    fn select_admin_room(&mut self, room_id: i64, cx: &mut Context<Self>) {
+        self.selected_admin_room = Some(room_id);
+        self.send_room_admin_command(ExecutorCommand::LoadRoomDetails { room_id }, cx);
+    }
+
+    fn bind_admin_room(&mut self, cx: &mut Context<Self>) {
+        let Some(room_id) = self.selected_admin_room else {
+            return;
+        };
+        let text = self.room_admin_inputs[1].read(cx).text().trim();
+        let profile_id = if text.is_empty() {
+            None
+        } else {
+            match text.parse() {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    self.room_admin_error = Some("Connection profile ID must be numeric".into());
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        self.send_room_admin_command(
+            ExecutorCommand::BindRoomConnection {
+                room_id,
+                profile_id,
+            },
+            cx,
+        );
+    }
+
+    fn cycle_room_member_role(&mut self, cx: &mut Context<Self>) {
+        self.room_admin_member_role = match self.room_admin_member_role {
+            sift_api_types::RoomRole::Viewer => sift_api_types::RoomRole::Editor,
+            sift_api_types::RoomRole::Editor => sift_api_types::RoomRole::Owner,
+            sift_api_types::RoomRole::Owner => sift_api_types::RoomRole::Viewer,
+        };
+        cx.notify();
+    }
+
+    fn add_admin_room_member(&mut self, cx: &mut Context<Self>) {
+        let Some(room_id) = self.selected_admin_room else {
+            return;
+        };
+        match self.room_admin_inputs[2].read(cx).text().trim().parse() {
+            Ok(principal_id) => self.send_room_admin_command(
+                ExecutorCommand::AddRoomMember {
+                    room_id,
+                    principal_id,
+                    role: self.room_admin_member_role.clone(),
+                },
+                cx,
+            ),
+            Err(_) => {
+                self.room_admin_error = Some("Member principal ID must be numeric".into());
+                cx.notify();
+            }
+        }
+    }
+
+    fn admin_room_action(&mut self, action: &str, cx: &mut Context<Self>) {
+        let Some(room_id) = self.selected_admin_room else {
+            return;
+        };
+        let command = match action {
+            "delete" => ExecutorCommand::DeleteRoom { room_id },
+            "join" => ExecutorCommand::JoinRoom { room_id },
+            "leave" => ExecutorCommand::LeaveRoom { room_id },
+            _ => return,
+        };
+        if action == "delete" {
+            self.selected_admin_room = None;
+        }
+        self.send_room_admin_command(command, cx);
+    }
+
     fn issue_api_token(&mut self, cx: &mut Context<Self>) {
         let name = self.api_token_name_input.read(cx).text().trim().to_owned();
         if name.is_empty() {
@@ -38049,6 +38266,7 @@ impl WorkspaceShell {
                                             shell.request_vaults(cx);
                                         })),
                                 )
+                                .child(Button::new("collaboration-rooms", "Rooms…").tone(ButtonTone::Ghost).on_click(cx.listener(|shell, _, _, cx| shell.open_room_administration(cx))))
                                 .child(div().flex_1())
                                 .child(
                                     IconButton::new(
@@ -39404,6 +39622,7 @@ impl WorkspaceShell {
             let catalog_diagram = matches!(modal, Modal::CatalogDiagram);
             let catalog_snapshots = matches!(modal, Modal::CatalogSnapshots);
             let ddl_sources = matches!(modal, Modal::DdlSources);
+            let room_administration = matches!(modal, Modal::RoomAdministration);
             let csv_import = matches!(modal, Modal::CsvImport);
             let transfer_recipes = matches!(modal, Modal::TransferRecipes);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
@@ -39420,6 +39639,7 @@ impl WorkspaceShell {
                 || vcs_diagnostics
                 || administration
                 || ddl_sources
+                || room_administration
                 || themes
                 || keymaps
                 || command_palette
@@ -44339,6 +44559,27 @@ impl WorkspaceShell {
                         .child(div().flex().justify_end().gap_2().child(Button::new("refresh-selected-ddl-source", "Rebuild model").tone(ButtonTone::Neutral).disabled(self.selected_ddl_source.is_none() || self.ddl_sources_pending).on_click(cx.listener(|shell, _, _, cx| shell.mutate_selected_ddl_source(false, cx)))).child(Button::new("delete-selected-ddl-source", "Delete").tone(ButtonTone::DangerGhost).disabled(self.selected_ddl_source.is_none() || self.ddl_sources_pending).on_click(cx.listener(|shell, _, _, cx| shell.mutate_selected_ddl_source(true, cx)))))
                         .into_any_element()
                 }
+                Modal::RoomAdministration => {
+                    let rooms = self.administered_rooms.clone();
+                    let members = self.room_members.clone();
+                    let results = self.room_admin_results.clone();
+                    div().w(px(760.)).h(px(620.)).flex().flex_col().gap_3()
+                        .child(div().flex().items_center().justify_between().child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Room administration")).child(Button::new("refresh-room-administration", "Refresh").tone(ButtonTone::Ghost).loading(self.room_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.open_room_administration(cx)))))
+                        .child(div().flex().gap_2().child(div().flex_1().child(self.room_admin_inputs[0].clone())).child(Button::new("create-shared-room", "Create shared room").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.create_admin_room(cx)))))
+                        .children(self.room_admin_error.clone().map(ErrorBanner::new))
+                        .child(div().flex_1().min_h_0().flex().gap_3()
+                            .child(div().id("admin-room-list").w(px(230.)).flex_none().overflow_y_scroll().children(rooms.into_iter().enumerate().map(|(index, room)| { let room_id = room.id.0; let selected = self.selected_admin_room == Some(room_id); div().id(("admin-room", index)).min_h(px(48.)).px_2().flex().flex_col().justify_center().rounded_sm().when(selected, |row| row.bg(colors.active_surface)).on_click(cx.listener(move |shell, _, _, cx| shell.select_admin_room(room_id, cx))).child(room.name).child(div().text_xs().text_color(colors.muted_text).child(format!("{:?} · {}", room.kind, room.bound_connection_profile_id.map_or_else(|| "unbound".into(), |id| format!("profile {}", id.0))))) })))
+                            .child(div().min_w_0().flex_1().flex().flex_col().gap_2()
+                                .child(div().flex().gap_2().child(div().flex_1().child(self.room_admin_inputs[1].clone())).child(Button::new("bind-admin-room", "Bind / unbind").tone(ButtonTone::Neutral).disabled(self.selected_admin_room.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.bind_admin_room(cx)))))
+                                .child(div().flex().gap_2().child(div().flex_1().child(self.room_admin_inputs[2].clone())).child(Button::new("cycle-room-role", format!("{:?}", self.room_admin_member_role)).tone(ButtonTone::Ghost).on_click(cx.listener(|shell, _, _, cx| shell.cycle_room_member_role(cx)))).child(Button::new("add-admin-room-member", "Add").tone(ButtonTone::Accent).disabled(self.selected_admin_room.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.add_admin_room_member(cx)))))
+                                .child(SectionLabel::new("Members"))
+                                .child(div().max_h(px(125.)).children(members.into_iter().enumerate().map(|(index, member)| div().id(("admin-room-member", index)).h(px(32.)).px_2().flex().items_center().justify_between().child(format!("Principal {}", member.principal_id.0)).child(div().text_xs().text_color(colors.muted_text).child(format!("{:?}", member.role))))))
+                                .child(SectionLabel::new("Shared results"))
+                                .child(div().id("admin-room-results").flex_1().min_h_0().overflow_y_scroll().children(results.into_iter().enumerate().map(|(index, result)| div().id(("admin-room-result", index)).min_h(px(48.)).px_2().flex().flex_col().justify_center().border_b_1().border_color(colors.subtle_border).child(format!("{:?} · {} row(s) · {} page(s)", result.status, result.row_count.unwrap_or_default(), result.page_count)).child(div().truncate().text_xs().font_family("monospace").text_color(colors.muted_text).child(result.result_id.to_string()))))))
+                        )
+                        .child(div().flex().justify_end().gap_2().child(Button::new("join-admin-room", "Join").tone(ButtonTone::Neutral).disabled(self.selected_admin_room.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.admin_room_action("join", cx)))).child(Button::new("leave-admin-room", "Leave").tone(ButtonTone::Ghost).disabled(self.selected_admin_room.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.admin_room_action("leave", cx)))).child(Button::new("delete-admin-room", "Delete room").tone(ButtonTone::DangerGhost).disabled(self.selected_admin_room.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.admin_room_action("delete", cx)))))
+                        .into_any_element()
+                }
                 Modal::WorkspaceCreateFile | Modal::WorkspaceCreateFolder => {
                     let folder = matches!(modal, Modal::WorkspaceCreateFolder);
                     let parent = self
@@ -47372,6 +47613,7 @@ impl WorkspaceShell {
                     | Modal::CatalogDiagram
                     | Modal::CatalogMigration
                     | Modal::DdlSources
+                    | Modal::RoomAdministration
                     | Modal::CatalogSnapshots
                     | Modal::CsvImport
                     | Modal::WorkspaceReconcile
