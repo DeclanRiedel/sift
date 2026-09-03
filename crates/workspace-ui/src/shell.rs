@@ -11796,21 +11796,59 @@ impl WorkspaceShell {
             InstanceManagerEvent::InstancePlan(plan) => {
                 self.instance_operation_pending = false;
                 self.instance_operation_error = None;
+                if self
+                    .instance_configuration
+                    .as_ref()
+                    .and_then(|configuration| configuration.root.as_ref())
+                    == Some(&plan.root)
+                {
+                    let missing = plan
+                        .credentials
+                        .iter()
+                        .filter(|credential| credential.readiness != "ready")
+                        .count();
+                    self.instance_configuration_editor.update(cx, |editor, cx| {
+                        editor.set_manifest_lifecycle(
+                            plan.current_generation.is_some() && !plan.drifted,
+                            missing,
+                            cx,
+                        )
+                    });
+                }
                 self.instance_plan = Some(*plan);
                 self.modal = Some(Modal::InstanceSetup);
             }
             InstanceManagerEvent::InstanceConfiguration(configuration) => {
                 self.instance_operation_pending = false;
                 self.instance_operation_error = None;
+                let lifecycle = self
+                    .instance_plan
+                    .as_ref()
+                    .filter(|plan| configuration.root.as_ref() == Some(&plan.root))
+                    .map(|plan| {
+                        (
+                            plan.current_generation.is_some() && !plan.drifted,
+                            plan.credentials
+                                .iter()
+                                .filter(|credential| credential.readiness != "ready")
+                                .count(),
+                        )
+                    })
+                    .unwrap_or((false, 0));
                 let editor = cx.new(|cx| {
-                    QueryEditor::new(QueryDocument::with_random_peer(&configuration.manifest), cx)
-                        .with_language(EditorLanguage::Toml)
-                        .with_manifest_schema()
-                        .with_keymap(if self.vim_mode_default() {
-                            EditorKeymap::Vim
-                        } else {
-                            EditorKeymap::Standard
-                        })
+                    let mut editor = QueryEditor::new(
+                        QueryDocument::with_random_peer(&configuration.manifest),
+                        cx,
+                    )
+                    .with_language(EditorLanguage::Toml)
+                    .with_manifest_schema()
+                    .with_keymap(if self.vim_mode_default() {
+                        EditorKeymap::Vim
+                    } else {
+                        EditorKeymap::Standard
+                    });
+                    editor.set_manifest_lifecycle(lifecycle.0, lifecycle.1, cx);
+                    editor
                 });
                 self.instance_configuration_editor = editor.clone();
                 let item_id = self.instance_configuration_item.unwrap_or_else(|| {

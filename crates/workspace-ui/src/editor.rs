@@ -1069,6 +1069,7 @@ pub struct QueryEditor {
     manifest_schema: bool,
     manifest_hover: Option<sift_instance_config::ManifestHover>,
     manifest_analysis_epoch: u64,
+    manifest_lifecycle: Option<ManifestLifecycle>,
     json_schema: Option<JsonSchema>,
     find_open: bool,
     find_query: Entity<TextInput>,
@@ -1077,6 +1078,12 @@ pub struct QueryEditor {
     find_cache: RefCell<FindMatchCache>,
     snippet_tabstops: Vec<Range<usize>>,
     snippet_tabstop_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManifestLifecycle {
+    applied: bool,
+    missing_credentials: usize,
 }
 
 impl QueryEditor {
@@ -1116,6 +1123,7 @@ impl QueryEditor {
             manifest_schema: false,
             manifest_hover: None,
             manifest_analysis_epoch: 0,
+            manifest_lifecycle: None,
             json_schema: None,
             find_open: false,
             find_query,
@@ -1146,8 +1154,25 @@ impl QueryEditor {
 
     pub fn with_manifest_schema(mut self) -> Self {
         self.manifest_schema = true;
+        self.manifest_lifecycle = Some(ManifestLifecycle {
+            applied: false,
+            missing_credentials: 0,
+        });
         self.refresh_manifest_diagnostics();
         self
+    }
+
+    pub fn set_manifest_lifecycle(
+        &mut self,
+        applied: bool,
+        missing_credentials: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.manifest_lifecycle = Some(ManifestLifecycle {
+            applied,
+            missing_credentials,
+        });
+        cx.notify();
     }
 
     pub fn with_keymap(mut self, keymap: EditorKeymap) -> Self {
@@ -2813,6 +2838,78 @@ impl QueryEditor {
         )
     }
 
+    fn render_manifest_lifecycle(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let lifecycle = self.manifest_lifecycle?;
+        let colors = cx.theme().colors;
+        let valid = self.semantic.diagnostics().is_empty();
+        let ready = lifecycle.applied && lifecycle.missing_credentials == 0;
+        let stages = [
+            ("Edited", true),
+            ("Validated", valid),
+            ("Applied", lifecycle.applied),
+            ("Ready", ready),
+        ];
+        Some(
+            div()
+                .id("manifest-lifecycle")
+                .h(px(30.))
+                .flex_none()
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .border_b_1()
+                .border_color(colors.subtle_border)
+                .bg(colors.toolbar)
+                .children(
+                    stages
+                        .into_iter()
+                        .enumerate()
+                        .flat_map(|(index, (label, complete))| {
+                            let mut elements = Vec::new();
+                            if index > 0 {
+                                elements.push(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("→")
+                                        .into_any_element(),
+                                );
+                            }
+                            elements.push(
+                                div()
+                                    .text_xs()
+                                    .text_color(if complete {
+                                        colors.success
+                                    } else {
+                                        colors.muted_text
+                                    })
+                                    .child(if complete {
+                                        format!("✓ {label}")
+                                    } else {
+                                        label.into()
+                                    })
+                                    .into_any_element(),
+                            );
+                            elements
+                        }),
+                )
+                .children(
+                    (lifecycle.applied && lifecycle.missing_credentials > 0).then(|| {
+                        div()
+                            .ml_auto()
+                            .text_xs()
+                            .text_color(colors.warning)
+                            .child(format!(
+                                "{} credential slot(s) need attention",
+                                lifecycle.missing_credentials
+                            ))
+                    }),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_star_expansion_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let preview = self.semantic.star_expansion()?;
         let (left, top) = self.caret_content_origin()?;
@@ -3335,6 +3432,7 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::replace_next))
             .on_action(cx.listener(Self::replace_all))
             .on_action(cx.listener(Self::close_find))
+            .children(self.render_manifest_lifecycle(cx))
             .children(self.render_find_bar(cx))
             .child(
                 div()
