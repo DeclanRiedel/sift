@@ -714,6 +714,64 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::ExportChangeLedger {
+                filter,
+                destination,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => match client.export_change_ledger(&filter).await {
+                        Ok(bytes) => tokio::fs::write(&destination, bytes)
+                            .await
+                            .map_err(|error| format!("writing ledger export failed: {error}")),
+                        Err(error) => {
+                            Err(format!("exporting database change ledger failed: {error}"))
+                        }
+                    },
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ChangeLedgerExported {
+                        destination,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadChangeLedgerPolicy { tenant_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .change_ledger_policy(sift_api_types::TenantId(tenant_id))
+                        .await
+                        .map_err(|error| format!("loading change ledger policy failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ChangeLedgerPolicyLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SaveChangeLedgerPolicy { tenant_id, request } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .update_change_ledger_policy(sift_api_types::TenantId(tenant_id), &request)
+                        .await
+                        .map_err(|error| format!("saving change ledger policy failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ChangeLedgerPolicyLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::Connect {
                 tenant_id,
                 profile_id,

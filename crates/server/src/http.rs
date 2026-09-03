@@ -4893,18 +4893,11 @@ async fn import_external_change_ledger_event(
     Ok(Json(entry))
 }
 
-#[derive(Deserialize, JsonSchema)]
-struct ChangeLedgerPolicyRequest {
-    retention_days: u32,
-    #[serde(default)]
-    external_sink: Option<String>,
-}
-
 async fn get_change_ledger_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(tenant): Path<i64>,
-) -> ApiResult<Json<sift_metadata::ChangeLedgerPolicy>> {
+) -> ApiResult<Json<sift_protocol::ChangeLedgerPolicy>> {
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let tenant = TenantId(tenant);
@@ -4918,8 +4911,8 @@ async fn update_change_ledger_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(tenant): Path<i64>,
-    Json(request): Json<ChangeLedgerPolicyRequest>,
-) -> ApiResult<Json<sift_metadata::ChangeLedgerPolicy>> {
+    Json(request): Json<sift_protocol::UpdateChangeLedgerPolicyRequest>,
+) -> ApiResult<Json<sift_protocol::ChangeLedgerPolicy>> {
     let metadata = metadata_store_cloned(&state)?;
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     let tenant = TenantId(tenant);

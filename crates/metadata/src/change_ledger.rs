@@ -4,8 +4,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sift_protocol::{
     ChangeIdentityConfidence, ChangeIdentitySource, ChangeLedgerEntry, ChangeLedgerFilter,
-    ChangeLedgerOperation, ChangeLedgerOutcome, ChangeLedgerPage, VersionedExecutionContext,
-    WorkspaceCheckpointId, WorkspaceId, WorkspacePath, WorkspaceRevision,
+    ChangeLedgerOperation, ChangeLedgerOutcome, ChangeLedgerPage, ChangeLedgerPolicy,
+    VersionedExecutionContext, WorkspaceCheckpointId, WorkspaceId, WorkspacePath,
+    WorkspaceRevision,
 };
 
 use crate::{now_text, parse_time_sql, MetadataError, MetadataStore, Result};
@@ -39,17 +40,6 @@ pub struct NewChangeLedgerEntry {
     pub result_code: Option<String>,
     pub identity_source: ChangeIdentitySource,
     pub identity_confidence: ChangeIdentityConfidence,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
-)]
-pub struct ChangeLedgerPolicy {
-    pub tenant_id: i64,
-    pub retention_days: u32,
-    pub external_sink: Option<String>,
-    pub updated_by: i64,
-    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]

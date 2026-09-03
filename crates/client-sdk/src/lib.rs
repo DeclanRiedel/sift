@@ -4468,50 +4468,49 @@ impl Client {
         &self,
         filter: &sift_protocol::ChangeLedgerFilter,
     ) -> Result<sift_protocol::ChangeLedgerPage> {
-        let mut query = Vec::new();
-        if let Some(value) = filter.tenant_id {
-            query.push(format!("tenant_id={value}"));
-        }
-        if let Some(value) = filter.connection_profile_id {
-            query.push(format!("connection_profile_id={value}"));
-        }
-        if let Some(value) = &filter.database_target {
-            query.push(format!("database_target={}", urlencoding_replace(value)));
-        }
-        if let Some(value) = &filter.affected_object {
-            query.push(format!("affected_object={}", urlencoding_replace(value)));
-        }
-        if let Some(value) = filter.executed_by {
-            query.push(format!("executed_by={value}"));
-        }
-        if let Some(value) = filter.operation {
-            let value = serde_json::to_value(value)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .unwrap_or_default();
-            query.push(format!("operation={value}"));
-        }
-        if let Some(value) = filter.from {
-            query.push(format!("from={}", urlencoding_replace(&value.to_rfc3339())));
-        }
-        if let Some(value) = filter.to {
-            query.push(format!("to={}", urlencoding_replace(&value.to_rfc3339())));
-        }
-        if let Some(value) = &filter.git_commit {
-            query.push(format!("git_commit={}", urlencoding_replace(value)));
-        }
-        if let Some(value) = filter.before_id {
-            query.push(format!("before_id={value}"));
-        }
-        if let Some(value) = filter.limit {
-            query.push(format!("limit={value}"));
-        }
-        let suffix = if query.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", query.join("&"))
-        };
+        let suffix = change_ledger_query(filter);
         self.get(&format!("/v1/change-ledger{suffix}")).await
+    }
+
+    pub async fn export_change_ledger(
+        &self,
+        filter: &sift_protocol::ChangeLedgerFilter,
+    ) -> Result<Vec<u8>> {
+        let suffix = change_ledger_query(filter);
+        let response = self
+            .send_response(
+                self.http
+                    .get(self.url(&format!("/v1/change-ledger/export{suffix}"))),
+            )
+            .await?;
+        if !response.status().is_success() {
+            return Err(server_error(response).await);
+        }
+        Ok(response.bytes().await?.to_vec())
+    }
+
+    pub async fn change_ledger_policy(
+        &self,
+        tenant: TenantId,
+    ) -> Result<sift_protocol::ChangeLedgerPolicy> {
+        self.get(&format!("/v1/change-ledger/policy/{}", tenant.0))
+            .await
+    }
+
+    pub async fn update_change_ledger_policy(
+        &self,
+        tenant: TenantId,
+        request: &sift_protocol::UpdateChangeLedgerPolicyRequest,
+    ) -> Result<sift_protocol::ChangeLedgerPolicy> {
+        self.put(&format!("/v1/change-ledger/policy/{}", tenant.0), request)
+            .await
+    }
+
+    pub async fn import_external_change_ledger_event(
+        &self,
+        event: &sift_protocol::ExternalChangeLedgerEvent,
+    ) -> Result<sift_protocol::ChangeLedgerEntry> {
+        self.post("/v1/change-ledger/external", event).await
     }
 
     pub async fn stream_query(
@@ -5066,6 +5065,52 @@ fn urlencoding_replace(s: &str) -> String {
     out
 }
 
+fn change_ledger_query(filter: &sift_protocol::ChangeLedgerFilter) -> String {
+    let mut query = Vec::new();
+    if let Some(value) = filter.tenant_id {
+        query.push(format!("tenant_id={value}"));
+    }
+    if let Some(value) = filter.connection_profile_id {
+        query.push(format!("connection_profile_id={value}"));
+    }
+    if let Some(value) = &filter.database_target {
+        query.push(format!("database_target={}", urlencoding_replace(value)));
+    }
+    if let Some(value) = &filter.affected_object {
+        query.push(format!("affected_object={}", urlencoding_replace(value)));
+    }
+    if let Some(value) = filter.executed_by {
+        query.push(format!("executed_by={value}"));
+    }
+    if let Some(value) = filter.operation {
+        let value = serde_json::to_value(value)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        query.push(format!("operation={value}"));
+    }
+    if let Some(value) = filter.from {
+        query.push(format!("from={}", urlencoding_replace(&value.to_rfc3339())));
+    }
+    if let Some(value) = filter.to {
+        query.push(format!("to={}", urlencoding_replace(&value.to_rfc3339())));
+    }
+    if let Some(value) = &filter.git_commit {
+        query.push(format!("git_commit={}", urlencoding_replace(value)));
+    }
+    if let Some(value) = filter.before_id {
+        query.push(format!("before_id={value}"));
+    }
+    if let Some(value) = filter.limit {
+        query.push(format!("limit={value}"));
+    }
+    if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5107,5 +5152,20 @@ mod tests {
         assert_eq!(batch.cursor_id, CursorId(42));
         assert!(batch.done);
         assert!(matches!(batch.pages.as_slice(), [Page::Done { .. }]));
+    }
+
+    #[test]
+    fn change_ledger_query_is_shared_and_url_encoded() {
+        let query = change_ledger_query(&sift_protocol::ChangeLedgerFilter {
+            tenant_id: Some(7),
+            affected_object: Some("lab.audit events".into()),
+            operation: Some(sift_protocol::ChangeLedgerOperation::DirectDml),
+            limit: Some(500),
+            ..Default::default()
+        });
+        assert_eq!(
+            query,
+            "?tenant_id=7&affected_object=lab.audit%20events&operation=direct_dml&limit=500"
+        );
     }
 }

@@ -2886,6 +2886,17 @@ pub enum ExecutorCommand {
     LoadChangeLedger {
         filter: sift_protocol::ChangeLedgerFilter,
     },
+    ExportChangeLedger {
+        filter: sift_protocol::ChangeLedgerFilter,
+        destination: PathBuf,
+    },
+    LoadChangeLedgerPolicy {
+        tenant_id: i64,
+    },
+    SaveChangeLedgerPolicy {
+        tenant_id: i64,
+        request: sift_protocol::UpdateChangeLedgerPolicyRequest,
+    },
     BindWorkspaceRepository {
         workspace_id: i64,
         root_handle: String,
@@ -3588,6 +3599,11 @@ pub enum ExecutorEvent {
         filter: sift_protocol::ChangeLedgerFilter,
         result: Result<sift_protocol::ChangeLedgerPage, String>,
     },
+    ChangeLedgerExported {
+        destination: PathBuf,
+        result: Result<(), String>,
+    },
+    ChangeLedgerPolicyLoaded(Result<sift_protocol::ChangeLedgerPolicy, String>),
     RepositorySetupFinished {
         workspace_id: i64,
         action: &'static str,
@@ -8905,6 +8921,11 @@ pub struct WorkspaceShell {
     change_ledger_chain_verified: bool,
     change_ledger_loading: bool,
     change_ledger_error: Option<String>,
+    change_ledger_policy: Option<sift_protocol::ChangeLedgerPolicy>,
+    change_ledger_retention_input: Entity<TextInput>,
+    change_ledger_sink_input: Entity<TextInput>,
+    change_ledger_policy_pending: bool,
+    change_ledger_export_pending: bool,
     repository_hosting: Option<sift_protocol::HostingRepositorySummary>,
     hosting_repositories: Vec<sift_protocol::HostingRepositoryCandidate>,
     repository_hosting_loading: bool,
@@ -9554,6 +9575,13 @@ impl WorkspaceShell {
             })
         })
         .collect();
+        let change_ledger_retention_input = cx.new(|cx| {
+            TextInput::new("365", "Retention days", cx).aria_label("Change ledger retention days")
+        });
+        let change_ledger_sink_input = cx.new(|cx| {
+            TextInput::new("", "External sink label (optional)", cx)
+                .aria_label("Change ledger external sink label")
+        });
         let connection_url_input = cx.new(|cx| {
             TextInput::new("", "postgresql://user:password@localhost:5432/database", cx)
                 .aria_label("PostgreSQL connection URL")
@@ -10084,6 +10112,11 @@ impl WorkspaceShell {
             change_ledger_chain_verified: false,
             change_ledger_loading: false,
             change_ledger_error: None,
+            change_ledger_policy: None,
+            change_ledger_retention_input,
+            change_ledger_sink_input,
+            change_ledger_policy_pending: false,
+            change_ledger_export_pending: false,
             repository_hosting: None,
             hosting_repositories: Vec::new(),
             repository_hosting_loading: false,
@@ -13080,6 +13113,37 @@ impl WorkspaceShell {
                         self.change_ledger_error = None;
                     }
                     Err(error) => self.change_ledger_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ChangeLedgerExported {
+                destination,
+                result,
+            } => {
+                self.change_ledger_export_pending = false;
+                match result {
+                    Ok(()) => self.show_success_toast(
+                        format!("Exported ledger to {}", destination.display()),
+                        cx,
+                    ),
+                    Err(message) => self.change_ledger_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ChangeLedgerPolicyLoaded(result) => {
+                self.change_ledger_policy_pending = false;
+                match result {
+                    Ok(policy) => {
+                        self.change_ledger_retention_input.update(cx, |input, cx| {
+                            input.set_text(policy.retention_days.to_string(), cx)
+                        });
+                        self.change_ledger_sink_input.update(cx, |input, cx| {
+                            input.set_text(policy.external_sink.clone().unwrap_or_default(), cx)
+                        });
+                        self.change_ledger_policy = Some(policy);
+                        self.change_ledger_error = None;
+                    }
+                    Err(message) => self.change_ledger_error = Some(message),
                 }
                 cx.notify();
             }
@@ -21355,8 +21419,11 @@ impl WorkspaceShell {
         let affected_object = self
             .focused_database_item(cx)
             .map(|(_, source)| format!("{}.{}", source.schema, source.object));
+        let tenant_id = self
+            .selected_database_tenant
+            .or_else(|| self.selected_tenant_id());
         self.change_ledger_filter = sift_protocol::ChangeLedgerFilter {
-            tenant_id: self.selected_database_tenant,
+            tenant_id,
             connection_profile_id: profile_id,
             affected_object,
             git_commit,
@@ -21372,6 +21439,95 @@ impl WorkspaceShell {
         // dispatches no action at all.
         self.focus_handle.focus(window, cx);
         self.request_change_ledger(false, cx);
+        if let (Some(tenant_id), Some(sender)) = (tenant_id, &self.executor_sender) {
+            self.change_ledger_policy_pending = true;
+            let _ = sender.send(ExecutorCommand::LoadChangeLedgerPolicy { tenant_id });
+        }
+    }
+
+    fn prompt_change_ledger_export(&mut self, cx: &mut Context<Self>) {
+        if self.change_ledger_export_pending {
+            return;
+        }
+        let prompt = cx.prompt_for_new_path(
+            std::path::Path::new("."),
+            Some("database-change-ledger.csv"),
+        );
+        cx.spawn(async move |shell, cx| {
+            let result = prompt.await;
+            let _ = shell.update(cx, |shell, cx| match result {
+                Ok(Ok(Some(destination))) => {
+                    let Some(sender) = &shell.executor_sender else {
+                        shell.change_ledger_error =
+                            Some("Change ledger service is unavailable".into());
+                        cx.notify();
+                        return;
+                    };
+                    let mut filter = shell.change_ledger_filter.clone();
+                    filter.before_id = None;
+                    filter.limit = Some(10_000);
+                    if sender
+                        .send(ExecutorCommand::ExportChangeLedger {
+                            filter,
+                            destination,
+                        })
+                        .is_ok()
+                    {
+                        shell.change_ledger_export_pending = true;
+                        shell.change_ledger_error = None;
+                    }
+                    cx.notify();
+                }
+                Ok(Err(error)) => {
+                    shell.change_ledger_error = Some(format!("opening export folder: {error}"));
+                    cx.notify();
+                }
+                Ok(Ok(None)) | Err(_) => {}
+            });
+        })
+        .detach();
+    }
+
+    fn save_change_ledger_policy(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.change_ledger_filter.tenant_id else {
+            self.change_ledger_error = Some("Select a tenant before saving policy".into());
+            cx.notify();
+            return;
+        };
+        let retention = self
+            .change_ledger_retention_input
+            .read(cx)
+            .text()
+            .trim()
+            .parse::<u32>();
+        let Ok(retention_days) = retention else {
+            self.change_ledger_error = Some("Retention days must be a whole number".into());
+            cx.notify();
+            return;
+        };
+        let sink = self
+            .change_ledger_sink_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let request = sift_protocol::UpdateChangeLedgerPolicyRequest {
+            retention_days,
+            external_sink: (!sink.is_empty()).then_some(sink),
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.change_ledger_error = Some("Change ledger service is unavailable".into());
+            cx.notify();
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::SaveChangeLedgerPolicy { tenant_id, request })
+            .is_ok()
+        {
+            self.change_ledger_policy_pending = true;
+            self.change_ledger_error = None;
+        }
+        cx.notify();
     }
 
     fn request_workspace_files(&mut self, cx: &mut Context<Self>) {
@@ -43508,7 +43664,7 @@ impl WorkspaceShell {
                         self.change_ledger_filter.affected_object.clone(),
                         self.change_ledger_filter.git_commit.as_deref().map(|oid| format!("commit {}", oid.chars().take(8).collect::<String>())),
                     ].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-                    div().debug_selector(|| "change-ledger-modal".into()).w(px(980.)).h(px(620.)).flex().flex_col().gap_3()
+                    div().debug_selector(|| "change-ledger-modal".into()).w(px(980.)).h(px(690.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between()
                             .child(div().flex().flex_col()
                                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Database change ledger"))
@@ -43546,10 +43702,22 @@ impl WorkspaceShell {
                                         .collect()
                                 }),
                             ).flex_1().min_h_0().w_full().track_scroll(&self.change_ledger_scroll_handle)))
+                        .child(div().p_2().rounded_sm().border_1().border_color(colors.subtle_border).flex().items_end().gap_2()
+                            .child(div().w(px(150.)).flex().flex_col().gap_1()
+                                .child(div().text_xs().text_color(colors.muted_text).child("RETENTION DAYS"))
+                                .child(self.change_ledger_retention_input.clone()))
+                            .child(div().flex_1().flex().flex_col().gap_1()
+                                .child(div().text_xs().text_color(colors.muted_text).child("EXTERNAL SINK LABEL"))
+                                .child(self.change_ledger_sink_input.clone()))
+                            .child(Button::new("save-change-ledger-policy", "Save policy").tone(ButtonTone::Neutral)
+                                .loading(self.change_ledger_policy_pending)
+                                .disabled(self.change_ledger_filter.tenant_id.is_none())
+                                .on_click(cx.listener(|shell, _, _, cx| shell.save_change_ledger_policy(cx)))))
                         .child(div().flex().justify_between()
                             .child(Button::new("more-change-ledger", if self.change_ledger_loading { "Loading…" } else { "Load older" }).tone(ButtonTone::Ghost)
                                 .disabled(self.change_ledger_loading || self.change_ledger_next_before_id.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.request_change_ledger(true, cx))))
                             .child(div().flex().gap_2()
+                                .child(Button::new("export-change-ledger", "Export CSV…").tone(ButtonTone::Accent).loading(self.change_ledger_export_pending).disabled(self.change_ledger_filter.tenant_id.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.prompt_change_ledger_export(cx))))
                                 .child(Button::new("refresh-change-ledger", "Refresh").tone(ButtonTone::Ghost).disabled(self.change_ledger_loading).on_click(cx.listener(|shell, _, _, cx| shell.request_change_ledger(false, cx))))
                                 .child(Button::new("close-change-ledger", "Close").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))))
                         .into_any_element()

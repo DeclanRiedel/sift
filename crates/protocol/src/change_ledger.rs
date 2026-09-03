@@ -118,6 +118,22 @@ pub struct ChangeLedgerPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChangeLedgerPolicy {
+    pub tenant_id: i64,
+    pub retention_days: u32,
+    pub external_sink: Option<String>,
+    pub updated_by: i64,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateChangeLedgerPolicyRequest {
+    pub retention_days: u32,
+    #[serde(default)]
+    pub external_sink: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ExternalChangeLedgerEvent {
     pub tenant_id: i64,
     pub connection_profile_id: Option<i64>,
