@@ -2036,6 +2036,7 @@ pub struct InstancePlanPresentation {
     pub bind: String,
     pub configuration_digest: String,
     pub lock_digest: String,
+    pub lock: String,
     pub principals: usize,
     pub tenants: usize,
     pub memberships: usize,
@@ -2055,6 +2056,7 @@ pub struct InstancePlanPresentation {
 pub struct InstanceConfigurationPresentation {
     pub root: Option<std::path::PathBuf>,
     pub manifest: String,
+    pub lock: String,
     pub source_revision: Option<String>,
     pub name: String,
     pub is_new: bool,
@@ -31006,6 +31008,53 @@ impl WorkspaceShell {
         self.open_current_configuration(cx);
     }
 
+    fn open_instance_lock(&mut self, source: String, cx: &mut Context<Self>) {
+        self.modal = None;
+        if let Some((pane_index, item_index)) =
+            self.panes.iter().enumerate().find_map(|(index, pane)| {
+                pane.read(cx)
+                    .items
+                    .iter()
+                    .position(|item| {
+                        item.kind == ItemKind::Configuration && item.title == "sift.lock"
+                    })
+                    .map(|item| (index, item))
+            })
+        {
+            self.active_pane = pane_index;
+            self.panes[pane_index].update(cx, |pane, cx| {
+                pane.activate_item(item_index, true);
+                cx.notify();
+            });
+            return;
+        }
+        let item_id = self.next_id;
+        self.next_id += 1;
+        let editor = cx.new(|cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
+                .with_language(EditorLanguage::Toml)
+                .with_keymap(EditorKeymap::Vim)
+                .read_only()
+        });
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |pane, cx| {
+                pane.open_configuration(
+                    ItemPresentation {
+                        id: item_id,
+                        kind: ItemKind::Configuration,
+                        title: "sift.lock".into(),
+                        dirty: false,
+                        source: None,
+                        last_result: None,
+                    },
+                    editor,
+                    cx,
+                )
+            });
+        }
+        cx.notify();
+    }
+
     fn forget_instance_root(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
         self.send_instance_command(InstanceCommand::ForgetRoot { root }, cx);
     }
@@ -41231,7 +41280,7 @@ impl WorkspaceShell {
                     let allow_destroy = plan.destroy_confirmation_required;
                     let manifest_path = plan.root.join("sift.toml");
                     let edit_manifest_root = plan.root.clone();
-                    let lock_path = plan.root.join("sift.lock");
+                    let lock_source = plan.lock.clone();
                     let refresh_root = plan.root.clone();
                     let configuration_digest = plan.configuration_digest.chars().take(12).collect::<String>();
                     let lock_digest = plan.lock_digest.chars().take(12).collect::<String>();
@@ -41469,12 +41518,12 @@ impl WorkspaceShell {
                                 .child(
                                     Button::new(
                                         "open-instance-lock",
-                                        "Open sift.lock",
+                                        "Inspect sift.lock",
                                     )
                                     .tone(ButtonTone::Neutral)
-                                    .on_click(move |_, _, cx| {
-                                        cx.open_with_system(&lock_path)
-                                    }),
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.open_instance_lock(lock_source.clone(), cx)
+                                    })),
                                 )
                                 .child(
                                     Button::new(
@@ -55656,6 +55705,7 @@ mod tests {
                     InstanceConfigurationPresentation {
                         root: None,
                         manifest: "name = \"current\"\n".into(),
+                        lock: "kind = \"sift-lock\"\n".into(),
                         source_revision: Some("sha256:one".into()),
                         name: "current".into(),
                         is_new: false,

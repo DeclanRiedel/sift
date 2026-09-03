@@ -22,6 +22,8 @@ use crate::{ApiTokenRow, CredentialMode, RoomKind, RoomRole, VaultItemId};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InstanceConfigurationDocument {
     pub manifest: String,
+    /// Generated lock contents for read-only inspection.
+    pub lock: String,
     pub manifest_id: String,
     pub name: String,
     /// Digest of the exact source bytes, used for optimistic concurrency.

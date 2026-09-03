@@ -707,6 +707,14 @@ fn prepare_root_configuration(
         .replace("name = \"demo-sift\"", "name = \"new-sift\"");
     Ok(InstanceConfigurationPresentation {
         root: Some(root.to_path_buf()),
+        lock: sift_instance_config::LockFile::generate(
+            &sift_instance_config::Manifest::parse(&source)
+                .map_err(|error| format!("validating template failed: {error}"))?,
+            sift_server::VERSION,
+            sift_protocol::PROTOCOL_VERSION_NUMBER,
+        )
+        .and_then(|lock| lock.to_toml_pretty())
+        .map_err(|error| format!("generating template lock failed: {error}"))?,
         manifest: source,
         source_revision: None,
         name: "New Sift Instance".into(),
@@ -792,6 +800,7 @@ fn configuration_presentation(
 ) -> InstanceConfigurationPresentation {
     InstanceConfigurationPresentation {
         root,
+        lock: document.lock,
         manifest: document.manifest,
         source_revision: Some(document.source_revision),
         name: document.name,
@@ -913,6 +922,10 @@ async fn inspect_root(
         bind: instance.manifest.server.bind,
         configuration_digest: static_plan.configuration_digest,
         lock_digest: static_plan.lock_digest,
+        lock: instance
+            .lock
+            .to_toml_pretty()
+            .map_err(|error| format!("encoding sift.lock failed: {error}"))?,
         principals: static_plan.resources.principals,
         tenants: static_plan.resources.tenants,
         memberships: static_plan.resources.memberships,

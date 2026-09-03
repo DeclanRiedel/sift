@@ -24,6 +24,9 @@ fn read_unlocked(root: &Path) -> Result<InstanceConfigurationDocument> {
     let manifest = Manifest::parse(&source).context("validating sift.toml")?;
     let lock = generated_lock(&manifest)?;
     Ok(InstanceConfigurationDocument {
+        lock: lock
+            .to_toml_pretty()
+            .context("encoding generated sift.lock")?,
         source_revision: source_revision(source.as_bytes()),
         configuration_digest: manifest
             .configuration_digest()
