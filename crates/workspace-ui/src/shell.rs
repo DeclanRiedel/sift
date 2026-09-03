@@ -838,6 +838,8 @@ struct ConnectionProjectionKey {
     expanded_count: usize,
     find_open: bool,
     find_query: String,
+    show_favorites: bool,
+    show_recents: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -8573,6 +8575,8 @@ pub struct WorkspaceShell {
     palette_recents: Vec<String>,
     favorite_database_objects: Vec<crate::presentation::DatabaseObjectBookmark>,
     recent_database_objects: Vec<crate::presentation::DatabaseObjectBookmark>,
+    show_favorite_database_objects: bool,
+    show_recent_database_objects: bool,
     command_projection_revision: u64,
     command_projection_cache: RefCell<Option<(CommandProjectionKey, Arc<Vec<CommandSpec>>)>>,
     query_history_focus_handle: FocusHandle,
@@ -9059,6 +9063,8 @@ impl WorkspaceShell {
         let palette_recents = state.palette_recents.clone();
         let favorite_database_objects = state.favorite_database_objects.clone();
         let recent_database_objects = state.recent_database_objects.clone();
+        let show_favorite_database_objects = state.show_favorite_database_objects;
+        let show_recent_database_objects = state.show_recent_database_objects;
         let explorer_views = state.explorer_views.clone();
         let explorer_object_kinds = state.explorer_object_kinds.clone();
         let vim_mode_default = settings.editor.default_mode == EditorMode::Vim;
@@ -9713,6 +9719,8 @@ impl WorkspaceShell {
             palette_recents,
             favorite_database_objects,
             recent_database_objects,
+            show_favorite_database_objects,
+            show_recent_database_objects,
             command_projection_revision: 0,
             command_projection_cache: RefCell::new(None),
             query_history_focus_handle: cx.focus_handle(),
@@ -15303,17 +15311,15 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn open_explorer_bookmark(
-        &mut self,
-        bookmark: crate::presentation::DatabaseObjectBookmark,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.explorer_view_menu_open = false;
-        match self.target_for_database_object_bookmark(&bookmark) {
-            Some(target) => self.open_schema_search_target(target, window, cx),
-            None => self.show_toast("Connect to this bookmark's database to open it".into(), cx),
+    fn toggle_explorer_shortcuts(&mut self, favorites: bool, cx: &mut Context<Self>) {
+        if favorites {
+            self.show_favorite_database_objects = !self.show_favorite_database_objects;
+        } else {
+            self.show_recent_database_objects = !self.show_recent_database_objects;
         }
+        self.invalidate_connection_projection();
+        self.persist(cx);
+        cx.notify();
     }
 
     fn apply_explorer_view(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -15442,16 +15448,12 @@ impl WorkspaceShell {
                     .child(group.label()),
             );
         }
-        if !self.favorite_database_objects.is_empty() {
-            menu = menu.child(SectionLabel::new("FAVORITES"));
-        }
-        for (index, bookmark) in self.favorite_database_objects.iter().cloned().enumerate() {
-            let label = format!("{}.{}", bookmark.schema, bookmark.object);
-            let kind = bookmark.object_kind;
-            menu = menu.child(
+        menu = menu
+            .child(SectionLabel::new("SHORTCUTS"))
+            .child(
                 div()
-                    .id(("explorer-favorite-object", index))
-                    .debug_selector(move || format!("explorer-favorite-object-{index}"))
+                    .id("toggle-explorer-favorites")
+                    .debug_selector(|| "toggle-explorer-favorites".into())
                     .h(px(28.))
                     .px_2()
                     .flex()
@@ -15460,40 +15462,42 @@ impl WorkspaceShell {
                     .rounded_sm()
                     .role(Role::MenuItem)
                     .hover(|row| row.bg(colors.hovered_surface))
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        shell.open_explorer_bookmark(bookmark.clone(), window, cx)
-                    }))
-                    .child(icon(schema_object_kind_icon(kind), colors.muted_text, 11.))
-                    .child(div().min_w_0().truncate().child(label)),
+                    .on_click(
+                        cx.listener(|shell, _, _, cx| shell.toggle_explorer_shortcuts(true, cx)),
+                    )
+                    .child(
+                        div()
+                            .w(px(14.))
+                            .when(self.show_favorite_database_objects, |slot| {
+                                slot.child(icon(IconName::Check, colors.accent, 11.))
+                            }),
+                    )
+                    .child("Show favourites"),
+            )
+            .child(
+                div()
+                    .id("toggle-explorer-recents")
+                    .debug_selector(|| "toggle-explorer-recents".into())
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .role(Role::MenuItem)
+                    .hover(|row| row.bg(colors.hovered_surface))
+                    .on_click(
+                        cx.listener(|shell, _, _, cx| shell.toggle_explorer_shortcuts(false, cx)),
+                    )
+                    .child(
+                        div()
+                            .w(px(14.))
+                            .when(self.show_recent_database_objects, |slot| {
+                                slot.child(icon(IconName::Check, colors.accent, 11.))
+                            }),
+                    )
+                    .child("Show recents"),
             );
-        }
-        if self.settings.ui.recent_objects && !self.recent_database_objects.is_empty() {
-            menu = menu.child(SectionLabel::new("RECENTS"));
-        }
-        if self.settings.ui.recent_objects {
-            for (index, bookmark) in self.recent_database_objects.iter().cloned().enumerate() {
-                let label = format!("{}.{}", bookmark.schema, bookmark.object);
-                let kind = bookmark.object_kind;
-                menu = menu.child(
-                    div()
-                        .id(("explorer-recent-object", index))
-                        .debug_selector(move || format!("explorer-recent-object-{index}"))
-                        .h(px(28.))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_sm()
-                        .role(Role::MenuItem)
-                        .hover(|row| row.bg(colors.hovered_surface))
-                        .on_click(cx.listener(move |shell, _, window, cx| {
-                            shell.open_explorer_bookmark(bookmark.clone(), window, cx)
-                        }))
-                        .child(icon(schema_object_kind_icon(kind), colors.muted_text, 11.))
-                        .child(div().min_w_0().truncate().child(label)),
-                );
-            }
-        }
         if !self.explorer_views.is_empty() {
             menu = menu.child(SectionLabel::new("SAVED VIEWS"));
         }
@@ -15597,6 +15601,8 @@ impl WorkspaceShell {
                 + self.expanded_object_groups.len(),
             find_open: self.connections_find_open,
             find_query: self.connections_find_query.clone(),
+            show_favorites: self.show_favorite_database_objects,
+            show_recents: self.show_recent_database_objects,
         };
         if let Some((cached_key, items)) = self.connection_projection_cache.borrow().as_ref() {
             if cached_key == &key {
@@ -15610,19 +15616,21 @@ impl WorkspaceShell {
 
     fn build_visible_connection_items(&self) -> Vec<ConnectionTreeItem> {
         let mut items = Vec::new();
-        items.extend(
-            self.favorite_database_objects
-                .iter()
-                .filter_map(|bookmark| {
-                    Some(ConnectionTreeItem {
-                        depth: 0,
-                        action: ConnectionTreeAction::FavoriteObject(
-                            self.target_for_database_object_bookmark(bookmark)?,
-                        ),
-                    })
-                }),
-        );
-        if self.settings.ui.recent_objects {
+        if self.show_favorite_database_objects {
+            items.extend(
+                self.favorite_database_objects
+                    .iter()
+                    .filter_map(|bookmark| {
+                        Some(ConnectionTreeItem {
+                            depth: 0,
+                            action: ConnectionTreeAction::FavoriteObject(
+                                self.target_for_database_object_bookmark(bookmark)?,
+                            ),
+                        })
+                    }),
+            );
+        }
+        if self.settings.ui.recent_objects && self.show_recent_database_objects {
             items.extend(self.recent_database_objects.iter().filter_map(|bookmark| {
                 Some(ConnectionTreeItem {
                     depth: 0,
@@ -25268,6 +25276,8 @@ impl WorkspaceShell {
             palette_recents: self.palette_recents.clone(),
             favorite_database_objects: self.favorite_database_objects.clone(),
             recent_database_objects: self.recent_database_objects.clone(),
+            show_favorite_database_objects: self.show_favorite_database_objects,
+            show_recent_database_objects: self.show_recent_database_objects,
             explorer_object_kinds: ObjectGroupKind::CANONICAL
                 .into_iter()
                 .filter(|group| self.schema_search_filters.contains(group))
@@ -47173,7 +47183,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn connections_object_menu_lists_favorites_and_recents(cx: &mut TestAppContext) {
+    fn connections_object_menu_toggles_favorites_and_recents(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -47196,8 +47206,16 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("explorer-favorite-object-0").is_some());
-        assert!(cx.debug_bounds("explorer-recent-object-0").is_some());
+        assert!(cx.debug_bounds("toggle-explorer-favorites").is_some());
+        assert!(cx.debug_bounds("toggle-explorer-recents").is_some());
+        assert!(cx.debug_bounds("explorer-favorite-object-0").is_none());
+        assert!(cx.debug_bounds("explorer-recent-object-0").is_none());
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.toggle_explorer_shortcuts(true, cx);
+            assert!(!shell.show_favorite_database_objects);
+            assert!(shell.show_recent_database_objects);
+        });
     }
 
     #[gpui::test]

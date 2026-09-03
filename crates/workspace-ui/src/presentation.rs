@@ -52,6 +52,10 @@ const fn is_false(value: &bool) -> bool {
     !*value
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f32,
@@ -347,6 +351,10 @@ pub struct PresentationState {
     pub favorite_database_objects: Vec<DatabaseObjectBookmark>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_database_objects: Vec<DatabaseObjectBookmark>,
+    #[serde(default = "default_true")]
+    pub show_favorite_database_objects: bool,
+    #[serde(default = "default_true")]
+    pub show_recent_database_objects: bool,
     #[serde(default = "all_explorer_object_kinds")]
     pub explorer_object_kinds: Vec<sift_protocol::ObjectKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -407,6 +415,8 @@ impl Default for PresentationState {
             palette_recents: Vec::new(),
             favorite_database_objects: Vec::new(),
             recent_database_objects: Vec::new(),
+            show_favorite_database_objects: true,
+            show_recent_database_objects: true,
             explorer_object_kinds: all_explorer_object_kinds(),
             explorer_views: Vec::new(),
         }
@@ -540,6 +550,8 @@ mod tests {
                 object: "users".into(),
                 object_kind: sift_protocol::ObjectKind::Table,
             }],
+            show_favorite_database_objects: false,
+            show_recent_database_objects: false,
             explorer_object_kinds: vec![
                 sift_protocol::ObjectKind::Table,
                 sift_protocol::ObjectKind::View,
