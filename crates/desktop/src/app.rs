@@ -1407,6 +1407,23 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadOperationAudit { cursor } => {
+                let append = cursor.is_some();
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .operation_audit_page(cursor.as_deref(), Some(100))
+                        .await
+                        .map_err(|error| format!("loading operation audit failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::OperationAuditLoaded { append, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()
