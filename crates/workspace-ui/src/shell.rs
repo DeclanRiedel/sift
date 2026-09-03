@@ -31423,6 +31423,7 @@ impl WorkspaceShell {
             CommandId::ToggleLeftDock => self.toggle_left_dock(&ToggleLeftDock, window, cx),
             CommandId::ToggleInspectorDock => self.toggle_right_dock(&ToggleRightDock, window, cx),
             CommandId::ToggleBottomDock => self.toggle_bottom_dock(&ToggleBottomDock, window, cx),
+            CommandId::ToggleQueryResultsPlacement => self.toggle_query_results_placement(cx),
             CommandId::OpenSettings => {
                 self.modal = Some(Modal::Settings);
                 cx.notify();

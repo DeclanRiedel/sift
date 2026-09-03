@@ -87,6 +87,7 @@ pub(super) fn menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
             Item::available(CommandId::ToggleLeftDock),
             Item::available(CommandId::ToggleInspectorDock),
             Item::available(CommandId::ToggleBottomDock),
+            Item::available(CommandId::ToggleQueryResultsPlacement),
             Item::available(CommandId::ToggleTheme),
         ],
         AppBarMenu::Go => vec![

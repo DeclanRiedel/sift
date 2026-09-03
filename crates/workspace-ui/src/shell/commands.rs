@@ -123,6 +123,7 @@ pub enum CommandId {
     ToggleLeftDock,
     ToggleInspectorDock,
     ToggleBottomDock,
+    ToggleQueryResultsPlacement,
     OpenSettings,
     OpenKeymaps,
     OpenServerConfiguration,
@@ -255,6 +256,7 @@ impl CommandId {
             Self::ToggleLeftDock => "workspace.toggle-left-dock",
             Self::ToggleInspectorDock => "workspace.toggle-right-dock",
             Self::ToggleBottomDock => "workspace.toggle-bottom-dock",
+            Self::ToggleQueryResultsPlacement => "workspace.toggle-query-results-placement",
             Self::OpenSettings => "ui.open-settings",
             Self::OpenKeymaps => "ui.open-keymaps",
             Self::OpenServerConfiguration => "instance.open-configuration",
@@ -1444,6 +1446,14 @@ const DEFINITIONS: &[CommandDefinition] = &[
         AvailabilityRule::Always,
     ),
     command(
+        CommandId::ToggleQueryResultsPlacement,
+        "Switch Editor | Data Layout: Vertical / Horizontal",
+        "",
+        "",
+        true,
+        AvailabilityRule::ActiveItem,
+    ),
+    command(
         CommandId::OpenSettings,
         "Settings",
         "",
@@ -1656,6 +1666,15 @@ mod tests {
         )
         .enabled());
         assert!(CommandRegistry::spec(CommandId::SplitPane, empty).enabled());
+        let layout = CommandRegistry::spec(
+            CommandId::ToggleQueryResultsPlacement,
+            CommandContext {
+                has_active_item: true,
+                ..empty
+            },
+        );
+        assert!(layout.enabled());
+        assert!(layout.label.contains("Vertical / Horizontal"));
         assert_eq!(
             CommandRegistry::spec(CommandId::OpenServerConfiguration, empty)
                 .disabled_reason
