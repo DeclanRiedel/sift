@@ -251,17 +251,19 @@ impl InstanceRoot {
             .context("vcs.max_diff_hunks does not fit this platform")?;
         config.vcs.max_diff_lines = usize::try_from(self.manifest.server.vcs.max_diff_lines)
             .context("vcs.max_diff_lines does not fit this platform")?;
-        config.tenant_limits.ceilings.connections =
-            Some(u64::from(self.manifest.server.limits.max_connections));
-        config.tenant_limits.ceilings.concurrent_queries = Some(u64::from(
-            self.manifest.server.limits.max_concurrent_queries,
-        ));
         config.tenant_limits.trusted_local_unlimited =
             self.manifest.server.tenant_limits.trusted_local_unlimited;
         config.tenant_limits.defaults =
             tenant_resource_limits(&self.manifest.server.tenant_limits.defaults);
         config.tenant_limits.ceilings =
             tenant_resource_limits(&self.manifest.server.tenant_limits.ceilings);
+        // Format-v1 compatibility fields remain the final authority for these
+        // two ceilings until a future format removes the duplication.
+        config.tenant_limits.ceilings.connections =
+            Some(u64::from(self.manifest.server.limits.max_connections));
+        config.tenant_limits.ceilings.concurrent_queries = Some(u64::from(
+            self.manifest.server.limits.max_concurrent_queries,
+        ));
         config
             .validate()
             .context("validating realized server settings")?;
