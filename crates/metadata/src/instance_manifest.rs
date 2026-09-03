@@ -1108,7 +1108,7 @@ fn missing_slots_locked(tx: &Transaction<'_>) -> crate::Result<Vec<String>> {
 }
 
 fn runtime_policy(connection: &sift_instance_config::ConnectionConfig) -> ConnectionPolicy {
-    let mut blocked = Vec::new();
+    let mut blocked = connection.policy.blocked_ops.clone();
     if !connection.policy.allow_sql {
         blocked.extend([
             OperationKind::ExecuteQuery,
@@ -1139,9 +1139,12 @@ fn runtime_policy(connection: &sift_instance_config::ConnectionConfig) -> Connec
     }
     blocked.dedup();
     ConnectionPolicy {
-        read_only: !connection.policy.allow_sql,
+        minimum_tenant_role: connection.policy.minimum_tenant_role,
+        read_only: connection.policy.read_only || !connection.policy.allow_sql,
+        allowed_ops: connection.policy.allowed_ops.clone(),
         blocked_ops: blocked,
-        ..ConnectionPolicy::default()
+        allowed_schemas: connection.policy.allowed_schemas.clone(),
+        revision: 0,
     }
 }
 
@@ -1230,6 +1233,30 @@ mod tests {
         ))
         .unwrap();
         (manifest, lock)
+    }
+
+    #[test]
+    fn manifest_connection_policy_preserves_precise_server_constraints() {
+        let (mut manifest, _) = fixture();
+        let policy = &mut manifest.connections[0].policy;
+        policy.minimum_tenant_role = sift_protocol::TenantRole::Admin;
+        policy.read_only = true;
+        policy.allowed_ops = Some(vec![OperationKind::ExecuteQuery]);
+        policy.blocked_ops = vec![OperationKind::ExportQuery];
+        policy.allowed_schemas = Some(vec![sift_protocol::SchemaSelector {
+            catalog: Some("analytics".into()),
+            schema: "reporting".into(),
+        }]);
+
+        let runtime = runtime_policy(&manifest.connections[0]);
+        assert_eq!(
+            runtime.minimum_tenant_role,
+            sift_protocol::TenantRole::Admin
+        );
+        assert!(runtime.read_only);
+        assert_eq!(runtime.allowed_ops, Some(vec![OperationKind::ExecuteQuery]));
+        assert!(runtime.blocked_ops.contains(&OperationKind::ExportQuery));
+        assert_eq!(runtime.allowed_schemas.unwrap()[0].schema, "reporting");
     }
 
     #[tokio::test]

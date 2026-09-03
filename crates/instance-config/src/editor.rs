@@ -823,6 +823,38 @@ const FIELDS: &[Field] = &[
         BOOL
     ),
     field!(
+        "connections.policy",
+        "minimum_tenant_role",
+        "enum",
+        "Lowest tenant role allowed to use this connection.",
+        &["\"member\"", "\"viewer\"", "\"admin\"", "\"owner\""]
+    ),
+    field!(
+        "connections.policy",
+        "read_only",
+        "boolean",
+        "Reject SQL writes while retaining query access.",
+        BOOL
+    ),
+    field!(
+        "connections.policy",
+        "allowed_ops",
+        "operation array",
+        "Optional operation allowlist; omit for unrestricted operations."
+    ),
+    field!(
+        "connections.policy",
+        "blocked_ops",
+        "operation array",
+        "Operations denied even when present in allowed_ops."
+    ),
+    field!(
+        "connections.policy",
+        "allowed_schemas",
+        "schema selector array",
+        "Optional catalog/schema allowlist; omit for unrestricted schemas."
+    ),
+    field!(
         "connections.lifecycle",
         "prevent_destroy",
         "boolean",

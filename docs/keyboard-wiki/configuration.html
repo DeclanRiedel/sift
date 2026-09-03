@@ -183,6 +183,11 @@
           <tr><td><code>[connections.policy]</code> <code>allow_sql</code></td><td>Permit query and mutation operations.</td></tr>
           <tr><td><code>[connections.policy]</code> <code>allow_schema_read</code></td><td>Permit catalog inspection.</td></tr>
           <tr><td><code>[connections.policy]</code> <code>allow_export</code></td><td>Permit result export.</td></tr>
+          <tr><td><code>[connections.policy]</code> <code>minimum_tenant_role</code></td><td>Lowest role that may use the connection: <code>viewer</code>, <code>member</code>, <code>admin</code>, or <code>owner</code>.</td></tr>
+          <tr><td><code>[connections.policy]</code> <code>read_only</code></td><td>Allow queries but reject SQL writes. This is more precise than disabling all SQL.</td></tr>
+          <tr><td><code>[connections.policy]</code> <code>allowed_ops</code></td><td>Optional array of protocol operation names. When present, only listed operations are allowed.</td></tr>
+          <tr><td><code>[connections.policy]</code> <code>blocked_ops</code></td><td>Array of denied operation names; denial wins over <code>allowed_ops</code>.</td></tr>
+          <tr><td><code>[connections.policy]</code> <code>allowed_schemas</code></td><td>Optional array of <code>{ schema = "…", catalog = "…" }</code> selectors. Omit <code>catalog</code> for the active catalog.</td></tr>
           <tr><td><code>[connections.lifecycle]</code> <code>prevent_destroy</code></td><td>Block deletion even when destroy approval is supplied.</td></tr>
         </tbody></table>
       </section>

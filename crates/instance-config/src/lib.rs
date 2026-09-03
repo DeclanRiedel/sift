@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sift_protocol::{OperationKind, SchemaSelector, TenantRole as ProtocolTenantRole};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -659,6 +660,11 @@ pub struct ConnectionPolicy {
     pub allow_sql: bool,
     pub allow_schema_read: bool,
     pub allow_export: bool,
+    pub minimum_tenant_role: ProtocolTenantRole,
+    pub read_only: bool,
+    pub allowed_ops: Option<Vec<OperationKind>>,
+    pub blocked_ops: Vec<OperationKind>,
+    pub allowed_schemas: Option<Vec<SchemaSelector>>,
 }
 
 impl Default for ConnectionPolicy {
@@ -667,6 +673,11 @@ impl Default for ConnectionPolicy {
             allow_sql: true,
             allow_schema_read: true,
             allow_export: false,
+            minimum_tenant_role: ProtocolTenantRole::Member,
+            read_only: false,
+            allowed_ops: None,
+            blocked_ops: Vec::new(),
+            allowed_schemas: None,
         }
     }
 }
