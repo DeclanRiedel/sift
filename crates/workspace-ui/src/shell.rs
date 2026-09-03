@@ -1782,6 +1782,7 @@ enum AdministrationSection {
     Keys,
     Approvals,
     Audit,
+    Github,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2859,6 +2860,14 @@ pub enum ExecutorCommand {
     LoadOperationAudit {
         cursor: Option<String>,
     },
+    LoadGithubAllowlist,
+    CreateGithubAllowlistEntry {
+        login: String,
+        target_principal_id: Option<i64>,
+    },
+    RevokeGithubAllowlistEntry {
+        entry_id: i64,
+    },
     LoadDdlSources {
         workspace_id: i64,
     },
@@ -3674,6 +3683,8 @@ pub enum ExecutorEvent {
         append: bool,
         result: Result<sift_protocol::CursorPage<sift_api_types::OperationAudit>, String>,
     },
+    GithubAllowlistLoaded(Result<Vec<sift_api_types::GithubAllowlistEntry>, String>),
+    GithubAllowlistChanged(Result<(), String>),
     DdlSourcesLoaded(Result<Vec<sift_protocol::DdlSource>, String>),
     DdlSourceModelLoaded(Result<sift_protocol::DdlSourceModel, String>),
     DdlSourceChanged(Result<(), String>),
@@ -9203,6 +9214,7 @@ pub struct WorkspaceShell {
     principal_key_inputs: Vec<Entity<TextInput>>,
     ddl_source_inputs: Vec<Entity<TextInput>>,
     room_admin_inputs: Vec<Entity<TextInput>>,
+    github_allowlist_inputs: Vec<Entity<TextInput>>,
     connection_url_input: Entity<TextInput>,
     database_name_input: Entity<TextInput>,
     database_host_input: Entity<TextInput>,
@@ -9542,6 +9554,7 @@ pub struct WorkspaceShell {
     room_admin_pending: bool,
     room_admin_error: Option<String>,
     room_admin_member_role: sift_api_types::RoomRole,
+    github_allowlist: Vec<sift_api_types::GithubAllowlistEntry>,
     connection_policy_profile: Option<i64>,
     connection_policy: Option<sift_protocol::ConnectionPolicy>,
     connection_policy_pending: bool,
@@ -10062,6 +10075,13 @@ impl WorkspaceShell {
                 TextInput::new("", "Member principal ID", cx).aria_label("Room member principal ID")
             }),
         ];
+        let github_allowlist_inputs = vec![
+            cx.new(|cx| TextInput::new("", "GitHub login", cx).aria_label("GitHub login")),
+            cx.new(|cx| {
+                TextInput::new("", "Target principal ID (optional)", cx)
+                    .aria_label("GitHub target principal ID")
+            }),
+        ];
         let connection_policy_schemas_input = cx.new(|cx| {
             TextInput::new("", "public, catalog.schema", cx).aria_label("Allowed database schemas")
         });
@@ -10485,6 +10505,7 @@ impl WorkspaceShell {
             principal_key_inputs,
             ddl_source_inputs,
             room_admin_inputs,
+            github_allowlist_inputs,
             connection_url_input,
             database_name_input,
             database_host_input,
@@ -10810,6 +10831,7 @@ impl WorkspaceShell {
             room_admin_pending: false,
             room_admin_error: None,
             room_admin_member_role: sift_api_types::RoomRole::Editor,
+            github_allowlist: Vec::new(),
             connection_policy_profile: None,
             connection_policy: None,
             connection_policy_pending: false,
@@ -12192,6 +12214,30 @@ impl WorkspaceShell {
                         }
                         self.operation_audit_cursor = page.next_cursor;
                         self.principal_admin_error = None;
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::GithubAllowlistLoaded(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(rows) => {
+                        self.github_allowlist = rows;
+                        self.principal_admin_error = None;
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::GithubAllowlistChanged(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(()) => {
+                        for input in &self.github_allowlist_inputs {
+                            input.update(cx, |input, cx| input.set_text("", cx));
+                        }
+                        self.load_github_allowlist(cx);
                     }
                     Err(error) => self.principal_admin_error = Some(error),
                 }
@@ -31202,6 +31248,7 @@ impl WorkspaceShell {
             AdministrationSection::Keys => self.load_principal_keys(cx),
             AdministrationSection::Approvals => self.load_operation_approvals(cx),
             AdministrationSection::Audit => self.load_operation_audit(false, cx),
+            AdministrationSection::Github => self.load_github_allowlist(cx),
             AdministrationSection::Principals => cx.notify(),
         }
     }
@@ -31351,6 +31398,47 @@ impl WorkspaceShell {
             .then(|| self.operation_audit_cursor.clone())
             .flatten();
         self.send_principal_command(ExecutorCommand::LoadOperationAudit { cursor }, cx);
+    }
+
+    fn load_github_allowlist(&mut self, cx: &mut Context<Self>) {
+        self.send_principal_command(ExecutorCommand::LoadGithubAllowlist, cx);
+    }
+
+    fn create_github_allowlist_entry(&mut self, cx: &mut Context<Self>) {
+        let login = self.github_allowlist_inputs[0]
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        if login.is_empty() {
+            self.principal_admin_error = Some("GitHub login is required".into());
+            cx.notify();
+            return;
+        }
+        let target = self.github_allowlist_inputs[1].read(cx).text().trim();
+        let target_principal_id = if target.is_empty() {
+            None
+        } else {
+            match target.parse() {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    self.principal_admin_error = Some("Target principal ID must be numeric".into());
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        self.send_principal_command(
+            ExecutorCommand::CreateGithubAllowlistEntry {
+                login,
+                target_principal_id,
+            },
+            cx,
+        );
+    }
+
+    fn revoke_github_allowlist_entry(&mut self, entry_id: i64, cx: &mut Context<Self>) {
+        self.send_principal_command(ExecutorCommand::RevokeGithubAllowlistEntry { entry_id }, cx);
     }
 
     fn open_ddl_sources(&mut self, cx: &mut Context<Self>) {
@@ -42155,18 +42243,20 @@ impl WorkspaceShell {
                     let keys = self.principal_keys.clone();
                     let approvals = self.operation_approvals.clone();
                     let audit_rows = self.operation_audit_rows.clone();
+                    let github_entries = self.github_allowlist.clone();
                     let principals = self.administration_section == AdministrationSection::Principals;
                     let tenants = self.administration_section == AdministrationSection::Tenants;
                     div().h(px(650.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between()
                             .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Server administration"))
-                            .child(Button::new("refresh-administration", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| match shell.administration_section { AdministrationSection::Principals => shell.load_principal_access(cx), AdministrationSection::Tenants => shell.load_tenant_invitations(cx), AdministrationSection::Keys => shell.load_principal_keys(cx), AdministrationSection::Approvals => shell.load_operation_approvals(cx), AdministrationSection::Audit => shell.load_operation_audit(false, cx) }))))
+                            .child(Button::new("refresh-administration", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| match shell.administration_section { AdministrationSection::Principals => shell.load_principal_access(cx), AdministrationSection::Tenants => shell.load_tenant_invitations(cx), AdministrationSection::Keys => shell.load_principal_keys(cx), AdministrationSection::Approvals => shell.load_operation_approvals(cx), AdministrationSection::Audit => shell.load_operation_audit(false, cx), AdministrationSection::Github => shell.load_github_allowlist(cx) }))))
                         .child(div().flex().gap_1()
                             .child(Button::new("admin-principals-tab", "Principals").tone(if principals { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Principals, cx))))
                             .child(Button::new("admin-tenants-tab", "Tenant access").tone(if tenants { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Tenants, cx))))
                             .child(Button::new("admin-keys-tab", "Signing keys").tone(if self.administration_section == AdministrationSection::Keys { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Keys, cx))))
                             .child(Button::new("admin-approvals-tab", "Approvals").tone(if self.administration_section == AdministrationSection::Approvals { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Approvals, cx))))
-                            .child(Button::new("admin-audit-tab", "Audit").tone(if self.administration_section == AdministrationSection::Audit { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Audit, cx)))))
+                            .child(Button::new("admin-audit-tab", "Audit").tone(if self.administration_section == AdministrationSection::Audit { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Audit, cx))))
+                            .child(Button::new("admin-github-tab", "GitHub access").tone(if self.administration_section == AdministrationSection::Github { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Github, cx)))))
                         .when(principals, |view| view
                             .child(div().flex().gap_2().children(self.principal_create_inputs.iter().cloned()).child(Button::new("create-principal", "Create").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_principal(cx)))))
                             .child(div().pt_2().border_t_1().border_color(colors.subtle_border).flex().items_center().gap_2()
@@ -42215,6 +42305,10 @@ impl WorkspaceShell {
                         .when(self.administration_section == AdministrationSection::Audit, |view| view
                             .child(div().id("operation-audit-list").flex_1().min_h_0().overflow_y_scroll().children(audit_rows.into_iter().enumerate().map(|(index, row)| div().id(("operation-audit-row", index)).min_h(px(54.)).px_2().py_1().flex().items_center().gap_3().border_b_1().border_color(colors.subtle_border).child(div().w(px(145.)).flex_none().text_xs().text_color(colors.muted_text).child(row.at.format("%Y-%m-%d %H:%M:%S").to_string())).child(div().min_w_0().flex_1().flex().flex_col().child(format!("{} · {}", row.action, row.target)).child(div().truncate().text_xs().text_color(colors.muted_text).child(format!("actor {} · {}{}", row.actor_principal_id.map_or_else(|| "system".into(), |id| id.0.to_string()), row.status, row.error_message.map(|error| format!(" · {error}")).unwrap_or_default())))))))
                             .child(Button::new("load-more-operation-audit", "Load more").tone(ButtonTone::Ghost).disabled(self.operation_audit_cursor.is_none() || self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.load_operation_audit(true, cx)))))
+                        .when(self.administration_section == AdministrationSection::Github, |view| view
+                            .child(div().text_xs().text_color(colors.muted_text).child("Allow a GitHub login to create a new account, or bind its first login to an existing principal."))
+                            .child(div().flex().gap_2().children(self.github_allowlist_inputs.iter().cloned()).child(Button::new("create-github-allowlist-entry", "Allow login").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_github_allowlist_entry(cx)))))
+                            .child(div().id("github-allowlist").flex_1().min_h_0().overflow_y_scroll().children(github_entries.into_iter().enumerate().map(|(index, entry)| { let entry_id = entry.id.0; let active = entry.revoked_at.is_none() && entry.consumed_at.is_none(); div().id(("github-allowlist-entry", index)).min_h(px(50.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border).child(div().min_w_0().flex_1().flex().flex_col().child(entry.normalized_login).child(div().text_xs().text_color(colors.muted_text).child(entry.target_principal_id.map_or_else(|| "Creates a new principal".into(), |id| format!("Links to principal {}", id.0))))).child(Button::new(("revoke-github-allowlist", index), if active { "Revoke" } else if entry.consumed_at.is_some() { "Used" } else { "Revoked" }).tone(ButtonTone::DangerGhost).disabled(!active || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_github_allowlist_entry(entry_id, cx)))) }))))
                         .children(self.principal_admin_error.clone().map(|error| div().text_sm().text_color(colors.danger).child(error)))
                         .into_any_element()
                 }

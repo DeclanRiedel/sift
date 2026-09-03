@@ -1696,6 +1696,63 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadGithubAllowlist => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .github_allowlist()
+                        .await
+                        .map_err(|error| format!("loading GitHub allowlist failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::GithubAllowlistLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateGithubAllowlistEntry {
+                login,
+                target_principal_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .create_github_allowlist_entry(
+                            sift_protocol::CreateGithubAllowlistRequest {
+                                login,
+                                target_principal_id,
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("adding GitHub login failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::GithubAllowlistChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RevokeGithubAllowlistEntry { entry_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .revoke_github_allowlist_entry(entry_id)
+                        .await
+                        .map_err(|error| format!("revoking GitHub login failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::GithubAllowlistChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()
