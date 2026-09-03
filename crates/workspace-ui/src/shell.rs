@@ -1665,6 +1665,7 @@ pub enum Modal {
     Account,
     ApiTokens,
     ConnectionPolicy,
+    TenantUsage,
     ConnectionUrl,
     DatabaseConnection,
     ConfirmDeleteConnection(ConnectionNavEntry),
@@ -2719,6 +2720,16 @@ pub enum ExecutorCommand {
         profile_id: i64,
         request: sift_protocol::UpdateConnectionPolicyRequest,
     },
+    LoadTenantUsage {
+        tenant_id: i64,
+    },
+    SaveTenantLimits {
+        tenant_id: i64,
+        limits: sift_protocol::TenantResourceLimits,
+    },
+    ClearTenantLimits {
+        tenant_id: i64,
+    },
     CloseSession {
         session_id: sift_protocol::SessionId,
     },
@@ -3439,6 +3450,8 @@ pub enum ExecutorEvent {
         profile_id: i64,
         result: Result<sift_protocol::ConnectionPolicy, String>,
     },
+    TenantUsageLoaded(Result<sift_protocol::TenantUsageSnapshot, String>),
+    TenantLimitsSaved(Result<sift_protocol::TenantUsageSnapshot, String>),
     SessionResourceClosed {
         result: Result<(), String>,
         active_connection_closed: bool,
@@ -9060,6 +9073,10 @@ pub struct WorkspaceShell {
     connection_policy: Option<sift_protocol::ConnectionPolicy>,
     connection_policy_pending: bool,
     connection_policy_error: Option<String>,
+    tenant_limit_inputs: Vec<Entity<TextInput>>,
+    tenant_usage: Option<sift_protocol::TenantUsageSnapshot>,
+    tenant_usage_pending: bool,
+    tenant_usage_error: Option<String>,
     server_sessions: Vec<sift_protocol::SessionInfo>,
     server_sessions_loading: bool,
     server_sessions_error: Option<String>,
@@ -9516,6 +9533,21 @@ impl WorkspaceShell {
         let connection_policy_schemas_input = cx.new(|cx| {
             TextInput::new("", "public, catalog.schema", cx).aria_label("Allowed database schemas")
         });
+        let tenant_limit_inputs = [
+            "Connection profiles",
+            "Sessions",
+            "Connections",
+            "Concurrent queries",
+            "Cursors",
+            "Retained result bytes",
+        ]
+        .into_iter()
+        .map(|label| {
+            cx.new(|cx| {
+                TextInput::new("", "Unlimited", cx).aria_label(format!("{label} tenant limit"))
+            })
+        })
+        .collect();
         let connection_url_input = cx.new(|cx| {
             TextInput::new("", "postgresql://user:password@localhost:5432/database", cx)
                 .aria_label("PostgreSQL connection URL")
@@ -10205,6 +10237,10 @@ impl WorkspaceShell {
             connection_policy: None,
             connection_policy_pending: false,
             connection_policy_error: None,
+            tenant_limit_inputs,
+            tenant_usage: None,
+            tenant_usage_pending: false,
+            tenant_usage_error: None,
             server_sessions: Vec::new(),
             server_sessions_loading: false,
             server_sessions_error: None,
@@ -11366,6 +11402,32 @@ impl WorkspaceShell {
                         self.connection_policy_error = None;
                     }
                     Err(message) => self.connection_policy_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TenantUsageLoaded(result) | ExecutorEvent::TenantLimitsSaved(result) => {
+                self.tenant_usage_pending = false;
+                match result {
+                    Ok(snapshot) => {
+                        let limits = &snapshot.limits;
+                        let values = [
+                            limits.connection_profiles,
+                            limits.sessions,
+                            limits.connections,
+                            limits.concurrent_queries,
+                            limits.cursors,
+                            limits.retained_result_bytes,
+                        ];
+                        for (input, value) in self.tenant_limit_inputs.iter().zip(values) {
+                            input.update(cx, |input, cx| {
+                                input
+                                    .set_text(value.map_or_else(String::new, |v| v.to_string()), cx)
+                            });
+                        }
+                        self.tenant_usage = Some(snapshot);
+                        self.tenant_usage_error = None;
+                    }
+                    Err(message) => self.tenant_usage_error = Some(message),
                 }
                 cx.notify();
             }
@@ -30134,6 +30196,80 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_tenant_usage(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            self.show_error_toast("No tenant is available".into(), cx);
+            return;
+        };
+        self.modal = Some(Modal::TenantUsage);
+        self.tenant_usage_pending = true;
+        self.tenant_usage_error = None;
+        if self.executor_sender.as_ref().is_none_or(|sender| {
+            sender
+                .send(ExecutorCommand::LoadTenantUsage { tenant_id })
+                .is_err()
+        }) {
+            self.tenant_usage_pending = false;
+            self.tenant_usage_error = Some("Tenant usage service is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn save_tenant_limits(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.tenant_usage.as_ref().map(|usage| usage.tenant_id) else {
+            return;
+        };
+        let mut parsed = Vec::with_capacity(self.tenant_limit_inputs.len());
+        for input in &self.tenant_limit_inputs {
+            let value = input.read(cx).text().trim().to_owned();
+            if value.is_empty() {
+                parsed.push(None);
+            } else if let Ok(value) = value.parse::<u64>() {
+                parsed.push(Some(value));
+            } else {
+                self.tenant_usage_error = Some("Limits must be whole numbers or empty".into());
+                cx.notify();
+                return;
+            }
+        }
+        let limits = sift_protocol::TenantResourceLimits {
+            connection_profiles: parsed[0],
+            sessions: parsed[1],
+            connections: parsed[2],
+            concurrent_queries: parsed[3],
+            cursors: parsed[4],
+            retained_result_bytes: parsed[5],
+        };
+        self.tenant_usage_pending = true;
+        self.tenant_usage_error = None;
+        if self.executor_sender.as_ref().is_none_or(|sender| {
+            sender
+                .send(ExecutorCommand::SaveTenantLimits { tenant_id, limits })
+                .is_err()
+        }) {
+            self.tenant_usage_pending = false;
+            self.tenant_usage_error = Some("Tenant usage service is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn clear_tenant_limits(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.tenant_usage.as_ref().map(|usage| usage.tenant_id) else {
+            return;
+        };
+        self.tenant_usage_pending = true;
+        self.tenant_usage_error = None;
+        if self.executor_sender.as_ref().is_none_or(|sender| {
+            sender
+                .send(ExecutorCommand::ClearTenantLimits { tenant_id })
+                .is_err()
+        }) {
+            self.tenant_usage_pending = false;
+            self.tenant_usage_error = Some("Tenant usage service is unavailable".into());
+        }
+        cx.notify();
+    }
+
     fn sign_in_with_github(&mut self, cx: &mut Context<Self>) {
         if self.account_pending {
             return;
@@ -37884,6 +38020,7 @@ impl WorkspaceShell {
             let settings = matches!(modal, Modal::Settings);
             let api_tokens = matches!(modal, Modal::ApiTokens);
             let connection_policy = matches!(modal, Modal::ConnectionPolicy);
+            let tenant_usage = matches!(modal, Modal::TenantUsage);
             let themes = matches!(modal, Modal::Themes);
             let keymaps = matches!(modal, Modal::Keymaps);
             let app_bar_modal = matches!(
@@ -37914,6 +38051,7 @@ impl WorkspaceShell {
             } else if settings
                 || api_tokens
                 || connection_policy
+                || tenant_usage
                 || themes
                 || keymaps
                 || command_palette
@@ -40274,6 +40412,107 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::TenantUsage => {
+                    let labels = [
+                        "Connection profiles",
+                        "Sessions",
+                        "Connections",
+                        "Concurrent queries",
+                        "Cursors",
+                        "Retained result bytes",
+                    ];
+                    let usage = self.tenant_usage.as_ref().map(|snapshot| {
+                        [
+                            snapshot.usage.connection_profiles,
+                            snapshot.usage.sessions,
+                            snapshot.usage.connections,
+                            snapshot.usage.concurrent_queries,
+                            snapshot.usage.cursors,
+                            snapshot.usage.retained_result_bytes,
+                        ]
+                    });
+                    let rows = labels.into_iter().enumerate().map(|(index, label)| {
+                        div()
+                            .h(px(44.))
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(div().flex_1().child(label))
+                            .child(
+                                div()
+                                    .w(px(110.))
+                                    .text_sm()
+                                    .text_color(colors.muted_text)
+                                    .child(usage.map_or_else(
+                                        || "— used".into(),
+                                        |values| format!("{} used", values[index]),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .w(px(160.))
+                                    .child(self.tenant_limit_inputs[index].clone()),
+                            )
+                    });
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Tenant usage and limits"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(self.tenant_usage.as_ref().map_or_else(
+                                            || "Loading…".into(),
+                                            |usage| format!("Tenant {}", usage.tenant_id),
+                                        )),
+                                ),
+                        )
+                        .child(div().children(rows))
+                        .children(self.tenant_usage_error.clone().map(|error| {
+                            div().text_sm().text_color(colors.danger).child(error)
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("clear-tenant-limits", "Clear limits")
+                                        .tone(ButtonTone::DangerGhost)
+                                        .disabled(
+                                            self.tenant_usage.is_none()
+                                                || self.tenant_usage_pending,
+                                        )
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.clear_tenant_limits(cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("save-tenant-limits", "Save limits")
+                                        .tone(ButtonTone::Accent)
+                                        .loading(self.tenant_usage_pending)
+                                        .disabled(self.tenant_usage.is_none())
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.save_tenant_limits(cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::Settings => {
                     let vim_mode_default = self.vim_mode_default();
                     let dark_theme = self.dark_theme;
@@ -40375,6 +40614,11 @@ impl WorkspaceShell {
                             div().flex().items_center().justify_between().gap_3()
                                 .child(div().flex().flex_col().gap_1().child("Connection policy").child(div().text_xs().text_color(colors.muted_text).child("Set role, write, and schema access for the active connection.")))
                                 .child(Button::new("manage-connection-policy", "Manage…").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_connection_policy(cx)))),
+                        )
+                        .child(
+                            div().flex().items_center().justify_between().gap_3()
+                                .child(div().flex().flex_col().gap_1().child("Tenant limits").child(div().text_xs().text_color(colors.muted_text).child("Inspect live usage and configure resource ceilings.")))
+                                .child(Button::new("manage-tenant-usage", "Manage…").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_tenant_usage(cx)))),
                         )
                         .child(toggle_row(
                             "settings-theme",
@@ -45587,6 +45831,7 @@ impl WorkspaceShell {
                     | Modal::Settings
                     | Modal::ApiTokens
                     | Modal::ConnectionPolicy
+                    | Modal::TenantUsage
                     | Modal::Themes
                     | Modal::Keymaps
                     | Modal::Account

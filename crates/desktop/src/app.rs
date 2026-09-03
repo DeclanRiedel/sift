@@ -939,6 +939,66 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadTenantUsage { tenant_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .tenant_usage(sift_api_types::TenantId(tenant_id))
+                        .await
+                        .map_err(|error| format!("loading tenant usage failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TenantUsageLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SaveTenantLimits { tenant_id, limits } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => match client
+                        .set_tenant_limits(sift_api_types::TenantId(tenant_id), limits)
+                        .await
+                    {
+                        Ok(_) => client
+                            .tenant_usage(sift_api_types::TenantId(tenant_id))
+                            .await
+                            .map_err(|error| format!("reloading tenant usage failed: {error}")),
+                        Err(error) => Err(format!("saving tenant limits failed: {error}")),
+                    },
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TenantLimitsSaved(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ClearTenantLimits { tenant_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => match client
+                        .clear_tenant_limits(sift_api_types::TenantId(tenant_id))
+                        .await
+                    {
+                        Ok(()) => client
+                            .tenant_usage(sift_api_types::TenantId(tenant_id))
+                            .await
+                            .map_err(|error| format!("reloading tenant usage failed: {error}")),
+                        Err(error) => Err(format!("clearing tenant limits failed: {error}")),
+                    },
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TenantLimitsSaved(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()
