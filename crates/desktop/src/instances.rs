@@ -9,7 +9,7 @@ use sift_protocol::{AuthClientKind, AuthTokensResponse, PasswordLoginRequest};
 use sift_workspace_ui::{
     InstanceCommand, InstanceConfigurationPresentation, InstanceCredentialKind,
     InstanceCredentialPresentation, InstanceManagerEvent, InstancePlanPresentation,
-    SavedInstanceRoot, SavedServerKind, SavedServerProfile,
+    InstanceResourceChangePresentation, SavedInstanceRoot, SavedServerKind, SavedServerProfile,
 };
 
 use crate::app::DesktopServer;
@@ -843,6 +843,30 @@ async fn inspect_root(
             || generation.record.lock_digest != static_plan.lock_digest
     });
 
+    let resource_changes = if current.is_some() {
+        let config = instance
+            .runtime_config(&state_dir)
+            .map_err(|error| format!("realizing instance settings failed: {error:#}"))?;
+        sift_server::instance_runtime::ensure_file_secret_key(&config)
+            .map_err(|error| format!("preparing instance secret store failed: {error:#}"))?;
+        let store = sift_server::metadata_runtime::build_metadata_store(&config)
+            .map_err(|error| format!("opening instance metadata failed: {error:#}"))?
+            .ok_or_else(|| "instance metadata is disabled".to_string())?;
+        store
+            .plan_instance_manifest(&instance.manifest)
+            .map_err(|error| format!("planning managed resources failed: {error}"))?
+            .into_iter()
+            .map(|change| InstanceResourceChangePresentation {
+                address: change.address,
+                kind: change.kind,
+                action: format!("{:?}", change.action).to_lowercase(),
+                prevent_destroy: change.prevent_destroy,
+            })
+            .collect()
+    } else {
+        initial_resource_plan(&instance.manifest)
+    };
+
     let credentials = if current.is_some() && !drifted {
         let (_, _, config) = sift_server::instance_runtime::load_current_config(root, None)
             .map_err(|error| format!("loading applied instance failed: {error:#}"))?;
@@ -896,12 +920,50 @@ async fn inspect_root(
         extensions: static_plan.resources.extensions,
         warnings: static_plan.warnings,
         credentials,
+        resource_changes,
         current_generation: current.map(|generation| generation.record.generation),
         generation_count: generations.len(),
         drifted,
         last_apply,
         destroy_confirmation_required: false,
     })
+}
+
+fn initial_resource_plan(
+    manifest: &sift_instance_config::Manifest,
+) -> Vec<InstanceResourceChangePresentation> {
+    let mut resources = Vec::new();
+    for principal in &manifest.identity.github_principals {
+        resources.push(("principal", format!("principal.{}", principal.name), false));
+    }
+    for tenant in &manifest.tenants {
+        resources.push(("tenant", format!("tenant.{}", tenant.name), false));
+        for membership in &tenant.memberships {
+            resources.push((
+                "membership",
+                format!("membership.{}.{}", tenant.name, membership.principal),
+                false,
+            ));
+        }
+    }
+    for connection in &manifest.connections {
+        resources.push((
+            "connection",
+            format!("connection.{}", connection.name),
+            connection.lifecycle.prevent_destroy,
+        ));
+    }
+    resources
+        .into_iter()
+        .map(
+            |(kind, address, prevent_destroy)| InstanceResourceChangePresentation {
+                address,
+                kind: kind.into(),
+                action: "create".into(),
+                prevent_destroy,
+            },
+        )
+        .collect()
 }
 
 async fn apply_root(

@@ -2020,6 +2020,14 @@ pub struct InstanceCredentialPresentation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceResourceChangePresentation {
+    pub address: String,
+    pub kind: String,
+    pub action: String,
+    pub prevent_destroy: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstancePlanPresentation {
     pub root: std::path::PathBuf,
     pub manifest_id: String,
@@ -2035,6 +2043,7 @@ pub struct InstancePlanPresentation {
     pub extensions: usize,
     pub warnings: Vec<String>,
     pub credentials: Vec<InstanceCredentialPresentation>,
+    pub resource_changes: Vec<InstanceResourceChangePresentation>,
     pub current_generation: Option<u64>,
     pub generation_count: usize,
     pub drifted: bool,
@@ -41307,6 +41316,43 @@ impl WorkspaceShell {
                                     }),
                             )
                     });
+                    let changed_resources = plan
+                        .resource_changes
+                        .iter()
+                        .filter(|resource| resource.action != "unchanged")
+                        .count();
+                    let resource_rows = plan.resource_changes.iter().cloned().enumerate().map(
+                        |(index, resource)| {
+                            let tone = match resource.action.as_str() {
+                                "create" => Tone::Success,
+                                "delete" => Tone::Danger,
+                                "update" => Tone::Warning,
+                                _ => Tone::Neutral,
+                            };
+                            div()
+                                .id(("instance-resource-change", index))
+                                .h(px(32.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .child(Badge::new(resource.action).tone(tone))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_xs()
+                                        .font_family("monospace")
+                                        .child(resource.address),
+                                )
+                                .children(resource.prevent_destroy.then(|| {
+                                    Badge::new("protected").tone(Tone::Warning)
+                                }))
+                        },
+                    );
 
                     div()
                         .id("instance-setup-scroll")
@@ -41386,6 +41432,38 @@ impl WorkspaceShell {
                                 .child(format!("Memberships: {}", plan.memberships))
                                 .child(format!("Connections: {}", plan.connections))
                                 .child(format!("Extensions: {}", plan.extensions)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("RESOURCE PLAN"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(if changed_resources == 0 {
+                                            colors.muted_text
+                                        } else {
+                                            colors.warning
+                                        })
+                                        .child(format!("{changed_resources} change(s)")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("instance-resource-plan")
+                                .max_h(px(190.))
+                                .overflow_y_scroll()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.subtle_border)
+                                .children(resource_rows),
                         )
                         .child(
                             div()

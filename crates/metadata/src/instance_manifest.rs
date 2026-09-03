@@ -41,6 +41,23 @@ pub struct InstanceCredentialStatus {
     pub consumers: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceResourceAction {
+    Create,
+    Update,
+    Delete,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceResourceChange {
+    pub address: String,
+    pub kind: String,
+    pub action: InstanceResourceAction,
+    pub prevent_destroy: bool,
+}
+
 #[derive(Debug, Clone)]
 struct DesiredResource {
     address: String,
@@ -67,6 +84,62 @@ struct ManagedResource {
 }
 
 impl MetadataStore {
+    /// Compare desired manifest resources with the last applied ownership
+    /// ledger without mutating either side.
+    pub fn plan_instance_manifest(
+        &self,
+        manifest: &Manifest,
+    ) -> crate::Result<Vec<InstanceResourceChange>> {
+        manifest.validate()?;
+        let desired = desired_resources(manifest)?;
+        let existing = {
+            let conn = self.conn()?;
+            let tx = conn.unchecked_transaction()?;
+            let resources = managed_resources_locked(&tx)?;
+            tx.rollback()?;
+            resources
+        };
+        let mut changes = desired
+            .iter()
+            .map(|resource| {
+                let action = match existing.get(&resource.address) {
+                    None => InstanceResourceAction::Create,
+                    Some(previous) if previous.desired_digest != resource.digest => {
+                        InstanceResourceAction::Update
+                    }
+                    Some(_) => InstanceResourceAction::Unchanged,
+                };
+                InstanceResourceChange {
+                    address: resource.address.clone(),
+                    kind: resource.kind.into(),
+                    action,
+                    prevent_destroy: resource.prevent_destroy,
+                }
+            })
+            .collect::<Vec<_>>();
+        changes.extend(
+            existing
+                .values()
+                .filter(|resource| {
+                    !desired
+                        .iter()
+                        .any(|candidate| candidate.address == resource.address)
+                })
+                .map(|resource| InstanceResourceChange {
+                    address: resource.address.clone(),
+                    kind: resource.kind.clone(),
+                    action: InstanceResourceAction::Delete,
+                    prevent_destroy: resource.prevent_destroy,
+                }),
+        );
+        changes.sort_by(|left, right| {
+            action_rank(left.action)
+                .cmp(&action_rank(right.action))
+                .then_with(|| left.address.cmp(&right.address))
+        });
+        Ok(changes)
+    }
+
     /// Confirm that SQLite is the realization selected by the immutable
     /// generation pointer. Startup uses this before accepting requests.
     pub fn verify_instance_manifest_state(
@@ -694,6 +767,15 @@ impl MetadataStore {
     }
 }
 
+fn action_rank(action: InstanceResourceAction) -> u8 {
+    match action {
+        InstanceResourceAction::Delete => 0,
+        InstanceResourceAction::Update => 1,
+        InstanceResourceAction::Create => 2,
+        InstanceResourceAction::Unchanged => 3,
+    }
+}
+
 fn desired_resources(manifest: &Manifest) -> crate::Result<Vec<DesiredResource>> {
     let mut resources = Vec::new();
     for principal in &manifest.identity.github_principals {
@@ -1155,6 +1237,10 @@ mod tests {
         let secrets = Arc::new(MemorySecretStore::new());
         let store = MetadataStore::open_in_memory(secrets.clone()).unwrap();
         let (manifest, lock) = fixture();
+        let initial_plan = store.plan_instance_manifest(&manifest).unwrap();
+        assert!(initial_plan
+            .iter()
+            .all(|change| change.action == InstanceResourceAction::Create));
         let first = store
             .apply_instance_manifest(&manifest, &lock, 1, false)
             .await
@@ -1204,6 +1290,11 @@ mod tests {
             .unwrap();
         assert!(!second.changed);
         assert!(second.missing_credentials.is_empty());
+        assert!(store
+            .plan_instance_manifest(&manifest)
+            .unwrap()
+            .iter()
+            .all(|change| change.action == InstanceResourceAction::Unchanged));
         assert!(matches!(
             store
                 .delete_connection_profile(
