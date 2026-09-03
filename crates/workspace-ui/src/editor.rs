@@ -3175,9 +3175,7 @@ impl gpui::Render for QueryEditor {
                             .children(self.render_star_expansion_card(cx)),
                     ),
             )
-            // This row is permanent: diagnostics update its content without
-            // inserting chrome above the buffer and shifting every line.
-            .child(
+            .children(status.map(|(message, error)| {
                 div()
                     .id("editor-status-line")
                     .debug_selector(|| "editor-status-line".to_string())
@@ -3191,18 +3189,12 @@ impl gpui::Render for QueryEditor {
                     .border_color(colors.subtle_border)
                     .bg(colors.surface)
                     .text_xs()
-                    .text_color(if status.as_ref().is_some_and(|(_, error)| *error) {
+                    .text_color(if error {
                         colors.danger
                     } else {
                         colors.muted_text
                     })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .children(status.map(|(message, _)| message)),
-                    )
+                    .child(div().flex_1().min_w_0().truncate().child(message))
                     .child(
                         div()
                             .flex_none()
@@ -3232,8 +3224,8 @@ impl gpui::Render for QueryEditor {
                                 .tooltip("Copy all problems with line numbers")
                                 .on_click(cx.listener(Self::copy_all_problems))
                             })),
-                    ),
-            )
+                    )
+            }))
     }
 }
 
@@ -4618,13 +4610,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn diagnostics_update_a_fixed_status_line_without_shifting_the_buffer(cx: &mut TestAppContext) {
+    fn diagnostic_status_line_is_hidden_until_needed(cx: &mut TestAppContext) {
         let (mut cx, editor, _) = editor_with_spy("select from", cx);
         cx.run_until_parked();
         let before = cx.debug_bounds("editor-scroll").expect("editor viewport");
-        let status_before = cx
-            .debug_bounds("editor-status-line")
-            .expect("fixed editor status line");
+        assert!(cx.debug_bounds("editor-status-line").is_none());
 
         editor.update(&mut cx, |editor, cx| {
             let revision = editor.text_revision();
@@ -4639,8 +4629,9 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert_eq!(cx.debug_bounds("editor-scroll"), Some(before));
-        assert_eq!(cx.debug_bounds("editor-status-line"), Some(status_before));
+        let after = cx.debug_bounds("editor-scroll").expect("editor viewport");
+        assert!(after.size.height < before.size.height);
+        assert!(cx.debug_bounds("editor-status-line").is_some());
     }
 
     #[gpui::test]
