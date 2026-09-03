@@ -2055,9 +2055,18 @@ pub struct InstancePlanPresentation {
     pub resource_changes: Vec<InstanceResourceChangePresentation>,
     pub current_generation: Option<u64>,
     pub generation_count: usize,
+    pub generations: Vec<InstanceGenerationPresentation>,
     pub drifted: bool,
     pub last_apply: Option<String>,
     pub destroy_confirmation_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceGenerationPresentation {
+    pub generation: u64,
+    pub current: bool,
+    pub created_at: String,
+    pub configuration_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2098,6 +2107,10 @@ pub enum InstanceCommand {
     ApplyRoot {
         root: std::path::PathBuf,
         allow_destroy: bool,
+    },
+    ReviewGenerationRollback {
+        root: std::path::PathBuf,
+        generation: u64,
     },
     ImportRootCredential {
         root: std::path::PathBuf,
@@ -31147,6 +31160,25 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn review_generation_rollback(&mut self, generation: u64, cx: &mut Context<Self>) {
+        let (Some(sender), Some(plan)) = (&self.instance_sender, &self.instance_plan) else {
+            return;
+        };
+        self.instance_operation_pending = true;
+        self.instance_operation_error = None;
+        if sender
+            .send(InstanceCommand::ReviewGenerationRollback {
+                root: plan.root.clone(),
+                generation,
+            })
+            .is_err()
+        {
+            self.instance_operation_pending = false;
+            self.instance_operation_error = Some("Instance manager stopped".into());
+        }
+        cx.notify();
+    }
+
     fn import_instance_credential(&mut self, cx: &mut Context<Self>) {
         let Some(slot) = self.selected_instance_credential.clone() else {
             return;
@@ -41400,6 +41432,19 @@ impl WorkspaceShell {
                                 }))
                         },
                     );
+                    let generation_rows = plan.generations.iter().cloned().enumerate().map(
+                        |(index, generation)| {
+                            let generation_number = generation.generation;
+                            div().id(("instance-generation", index)).min_h(px(32.)).px_2()
+                                .flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border)
+                                .child(Badge::new(format!("#{}", generation.generation)).tone(if generation.current { Tone::Success } else { Tone::Neutral }))
+                                .child(div().min_w_0().flex_1().truncate().text_xs().child(format!("{} · {}", generation.created_at, generation.configuration_digest.chars().take(15).collect::<String>())))
+                                .child(Button::new(("review-generation", index), if generation.current { "Current" } else { "Restore for review" })
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(generation.current || self.instance_operation_pending)
+                                    .on_click(cx.listener(move |shell, _, _, cx| shell.review_generation_rollback(generation_number, cx))))
+                        },
+                    );
 
                     div()
                         .id("instance-setup-scroll")
@@ -41512,6 +41557,11 @@ impl WorkspaceShell {
                                 .border_color(colors.subtle_border)
                                 .children(resource_rows),
                         )
+                        .children((!plan.generations.is_empty()).then(|| {
+                            div().flex().flex_col().gap_1()
+                                .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("GENERATIONS"))
+                                .child(div().id("instance-generation-history").max_h(px(128.)).overflow_y_scroll().rounded_sm().border_1().border_color(colors.subtle_border).children(generation_rows))
+                        }))
                         .child(
                             div()
                                 .flex()
@@ -41569,10 +41619,12 @@ impl WorkspaceShell {
                                 .children(plan.warnings.iter().cloned())
                         }))
                         .children(plan.last_apply.clone().map(|summary| {
+                            let failed = summary.starts_with("Apply failed") || summary.starts_with("Apply blocked");
                             div()
                                 .p_2()
                                 .rounded_sm()
-                                .bg(colors.active_surface)
+                                .bg(if failed { colors.danger_muted } else { colors.active_surface })
+                                .text_color(if failed { colors.danger } else { colors.text })
                                 .text_sm()
                                 .child(summary)
                         }))

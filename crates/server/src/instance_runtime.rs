@@ -962,6 +962,10 @@ mod tests {
         let generations = instance.generations(&state).unwrap();
         assert_eq!(generations.len(), 1);
         assert!(generations[0].current);
+        assert_eq!(
+            instance.generation_manifest(&state, 1).unwrap(),
+            instance.manifest
+        );
     }
 
     #[test]

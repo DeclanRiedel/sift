@@ -8,9 +8,9 @@ use sift_client_sdk::SessionTokenProvider;
 use sift_protocol::{AuthClientKind, AuthTokensResponse, PasswordLoginRequest};
 use sift_workspace_ui::{
     InstanceCommand, InstanceConfigurationPresentation, InstanceCredentialKind,
-    InstanceCredentialPresentation, InstanceFieldChangePresentation, InstanceManagerEvent,
-    InstancePlanPresentation, InstanceResourceChangePresentation, SavedInstanceRoot,
-    SavedServerKind, SavedServerProfile,
+    InstanceCredentialPresentation, InstanceFieldChangePresentation,
+    InstanceGenerationPresentation, InstanceManagerEvent, InstancePlanPresentation,
+    InstanceResourceChangePresentation, SavedInstanceRoot, SavedServerKind, SavedServerProfile,
 };
 
 use crate::app::DesktopServer;
@@ -424,6 +424,19 @@ pub async fn run_instance_manager(
                         .map_err(|_| "desktop window closed".to_string())?;
                     Ok(ManagerOutcome::None)
                 });
+                (false, result)
+            }
+            InstanceCommand::ReviewGenerationRollback { root, generation } => {
+                let result =
+                    review_generation_rollback(&root, generation).and_then(|configuration| {
+                        channels
+                            .events
+                            .send(InstanceManagerEvent::InstanceConfiguration(Box::new(
+                                configuration,
+                            )))
+                            .map_err(|_| "desktop window closed".to_string())?;
+                        Ok(ManagerOutcome::None)
+                    });
                 (false, result)
             }
             InstanceCommand::ImportRootCredential {
@@ -985,10 +998,39 @@ async fn inspect_root(
         resource_changes,
         current_generation: current.map(|generation| generation.record.generation),
         generation_count: generations.len(),
+        generations: generations
+            .iter()
+            .map(|generation| InstanceGenerationPresentation {
+                generation: generation.record.generation,
+                current: generation.current,
+                created_at: generation.record.created_at.to_rfc3339(),
+                configuration_digest: generation.record.configuration_digest.clone(),
+            })
+            .collect(),
         drifted,
         last_apply,
         destroy_confirmation_required: false,
     })
+}
+
+fn review_generation_rollback(
+    root: &std::path::Path,
+    generation: u64,
+) -> Result<InstanceConfigurationPresentation, String> {
+    let instance = sift_server::instance_runtime::InstanceRoot::open(root)
+        .map_err(|error| format!("validating instance root failed: {error:#}"))?;
+    let manifest = instance
+        .generation_manifest(&instance.default_state_dir(), generation)
+        .map_err(|error| format!("reading generation {generation} failed: {error:#}"))?;
+    if manifest.manifest_id != instance.manifest.manifest_id {
+        return Err("generation belongs to another instance".into());
+    }
+    let mut configuration = prepare_root_configuration(root)?;
+    configuration.manifest = manifest
+        .to_toml_pretty()
+        .map_err(|error| format!("formatting generation failed: {error}"))?;
+    configuration.name = format!("{} · rollback generation {generation}", manifest.name);
+    Ok(configuration)
 }
 
 fn initial_resource_plan(
@@ -1153,11 +1195,12 @@ async fn apply_root(
         Err(error) => {
             let message = format!("{error:#}");
             if message.contains("destroy approval") || message.contains("allow-destroy") {
-                let mut plan = inspect_root(root, Some(message)).await?;
+                let mut plan =
+                    inspect_root(root, Some(format!("Apply blocked · {message}"))).await?;
                 plan.destroy_confirmation_required = true;
                 Ok(plan)
             } else {
-                Err(format!("applying instance failed: {message}"))
+                inspect_root(root, Some(format!("Apply failed · {message}"))).await
             }
         }
     }
