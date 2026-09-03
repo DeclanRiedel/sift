@@ -1027,6 +1027,46 @@ pub fn manifest_completions(
     let cursor = cursor.min(source.len());
     let line_start = source[..cursor].rfind('\n').map_or(0, |offset| offset + 1);
     let before = &source[line_start..cursor];
+    if let Some(marker) = before.find("[[") {
+        let prefix = before[marker + 2..].trim();
+        let templates = [
+            (
+                "connections",
+                "[[connections]]\nname = \"tenant/connection\"\ntenant = \"tenant\"\nprovider = \"postgres\"\nconnection_string = \"postgresql://user@localhost:5432/database?sslmode=prefer\"\ncredential_mode = \"shared\"\ncredential = \"credential:tenant/connection/shared\"\nenabled = true\n\n[connections.policy]\nallow_sql = true\nallow_schema_read = true\nallow_export = false\n\n[connections.lifecycle]\nprevent_destroy = false",
+                "New PostgreSQL connection with policy and lifecycle",
+            ),
+            (
+                "tenants",
+                "[[tenants]]\nname = \"tenant\"\n\n[[tenants.memberships]]\nprincipal = \"operator\"\nrole = \"owner\"",
+                "New tenant with an owner membership",
+            ),
+            (
+                "identity.github_principals",
+                "[[identity.github_principals]]\nname = \"operator\"\nsubject = \"github-id\"\nlogin_hint = \"operator\"\ninstance_admin = false\nbootstrap = false",
+                "New immutable GitHub principal",
+            ),
+            (
+                "server.workspaces.roots",
+                "[[server.workspaces.roots]]\nhandle = \"workspace\"\npath = \"/absolute/path\"\nread_only = false",
+                "New filesystem workspace root",
+            ),
+            (
+                "extensions",
+                "[[extensions]]\nname = \"publisher/extension\"\nversion = \"1.0.0\"\nartifact = \"https://example.invalid/extension.zip\"\nsha256 = \"sha256:replace-with-64-hex-digits\"\npublisher_key = \"sha256:replace-with-64-hex-digits\"\npublisher_public_key = \"base64:replace-with-ed25519-public-key\"\ngrants = []",
+                "New signed extension",
+            ),
+        ];
+        let candidates = templates
+            .into_iter()
+            .filter(|(table, _, _)| table.starts_with(prefix))
+            .map(|(table, insertion, detail)| ManifestCompletion {
+                label: format!("[[{table}]]"),
+                insertion: insertion.into(),
+                detail: detail.into(),
+            })
+            .collect();
+        return ((line_start + marker)..cursor, candidates);
+    }
     let table = active_table(source, line_start);
     if let Some(eq) = before.find('=') {
         let key = before[..eq].trim();
@@ -1272,6 +1312,17 @@ mod tests {
             &source[manifest_completions(source, source.len()).0],
             "\"te"
         );
+    }
+
+    #[test]
+    fn array_header_completion_inserts_a_complete_resource_template() {
+        let source = "[[con";
+        let (range, candidates) = manifest_completions(source, source.len());
+        assert_eq!(range, 0..source.len());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].label, "[[connections]]");
+        assert!(candidates[0].insertion.contains("[connections.policy]"));
+        assert!(candidates[0].insertion.contains("credential_mode"));
     }
 
     #[test]
