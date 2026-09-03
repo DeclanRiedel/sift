@@ -1095,4 +1095,24 @@ mod tests {
         let source = "[[connections]]\nname = \"warehouse\"\nprovider = \"postgres\"\n";
         assert_eq!(manifest_outline(source)[0].title, "connections: warehouse");
     }
+
+    #[test]
+    fn configuration_wiki_covers_every_schema_field_and_table() {
+        let wiki = include_str!("../../../docs/keyboard-wiki/configuration.html");
+        for field in FIELDS {
+            assert!(
+                wiki.contains(&format!("<code>{}</code>", field.key)),
+                "configuration wiki is missing key {}.{}",
+                field.table,
+                field.key
+            );
+            if !field.table.is_empty() {
+                assert!(
+                    wiki.contains(field.table),
+                    "configuration wiki is missing table {}",
+                    field.table
+                );
+            }
+        }
+    }
 }

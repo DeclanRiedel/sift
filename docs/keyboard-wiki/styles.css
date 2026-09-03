@@ -31,6 +31,40 @@ footer {
   margin-bottom: 40px;
 }
 
+.doc-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 28px;
+  border-bottom: 1px solid var(--border);
+}
+
+.doc-tabs a {
+  padding: 9px 14px;
+  color: var(--gray);
+  text-decoration: none;
+  border: 1px solid transparent;
+  border-bottom: 0;
+}
+
+.doc-tabs a.active {
+  margin-bottom: -1px;
+  color: var(--white);
+  background: var(--black);
+  border-color: var(--border);
+  border-top: 2px solid var(--accent);
+}
+
+.note {
+  padding: 12px 14px;
+  border-left: 3px solid var(--accent);
+  background: #151515;
+}
+
+.compact td:first-child {
+  width: 34%;
+  white-space: nowrap;
+}
+
 h1,
 h2 {
   margin: 0 0 12px;

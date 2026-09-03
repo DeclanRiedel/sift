@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sift configuration</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="doc-tabs" aria-label="Sift documentation">
+          <a href="index.html">Keyboard</a>
+          <a class="active" href="configuration.html">Sift configuration</a>
+        </div>
+        <h1><code>sift.toml</code></h1>
+        <p>
+          One strict, portable desired-state file defines server policy and
+          operator-managed resources. Edit it in Sift, save with <kbd>:w</kbd>,
+          review the resource plan, import missing credential slots, and apply.
+        </p>
+        <p class="note">
+          Secret bytes never belong here. UI preferences and keymaps are local;
+          documents, rooms, approvals, sessions, results, and per-user credentials
+          are live user state. Generated paths, resolved ports, and generations
+          are destination-private. <code>sift.lock</code> is generated and read-only.
+        </p>
+      </header>
+
+      <nav>
+        <a href="#identity">Identity</a>
+        <a href="#server">Server</a>
+        <a href="#operations">Operations</a>
+        <a href="#access">Access</a>
+        <a href="#connections-config">Connections</a>
+        <a href="#extensions-config">Extensions</a>
+        <a href="#workflow">Workflow</a>
+      </nav>
+
+      <section id="identity">
+        <h2>Manifest identity</h2>
+        <table class="compact"><thead><tr><th>Key</th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>kind</code></td><td>Required discriminator: <code>sift-instance</code>.</td></tr>
+          <tr><td><code>format_version</code></td><td>File format, currently <code>1</code>.</td></tr>
+          <tr><td><code>manifest_id</code></td><td>Stable UUID identifying this instance across copies.</td></tr>
+          <tr><td><code>name</code></td><td>Human-readable server name.</td></tr>
+          <tr><td><code>[compatibility]</code> <code>sift</code></td><td>Semantic-version requirement for the Sift runtime.</td></tr>
+        </tbody></table>
+      </section>
+
+      <section id="server">
+        <h2>Server topology</h2>
+        <table class="compact"><thead><tr><th><code>[server]</code></th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>deployment</code></td><td><code>personal</code> or <code>team</code> identity policy.</td></tr>
+          <tr><td><code>transport</code></td><td><code>loopback</code>, <code>network</code>, or daemon-only <code>ssh-proxy</code>.</td></tr>
+          <tr><td><code>mode</code></td><td><code>in-process</code>, <code>daemon</code>, or <code>container</code> process ownership.</td></tr>
+          <tr><td><code>bind</code></td><td>Socket address, <code>auto-loopback</code>, or <code>prompt-required</code>.</td></tr>
+          <tr><td><code>public_base_url</code></td><td>HTTPS origin used for hosted OAuth callbacks.</td></tr>
+        </tbody></table>
+
+        <table class="compact"><thead><tr><th><code>[server.timeouts]</code></th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>request_secs</code></td><td>Synchronous request deadline.</td></tr>
+          <tr><td><code>shutdown_drain_secs</code></td><td>Graceful in-flight query drain deadline.</td></tr>
+        </tbody></table>
+
+        <table class="compact"><thead><tr><th><code>[server.metadata]</code></th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>secret_backend</code></td><td><code>file</code>, <code>keychain</code>, or non-durable <code>memory</code>.</td></tr>
+          <tr><td><code>store_sql</code></td><td>Whether query history retains raw SQL rather than fingerprints only.</td></tr>
+        </tbody></table>
+      </section>
+
+      <section id="operations">
+        <h2>Operational policy</h2>
+        <table class="compact"><thead><tr><th><code>[server.limits]</code></th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>max_http_result_rows</code></td><td>Rows allowed in a synchronous response.</td></tr>
+          <tr><td><code>max_http_result_bytes</code></td><td>Approximate response-byte ceiling.</td></tr>
+          <tr><td><code>max_connections</code></td><td>Compatibility ceiling for open tenant connections.</td></tr>
+          <tr><td><code>max_concurrent_queries</code></td><td>Compatibility ceiling for concurrent tenant queries.</td></tr>
+          <tr><td><code>max_cursors_per_session</code></td><td>Open cursors retained per query session.</td></tr>
+          <tr><td><code>cursor_prefetch_pages</code></td><td>Pages buffered ahead before backpressure.</td></tr>
+          <tr><td><code>cursor_spill_dir</code></td><td>Optional bounded cursor spill directory.</td></tr>
+          <tr><td><code>cursor_spill_ttl_secs</code></td><td>Lifetime of abandoned spill files.</td></tr>
+          <tr><td><code>schema_cache_ttl_secs</code></td><td>Maximum schema-cache age.</td></tr>
+          <tr><td><code>schema_mssql_poll_secs</code></td><td>SQL Server schema invalidation poll interval.</td></tr>
+          <tr><td><code>plan_capture_max_bytes</code></td><td>Maximum normalized plan capture size.</td></tr>
+          <tr><td><code>plan_capture_max_per_tenant</code></td><td>Retained plan captures per tenant.</td></tr>
+          <tr><td><code>plan_capture_max_per_source</code></td><td>Retained plan captures per semantic source.</td></tr>
+          <tr><td><code>plan_capture_max_age_days</code></td><td>Maximum retained plan age.</td></tr>
+        </tbody></table>
+
+        <table class="compact"><thead><tr><th><code>[server.vault]</code></th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>max_label_bytes</code></td><td>Maximum vault label size.</td></tr>
+          <tr><td><code>max_metadata_bytes</code></td><td>Maximum metadata JSON size.</td></tr>
+          <tr><td><code>max_secret_bytes</code></td><td>Maximum stored secret size.</td></tr>
+          <tr><td><code>max_vaults_per_tenant</code></td><td>Vault count ceiling.</td></tr>
+          <tr><td><code>max_items_per_vault</code></td><td>Item count ceiling per vault.</td></tr>
+          <tr><td><code>max_versions_per_item</code></td><td>Immutable versions retained per item.</td></tr>
+          <tr><td><code>cleanup_batch_size</code></td><td>Orphaned handles processed per cleanup pass.</td></tr>
+          <tr><td><code>cleanup_interval_secs</code></td><td>Cleanup worker interval.</td></tr>
+          <tr><td><code>cleanup_retry_initial_secs</code></td><td>First retry delay after cleanup failure.</td></tr>
+          <tr><td><code>cleanup_retry_max_secs</code></td><td>Maximum exponential retry delay.</td></tr>
+        </tbody></table>
+
+        <table class="compact"><thead><tr><th>Section</th><th>Keys</th></tr></thead><tbody>
+          <tr><td><code>[server.log]</code></td><td><code>filter</code> sets the RUST_LOG-style tracing filter.</td></tr>
+          <tr><td><code>[server.audit]</code></td><td><code>operation_log_path</code> optionally writes replayable JSONL audit rows.</td></tr>
+          <tr><td><code>[server.drivers]</code></td><td><code>mock</code> and <code>mock_extra</code> register demo/test drivers.</td></tr>
+          <tr><td><code>[server.extension_policy]</code></td><td><code>development_overrides</code> lists local directories; <code>allow_hosted_development</code> permits them in team mode.</td></tr>
+        </tbody></table>
+
+        <table class="compact"><thead><tr><th><code>[server.updater]</code></th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>enabled</code></td><td>Enable signed background release checks.</td></tr>
+          <tr><td><code>channel</code></td><td>Explicit signed release channel.</td></tr>
+          <tr><td><code>manifest_url</code></td><td>Distribution-owned HTTPS update manifest.</td></tr>
+          <tr><td><code>signature_url</code></td><td>HTTPS detached signature for the manifest.</td></tr>
+          <tr><td><code>max_artifact_bytes</code></td><td>Hard update download ceiling.</td></tr>
+          <tr><td><code>initial_delay_secs</code></td><td>Delay before the first check.</td></tr>
+          <tr><td><code>check_interval_secs</code></td><td>Base interval between checks.</td></tr>
+          <tr><td><code>jitter_secs</code></td><td>Random delay added to checks.</td></tr>
+        </tbody></table>
+      </section>
+
+      <section id="access">
+        <h2>Rate and tenant limits</h2>
+        <p>
+          <code>[server.rate_limits]</code> has <code>trusted_local_exempt</code>
+          and <code>idle_ttl_secs</code>. Each optional bucket—
+          <code>[server.rate_limits.control]</code>,
+          <code>[server.rate_limits.interactive]</code>,
+          <code>[server.rate_limits.query]</code>,
+          <code>[server.rate_limits.heavy_transfer]</code>, and
+          <code>[server.rate_limits.stream_bytes]</code>—uses the same keys:
+          <code>refill_per_second</code>, <code>burst</code>, and <code>cost</code>.
+          Omitting a bucket disables that limiter.
+        </p>
+        <p>
+          <code>[server.tenant_limits]</code> has
+          <code>trusted_local_unlimited</code>. Both
+          <code>[server.tenant_limits.defaults]</code> and
+          <code>[server.tenant_limits.ceilings]</code> accept optional
+          <code>connection_profiles</code>, <code>sessions</code>,
+          <code>connections</code>, <code>concurrent_queries</code>,
+          <code>cursors</code>, and <code>retained_result_bytes</code>.
+          Defaults apply to tenants; ceilings bound later tenant policy.
+        </p>
+
+        <table class="compact"><thead><tr><th>Section</th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>[automation]</code> <code>unattended_apply</code></td><td><code>disabled</code> or <code>standard-risk</code>.</td></tr>
+          <tr><td><code>[auth.github]</code> <code>flow</code></td><td><code>local-device</code> for personal loopback or <code>hosted-code</code>.</td></tr>
+          <tr><td><code>[auth.github]</code> <code>client_id</code></td><td>Hosted GitHub OAuth App client id.</td></tr>
+          <tr><td><code>[auth.github]</code> <code>client_secret</code></td><td>Logical credential-slot name, never the secret.</td></tr>
+          <tr><td><code>[auth.admission]</code> <code>mode</code></td><td>Strict admission mode; currently <code>allowlist</code>.</td></tr>
+        </tbody></table>
+
+        <table class="compact"><thead><tr><th><code>[[identity.github_principals]]</code></th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>name</code></td><td>Stable logical principal name.</td></tr>
+          <tr><td><code>subject</code></td><td>Immutable positive GitHub numeric user id.</td></tr>
+          <tr><td><code>login_hint</code></td><td>Optional display-only login hint.</td></tr>
+          <tr><td><code>instance_admin</code></td><td>Grant instance-wide administration.</td></tr>
+          <tr><td><code>bootstrap</code></td><td>Exactly one principal is the bootstrap administrator.</td></tr>
+        </tbody></table>
+
+        <table class="compact"><thead><tr><th>Tenant sections</th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>[[tenants]]</code> <code>name</code></td><td>Stable tenant name.</td></tr>
+          <tr><td><code>[[tenants.memberships]]</code> <code>principal</code></td><td>Logical principal reference.</td></tr>
+          <tr><td><code>[[tenants.memberships]]</code> <code>role</code></td><td><code>owner</code>, <code>editor</code>, or <code>viewer</code>; every tenant needs an owner.</td></tr>
+        </tbody></table>
+      </section>
+
+      <section id="connections-config">
+        <h2>Connections</h2>
+        <table class="compact"><thead><tr><th><code>[[connections]]</code></th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>name</code></td><td>Stable profile name.</td></tr>
+          <tr><td><code>tenant</code></td><td>Owning tenant name.</td></tr>
+          <tr><td><code>provider</code></td><td><code>postgres</code> or <code>sql-server</code>.</td></tr>
+          <tr><td><code>connection_string</code></td><td>Endpoint, database, and username only; inline secrets are rejected.</td></tr>
+          <tr><td><code>credential_mode</code></td><td><code>shared</code> or <code>per-user</code>.</td></tr>
+          <tr><td><code>credential</code></td><td>Required logical slot for shared mode.</td></tr>
+          <tr><td><code>enabled</code></td><td>Must be true in format 1; remove the resource to disable it.</td></tr>
+          <tr><td><code>tags</code></td><td>Search and organization tags.</td></tr>
+        </tbody></table>
+        <table class="compact"><thead><tr><th>Nested section</th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>[connections.policy]</code> <code>allow_sql</code></td><td>Permit query and mutation operations.</td></tr>
+          <tr><td><code>[connections.policy]</code> <code>allow_schema_read</code></td><td>Permit catalog inspection.</td></tr>
+          <tr><td><code>[connections.policy]</code> <code>allow_export</code></td><td>Permit result export.</td></tr>
+          <tr><td><code>[connections.lifecycle]</code> <code>prevent_destroy</code></td><td>Block deletion even when destroy approval is supplied.</td></tr>
+        </tbody></table>
+      </section>
+
+      <section id="extensions-config">
+        <h2>Extensions</h2>
+        <table class="compact"><thead><tr><th><code>[[extensions]]</code></th><th>Meaning</th></tr></thead><tbody>
+          <tr><td><code>name</code></td><td>Stable extension name.</td></tr>
+          <tr><td><code>version</code></td><td>Exact semantic version.</td></tr>
+          <tr><td><code>artifact</code></td><td>Pinned HTTPS artifact URL.</td></tr>
+          <tr><td><code>sha256</code></td><td>Artifact digest.</td></tr>
+          <tr><td><code>publisher_key</code></td><td>Trusted publisher key id.</td></tr>
+          <tr><td><code>grants</code></td><td>Explicit capabilities granted to the extension.</td></tr>
+        </tbody></table>
+      </section>
+
+      <section id="workflow">
+        <h2>Workspace and Git</h2>
+        <table class="compact"><thead><tr><th>Section</th><th>Keys</th></tr></thead><tbody>
+          <tr><td><code>[server.workspaces]</code></td><td><code>enabled</code> controls filesystem-backed projections.</td></tr>
+          <tr><td><code>[[server.workspaces.roots]]</code></td><td><code>handle</code>, absolute <code>path</code>, and <code>read_only</code>.</td></tr>
+          <tr><td><code>[server.vcs]</code></td><td><code>enabled</code>, <code>network_enabled</code>, optional absolute <code>executable</code>, <code>local_timeout_secs</code>, and <code>network_timeout_secs</code>.</td></tr>
+          <tr><td><code>[server.vcs]</code> bounds</td><td><code>max_output_bytes</code>, <code>max_file_bytes</code>, <code>max_status_entries</code>, <code>max_history_page</code>, <code>max_commit_files</code>, <code>max_diff_files</code>, <code>max_diff_hunks</code>, and <code>max_diff_lines</code>.</td></tr>
+        </tbody></table>
+        <p>
+          Unknown fields fail closed. Optional sections use safe defaults and
+          may be omitted; hovering a key in the IDE shows its type and allowed
+          values. Applying creates an immutable generation, and startup refuses
+          unapplied drift.
+        </p>
+      </section>
+
+      <footer>
+        Full operational details and threat boundaries are in
+        <code>docs/INSTANCE-CONFIG.md</code>.
+      </footer>
+    </main>
+  </body>
+</html>
