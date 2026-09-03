@@ -896,8 +896,13 @@ pub fn manifest_completions(
         let key = before[..eq].trim();
         let value_start =
             line_start + eq + 1 + before[eq + 1..].len() - before[eq + 1..].trim_start().len();
-        let prefix = source[value_start..cursor].trim_matches('"');
-        let replaced = (cursor - prefix.len())..cursor;
+        let raw_prefix = &source[value_start..cursor];
+        let prefix = raw_prefix.trim_matches('"');
+        let replaced = if raw_prefix.starts_with('"') {
+            value_start..cursor
+        } else {
+            (cursor - prefix.len())..cursor
+        };
         let candidates = FIELDS
             .iter()
             .find(|field| field.table == table && field.key == key)
@@ -1079,6 +1084,10 @@ mod tests {
         let (_, candidates) = manifest_completions(source, source.len());
         assert_eq!(candidates[0].label, "team");
         assert_eq!(candidates[0].insertion, "\"team\"");
+        assert_eq!(
+            &source[manifest_completions(source, source.len()).0],
+            "\"te"
+        );
     }
 
     #[test]
