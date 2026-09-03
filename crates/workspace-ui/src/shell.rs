@@ -1055,7 +1055,7 @@ fn shell_connection_row_menu(
                     shell.request_edit_connection(&edit_entry, cx);
                 }))
                 .child(icon(IconName::Edit, colors.muted_text, 11.))
-                .child("Edit connection"),
+                .child("Edit in sift.toml"),
         )
         .child(
             div()
@@ -1075,7 +1075,7 @@ fn shell_connection_row_menu(
                     shell.request_delete_connection(&delete_entry, cx);
                 }))
                 .child(icon(IconName::Close, colors.danger, 11.))
-                .child("Remove connection"),
+                .child("Remove in sift.toml"),
         )
 }
 
@@ -9579,6 +9579,7 @@ pub struct WorkspaceShell {
     instance_plan: Option<InstancePlanPresentation>,
     instance_configuration: Option<InstanceConfigurationPresentation>,
     instance_configuration_item: Option<u64>,
+    pending_manifest_path: Option<String>,
     selected_instance_credential: Option<String>,
     instance_operation_pending: bool,
     instance_operation_error: Option<String>,
@@ -10856,6 +10857,7 @@ impl WorkspaceShell {
             instance_plan: None,
             instance_configuration: None,
             instance_configuration_item: None,
+            pending_manifest_path: None,
             selected_instance_credential: None,
             instance_operation_pending: false,
             instance_operation_error: None,
@@ -11850,6 +11852,16 @@ impl WorkspaceShell {
                     editor.set_manifest_lifecycle(lifecycle.0, lifecycle.1, cx);
                     editor
                 });
+                if let Some(path) = self.pending_manifest_path.take() {
+                    if let Some(target) = editor
+                        .read(cx)
+                        .manifest_outline()
+                        .into_iter()
+                        .find(|entry| entry.path == path || entry.path.starts_with(&path))
+                    {
+                        editor.update(cx, |editor, cx| editor.go_to_offset(target.offset, cx));
+                    }
+                }
                 self.instance_configuration_editor = editor.clone();
                 let item_id = self.instance_configuration_item.unwrap_or_else(|| {
                     let item_id = self.next_id;
@@ -17576,6 +17588,16 @@ impl WorkspaceShell {
                             .flex_none()
                             .px_1()
                             .rounded_sm()
+                            .bg(colors.active_surface)
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child("sift.toml"),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .px_1()
+                            .rounded_sm()
                             .border_1()
                             .border_color(environment_color)
                             .text_xs()
@@ -19927,8 +19949,8 @@ impl WorkspaceShell {
     }
 
     fn request_delete_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
-        self.modal = Some(Modal::ConfirmDeleteConnection(entry.clone()));
-        cx.notify();
+        let _ = entry;
+        self.edit_manifest_section("connections", cx);
     }
 
     fn disconnect_connection_profile(&mut self, profile_id: i64, cx: &mut Context<Self>) {
@@ -19947,20 +19969,8 @@ impl WorkspaceShell {
     }
 
     fn request_edit_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
-        let Some(sender) = &self.executor_sender else {
-            self.show_error_toast("Database connection manager is unavailable".into(), cx);
-            return;
-        };
-        self.editing_connection_profile = Some(entry.id);
-        self.database_connection_pending = true;
-        self.database_connection_error = None;
-        self.database_connection_tested = false;
-        self.modal = Some(Modal::DatabaseConnection);
-        let _ = sender.send(ExecutorCommand::LoadConnectionProfile {
-            tenant_id: entry.tenant_id,
-            profile_id: entry.id,
-        });
-        cx.notify();
+        let _ = entry;
+        self.edit_manifest_section("connections", cx);
     }
 
     fn populate_connection_profile(
@@ -20109,17 +20119,8 @@ impl WorkspaceShell {
         }
     }
 
-    fn open_connection_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.editing_connection_profile = None;
-        self.database_connection_vault_id = None;
-        self.selected_database_tenant = self.lifecycle.tenants.first().map(|tenant| tenant.id.0);
-        self.database_connection_error = None;
-        self.database_connection_pending = false;
-        self.connection_url_input
-            .update(cx, |input, cx| input.set_text("", cx));
-        self.modal = Some(Modal::ConnectionUrl);
-        self.connection_url_input.focus_handle(cx).focus(window, cx);
-        cx.notify();
+    fn open_connection_url(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.edit_manifest_section("connections", cx);
     }
 
     fn submit_connection_url(&mut self, cx: &mut Context<Self>) {
@@ -20185,7 +20186,12 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn open_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_database_connection(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.edit_manifest_section("connections", cx);
+    }
+
+    #[allow(dead_code)]
+    fn open_legacy_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing_connection_profile = None;
         self.database_connection_vault_id = None;
         self.editing_connection_credential_mode = sift_api_types::CredentialMode::Shared;
@@ -30994,6 +31000,12 @@ impl WorkspaceShell {
         self.send_instance_command(InstanceCommand::OpenCurrentConfiguration, cx);
     }
 
+    fn edit_manifest_section(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.pending_manifest_path = Some(path.into());
+        self.modal = None;
+        self.open_current_configuration(cx);
+    }
+
     fn forget_instance_root(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
         self.send_instance_command(InstanceCommand::ForgetRoot { root }, cx);
     }
@@ -31849,28 +31861,7 @@ impl WorkspaceShell {
     }
 
     fn open_connection_policy(&mut self, cx: &mut Context<Self>) {
-        let profile_id = match self.connection_status {
-            ConnectionStatus::Connected { profile_id, .. }
-            | ConnectionStatus::Connecting { profile_id }
-            | ConnectionStatus::Failed { profile_id, .. } => profile_id,
-            ConnectionStatus::Disconnected => {
-                self.show_error_toast("Connect to a database before editing its policy".into(), cx);
-                return;
-            }
-        };
-        self.modal = Some(Modal::ConnectionPolicy);
-        self.connection_policy_profile = Some(profile_id);
-        self.connection_policy_pending = true;
-        self.connection_policy_error = None;
-        if self.executor_sender.as_ref().is_none_or(|sender| {
-            sender
-                .send(ExecutorCommand::LoadConnectionPolicy { profile_id })
-                .is_err()
-        }) {
-            self.connection_policy_pending = false;
-            self.connection_policy_error = Some("Connection policy service is unavailable".into());
-        }
-        cx.notify();
+        self.edit_manifest_section("connections", cx);
     }
 
     fn toggle_connection_policy_read_only(&mut self, cx: &mut Context<Self>) {
@@ -31961,61 +31952,6 @@ impl WorkspaceShell {
         if self.executor_sender.as_ref().is_none_or(|sender| {
             sender
                 .send(ExecutorCommand::LoadTenantUsage { tenant_id })
-                .is_err()
-        }) {
-            self.tenant_usage_pending = false;
-            self.tenant_usage_error = Some("Tenant usage service is unavailable".into());
-        }
-        cx.notify();
-    }
-
-    fn save_tenant_limits(&mut self, cx: &mut Context<Self>) {
-        let Some(tenant_id) = self.tenant_usage.as_ref().map(|usage| usage.tenant_id) else {
-            return;
-        };
-        let mut parsed = Vec::with_capacity(self.tenant_limit_inputs.len());
-        for input in &self.tenant_limit_inputs {
-            let value = input.read(cx).text().trim().to_owned();
-            if value.is_empty() {
-                parsed.push(None);
-            } else if let Ok(value) = value.parse::<u64>() {
-                parsed.push(Some(value));
-            } else {
-                self.tenant_usage_error = Some("Limits must be whole numbers or empty".into());
-                cx.notify();
-                return;
-            }
-        }
-        let limits = sift_protocol::TenantResourceLimits {
-            connection_profiles: parsed[0],
-            sessions: parsed[1],
-            connections: parsed[2],
-            concurrent_queries: parsed[3],
-            cursors: parsed[4],
-            retained_result_bytes: parsed[5],
-        };
-        self.tenant_usage_pending = true;
-        self.tenant_usage_error = None;
-        if self.executor_sender.as_ref().is_none_or(|sender| {
-            sender
-                .send(ExecutorCommand::SaveTenantLimits { tenant_id, limits })
-                .is_err()
-        }) {
-            self.tenant_usage_pending = false;
-            self.tenant_usage_error = Some("Tenant usage service is unavailable".into());
-        }
-        cx.notify();
-    }
-
-    fn clear_tenant_limits(&mut self, cx: &mut Context<Self>) {
-        let Some(tenant_id) = self.tenant_usage.as_ref().map(|usage| usage.tenant_id) else {
-            return;
-        };
-        self.tenant_usage_pending = true;
-        self.tenant_usage_error = None;
-        if self.executor_sender.as_ref().is_none_or(|sender| {
-            sender
-                .send(ExecutorCommand::ClearTenantLimits { tenant_id })
                 .is_err()
         }) {
             self.tenant_usage_pending = false;
@@ -42278,6 +42214,16 @@ impl WorkspaceShell {
                             snapshot.usage.retained_result_bytes,
                         ]
                     });
+                    let limits = self.tenant_usage.as_ref().map(|snapshot| {
+                        [
+                            snapshot.limits.connection_profiles,
+                            snapshot.limits.sessions,
+                            snapshot.limits.connections,
+                            snapshot.limits.concurrent_queries,
+                            snapshot.limits.cursors,
+                            snapshot.limits.retained_result_bytes,
+                        ]
+                    });
                     let rows = labels.into_iter().enumerate().map(|(index, label)| {
                         div()
                             .h(px(44.))
@@ -42300,7 +42246,14 @@ impl WorkspaceShell {
                             .child(
                                 div()
                                     .w(px(160.))
-                                    .child(self.tenant_limit_inputs[index].clone()),
+                                    .text_sm()
+                                    .child(limits.map_or_else(
+                                        || "— limit".into(),
+                                        |values| values[index].map_or_else(
+                                            || "Unlimited".into(),
+                                            |value| format!("{value} limit"),
+                                        ),
+                                    )),
                             )
                     });
                     div()
@@ -42333,30 +42286,11 @@ impl WorkspaceShell {
                             div().text_sm().text_color(colors.danger).child(error)
                         }))
                         .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .gap_2()
-                                .child(
-                                    Button::new("clear-tenant-limits", "Clear limits")
-                                        .tone(ButtonTone::DangerGhost)
-                                        .disabled(
-                                            self.tenant_usage.is_none()
-                                                || self.tenant_usage_pending,
-                                        )
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.clear_tenant_limits(cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new("save-tenant-limits", "Save limits")
-                                        .tone(ButtonTone::Accent)
-                                        .loading(self.tenant_usage_pending)
-                                        .disabled(self.tenant_usage.is_none())
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.save_tenant_limits(cx)
-                                        })),
-                                ),
+                            Button::new("edit-manifest-tenant-limits", "Edit limits in sift.toml")
+                                .tone(ButtonTone::Accent)
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.edit_manifest_section("server.tenant_limits", cx)
+                                })),
                         )
                         .into_any_element()
                 }
@@ -42420,7 +42354,7 @@ impl WorkspaceShell {
                     div().h(px(650.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between()
                             .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Server administration"))
-                            .child(Button::new("refresh-administration", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| match shell.administration_section { AdministrationSection::Principals => shell.load_principal_access(cx), AdministrationSection::Tenants => shell.load_tenant_invitations(cx), AdministrationSection::Keys => shell.load_principal_keys(cx), AdministrationSection::Approvals => shell.load_operation_approvals(cx), AdministrationSection::Audit => shell.load_operation_audit(false, cx), AdministrationSection::Github => shell.load_github_allowlist(cx) }))))
+                            .child(Button::new("refresh-administration", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending || matches!(self.administration_section, AdministrationSection::Principals | AdministrationSection::Tenants | AdministrationSection::Github)).on_click(cx.listener(|shell, _, _, cx| match shell.administration_section { AdministrationSection::Principals => shell.load_principal_access(cx), AdministrationSection::Tenants => shell.load_tenant_invitations(cx), AdministrationSection::Keys => shell.load_principal_keys(cx), AdministrationSection::Approvals => shell.load_operation_approvals(cx), AdministrationSection::Audit => shell.load_operation_audit(false, cx), AdministrationSection::Github => shell.load_github_allowlist(cx) }))))
                         .child(div().flex().gap_1()
                             .child(Button::new("admin-principals-tab", "Principals").tone(if principals { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Principals, cx))))
                             .child(Button::new("admin-tenants-tab", "Tenant access").tone(if tenants { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Tenants, cx))))
@@ -42428,7 +42362,15 @@ impl WorkspaceShell {
                             .child(Button::new("admin-approvals-tab", "Approvals").tone(if self.administration_section == AdministrationSection::Approvals { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Approvals, cx))))
                             .child(Button::new("admin-audit-tab", "Audit").tone(if self.administration_section == AdministrationSection::Audit { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Audit, cx))))
                             .child(Button::new("admin-github-tab", "GitHub access").tone(if self.administration_section == AdministrationSection::Github { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Github, cx)))))
-                        .when(principals, |view| view
+                        .when(principals, |view| view.child(
+                            div().flex_1().flex().items_center().justify_center().child(
+                                div().max_w(px(520.)).p_4().rounded_sm().border_1().border_color(colors.subtle_border).bg(colors.surface).flex().flex_col().gap_3()
+                                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Principals are manifest-owned"))
+                                    .child(div().text_sm().text_color(colors.muted_text).child("Add, remove, or change immutable GitHub principals in [[identity.github_principals]]. Save with :w, review the resource plan, then apply."))
+                                    .child(Button::new("edit-manifest-principals", "Edit in sift.toml").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.edit_manifest_section("identity.github_principals", cx))))
+                            )
+                        ))
+                        .when(false && principals, |view| view
                             .child(div().flex().gap_2().children(self.principal_create_inputs.iter().cloned()).child(Button::new("create-principal", "Create").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_principal(cx)))))
                             .child(div().pt_2().border_t_1().border_color(colors.subtle_border).flex().items_center().gap_2()
                             .child(div().w(px(150.)).child(self.principal_id_input.clone()))
@@ -42458,7 +42400,15 @@ impl WorkspaceShell {
                                     .child(div().min_w_0().flex_1().flex().flex_col().child(session.client_label.unwrap_or(session.client_kind)).child(div().text_xs().text_color(colors.muted_text).child(format!("Created {} · expires {}", session.created_at.format("%Y-%m-%d"), session.expires_at.format("%Y-%m-%d")))))
                                     .child(Button::new(("revoke-principal-session", index), "Revoke").tone(ButtonTone::DangerGhost).disabled(session.revoked_at.is_some() || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_principal_session(session_id.clone(), cx))))
                             }))))
-                        .when(tenants, |view| view
+                        .when(tenants, |view| view.child(
+                            div().flex_1().flex().items_center().justify_center().child(
+                                div().max_w(px(520.)).p_4().rounded_sm().border_1().border_color(colors.subtle_border).bg(colors.surface).flex().flex_col().gap_3()
+                                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Tenant access is manifest-owned"))
+                                    .child(div().text_sm().text_color(colors.muted_text).child("Tenants and memberships live in [[tenants]] and [[tenants.memberships]]. This keeps access changes reproducible and reviewable."))
+                                    .child(Button::new("edit-manifest-tenants", "Edit in sift.toml").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.edit_manifest_section("tenants", cx))))
+                            )
+                        ))
+                        .when(false && tenants, |view| view
                             .child(div().flex().items_center().gap_2()
                                 .child(div().flex_1().child(self.tenant_invite_principal_input.clone()))
                                 .child(Button::new("cycle-invitation-role", format!("{:?}", self.tenant_invitation_role)).tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.cycle_invitation_role(cx))))
@@ -42476,7 +42426,15 @@ impl WorkspaceShell {
                         .when(self.administration_section == AdministrationSection::Audit, |view| view
                             .child(div().id("operation-audit-list").flex_1().min_h_0().overflow_y_scroll().children(audit_rows.into_iter().enumerate().map(|(index, row)| div().id(("operation-audit-row", index)).min_h(px(54.)).px_2().py_1().flex().items_center().gap_3().border_b_1().border_color(colors.subtle_border).child(div().w(px(145.)).flex_none().text_xs().text_color(colors.muted_text).child(row.at.format("%Y-%m-%d %H:%M:%S").to_string())).child(div().min_w_0().flex_1().flex().flex_col().child(format!("{} · {}", row.action, row.target)).child(div().truncate().text_xs().text_color(colors.muted_text).child(format!("actor {} · {}{}", row.actor_principal_id.map_or_else(|| "system".into(), |id| id.0.to_string()), row.status, row.error_message.map(|error| format!(" · {error}")).unwrap_or_default())))))))
                             .child(Button::new("load-more-operation-audit", "Load more").tone(ButtonTone::Ghost).disabled(self.operation_audit_cursor.is_none() || self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.load_operation_audit(true, cx)))))
-                        .when(self.administration_section == AdministrationSection::Github, |view| view
+                        .when(self.administration_section == AdministrationSection::Github, |view| view.child(
+                            div().flex_1().flex().items_center().justify_center().child(
+                                div().max_w(px(520.)).p_4().rounded_sm().border_1().border_color(colors.subtle_border).bg(colors.surface).flex().flex_col().gap_3()
+                                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("GitHub admission is manifest-owned"))
+                                    .child(div().text_sm().text_color(colors.muted_text).child("Configure the authentication flow under [auth.github] and admitted identities under [[identity.github_principals]]."))
+                                    .child(Button::new("edit-manifest-github", "Edit in sift.toml").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.edit_manifest_section("auth.github", cx))))
+                            )
+                        ))
+                        .when(false && self.administration_section == AdministrationSection::Github, |view| view
                             .child(div().text_xs().text_color(colors.muted_text).child("Allow a GitHub login to create a new account, or bind its first login to an existing principal."))
                             .child(div().flex().gap_2().children(self.github_allowlist_inputs.iter().cloned()).child(Button::new("create-github-allowlist-entry", "Allow login").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_github_allowlist_entry(cx)))))
                             .child(div().id("github-allowlist").flex_1().min_h_0().overflow_y_scroll().children(github_entries.into_iter().enumerate().map(|(index, entry)| { let entry_id = entry.id.0; let active = entry.revoked_at.is_none() && entry.consumed_at.is_none(); div().id(("github-allowlist-entry", index)).min_h(px(50.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border).child(div().min_w_0().flex_1().flex().flex_col().child(entry.normalized_login).child(div().text_xs().text_color(colors.muted_text).child(entry.target_principal_id.map_or_else(|| "Creates a new principal".into(), |id| format!("Links to principal {}", id.0))))).child(Button::new(("revoke-github-allowlist", index), if active { "Revoke" } else if entry.consumed_at.is_some() { "Used" } else { "Revoked" }).tone(ButtonTone::DangerGhost).disabled(!active || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_github_allowlist_entry(entry_id, cx)))) }))))
@@ -50297,13 +50255,15 @@ mod tests {
     }
 
     #[gpui::test]
-    fn connection_rows_move_management_into_one_context_menu(cx: &mut TestAppContext) {
+    fn connection_rows_route_management_to_sift_toml(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (instance_sender, mut instance_receiver) = tokio::sync::mpsc::unbounded_channel();
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
+            shell.instance_sender = Some(instance_sender);
             shell.lifecycle.tenants = vec![crate::TenantNavEntry {
                 id: sift_api_types::TenantId(1),
                 name: "Personal".into(),
@@ -50349,12 +50309,13 @@ mod tests {
         cx.simulate_click(edit.center(), Modifiers::default());
         cx.run_until_parked();
         workspace.read_with(&cx, |shell, _| {
-            assert_eq!(shell.modal, Some(Modal::DatabaseConnection));
+            assert_eq!(shell.modal, None);
             assert!(shell.connection_row_menu.is_none());
+            assert_eq!(shell.pending_manifest_path.as_deref(), Some("connections"));
         });
         assert!(matches!(
-            receiver.try_recv(),
-            Ok(ExecutorCommand::LoadConnectionProfile { profile_id: 7, .. })
+            instance_receiver.try_recv(),
+            Ok(InstanceCommand::OpenCurrentConfiguration)
         ));
 
         workspace.update(&mut cx, |shell, cx| {
@@ -50362,15 +50323,14 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        let actions = cx.debug_bounds("connection-row-actions-7").unwrap();
-        cx.simulate_click(actions.center(), Modifiers::default());
+        cx.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::default());
         cx.run_until_parked();
         let remove = cx.debug_bounds("connection-row-remove").unwrap();
         cx.simulate_click(remove.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(matches!(
-            workspace.read_with(&cx, |shell, _| shell.modal.clone()),
-            Some(Modal::ConfirmDeleteConnection(entry)) if entry.id == 7
+            instance_receiver.try_recv(),
+            Ok(InstanceCommand::OpenCurrentConfiguration)
         ));
     }
 
@@ -55398,30 +55358,21 @@ mod tests {
     }
 
     #[gpui::test]
-    fn database_wizard_stages_selection_details_and_review(cx: &mut TestAppContext) {
+    fn database_wizard_entry_routes_to_sift_toml(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
 
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.instance_sender = Some(sender);
             shell.open_database_connection(window, cx);
-            assert_eq!(shell.database_wizard_step, DatabaseWizardStep::Provider);
-            assert!(shell.selected_database_provider.is_none());
-            shell.select_database_provider("sift/postgres".into(), cx);
-            assert_eq!(shell.database_port_input.read(cx).text(), "5432");
-            assert_eq!(shell.selected_database_ssl_mode.as_deref(), Some("prefer"));
-            shell.database_wizard_next(window, cx);
-            assert_eq!(shell.database_wizard_step, DatabaseWizardStep::Details);
-            shell.selected_database_tenant = Some(7);
-            shell
-                .database_name_input
-                .update(cx, |input, cx| input.set_text("Reporting", cx));
-            shell
-                .database_user_input
-                .update(cx, |input, cx| input.set_text("sift", cx));
-            shell.database_wizard_next(window, cx);
-            assert_eq!(shell.database_wizard_step, DatabaseWizardStep::Review);
+            assert_eq!(shell.pending_manifest_path.as_deref(), Some("connections"));
         });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(InstanceCommand::OpenCurrentConfiguration)
+        ));
     }
 
     #[gpui::test]
