@@ -22,6 +22,7 @@ sift-api-types = { workspace = true }
 sift-client-sdk = { workspace = true }
 sift-completion = { workspace = true }
 sift-doc = { workspace = true }
+sift-instance-config = { workspace = true }
 sift-protocol = { workspace = true }
 sift-sql-variables = { workspace = true }
 sift-snippets = { workspace = true }

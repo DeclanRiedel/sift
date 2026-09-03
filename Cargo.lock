@@ -7842,6 +7842,7 @@ dependencies = [
  "sift-client-sdk",
  "sift-completion",
  "sift-doc",
+ "sift-instance-config",
  "sift-protocol",
  "sift-snippets",
  "sift-sql-variables",

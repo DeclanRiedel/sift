@@ -8053,7 +8053,61 @@ impl gpui::Render for Pane {
                     Some(item) if item.kind == ItemKind::Configuration => {
                         match self.editors.get(&item.id) {
                             Some(editor) => {
-                                body.child(div().flex_1().min_h_0().child(editor.clone()))
+                                let outline = (item.title == "sift.toml")
+                                    .then(|| editor.read(cx).manifest_outline())
+                                    .unwrap_or_default();
+                                let outline_editor = editor.clone();
+                                body.child(
+                                    div()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .flex()
+                                        .children((!outline.is_empty()).then(|| {
+                                            div()
+                                                .id("manifest-outline")
+                                                .w(px(190.))
+                                                .flex_none()
+                                                .overflow_y_scroll()
+                                                .border_r_1()
+                                                .border_color(colors.subtle_border)
+                                                .bg(colors.surface)
+                                                .child(
+                                                    div()
+                                                        .h(px(30.))
+                                                        .px_2()
+                                                        .flex()
+                                                        .items_center()
+                                                        .text_xs()
+                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                        .text_color(colors.muted_text)
+                                                        .child("SIFT CONFIGURATION"),
+                                                )
+                                                .children(outline.into_iter().enumerate().map(
+                                                    move |(index, entry)| {
+                                                        let target = entry.offset;
+                                                        let target_editor = outline_editor.clone();
+                                                        div()
+                                                            .id(("manifest-outline-row", index))
+                                                            .h(px(28.))
+                                                            .pl(px(8. + 12. * entry.depth as f32))
+                                                            .pr_2()
+                                                            .flex()
+                                                            .items_center()
+                                                            .text_xs()
+                                                            .truncate()
+                                                            .cursor_pointer()
+                                                            .hover(|row| row.bg(colors.hovered_surface))
+                                                            .on_click(move |_, _, cx| {
+                                                                target_editor.update(cx, |editor, cx| {
+                                                                    editor.go_to_offset(target, cx)
+                                                                });
+                                                            })
+                                                            .child(entry.title)
+                                                    },
+                                                ))
+                                        }))
+                                        .child(div().flex_1().min_w_0().child(editor.clone())),
+                                )
                             }
                             None => body.child(
                                 div()
@@ -11742,6 +11796,7 @@ impl WorkspaceShell {
                 let editor = cx.new(|cx| {
                     QueryEditor::new(QueryDocument::with_random_peer(&configuration.manifest), cx)
                         .with_language(EditorLanguage::Toml)
+                        .with_manifest_schema()
                         .with_keymap(if self.vim_mode_default() {
                             EditorKeymap::Vim
                         } else {

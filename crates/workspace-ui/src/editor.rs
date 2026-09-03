@@ -1066,6 +1066,9 @@ pub struct QueryEditor {
     read_only: bool,
     semantic: SemanticState,
     hover_anchor: Option<(Pixels, Pixels)>,
+    manifest_schema: bool,
+    manifest_hover: Option<sift_instance_config::ManifestHover>,
+    manifest_analysis_epoch: u64,
     json_schema: Option<JsonSchema>,
     find_open: bool,
     find_query: Entity<TextInput>,
@@ -1110,6 +1113,9 @@ impl QueryEditor {
             read_only: false,
             semantic: SemanticState::default(),
             hover_anchor: None,
+            manifest_schema: false,
+            manifest_hover: None,
+            manifest_analysis_epoch: 0,
             json_schema: None,
             find_open: false,
             find_query,
@@ -1138,6 +1144,12 @@ impl QueryEditor {
         self
     }
 
+    pub fn with_manifest_schema(mut self) -> Self {
+        self.manifest_schema = true;
+        self.refresh_manifest_diagnostics();
+        self
+    }
+
     pub fn with_keymap(mut self, keymap: EditorKeymap) -> Self {
         self.apply_keymap(keymap);
         self
@@ -1162,7 +1174,9 @@ impl QueryEditor {
         self.revision = self.revision.wrapping_add(1);
         self.line_cache.borrow_mut().lines.clear();
         self.semantic.invalidate();
-        if self.language == EditorLanguage::Json {
+        if self.manifest_schema {
+            self.refresh_manifest_diagnostics();
+        } else if self.language == EditorLanguage::Json {
             self.refresh_local_diagnostics();
         } else {
             self.request_semantic(SemanticRequestKind::Analyze, cx);
@@ -1200,7 +1214,9 @@ impl QueryEditor {
         self.language = language;
         self.diff_language = None;
         self.semantic.invalidate();
-        if self.language == EditorLanguage::Json {
+        if self.manifest_schema {
+            self.refresh_manifest_diagnostics();
+        } else if self.language == EditorLanguage::Json {
             self.refresh_local_diagnostics();
         } else {
             self.request_semantic(SemanticRequestKind::Analyze, cx);
@@ -1400,6 +1416,18 @@ impl QueryEditor {
         &self.semantic
     }
 
+    pub fn manifest_outline(&self) -> Vec<sift_instance_config::ManifestOutlineItem> {
+        if self.manifest_schema {
+            sift_instance_config::manifest_outline(self.document.text())
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn go_to_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.set_cursor_offset(offset, cx);
+    }
+
     /// Semantics are a SQL-only, writable-buffer concern. Read-only DDL
     /// previews and TOML settings buffers never open a server document.
     pub fn semantic_enabled(&self) -> bool {
@@ -1525,6 +1553,10 @@ impl QueryEditor {
     }
 
     fn complete(&mut self, _: &Complete, _: &mut Window, cx: &mut Context<Self>) {
+        if self.manifest_schema {
+            self.open_manifest_completion(cx);
+            return;
+        }
         if self.language == EditorLanguage::Json {
             self.open_json_completion(cx);
             return;
@@ -1558,16 +1590,33 @@ impl QueryEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.semantic_enabled() {
+        if !self.semantic_enabled() && !self.manifest_schema {
             return;
         }
         let Some(offset) = self.byte_index_for_point(position, cx.theme(), window) else {
-            if self.semantic.clear_hover() {
+            if self.semantic.clear_hover() || self.manifest_hover.take().is_some() {
                 self.hover_anchor = None;
                 cx.notify();
             }
             return;
         };
+        if self.manifest_schema {
+            let hover = sift_instance_config::manifest_hover(self.document.text(), offset);
+            if hover == self.manifest_hover {
+                return;
+            }
+            self.manifest_hover = hover;
+            let viewport = self.scroll_handle.bounds();
+            let scroll = self.scroll_handle.offset();
+            self.hover_anchor = self.manifest_hover.as_ref().map(|_| {
+                (
+                    position.x - viewport.left(),
+                    position.y - viewport.top() - scroll.y + px(16.),
+                )
+            });
+            cx.notify();
+            return;
+        }
         let Some(hover_position) = identifier_hover_position(self.document.text(), offset) else {
             if self.semantic.clear_hover() {
                 self.hover_anchor = None;
@@ -1695,7 +1744,9 @@ impl QueryEditor {
         if self.read_only {
             return;
         }
-        if self.language == EditorLanguage::Json {
+        if self.manifest_schema {
+            self.schedule_manifest_diagnostics(cx);
+        } else if self.language == EditorLanguage::Json {
             match format_json_document(self.document.text()) {
                 Ok(formatted) if formatted != self.document.text() => {
                     let length = self.document.text().len();
@@ -1924,9 +1975,12 @@ impl QueryEditor {
         let auto_complete = allow_auto_completion
             && self.keymap == EditorKeymap::Vim
             && self.vim_mode == VimMode::Insert
-            && should_auto_complete(self.document.text(), self.document.cursor());
+            && (self.manifest_schema
+                || should_auto_complete(self.document.text(), self.document.cursor()));
         if reopen_completion || auto_complete {
-            if self.language == EditorLanguage::Json {
+            if self.manifest_schema {
+                self.open_manifest_completion(cx);
+            } else if self.language == EditorLanguage::Json {
                 self.open_json_completion(cx);
             } else {
                 self.semantic.expect_completion(self.revision);
@@ -1946,6 +2000,83 @@ impl QueryEditor {
             diagnostics,
             false,
         );
+    }
+
+    fn schedule_manifest_diagnostics(&mut self, cx: &mut Context<Self>) {
+        self.manifest_analysis_epoch = self.manifest_analysis_epoch.wrapping_add(1);
+        let epoch = self.manifest_analysis_epoch;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                if editor.manifest_schema && editor.manifest_analysis_epoch == epoch {
+                    editor.refresh_manifest_diagnostics();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_manifest_diagnostics(&mut self) {
+        let diagnostics = sift_instance_config::manifest_diagnostics(self.document.text())
+            .into_iter()
+            .enumerate()
+            .map(|(index, diagnostic)| sift_protocol::SemanticDiagnostic {
+                id: format!("manifest-{index}"),
+                severity: sift_protocol::DiagnosticSeverity::Error,
+                code: "sift.toml".into(),
+                message: diagnostic.message,
+                range: sift_protocol::TextRange {
+                    start: diagnostic.range.start as u32,
+                    end: diagnostic.range.end as u32,
+                },
+                related_ranges: Vec::new(),
+                source: "sift.toml".into(),
+                quick_fix_ids: Vec::new(),
+            })
+            .collect();
+        self.semantic.set_diagnostics(
+            self.document.text(),
+            self.revision,
+            self.revision,
+            diagnostics,
+            false,
+        );
+    }
+
+    fn open_manifest_completion(&mut self, cx: &mut Context<Self>) {
+        let (replaced, completions) = sift_instance_config::manifest_completions(
+            self.document.text(),
+            self.document.cursor(),
+        );
+        let candidates = completions
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, completion)| sift_protocol::completion::CompletionCandidate {
+                    label: completion.label.into(),
+                    insert: completion.insertion.into(),
+                    kind: sift_protocol::completion::CompletionKind::Keyword,
+                    detail: Some(completion.detail),
+                    qualified_name: None,
+                    score: 10_000 - index as i32,
+                },
+            )
+            .collect();
+        self.semantic.expect_completion(self.revision);
+        self.semantic.set_completions(
+            self.document.text(),
+            self.revision,
+            self.revision,
+            sift_protocol::TextRange {
+                start: replaced.start as u32,
+                end: replaced.end as u32,
+            },
+            candidates,
+        );
+        cx.notify();
     }
 
     fn open_json_completion(&mut self, cx: &mut Context<Self>) {
@@ -2634,6 +2765,54 @@ impl QueryEditor {
         )
     }
 
+    fn render_manifest_hover_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let hover = self.manifest_hover.as_ref()?;
+        let (left, top) = self.hover_anchor?;
+        let colors = cx.theme().colors;
+        let choices =
+            (!hover.choices.is_empty()).then(|| format!("Choices: {}", hover.choices.join(", ")));
+        Some(
+            div()
+                .absolute()
+                .left(left)
+                .top(top)
+                .w(px(380.))
+                .p_3()
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.elevated_surface)
+                .rounded(cx.theme().metrics.radius)
+                .shadow_md()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(colors.text)
+                        .child(hover.path.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.accent)
+                        .child(hover.value_type),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.text)
+                        .child(hover.documentation),
+                )
+                .children(
+                    choices.map(|choices| {
+                        div().text_xs().text_color(colors.muted_text).child(choices)
+                    }),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_star_expansion_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let preview = self.semantic.star_expansion()?;
         let (left, top) = self.caret_content_origin()?;
@@ -3028,14 +3207,18 @@ impl EntityInputHandler for QueryEditor {
 impl gpui::Render for QueryEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
-        let status = match self.language {
-            EditorLanguage::Toml => {
-                toml_diagnostic(self.document.text()).map(|message| (message, true))
+        let status = if self.manifest_schema {
+            self.semantic_status()
+        } else {
+            match self.language {
+                EditorLanguage::Toml => {
+                    toml_diagnostic(self.document.text()).map(|message| (message, true))
+                }
+                EditorLanguage::Json
+                | EditorLanguage::Sql
+                | EditorLanguage::Markdown
+                | EditorLanguage::PlainText => self.semantic_status(),
             }
-            EditorLanguage::Json
-            | EditorLanguage::Sql
-            | EditorLanguage::Markdown
-            | EditorLanguage::PlainText => self.semantic_status(),
         };
         let focused = self.focus_handle.is_focused(window);
         let has_current_problem = self.current_problem_text().is_some();
@@ -3079,7 +3262,9 @@ impl gpui::Render for QueryEditor {
             .font_family("monospace")
             .text_color(colors.text)
             .on_hover(cx.listener(|editor, hovered: &bool, _, cx| {
-                if !*hovered && editor.semantic.clear_hover() {
+                if !*hovered
+                    && (editor.semantic.clear_hover() || editor.manifest_hover.take().is_some())
+                {
                     editor.hover_anchor = None;
                     cx.notify();
                 }
@@ -3172,6 +3357,7 @@ impl gpui::Render for QueryEditor {
                             })
                             .children(self.render_completion_menu(cx))
                             .children(self.render_hover_card(cx))
+                            .children(self.render_manifest_hover_card(cx))
                             .children(self.render_star_expansion_card(cx)),
                     ),
             )
