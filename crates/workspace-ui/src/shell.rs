@@ -1776,6 +1776,7 @@ pub enum Modal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdministrationSection {
     Principals,
+    Tenants,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2819,6 +2820,24 @@ pub enum ExecutorCommand {
         principal_id: i64,
         identity_id: i64,
     },
+    LoadTenantInvitations {
+        tenant_id: i64,
+    },
+    CreateTenantInvitation {
+        tenant_id: i64,
+        request: sift_protocol::CreateTenantInvitationRequest,
+    },
+    RevokeTenantInvitation {
+        tenant_id: i64,
+        invitation_id: i64,
+    },
+    AcceptTenantInvitation {
+        token: String,
+    },
+    RemoveTenantMember {
+        tenant_id: i64,
+        principal_id: i64,
+    },
     CloseSession {
         session_id: sift_protocol::SessionId,
     },
@@ -3573,6 +3592,9 @@ pub enum ExecutorEvent {
         result: Result<sift_protocol::AuthIdentitySummary, String>,
     },
     PrincipalPasswordResetIssued(Result<sift_protocol::IssuedPasswordResetResponse, String>),
+    TenantInvitationsLoaded(Result<Vec<sift_api_types::TenantInvitation>, String>),
+    TenantInvitationIssued(Result<sift_protocol::IssuedTenantInvitationResponse, String>),
+    TenantMembershipChanged(Result<Option<sift_api_types::TenantMembership>, String>),
     SessionResourceClosed {
         result: Result<(), String>,
         active_connection_closed: bool,
@@ -9081,6 +9103,9 @@ pub struct WorkspaceShell {
     principal_create_inputs: Vec<Entity<TextInput>>,
     principal_id_input: Entity<TextInput>,
     principal_link_inputs: Vec<Entity<TextInput>>,
+    tenant_invite_principal_input: Entity<TextInput>,
+    tenant_invite_token_input: Entity<TextInput>,
+    tenant_member_input: Entity<TextInput>,
     connection_url_input: Entity<TextInput>,
     database_name_input: Entity<TextInput>,
     database_host_input: Entity<TextInput>,
@@ -9402,6 +9427,9 @@ pub struct WorkspaceShell {
     principal_admin_pending: bool,
     principal_admin_error: Option<String>,
     principal_reset_token: Option<String>,
+    tenant_invitation_role: sift_protocol::InvitationRole,
+    tenant_invitations: Vec<sift_api_types::TenantInvitation>,
+    tenant_invitation_token: Option<String>,
     connection_policy_profile: Option<i64>,
     connection_policy: Option<sift_protocol::ConnectionPolicy>,
     connection_policy_pending: bool,
@@ -9888,6 +9916,15 @@ impl WorkspaceShell {
                     .masked()
             }),
         ];
+        let tenant_invite_principal_input = cx.new(|cx| {
+            TextInput::new("", "Target principal ID (optional)", cx)
+                .aria_label("Invitation target principal ID")
+        });
+        let tenant_invite_token_input =
+            cx.new(|cx| TextInput::new("", "Invitation token", cx).aria_label("Invitation token"));
+        let tenant_member_input = cx.new(|cx| {
+            TextInput::new("", "Member principal ID", cx).aria_label("Member principal ID")
+        });
         let connection_policy_schemas_input = cx.new(|cx| {
             TextInput::new("", "public, catalog.schema", cx).aria_label("Allowed database schemas")
         });
@@ -10305,6 +10342,9 @@ impl WorkspaceShell {
             principal_create_inputs,
             principal_id_input,
             principal_link_inputs,
+            tenant_invite_principal_input,
+            tenant_invite_token_input,
+            tenant_member_input,
             connection_url_input,
             database_name_input,
             database_host_input,
@@ -10612,6 +10652,9 @@ impl WorkspaceShell {
             principal_admin_pending: false,
             principal_admin_error: None,
             principal_reset_token: None,
+            tenant_invitation_role: sift_protocol::InvitationRole::Member,
+            tenant_invitations: Vec::new(),
+            tenant_invitation_token: None,
             connection_policy_profile: None,
             connection_policy: None,
             connection_policy_pending: false,
@@ -11901,6 +11944,40 @@ impl WorkspaceShell {
                     Ok(reset) => {
                         self.principal_reset_token = Some(reset.token);
                         self.principal_admin_error = None;
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TenantInvitationsLoaded(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(rows) => {
+                        self.tenant_invitations = rows;
+                        self.principal_admin_error = None;
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TenantInvitationIssued(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(invitation) => {
+                        self.tenant_invitation_token = Some(invitation.token);
+                        self.principal_admin_error = None;
+                        self.load_tenant_invitations(cx);
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TenantMembershipChanged(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(_) => {
+                        self.principal_admin_error = None;
+                        self.load_tenant_invitations(cx);
                     }
                     Err(error) => self.principal_admin_error = Some(error),
                 }
@@ -30825,6 +30902,109 @@ impl WorkspaceShell {
         }
     }
 
+    fn select_administration_section(
+        &mut self,
+        section: AdministrationSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.administration_section = section;
+        if section == AdministrationSection::Tenants {
+            self.load_tenant_invitations(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn load_tenant_invitations(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            self.principal_admin_error = Some("Select a tenant first".into());
+            cx.notify();
+            return;
+        };
+        self.send_principal_command(ExecutorCommand::LoadTenantInvitations { tenant_id }, cx);
+    }
+
+    fn cycle_invitation_role(&mut self, cx: &mut Context<Self>) {
+        self.tenant_invitation_role = match self.tenant_invitation_role {
+            sift_protocol::InvitationRole::Viewer => sift_protocol::InvitationRole::Member,
+            sift_protocol::InvitationRole::Member => sift_protocol::InvitationRole::Admin,
+            sift_protocol::InvitationRole::Admin => sift_protocol::InvitationRole::Viewer,
+        };
+        cx.notify();
+    }
+
+    fn create_tenant_invitation(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            self.principal_admin_error = Some("Select a tenant first".into());
+            cx.notify();
+            return;
+        };
+        let target = self
+            .tenant_invite_principal_input
+            .read(cx)
+            .text()
+            .trim()
+            .parse::<i64>()
+            .ok();
+        self.send_principal_command(
+            ExecutorCommand::CreateTenantInvitation {
+                tenant_id,
+                request: sift_protocol::CreateTenantInvitationRequest {
+                    role: self.tenant_invitation_role,
+                    target_principal_id: target,
+                    expires_at: chrono::Utc::now() + chrono::Duration::days(7),
+                },
+            },
+            cx,
+        );
+    }
+
+    fn revoke_tenant_invitation(&mut self, invitation_id: i64, cx: &mut Context<Self>) {
+        if let Some(tenant_id) = self.selected_tenant_id() {
+            self.send_principal_command(
+                ExecutorCommand::RevokeTenantInvitation {
+                    tenant_id,
+                    invitation_id,
+                },
+                cx,
+            );
+        }
+    }
+
+    fn accept_tenant_invitation(&mut self, cx: &mut Context<Self>) {
+        let token = self
+            .tenant_invite_token_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        if token.is_empty() {
+            self.principal_admin_error = Some("Invitation token is required".into());
+            cx.notify();
+            return;
+        }
+        self.send_principal_command(ExecutorCommand::AcceptTenantInvitation { token }, cx);
+    }
+
+    fn remove_tenant_member(&mut self, cx: &mut Context<Self>) {
+        let Some(tenant_id) = self.selected_tenant_id() else {
+            return;
+        };
+        match self.tenant_member_input.read(cx).text().trim().parse() {
+            Ok(principal_id) => self.send_principal_command(
+                ExecutorCommand::RemoveTenantMember {
+                    tenant_id,
+                    principal_id,
+                },
+                cx,
+            ),
+            Err(_) => {
+                self.principal_admin_error = Some("Enter a numeric member principal ID".into());
+                cx.notify();
+            }
+        }
+    }
+
     fn issue_api_token(&mut self, cx: &mut Context<Self>) {
         let name = self.api_token_name_input.read(cx).text().trim().to_owned();
         if name.is_empty() {
@@ -41351,26 +41531,30 @@ impl WorkspaceShell {
                 Modal::Administration => {
                     let identities = self.principal_identities.clone();
                     let sessions = self.principal_sessions.clone();
+                    let invitations = self.tenant_invitations.clone();
+                    let principals = self.administration_section == AdministrationSection::Principals;
                     div().h(px(650.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between()
                             .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Server administration"))
-                            .child(Button::new("refresh-principal-access", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.load_principal_access(cx)))))
-                        .child(div().flex().gap_1().child(Button::new("admin-principals-tab", "Principals").tone(ButtonTone::Accent)))
-                        .child(div().flex().gap_2().children(self.principal_create_inputs.iter().cloned()).child(Button::new("create-principal", "Create").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_principal(cx)))))
-                        .child(div().pt_2().border_t_1().border_color(colors.subtle_border).flex().items_center().gap_2()
+                            .child(Button::new("refresh-administration", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| if shell.administration_section == AdministrationSection::Principals { shell.load_principal_access(cx) } else { shell.load_tenant_invitations(cx) }))))
+                        .child(div().flex().gap_1()
+                            .child(Button::new("admin-principals-tab", "Principals").tone(if principals { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Principals, cx))))
+                            .child(Button::new("admin-tenants-tab", "Tenant access").tone(if principals { ButtonTone::Neutral } else { ButtonTone::Accent }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Tenants, cx)))))
+                        .when(principals, |view| view
+                            .child(div().flex().gap_2().children(self.principal_create_inputs.iter().cloned()).child(Button::new("create-principal", "Create").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_principal(cx)))))
+                            .child(div().pt_2().border_t_1().border_color(colors.subtle_border).flex().items_center().gap_2()
                             .child(div().w(px(150.)).child(self.principal_id_input.clone()))
                             .child(Button::new("load-principal", "Inspect").tone(ButtonTone::Neutral).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.load_principal_access(cx))))
                             .child(Button::new("disable-principal", "Disable").tone(ButtonTone::DangerGhost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.set_principal_disabled(true, cx))))
                             .child(Button::new("enable-principal", "Enable").tone(ButtonTone::Neutral).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.set_principal_disabled(false, cx)))))
-                        .child(div().flex().gap_2().children(self.principal_link_inputs.iter().cloned()).child(Button::new("link-password-identity", "Link password login").tone(ButtonTone::Neutral).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.link_principal_password(cx)))))
-                        .children(self.principal_reset_token.clone().map(|token| {
+                            .child(div().flex().gap_2().children(self.principal_link_inputs.iter().cloned()).child(Button::new("link-password-identity", "Link password login").tone(ButtonTone::Neutral).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.link_principal_password(cx)))))
+                            .children(self.principal_reset_token.clone().map(|token| {
                             let copy = token.clone();
                             div().p_2().rounded_sm().bg(colors.active_surface).flex().items_center().gap_2()
                                 .child(div().min_w_0().flex_1().truncate().font_family("monospace").text_xs().child(token))
                                 .child(Button::new("copy-principal-reset-token", "Copy reset token").tone(ButtonTone::Accent).on_click(cx.listener(move |shell, _, _, cx| { cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone())); shell.show_success_toast("Reset token copied".into(), cx); })))
-                        }))
-                        .children(self.principal_admin_error.clone().map(|error| div().text_sm().text_color(colors.danger).child(error)))
-                        .child(div().id("principal-access-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_3()
+                            }))
+                            .child(div().id("principal-access-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_3()
                             .child(SectionLabel::new("Identities"))
                             .children(identities.into_iter().enumerate().map(|(index, identity)| {
                                 let identity_id = identity.id;
@@ -41385,7 +41569,17 @@ impl WorkspaceShell {
                                 div().id(("principal-session", index)).min_h(px(44.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border)
                                     .child(div().min_w_0().flex_1().flex().flex_col().child(session.client_label.unwrap_or(session.client_kind)).child(div().text_xs().text_color(colors.muted_text).child(format!("Created {} · expires {}", session.created_at.format("%Y-%m-%d"), session.expires_at.format("%Y-%m-%d")))))
                                     .child(Button::new(("revoke-principal-session", index), "Revoke").tone(ButtonTone::DangerGhost).disabled(session.revoked_at.is_some() || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_principal_session(session_id.clone(), cx))))
-                            })))
+                            }))))
+                        .when(!principals, |view| view
+                            .child(div().flex().items_center().gap_2()
+                                .child(div().flex_1().child(self.tenant_invite_principal_input.clone()))
+                                .child(Button::new("cycle-invitation-role", format!("{:?}", self.tenant_invitation_role)).tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.cycle_invitation_role(cx))))
+                                .child(Button::new("create-tenant-invitation", "Invite").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_tenant_invitation(cx)))))
+                            .children(self.tenant_invitation_token.clone().map(|token| { let copy = token.clone(); div().p_2().rounded_sm().bg(colors.active_surface).flex().items_center().gap_2().child(div().min_w_0().flex_1().truncate().font_family("monospace").text_xs().child(token)).child(Button::new("copy-invitation-token", "Copy invitation").tone(ButtonTone::Accent).on_click(cx.listener(move |_, _, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))))) }))
+                            .child(div().flex().gap_2().child(div().flex_1().child(self.tenant_invite_token_input.clone())).child(Button::new("accept-tenant-invitation", "Accept invitation").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.accept_tenant_invitation(cx)))))
+                            .child(div().flex().gap_2().child(div().flex_1().child(self.tenant_member_input.clone())).child(Button::new("remove-tenant-member", "Remove member").tone(ButtonTone::DangerGhost).on_click(cx.listener(|shell, _, _, cx| shell.remove_tenant_member(cx)))))
+                            .child(div().id("tenant-invitation-list").flex_1().min_h_0().overflow_y_scroll().children(invitations.into_iter().enumerate().map(|(index, invitation)| { let invitation_id = invitation.id.0; div().id(("tenant-invitation", index)).min_h(px(48.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border).child(div().min_w_0().flex_1().flex().flex_col().child(format!("{:?} invitation", invitation.intended_role)).child(div().text_xs().text_color(colors.muted_text).child(format!("Principal {} · expires {}", invitation.target_principal_id.map_or_else(|| "any".into(), |id| id.0.to_string()), invitation.expires_at.format("%Y-%m-%d"))))).child(Button::new(("revoke-tenant-invitation", index), "Revoke").tone(ButtonTone::DangerGhost).disabled(invitation.revoked_at.is_some() || invitation.consumed_at.is_some() || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_tenant_invitation(invitation_id, cx)))) }))))
+                        .children(self.principal_admin_error.clone().map(|error| div().text_sm().text_color(colors.danger).child(error)))
                         .into_any_element()
                 }
                 Modal::Settings => {

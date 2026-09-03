@@ -9,6 +9,7 @@ repository.workspace = true
 benchmark = []
 
 [dependencies]
+chrono = { workspace = true }
 csv = { workspace = true }
 gpui = { workspace = true }
 modalkit = { workspace = true }
@@ -31,7 +32,6 @@ toml_edit = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-chrono = { workspace = true }
 criterion = { workspace = true }
 gpui = { workspace = true, features = ["bench", "test-support"] }
 gpui_platform = { workspace = true, features = ["test-support"] }

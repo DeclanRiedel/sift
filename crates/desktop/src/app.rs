@@ -1219,6 +1219,103 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadTenantInvitations { tenant_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .tenant_invitations(sift_api_types::TenantId(tenant_id))
+                        .await
+                        .map_err(|error| format!("loading invitations failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TenantInvitationsLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateTenantInvitation { tenant_id, request } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .create_tenant_invitation(sift_api_types::TenantId(tenant_id), request)
+                        .await
+                        .map_err(|error| format!("creating invitation failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TenantInvitationIssued(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RevokeTenantInvitation {
+                tenant_id,
+                invitation_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .revoke_tenant_invitation(
+                            sift_api_types::TenantId(tenant_id),
+                            invitation_id,
+                        )
+                        .await
+                        .map(|()| None)
+                        .map_err(|error| format!("revoking invitation failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TenantMembershipChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::AcceptTenantInvitation { token } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .accept_tenant_invitation(sift_protocol::AcceptTenantInvitationRequest {
+                            token,
+                        })
+                        .await
+                        .map(Some)
+                        .map_err(|error| format!("accepting invitation failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TenantMembershipChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RemoveTenantMember {
+                tenant_id,
+                principal_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .remove_tenant_member(
+                            sift_api_types::TenantId(tenant_id),
+                            sift_api_types::PrincipalId(principal_id),
+                        )
+                        .await
+                        .map(|()| None)
+                        .map_err(|error| format!("removing tenant member failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::TenantMembershipChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()
