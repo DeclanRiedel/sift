@@ -1777,12 +1777,9 @@ pub enum Modal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdministrationSection {
-    Principals,
-    Tenants,
     Keys,
     Approvals,
     Audit,
-    Github,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2834,50 +2831,6 @@ pub enum ExecutorCommand {
         tenant_id: i64,
     },
     LoadVcsDiagnostics,
-    CreatePrincipal {
-        request: sift_protocol::AdminCreatePasswordPrincipalRequest,
-    },
-    LoadPrincipalAccess {
-        principal_id: i64,
-    },
-    SetPrincipalDisabled {
-        principal_id: i64,
-        disabled: bool,
-    },
-    LinkPasswordIdentity {
-        principal_id: i64,
-        request: sift_protocol::AdminLinkPasswordIdentityRequest,
-    },
-    UnlinkIdentity {
-        principal_id: i64,
-        identity_id: i64,
-    },
-    RevokePrincipalSession {
-        principal_id: i64,
-        session_id: String,
-    },
-    IssuePrincipalPasswordReset {
-        principal_id: i64,
-        identity_id: i64,
-    },
-    LoadTenantInvitations {
-        tenant_id: i64,
-    },
-    CreateTenantInvitation {
-        tenant_id: i64,
-        request: sift_protocol::CreateTenantInvitationRequest,
-    },
-    RevokeTenantInvitation {
-        tenant_id: i64,
-        invitation_id: i64,
-    },
-    AcceptTenantInvitation {
-        token: String,
-    },
-    RemoveTenantMember {
-        tenant_id: i64,
-        principal_id: i64,
-    },
     LoadPrincipalKeys,
     RegisterPrincipalKey {
         public_key: String,
@@ -2893,14 +2846,6 @@ pub enum ExecutorCommand {
     },
     LoadOperationAudit {
         cursor: Option<String>,
-    },
-    LoadGithubAllowlist,
-    CreateGithubAllowlistEntry {
-        login: String,
-        target_principal_id: Option<i64>,
-    },
-    RevokeGithubAllowlistEntry {
-        entry_id: i64,
     },
     LoadDdlSources {
         workspace_id: i64,
@@ -3686,29 +3631,6 @@ pub enum ExecutorEvent {
     TenantUsageLoaded(Result<sift_protocol::TenantUsageSnapshot, String>),
     TenantLimitsSaved(Result<sift_protocol::TenantUsageSnapshot, String>),
     VcsDiagnosticsLoaded(Result<sift_protocol::VcsAdapterDiagnostics, String>),
-    PrincipalCreated(Result<sift_protocol::AuthPrincipal, String>),
-    PrincipalAccessLoaded {
-        principal_id: i64,
-        result: Result<
-            (
-                Vec<sift_protocol::AuthIdentitySummary>,
-                Vec<sift_protocol::AuthSessionSummary>,
-            ),
-            String,
-        >,
-    },
-    PrincipalAdminChanged {
-        principal_id: i64,
-        result: Result<(), String>,
-    },
-    PrincipalIdentityLinked {
-        principal_id: i64,
-        result: Result<sift_protocol::AuthIdentitySummary, String>,
-    },
-    PrincipalPasswordResetIssued(Result<sift_protocol::IssuedPasswordResetResponse, String>),
-    TenantInvitationsLoaded(Result<Vec<sift_api_types::TenantInvitation>, String>),
-    TenantInvitationIssued(Result<sift_protocol::IssuedTenantInvitationResponse, String>),
-    TenantMembershipChanged(Result<Option<sift_api_types::TenantMembership>, String>),
     PrincipalKeysLoaded(Result<Vec<sift_api_types::PrincipalKey>, String>),
     PrincipalKeyChanged(Result<(), String>),
     OperationApprovalsLoaded(Result<Vec<sift_protocol::OperationApproval>, String>),
@@ -3717,8 +3639,6 @@ pub enum ExecutorEvent {
         append: bool,
         result: Result<sift_protocol::CursorPage<sift_api_types::OperationAudit>, String>,
     },
-    GithubAllowlistLoaded(Result<Vec<sift_api_types::GithubAllowlistEntry>, String>),
-    GithubAllowlistChanged(Result<(), String>),
     DdlSourcesLoaded(Result<Vec<sift_protocol::DdlSource>, String>),
     DdlSourceModelLoaded(Result<sift_protocol::DdlSourceModel, String>),
     DdlSourceChanged(Result<(), String>),
@@ -9295,16 +9215,9 @@ pub struct WorkspaceShell {
     account_password_input: Entity<TextInput>,
     api_token_name_input: Entity<TextInput>,
     administration_section: AdministrationSection,
-    principal_create_inputs: Vec<Entity<TextInput>>,
-    principal_id_input: Entity<TextInput>,
-    principal_link_inputs: Vec<Entity<TextInput>>,
-    tenant_invite_principal_input: Entity<TextInput>,
-    tenant_invite_token_input: Entity<TextInput>,
-    tenant_member_input: Entity<TextInput>,
     principal_key_inputs: Vec<Entity<TextInput>>,
     ddl_source_inputs: Vec<Entity<TextInput>>,
     room_admin_inputs: Vec<Entity<TextInput>>,
-    github_allowlist_inputs: Vec<Entity<TextInput>>,
     connection_url_input: Entity<TextInput>,
     database_name_input: Entity<TextInput>,
     database_host_input: Entity<TextInput>,
@@ -9622,14 +9535,8 @@ pub struct WorkspaceShell {
     api_token_plaintext: Option<String>,
     api_tokens_pending: bool,
     api_tokens_error: Option<String>,
-    principal_identities: Vec<sift_protocol::AuthIdentitySummary>,
-    principal_sessions: Vec<sift_protocol::AuthSessionSummary>,
     principal_admin_pending: bool,
     principal_admin_error: Option<String>,
-    principal_reset_token: Option<String>,
-    tenant_invitation_role: sift_protocol::InvitationRole,
-    tenant_invitations: Vec<sift_api_types::TenantInvitation>,
-    tenant_invitation_token: Option<String>,
     principal_keys: Vec<sift_api_types::PrincipalKey>,
     operation_approvals: Vec<sift_protocol::OperationApproval>,
     operation_audit_rows: Vec<sift_api_types::OperationAudit>,
@@ -9645,7 +9552,6 @@ pub struct WorkspaceShell {
     room_admin_pending: bool,
     room_admin_error: Option<String>,
     room_admin_member_role: sift_api_types::RoomRole,
-    github_allowlist: Vec<sift_api_types::GithubAllowlistEntry>,
     connection_policy_profile: Option<i64>,
     connection_policy: Option<sift_protocol::ConnectionPolicy>,
     connection_policy_pending: bool,
@@ -10110,37 +10016,6 @@ impl WorkspaceShell {
         });
         let api_token_name_input =
             cx.new(|cx| TextInput::new("", "Token name", cx).aria_label("API token name"));
-        let principal_create_inputs = vec![
-            cx.new(|cx| TextInput::new("", "Username", cx).aria_label("Principal username")),
-            cx.new(|cx| {
-                TextInput::new("", "Temporary password", cx)
-                    .aria_label("Temporary password")
-                    .masked()
-            }),
-            cx.new(|cx| {
-                TextInput::new("", "Display name", cx).aria_label("Principal display name")
-            }),
-            cx.new(|cx| TextInput::new("", "Email (optional)", cx).aria_label("Principal email")),
-        ];
-        let principal_id_input =
-            cx.new(|cx| TextInput::new("", "Principal ID", cx).aria_label("Principal ID"));
-        let principal_link_inputs = vec![
-            cx.new(|cx| TextInput::new("", "New username", cx).aria_label("Linked username")),
-            cx.new(|cx| {
-                TextInput::new("", "Temporary password", cx)
-                    .aria_label("Linked password")
-                    .masked()
-            }),
-        ];
-        let tenant_invite_principal_input = cx.new(|cx| {
-            TextInput::new("", "Target principal ID (optional)", cx)
-                .aria_label("Invitation target principal ID")
-        });
-        let tenant_invite_token_input =
-            cx.new(|cx| TextInput::new("", "Invitation token", cx).aria_label("Invitation token"));
-        let tenant_member_input = cx.new(|cx| {
-            TextInput::new("", "Member principal ID", cx).aria_label("Member principal ID")
-        });
         let principal_key_inputs = vec![
             cx.new(|cx| TextInput::new("", "Key label", cx).aria_label("Signing key label")),
             cx.new(|cx| {
@@ -10164,13 +10039,6 @@ impl WorkspaceShell {
             }),
             cx.new(|cx| {
                 TextInput::new("", "Member principal ID", cx).aria_label("Room member principal ID")
-            }),
-        ];
-        let github_allowlist_inputs = vec![
-            cx.new(|cx| TextInput::new("", "GitHub login", cx).aria_label("GitHub login")),
-            cx.new(|cx| {
-                TextInput::new("", "Target principal ID (optional)", cx)
-                    .aria_label("GitHub target principal ID")
             }),
         ];
         let connection_policy_schemas_input = cx.new(|cx| {
@@ -10586,17 +10454,10 @@ impl WorkspaceShell {
             account_username_input,
             account_password_input,
             api_token_name_input,
-            administration_section: AdministrationSection::Principals,
-            principal_create_inputs,
-            principal_id_input,
-            principal_link_inputs,
-            tenant_invite_principal_input,
-            tenant_invite_token_input,
-            tenant_member_input,
+            administration_section: AdministrationSection::Keys,
             principal_key_inputs,
             ddl_source_inputs,
             room_admin_inputs,
-            github_allowlist_inputs,
             connection_url_input,
             database_name_input,
             database_host_input,
@@ -10900,14 +10761,8 @@ impl WorkspaceShell {
             api_token_plaintext: None,
             api_tokens_pending: false,
             api_tokens_error: None,
-            principal_identities: Vec::new(),
-            principal_sessions: Vec::new(),
             principal_admin_pending: false,
             principal_admin_error: None,
-            principal_reset_token: None,
-            tenant_invitation_role: sift_protocol::InvitationRole::Member,
-            tenant_invitations: Vec::new(),
-            tenant_invitation_token: None,
             principal_keys: Vec::new(),
             operation_approvals: Vec::new(),
             operation_audit_rows: Vec::new(),
@@ -10923,7 +10778,6 @@ impl WorkspaceShell {
             room_admin_pending: false,
             room_admin_error: None,
             room_admin_member_role: sift_api_types::RoomRole::Editor,
-            github_allowlist: Vec::new(),
             connection_policy_profile: None,
             connection_policy: None,
             connection_policy_pending: false,
@@ -12199,122 +12053,6 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
-            ExecutorEvent::PrincipalCreated(result) => {
-                self.principal_admin_pending = false;
-                match result {
-                    Ok(principal) => {
-                        self.principal_id_input
-                            .update(cx, |input, cx| input.set_text(principal.id.to_string(), cx));
-                        for input in &self.principal_create_inputs {
-                            input.update(cx, |input, cx| input.set_text("", cx));
-                        }
-                        self.principal_admin_error = None;
-                        self.show_success_toast(
-                            format!("Created principal {}", principal.display_name),
-                            cx,
-                        );
-                        self.load_principal_access(cx);
-                    }
-                    Err(error) => self.principal_admin_error = Some(error),
-                }
-                cx.notify();
-            }
-            ExecutorEvent::PrincipalAccessLoaded {
-                principal_id: _,
-                result,
-            } => {
-                self.principal_admin_pending = false;
-                match result {
-                    Ok((identities, sessions)) => {
-                        self.principal_identities = identities;
-                        self.principal_sessions = sessions;
-                        self.principal_admin_error = None;
-                    }
-                    Err(error) => self.principal_admin_error = Some(error),
-                }
-                cx.notify();
-            }
-            ExecutorEvent::PrincipalAdminChanged {
-                principal_id,
-                result,
-            } => {
-                self.principal_admin_pending = false;
-                match result {
-                    Ok(()) => {
-                        self.principal_admin_error = None;
-                        self.send_principal_command(
-                            ExecutorCommand::LoadPrincipalAccess { principal_id },
-                            cx,
-                        );
-                    }
-                    Err(error) => self.principal_admin_error = Some(error),
-                }
-                cx.notify();
-            }
-            ExecutorEvent::PrincipalIdentityLinked {
-                principal_id,
-                result,
-            } => {
-                self.principal_admin_pending = false;
-                match result {
-                    Ok(_) => {
-                        for input in &self.principal_link_inputs {
-                            input.update(cx, |input, cx| input.set_text("", cx));
-                        }
-                        self.send_principal_command(
-                            ExecutorCommand::LoadPrincipalAccess { principal_id },
-                            cx,
-                        );
-                    }
-                    Err(error) => self.principal_admin_error = Some(error),
-                }
-                cx.notify();
-            }
-            ExecutorEvent::PrincipalPasswordResetIssued(result) => {
-                self.principal_admin_pending = false;
-                match result {
-                    Ok(reset) => {
-                        self.principal_reset_token = Some(reset.token);
-                        self.principal_admin_error = None;
-                    }
-                    Err(error) => self.principal_admin_error = Some(error),
-                }
-                cx.notify();
-            }
-            ExecutorEvent::TenantInvitationsLoaded(result) => {
-                self.principal_admin_pending = false;
-                match result {
-                    Ok(rows) => {
-                        self.tenant_invitations = rows;
-                        self.principal_admin_error = None;
-                    }
-                    Err(error) => self.principal_admin_error = Some(error),
-                }
-                cx.notify();
-            }
-            ExecutorEvent::TenantInvitationIssued(result) => {
-                self.principal_admin_pending = false;
-                match result {
-                    Ok(invitation) => {
-                        self.tenant_invitation_token = Some(invitation.token);
-                        self.principal_admin_error = None;
-                        self.load_tenant_invitations(cx);
-                    }
-                    Err(error) => self.principal_admin_error = Some(error),
-                }
-                cx.notify();
-            }
-            ExecutorEvent::TenantMembershipChanged(result) => {
-                self.principal_admin_pending = false;
-                match result {
-                    Ok(_) => {
-                        self.principal_admin_error = None;
-                        self.load_tenant_invitations(cx);
-                    }
-                    Err(error) => self.principal_admin_error = Some(error),
-                }
-                cx.notify();
-            }
             ExecutorEvent::PrincipalKeysLoaded(result) => {
                 self.principal_admin_pending = false;
                 match result {
@@ -12369,30 +12107,6 @@ impl WorkspaceShell {
                         }
                         self.operation_audit_cursor = page.next_cursor;
                         self.principal_admin_error = None;
-                    }
-                    Err(error) => self.principal_admin_error = Some(error),
-                }
-                cx.notify();
-            }
-            ExecutorEvent::GithubAllowlistLoaded(result) => {
-                self.principal_admin_pending = false;
-                match result {
-                    Ok(rows) => {
-                        self.github_allowlist = rows;
-                        self.principal_admin_error = None;
-                    }
-                    Err(error) => self.principal_admin_error = Some(error),
-                }
-                cx.notify();
-            }
-            ExecutorEvent::GithubAllowlistChanged(result) => {
-                self.principal_admin_pending = false;
-                match result {
-                    Ok(()) => {
-                        for input in &self.github_allowlist_inputs {
-                            input.update(cx, |input, cx| input.set_text("", cx));
-                        }
-                        self.load_github_allowlist(cx);
                     }
                     Err(error) => self.principal_admin_error = Some(error),
                 }
@@ -31047,10 +30761,6 @@ impl WorkspaceShell {
         self.open_current_configuration(cx);
     }
 
-    const fn interactive_manifest_mutation_available() -> bool {
-        false
-    }
-
     fn open_instance_lock(&mut self, source: String, cx: &mut Context<Self>) {
         self.modal = None;
         if let Some((pane_index, item_index)) =
@@ -31334,18 +31044,10 @@ impl WorkspaceShell {
 
     fn open_administration(&mut self, cx: &mut Context<Self>) {
         self.modal = Some(Modal::Administration);
-        self.administration_section = AdministrationSection::Principals;
+        self.administration_section = AdministrationSection::Keys;
         self.principal_admin_error = None;
+        self.load_principal_keys(cx);
         cx.notify();
-    }
-
-    fn principal_target_id(&self, cx: &App) -> Result<i64, String> {
-        self.principal_id_input
-            .read(cx)
-            .text()
-            .trim()
-            .parse()
-            .map_err(|_| "Enter a numeric principal ID".into())
     }
 
     fn send_principal_command(&mut self, command: ExecutorCommand, cx: &mut Context<Self>) {
@@ -31362,123 +31064,6 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn create_principal(&mut self, cx: &mut Context<Self>) {
-        let values = self
-            .principal_create_inputs
-            .iter()
-            .map(|input| input.read(cx).text().trim().to_owned())
-            .collect::<Vec<_>>();
-        if values[0].is_empty() || values[1].is_empty() || values[2].is_empty() {
-            self.principal_admin_error =
-                Some("Username, temporary password, and display name are required".into());
-            cx.notify();
-            return;
-        }
-        self.send_principal_command(
-            ExecutorCommand::CreatePrincipal {
-                request: sift_protocol::AdminCreatePasswordPrincipalRequest {
-                    username: values[0].clone(),
-                    password: values[1].clone(),
-                    display_name: values[2].clone(),
-                    email: (!values[3].is_empty()).then(|| values[3].clone()),
-                    is_instance_admin: false,
-                },
-            },
-            cx,
-        );
-    }
-
-    fn load_principal_access(&mut self, cx: &mut Context<Self>) {
-        match self.principal_target_id(cx) {
-            Ok(principal_id) => self
-                .send_principal_command(ExecutorCommand::LoadPrincipalAccess { principal_id }, cx),
-            Err(error) => {
-                self.principal_admin_error = Some(error);
-                cx.notify();
-            }
-        }
-    }
-
-    fn set_principal_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
-        match self.principal_target_id(cx) {
-            Ok(principal_id) => self.send_principal_command(
-                ExecutorCommand::SetPrincipalDisabled {
-                    principal_id,
-                    disabled,
-                },
-                cx,
-            ),
-            Err(error) => {
-                self.principal_admin_error = Some(error);
-                cx.notify();
-            }
-        }
-    }
-
-    fn link_principal_password(&mut self, cx: &mut Context<Self>) {
-        let Ok(principal_id) = self.principal_target_id(cx).inspect_err(|error| {
-            self.principal_admin_error = Some(error.clone());
-            cx.notify();
-        }) else {
-            return;
-        };
-        let username = self.principal_link_inputs[0]
-            .read(cx)
-            .text()
-            .trim()
-            .to_owned();
-        let password = self.principal_link_inputs[1].read(cx).text().to_owned();
-        if username.is_empty() || password.is_empty() {
-            self.principal_admin_error =
-                Some("Username and temporary password are required".into());
-            cx.notify();
-            return;
-        }
-        self.send_principal_command(
-            ExecutorCommand::LinkPasswordIdentity {
-                principal_id,
-                request: sift_protocol::AdminLinkPasswordIdentityRequest { username, password },
-            },
-            cx,
-        );
-    }
-
-    fn unlink_principal_identity(&mut self, identity_id: i64, cx: &mut Context<Self>) {
-        if let Ok(principal_id) = self.principal_target_id(cx) {
-            self.send_principal_command(
-                ExecutorCommand::UnlinkIdentity {
-                    principal_id,
-                    identity_id,
-                },
-                cx,
-            );
-        }
-    }
-
-    fn revoke_principal_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        if let Ok(principal_id) = self.principal_target_id(cx) {
-            self.send_principal_command(
-                ExecutorCommand::RevokePrincipalSession {
-                    principal_id,
-                    session_id,
-                },
-                cx,
-            );
-        }
-    }
-
-    fn issue_principal_password_reset(&mut self, identity_id: i64, cx: &mut Context<Self>) {
-        if let Ok(principal_id) = self.principal_target_id(cx) {
-            self.send_principal_command(
-                ExecutorCommand::IssuePrincipalPasswordReset {
-                    principal_id,
-                    identity_id,
-                },
-                cx,
-            );
-        }
-    }
-
     fn select_administration_section(
         &mut self,
         section: AdministrationSection,
@@ -31486,102 +31071,9 @@ impl WorkspaceShell {
     ) {
         self.administration_section = section;
         match section {
-            AdministrationSection::Tenants => self.load_tenant_invitations(cx),
             AdministrationSection::Keys => self.load_principal_keys(cx),
             AdministrationSection::Approvals => self.load_operation_approvals(cx),
             AdministrationSection::Audit => self.load_operation_audit(false, cx),
-            AdministrationSection::Github => self.load_github_allowlist(cx),
-            AdministrationSection::Principals => cx.notify(),
-        }
-    }
-
-    fn load_tenant_invitations(&mut self, cx: &mut Context<Self>) {
-        let Some(tenant_id) = self.selected_tenant_id() else {
-            self.principal_admin_error = Some("Select a tenant first".into());
-            cx.notify();
-            return;
-        };
-        self.send_principal_command(ExecutorCommand::LoadTenantInvitations { tenant_id }, cx);
-    }
-
-    fn cycle_invitation_role(&mut self, cx: &mut Context<Self>) {
-        self.tenant_invitation_role = match self.tenant_invitation_role {
-            sift_protocol::InvitationRole::Viewer => sift_protocol::InvitationRole::Member,
-            sift_protocol::InvitationRole::Member => sift_protocol::InvitationRole::Admin,
-            sift_protocol::InvitationRole::Admin => sift_protocol::InvitationRole::Viewer,
-        };
-        cx.notify();
-    }
-
-    fn create_tenant_invitation(&mut self, cx: &mut Context<Self>) {
-        let Some(tenant_id) = self.selected_tenant_id() else {
-            self.principal_admin_error = Some("Select a tenant first".into());
-            cx.notify();
-            return;
-        };
-        let target = self
-            .tenant_invite_principal_input
-            .read(cx)
-            .text()
-            .trim()
-            .parse::<i64>()
-            .ok();
-        self.send_principal_command(
-            ExecutorCommand::CreateTenantInvitation {
-                tenant_id,
-                request: sift_protocol::CreateTenantInvitationRequest {
-                    role: self.tenant_invitation_role,
-                    target_principal_id: target,
-                    expires_at: chrono::Utc::now() + chrono::Duration::days(7),
-                },
-            },
-            cx,
-        );
-    }
-
-    fn revoke_tenant_invitation(&mut self, invitation_id: i64, cx: &mut Context<Self>) {
-        if let Some(tenant_id) = self.selected_tenant_id() {
-            self.send_principal_command(
-                ExecutorCommand::RevokeTenantInvitation {
-                    tenant_id,
-                    invitation_id,
-                },
-                cx,
-            );
-        }
-    }
-
-    fn accept_tenant_invitation(&mut self, cx: &mut Context<Self>) {
-        let token = self
-            .tenant_invite_token_input
-            .read(cx)
-            .text()
-            .trim()
-            .to_owned();
-        if token.is_empty() {
-            self.principal_admin_error = Some("Invitation token is required".into());
-            cx.notify();
-            return;
-        }
-        self.send_principal_command(ExecutorCommand::AcceptTenantInvitation { token }, cx);
-    }
-
-    fn remove_tenant_member(&mut self, cx: &mut Context<Self>) {
-        let Some(tenant_id) = self.selected_tenant_id() else {
-            return;
-        };
-        match self.tenant_member_input.read(cx).text().trim().parse() {
-            Ok(principal_id) => self.send_principal_command(
-                ExecutorCommand::RemoveTenantMember {
-                    tenant_id,
-                    principal_id,
-                },
-                cx,
-            ),
-            Err(_) => {
-                self.principal_admin_error = Some("Enter a numeric member principal ID".into());
-                cx.notify();
-            }
         }
     }
 
@@ -31640,47 +31132,6 @@ impl WorkspaceShell {
             .then(|| self.operation_audit_cursor.clone())
             .flatten();
         self.send_principal_command(ExecutorCommand::LoadOperationAudit { cursor }, cx);
-    }
-
-    fn load_github_allowlist(&mut self, cx: &mut Context<Self>) {
-        self.send_principal_command(ExecutorCommand::LoadGithubAllowlist, cx);
-    }
-
-    fn create_github_allowlist_entry(&mut self, cx: &mut Context<Self>) {
-        let login = self.github_allowlist_inputs[0]
-            .read(cx)
-            .text()
-            .trim()
-            .to_owned();
-        if login.is_empty() {
-            self.principal_admin_error = Some("GitHub login is required".into());
-            cx.notify();
-            return;
-        }
-        let target = self.github_allowlist_inputs[1].read(cx).text().trim();
-        let target_principal_id = if target.is_empty() {
-            None
-        } else {
-            match target.parse() {
-                Ok(id) => Some(id),
-                Err(_) => {
-                    self.principal_admin_error = Some("Target principal ID must be numeric".into());
-                    cx.notify();
-                    return;
-                }
-            }
-        };
-        self.send_principal_command(
-            ExecutorCommand::CreateGithubAllowlistEntry {
-                login,
-                target_principal_id,
-            },
-            cx,
-        );
-    }
-
-    fn revoke_github_allowlist_entry(&mut self, entry_id: i64, cx: &mut Context<Self>) {
-        self.send_principal_command(ExecutorCommand::RevokeGithubAllowlistEntry { entry_id }, cx);
     }
 
     fn open_ddl_sources(&mut self, cx: &mut Context<Self>) {
@@ -42490,81 +41941,21 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::Administration => {
-                    let identities = self.principal_identities.clone();
-                    let sessions = self.principal_sessions.clone();
-                    let invitations = self.tenant_invitations.clone();
                     let keys = self.principal_keys.clone();
                     let approvals = self.operation_approvals.clone();
                     let audit_rows = self.operation_audit_rows.clone();
-                    let github_entries = self.github_allowlist.clone();
-                    let principals = self.administration_section == AdministrationSection::Principals;
-                    let tenants = self.administration_section == AdministrationSection::Tenants;
                     div().h(px(650.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between()
-                            .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Server administration"))
-                            .child(Button::new("refresh-administration", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending || matches!(self.administration_section, AdministrationSection::Principals | AdministrationSection::Tenants | AdministrationSection::Github)).on_click(cx.listener(|shell, _, _, cx| match shell.administration_section { AdministrationSection::Principals => shell.load_principal_access(cx), AdministrationSection::Tenants => shell.load_tenant_invitations(cx), AdministrationSection::Keys => shell.load_principal_keys(cx), AdministrationSection::Approvals => shell.load_operation_approvals(cx), AdministrationSection::Audit => shell.load_operation_audit(false, cx), AdministrationSection::Github => shell.load_github_allowlist(cx) }))))
+                            .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Runtime administration"))
+                            .child(Button::new("refresh-administration", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| match shell.administration_section {
+                                AdministrationSection::Keys => shell.load_principal_keys(cx),
+                                AdministrationSection::Approvals => shell.load_operation_approvals(cx),
+                                AdministrationSection::Audit => shell.load_operation_audit(false, cx),
+                            }))))
                         .child(div().flex().gap_1()
-                            .child(Button::new("admin-principals-tab", "Principals").tone(if principals { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Principals, cx))))
-                            .child(Button::new("admin-tenants-tab", "Tenant access").tone(if tenants { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Tenants, cx))))
                             .child(Button::new("admin-keys-tab", "Signing keys").tone(if self.administration_section == AdministrationSection::Keys { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Keys, cx))))
                             .child(Button::new("admin-approvals-tab", "Approvals").tone(if self.administration_section == AdministrationSection::Approvals { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Approvals, cx))))
-                            .child(Button::new("admin-audit-tab", "Audit").tone(if self.administration_section == AdministrationSection::Audit { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Audit, cx))))
-                            .child(Button::new("admin-github-tab", "GitHub access").tone(if self.administration_section == AdministrationSection::Github { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Github, cx)))))
-                        .when(principals, |view| view.child(
-                            div().flex_1().flex().items_center().justify_center().child(
-                                div().max_w(px(520.)).p_4().rounded_sm().border_1().border_color(colors.subtle_border).bg(colors.surface).flex().flex_col().gap_3()
-                                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Principals are manifest-owned"))
-                                    .child(div().text_sm().text_color(colors.muted_text).child("Add, remove, or change immutable GitHub principals in [[identity.github_principals]]. Save with :w, review the resource plan, then apply."))
-                                    .child(Button::new("edit-manifest-principals", "Edit in sift.toml").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.edit_manifest_section("identity.github_principals", cx))))
-                            )
-                        ))
-                        .when(Self::interactive_manifest_mutation_available() && principals, |view| view
-                            .child(div().flex().gap_2().children(self.principal_create_inputs.iter().cloned()).child(Button::new("create-principal", "Create").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_principal(cx)))))
-                            .child(div().pt_2().border_t_1().border_color(colors.subtle_border).flex().items_center().gap_2()
-                            .child(div().w(px(150.)).child(self.principal_id_input.clone()))
-                            .child(Button::new("load-principal", "Inspect").tone(ButtonTone::Neutral).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.load_principal_access(cx))))
-                            .child(Button::new("disable-principal", "Disable").tone(ButtonTone::DangerGhost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.set_principal_disabled(true, cx))))
-                            .child(Button::new("enable-principal", "Enable").tone(ButtonTone::Neutral).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.set_principal_disabled(false, cx)))))
-                            .child(div().flex().gap_2().children(self.principal_link_inputs.iter().cloned()).child(Button::new("link-password-identity", "Link password login").tone(ButtonTone::Neutral).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.link_principal_password(cx)))))
-                            .children(self.principal_reset_token.clone().map(|token| {
-                            let copy = token.clone();
-                            div().p_2().rounded_sm().bg(colors.active_surface).flex().items_center().gap_2()
-                                .child(div().min_w_0().flex_1().truncate().font_family("monospace").text_xs().child(token))
-                                .child(Button::new("copy-principal-reset-token", "Copy reset token").tone(ButtonTone::Accent).on_click(cx.listener(move |shell, _, _, cx| { cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone())); shell.show_success_toast("Reset token copied".into(), cx); })))
-                            }))
-                            .child(div().id("principal-access-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_3()
-                            .child(SectionLabel::new("Identities"))
-                            .children(identities.into_iter().enumerate().map(|(index, identity)| {
-                                let identity_id = identity.id;
-                                div().id(("principal-identity", index)).min_h(px(44.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border)
-                                    .child(div().min_w_0().flex_1().flex().flex_col().child(format!("{} · {}", identity.method, identity.subject)).child(div().text_xs().text_color(colors.muted_text).child(format!("{} · identity {}", identity.issuer, identity.id))))
-                                    .child(Button::new(("reset-principal-password", index), "Reset").tone(ButtonTone::Ghost).disabled(identity.method != "password" || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.issue_principal_password_reset(identity_id, cx))))
-                                    .child(Button::new(("unlink-principal-identity", index), "Unlink").tone(ButtonTone::DangerGhost).disabled(self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.unlink_principal_identity(identity_id, cx))))
-                            }))
-                            .child(SectionLabel::new("Auth sessions"))
-                            .children(sessions.into_iter().enumerate().map(|(index, session)| {
-                                let session_id = session.id.clone();
-                                div().id(("principal-session", index)).min_h(px(44.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border)
-                                    .child(div().min_w_0().flex_1().flex().flex_col().child(session.client_label.unwrap_or(session.client_kind)).child(div().text_xs().text_color(colors.muted_text).child(format!("Created {} · expires {}", session.created_at.format("%Y-%m-%d"), session.expires_at.format("%Y-%m-%d")))))
-                                    .child(Button::new(("revoke-principal-session", index), "Revoke").tone(ButtonTone::DangerGhost).disabled(session.revoked_at.is_some() || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_principal_session(session_id.clone(), cx))))
-                            }))))
-                        .when(tenants, |view| view.child(
-                            div().flex_1().flex().items_center().justify_center().child(
-                                div().max_w(px(520.)).p_4().rounded_sm().border_1().border_color(colors.subtle_border).bg(colors.surface).flex().flex_col().gap_3()
-                                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Tenant access is manifest-owned"))
-                                    .child(div().text_sm().text_color(colors.muted_text).child("Tenants and memberships live in [[tenants]] and [[tenants.memberships]]. This keeps access changes reproducible and reviewable."))
-                                    .child(Button::new("edit-manifest-tenants", "Edit in sift.toml").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.edit_manifest_section("tenants", cx))))
-                            )
-                        ))
-                        .when(Self::interactive_manifest_mutation_available() && tenants, |view| view
-                            .child(div().flex().items_center().gap_2()
-                                .child(div().flex_1().child(self.tenant_invite_principal_input.clone()))
-                                .child(Button::new("cycle-invitation-role", format!("{:?}", self.tenant_invitation_role)).tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.cycle_invitation_role(cx))))
-                                .child(Button::new("create-tenant-invitation", "Invite").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_tenant_invitation(cx)))))
-                            .children(self.tenant_invitation_token.clone().map(|token| { let copy = token.clone(); div().p_2().rounded_sm().bg(colors.active_surface).flex().items_center().gap_2().child(div().min_w_0().flex_1().truncate().font_family("monospace").text_xs().child(token)).child(Button::new("copy-invitation-token", "Copy invitation").tone(ButtonTone::Accent).on_click(cx.listener(move |_, _, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))))) }))
-                            .child(div().flex().gap_2().child(div().flex_1().child(self.tenant_invite_token_input.clone())).child(Button::new("accept-tenant-invitation", "Accept invitation").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.accept_tenant_invitation(cx)))))
-                            .child(div().flex().gap_2().child(div().flex_1().child(self.tenant_member_input.clone())).child(Button::new("remove-tenant-member", "Remove member").tone(ButtonTone::DangerGhost).on_click(cx.listener(|shell, _, _, cx| shell.remove_tenant_member(cx)))))
-                            .child(div().id("tenant-invitation-list").flex_1().min_h_0().overflow_y_scroll().children(invitations.into_iter().enumerate().map(|(index, invitation)| { let invitation_id = invitation.id.0; div().id(("tenant-invitation", index)).min_h(px(48.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border).child(div().min_w_0().flex_1().flex().flex_col().child(format!("{:?} invitation", invitation.intended_role)).child(div().text_xs().text_color(colors.muted_text).child(format!("Principal {} · expires {}", invitation.target_principal_id.map_or_else(|| "any".into(), |id| id.0.to_string()), invitation.expires_at.format("%Y-%m-%d"))))).child(Button::new(("revoke-tenant-invitation", index), "Revoke").tone(ButtonTone::DangerGhost).disabled(invitation.revoked_at.is_some() || invitation.consumed_at.is_some() || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_tenant_invitation(invitation_id, cx)))) }))))
+                            .child(Button::new("admin-audit-tab", "Audit").tone(if self.administration_section == AdministrationSection::Audit { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Audit, cx)))))
                         .when(self.administration_section == AdministrationSection::Keys, |view| view
                             .child(div().flex().gap_2().children(self.principal_key_inputs.iter().cloned()).child(Button::new("register-principal-key", "Register key").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.register_principal_key(cx)))))
                             .child(div().id("principal-key-list").flex_1().min_h_0().overflow_y_scroll().children(keys.into_iter().enumerate().map(|(index, key)| { let key_id = key.id.0; div().id(("principal-key", index)).min_h(px(48.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border).child(div().min_w_0().flex_1().flex().flex_col().child(key.label).child(div().text_xs().font_family("monospace").text_color(colors.muted_text).child(key.fingerprint))).child(Button::new(("revoke-principal-key", index), "Revoke").tone(ButtonTone::DangerGhost).disabled(key.revoked_at.is_some() || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_principal_key(key_id, cx)))) }))))
@@ -42574,18 +41965,6 @@ impl WorkspaceShell {
                         .when(self.administration_section == AdministrationSection::Audit, |view| view
                             .child(div().id("operation-audit-list").flex_1().min_h_0().overflow_y_scroll().children(audit_rows.into_iter().enumerate().map(|(index, row)| div().id(("operation-audit-row", index)).min_h(px(54.)).px_2().py_1().flex().items_center().gap_3().border_b_1().border_color(colors.subtle_border).child(div().w(px(145.)).flex_none().text_xs().text_color(colors.muted_text).child(row.at.format("%Y-%m-%d %H:%M:%S").to_string())).child(div().min_w_0().flex_1().flex().flex_col().child(format!("{} · {}", row.action, row.target)).child(div().truncate().text_xs().text_color(colors.muted_text).child(format!("actor {} · {}{}", row.actor_principal_id.map_or_else(|| "system".into(), |id| id.0.to_string()), row.status, row.error_message.map(|error| format!(" · {error}")).unwrap_or_default())))))))
                             .child(Button::new("load-more-operation-audit", "Load more").tone(ButtonTone::Ghost).disabled(self.operation_audit_cursor.is_none() || self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.load_operation_audit(true, cx)))))
-                        .when(self.administration_section == AdministrationSection::Github, |view| view.child(
-                            div().flex_1().flex().items_center().justify_center().child(
-                                div().max_w(px(520.)).p_4().rounded_sm().border_1().border_color(colors.subtle_border).bg(colors.surface).flex().flex_col().gap_3()
-                                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("GitHub admission is manifest-owned"))
-                                    .child(div().text_sm().text_color(colors.muted_text).child("Configure the authentication flow under [auth.github] and admitted identities under [[identity.github_principals]]."))
-                                    .child(Button::new("edit-manifest-github", "Edit in sift.toml").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.edit_manifest_section("auth.github", cx))))
-                            )
-                        ))
-                        .when(Self::interactive_manifest_mutation_available() && self.administration_section == AdministrationSection::Github, |view| view
-                            .child(div().text_xs().text_color(colors.muted_text).child("Allow a GitHub login to create a new account, or bind its first login to an existing principal."))
-                            .child(div().flex().gap_2().children(self.github_allowlist_inputs.iter().cloned()).child(Button::new("create-github-allowlist-entry", "Allow login").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_github_allowlist_entry(cx)))))
-                            .child(div().id("github-allowlist").flex_1().min_h_0().overflow_y_scroll().children(github_entries.into_iter().enumerate().map(|(index, entry)| { let entry_id = entry.id.0; let active = entry.revoked_at.is_none() && entry.consumed_at.is_none(); div().id(("github-allowlist-entry", index)).min_h(px(50.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border).child(div().min_w_0().flex_1().flex().flex_col().child(entry.normalized_login).child(div().text_xs().text_color(colors.muted_text).child(entry.target_principal_id.map_or_else(|| "Creates a new principal".into(), |id| format!("Links to principal {}", id.0))))).child(Button::new(("revoke-github-allowlist", index), if active { "Revoke" } else if entry.consumed_at.is_some() { "Used" } else { "Revoked" }).tone(ButtonTone::DangerGhost).disabled(!active || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_github_allowlist_entry(entry_id, cx)))) }))))
                         .children(self.principal_admin_error.clone().map(|error| div().text_sm().text_color(colors.danger).child(error)))
                         .into_any_element()
                 }
