@@ -1368,6 +1368,45 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadOperationApprovals => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .operation_approvals()
+                        .await
+                        .map_err(|error| format!("loading approvals failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::OperationApprovalsLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ApproveOperation {
+                approval_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .approve_operation(
+                            &approval_id,
+                            &sift_protocol::ExpectedRevision { expected_revision },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("approving operation failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::OperationApprovalChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()

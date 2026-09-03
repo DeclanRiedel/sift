@@ -17,6 +17,22 @@ pub struct ApprovalBinding {
 }
 
 impl MetadataStore {
+    pub fn list_operation_approvals(
+        &self,
+        principal_id: PrincipalId,
+    ) -> Result<Vec<OperationApproval>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id, principal_id, operation_id, input_fingerprint, expires_at,
+                    approved_at, consumed_at, revision
+             FROM operation_approval WHERE principal_id = ?1
+             ORDER BY created_at DESC, id DESC LIMIT 200",
+        )?;
+        let rows = statement.query_map([principal_id.0], operation_approval_from_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn create_operation_approval(
         &self,
         binding: &ApprovalBinding,
@@ -129,24 +145,26 @@ fn operation_approval(conn: &rusqlite::Connection, id: &str) -> Result<Option<Op
                 approved_at, consumed_at, revision
          FROM operation_approval WHERE id = ?1",
         [id],
-        |row| {
-            Ok(OperationApproval {
-                id: row.get(0)?,
-                principal_id: row.get(1)?,
-                operation_id: row.get(2)?,
-                input_fingerprint: row.get(3)?,
-                expires_at: row.get(4)?,
-                approved_at: row.get(5)?,
-                consumed_at: row.get(6)?,
-                revision: row
-                    .get::<_, i64>(7)?
-                    .try_into()
-                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(7, i64::MIN))?,
-            })
-        },
+        operation_approval_from_row,
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn operation_approval_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationApproval> {
+    Ok(OperationApproval {
+        id: row.get(0)?,
+        principal_id: row.get(1)?,
+        operation_id: row.get(2)?,
+        input_fingerprint: row.get(3)?,
+        expires_at: row.get(4)?,
+        approved_at: row.get(5)?,
+        consumed_at: row.get(6)?,
+        revision: row
+            .get::<_, i64>(7)?
+            .try_into()
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(7, i64::MIN))?,
+    })
 }
 
 #[cfg(test)]

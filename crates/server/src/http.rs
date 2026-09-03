@@ -269,7 +269,7 @@ pub fn app(state: AppState) -> Router {
         )
         .api_route(
             "/v1/operation-approvals",
-            post_with(create_operation_approval, doc("createOperationApproval", "Create a narrowly bound one-use approval request")),
+            get_with(list_operation_approvals, doc("listOperationApprovals", "List the current principal's operation approvals")).post_with(create_operation_approval, doc("createOperationApproval", "Create a narrowly bound one-use approval request")),
         )
         .api_route(
             "/v1/operation-approvals/:approval_id/approve",
@@ -5461,6 +5461,19 @@ async fn create_operation_approval(
     };
     Ok(Json(
         metadata_store_cloned(&state)?.create_operation_approval(&binding, None)?,
+    ))
+}
+
+async fn list_operation_approvals(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+) -> ApiResult<Json<Vec<sift_protocol::OperationApproval>>> {
+    let auth = auth
+        .as_ref()
+        .map(|Extension(auth)| auth)
+        .ok_or(ApiError::Unauthorized)?;
+    Ok(Json(
+        metadata_store_cloned(&state)?.list_operation_approvals(auth.principal_id)?,
     ))
 }
 

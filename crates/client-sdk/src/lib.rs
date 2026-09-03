@@ -156,6 +156,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listMetadataSavedQueries",
     "listMetadataVaultGrants",
     "listMetadataVaultItemVersions",
+    "listOperationApprovals",
     "listMetadataVaultItems",
     "listMetadataVaults",
     "listCatalogSnapshots",
@@ -4423,6 +4424,10 @@ impl Client {
         request: &sift_protocol::CreateOperationApprovalRequest,
     ) -> Result<OperationApproval> {
         self.post("/v1/operation-approvals", request).await
+    }
+
+    pub async fn operation_approvals(&self) -> Result<Vec<OperationApproval>> {
+        self.get("/v1/operation-approvals").await
     }
 
     pub async fn approve_operation(

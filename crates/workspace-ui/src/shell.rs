@@ -1778,6 +1778,7 @@ enum AdministrationSection {
     Principals,
     Tenants,
     Keys,
+    Approvals,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2847,6 +2848,11 @@ pub enum ExecutorCommand {
     RevokePrincipalKey {
         key_id: i64,
     },
+    LoadOperationApprovals,
+    ApproveOperation {
+        approval_id: String,
+        expected_revision: u64,
+    },
     CloseSession {
         session_id: sift_protocol::SessionId,
     },
@@ -3606,6 +3612,8 @@ pub enum ExecutorEvent {
     TenantMembershipChanged(Result<Option<sift_api_types::TenantMembership>, String>),
     PrincipalKeysLoaded(Result<Vec<sift_api_types::PrincipalKey>, String>),
     PrincipalKeyChanged(Result<(), String>),
+    OperationApprovalsLoaded(Result<Vec<sift_protocol::OperationApproval>, String>),
+    OperationApprovalChanged(Result<(), String>),
     SessionResourceClosed {
         result: Result<(), String>,
         active_connection_closed: bool,
@@ -9443,6 +9451,7 @@ pub struct WorkspaceShell {
     tenant_invitations: Vec<sift_api_types::TenantInvitation>,
     tenant_invitation_token: Option<String>,
     principal_keys: Vec<sift_api_types::PrincipalKey>,
+    operation_approvals: Vec<sift_protocol::OperationApproval>,
     connection_policy_profile: Option<i64>,
     connection_policy: Option<sift_protocol::ConnectionPolicy>,
     connection_policy_pending: bool,
@@ -10677,6 +10686,7 @@ impl WorkspaceShell {
             tenant_invitations: Vec::new(),
             tenant_invitation_token: None,
             principal_keys: Vec::new(),
+            operation_approvals: Vec::new(),
             connection_policy_profile: None,
             connection_policy: None,
             connection_policy_pending: false,
@@ -12025,6 +12035,25 @@ impl WorkspaceShell {
                         }
                         self.load_principal_keys(cx);
                     }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::OperationApprovalsLoaded(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(rows) => {
+                        self.operation_approvals = rows;
+                        self.principal_admin_error = None;
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::OperationApprovalChanged(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(()) => self.load_operation_approvals(cx),
                     Err(error) => self.principal_admin_error = Some(error),
                 }
                 cx.notify();
@@ -30957,6 +30986,7 @@ impl WorkspaceShell {
         match section {
             AdministrationSection::Tenants => self.load_tenant_invitations(cx),
             AdministrationSection::Keys => self.load_principal_keys(cx),
+            AdministrationSection::Approvals => self.load_operation_approvals(cx),
             AdministrationSection::Principals => cx.notify(),
         }
     }
@@ -31080,6 +31110,25 @@ impl WorkspaceShell {
 
     fn revoke_principal_key(&mut self, key_id: i64, cx: &mut Context<Self>) {
         self.send_principal_command(ExecutorCommand::RevokePrincipalKey { key_id }, cx);
+    }
+
+    fn load_operation_approvals(&mut self, cx: &mut Context<Self>) {
+        self.send_principal_command(ExecutorCommand::LoadOperationApprovals, cx);
+    }
+
+    fn approve_operation(
+        &mut self,
+        approval_id: String,
+        expected_revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_principal_command(
+            ExecutorCommand::ApproveOperation {
+                approval_id,
+                expected_revision,
+            },
+            cx,
+        );
     }
 
     fn issue_api_token(&mut self, cx: &mut Context<Self>) {
@@ -41610,16 +41659,18 @@ impl WorkspaceShell {
                     let sessions = self.principal_sessions.clone();
                     let invitations = self.tenant_invitations.clone();
                     let keys = self.principal_keys.clone();
+                    let approvals = self.operation_approvals.clone();
                     let principals = self.administration_section == AdministrationSection::Principals;
                     let tenants = self.administration_section == AdministrationSection::Tenants;
                     div().h(px(650.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between()
                             .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Server administration"))
-                            .child(Button::new("refresh-administration", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| match shell.administration_section { AdministrationSection::Principals => shell.load_principal_access(cx), AdministrationSection::Tenants => shell.load_tenant_invitations(cx), AdministrationSection::Keys => shell.load_principal_keys(cx) }))))
+                            .child(Button::new("refresh-administration", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| match shell.administration_section { AdministrationSection::Principals => shell.load_principal_access(cx), AdministrationSection::Tenants => shell.load_tenant_invitations(cx), AdministrationSection::Keys => shell.load_principal_keys(cx), AdministrationSection::Approvals => shell.load_operation_approvals(cx) }))))
                         .child(div().flex().gap_1()
                             .child(Button::new("admin-principals-tab", "Principals").tone(if principals { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Principals, cx))))
                             .child(Button::new("admin-tenants-tab", "Tenant access").tone(if tenants { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Tenants, cx))))
-                            .child(Button::new("admin-keys-tab", "Signing keys").tone(if self.administration_section == AdministrationSection::Keys { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Keys, cx)))))
+                            .child(Button::new("admin-keys-tab", "Signing keys").tone(if self.administration_section == AdministrationSection::Keys { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Keys, cx))))
+                            .child(Button::new("admin-approvals-tab", "Approvals").tone(if self.administration_section == AdministrationSection::Approvals { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Approvals, cx)))))
                         .when(principals, |view| view
                             .child(div().flex().gap_2().children(self.principal_create_inputs.iter().cloned()).child(Button::new("create-principal", "Create").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_principal(cx)))))
                             .child(div().pt_2().border_t_1().border_color(colors.subtle_border).flex().items_center().gap_2()
@@ -41662,6 +41713,9 @@ impl WorkspaceShell {
                         .when(self.administration_section == AdministrationSection::Keys, |view| view
                             .child(div().flex().gap_2().children(self.principal_key_inputs.iter().cloned()).child(Button::new("register-principal-key", "Register key").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.register_principal_key(cx)))))
                             .child(div().id("principal-key-list").flex_1().min_h_0().overflow_y_scroll().children(keys.into_iter().enumerate().map(|(index, key)| { let key_id = key.id.0; div().id(("principal-key", index)).min_h(px(48.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border).child(div().min_w_0().flex_1().flex().flex_col().child(key.label).child(div().text_xs().font_family("monospace").text_color(colors.muted_text).child(key.fingerprint))).child(Button::new(("revoke-principal-key", index), "Revoke").tone(ButtonTone::DangerGhost).disabled(key.revoked_at.is_some() || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_principal_key(key_id, cx)))) }))))
+                        .when(self.administration_section == AdministrationSection::Approvals, |view| view
+                            .child(div().text_xs().text_color(colors.muted_text).child("Pending extension operations are scoped to your identity and expire automatically."))
+                            .child(div().id("operation-approval-list").flex_1().min_h_0().overflow_y_scroll().children(approvals.into_iter().enumerate().map(|(index, approval)| { let approval_id = approval.id.clone(); let revision = approval.revision; let pending = approval.approved_at.is_none() && approval.consumed_at.is_none(); div().id(("operation-approval", index)).min_h(px(52.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border).child(div().min_w_0().flex_1().flex().flex_col().child(approval.operation_id).child(div().text_xs().font_family("monospace").text_color(colors.muted_text).child(format!("{} · expires {}", approval.id, approval.expires_at)))).child(Button::new(("approve-operation", index), if pending { "Approve" } else if approval.consumed_at.is_some() { "Consumed" } else { "Approved" }).tone(if pending { ButtonTone::Accent } else { ButtonTone::Neutral }).disabled(!pending || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.approve_operation(approval_id.clone(), revision, cx)))) }))))
                         .children(self.principal_admin_error.clone().map(|error| div().text_sm().text_color(colors.danger).child(error)))
                         .into_any_element()
                 }
