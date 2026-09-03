@@ -61,6 +61,17 @@ pub struct GenerationView {
     pub current: bool,
     #[serde(flatten)]
     pub record: GenerationRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apply: Option<GenerationApplyOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationApplyOutcome {
+    pub status: String,
+    pub at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 impl InstanceRoot {
@@ -317,6 +328,7 @@ impl InstanceRoot {
                     .as_ref()
                     .is_some_and(|selected| selected.generation == number),
                 record,
+                apply: read_generation_apply(&entry.path())?,
             });
         }
         records.sort_by_key(|view| view.record.generation);
@@ -404,13 +416,31 @@ impl InstanceRoot {
         store
             .apply_migrations(false)
             .context("preparing instance metadata schema")?;
-        let metadata = store
+        let metadata = match store
             .apply_instance_manifest(&self.manifest, &self.lock, record.generation, allow_destroy)
             .await
-            .context("reconciling manifest-managed resources")?;
-        self.realize_extensions(state_dir, &store)
-            .await
-            .context("realizing manifest-managed extensions")?;
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                record_generation_apply(
+                    state_dir,
+                    record.generation,
+                    "failed",
+                    Some(&error.to_string()),
+                )?;
+                return Err(error).context("reconciling manifest-managed resources");
+            }
+        };
+        if let Err(error) = self.realize_extensions(state_dir, &store).await {
+            record_generation_apply(
+                state_dir,
+                record.generation,
+                "failed",
+                Some(&error.to_string()),
+            )?;
+            return Err(error).context("realizing manifest-managed extensions");
+        }
+        record_generation_apply(state_dir, record.generation, "succeeded", None)?;
 
         if !unchanged {
             write_atomic_private(
@@ -843,6 +873,36 @@ fn read_current(state_dir: &Path) -> anyhow::Result<Option<GenerationRecord>> {
     Ok(Some(record))
 }
 
+fn read_generation_apply(directory: &Path) -> anyhow::Result<Option<GenerationApplyOutcome>> {
+    let path = directory.join("apply-report.json");
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => serde_json::from_slice(&read_bounded_bytes(&path, 16 * 1024)?)
+            .map(Some)
+            .context("decoding generation apply report"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("reading generation apply report"),
+    }
+}
+
+fn record_generation_apply(
+    state_dir: &Path,
+    generation: u64,
+    status: &str,
+    message: Option<&str>,
+) -> anyhow::Result<()> {
+    let message = message.map(|message| message.chars().take(2_048).collect());
+    let report = GenerationApplyOutcome {
+        status: status.into(),
+        at: chrono::Utc::now(),
+        message,
+    };
+    write_atomic_private(
+        &state_dir.join(GENERATIONS_DIR).join(generation.to_string()),
+        "apply-report.json",
+        &serde_json::to_vec_pretty(&report)?,
+    )
+}
+
 fn next_generation(generations: &Path) -> anyhow::Result<u64> {
     let mut maximum = 0_u64;
     for entry in std::fs::read_dir(generations)
@@ -966,6 +1026,12 @@ mod tests {
             instance.generation_manifest(&state, 1).unwrap(),
             instance.manifest
         );
+        record_generation_apply(&state, 1, "failed", Some(&"x".repeat(3_000))).unwrap();
+        let apply = read_generation_apply(&state.join("generations/1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(apply.status, "failed");
+        assert_eq!(apply.message.unwrap().chars().count(), 2_048);
     }
 
     #[test]

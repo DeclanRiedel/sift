@@ -2067,6 +2067,8 @@ pub struct InstanceGenerationPresentation {
     pub current: bool,
     pub created_at: String,
     pub configuration_digest: String,
+    pub apply_status: Option<String>,
+    pub apply_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41437,8 +41439,8 @@ impl WorkspaceShell {
                             let generation_number = generation.generation;
                             div().id(("instance-generation", index)).min_h(px(32.)).px_2()
                                 .flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border)
-                                .child(Badge::new(format!("#{}", generation.generation)).tone(if generation.current { Tone::Success } else { Tone::Neutral }))
-                                .child(div().min_w_0().flex_1().truncate().text_xs().child(format!("{} · {}", generation.created_at, generation.configuration_digest.chars().take(15).collect::<String>())))
+                                .child(Badge::new(format!("#{}", generation.generation)).tone(if generation.apply_status.as_deref() == Some("failed") { Tone::Danger } else if generation.current { Tone::Success } else { Tone::Neutral }))
+                                .child(div().min_w_0().flex_1().truncate().text_xs().child(format!("{} · {}{}", generation.created_at, generation.configuration_digest.chars().take(15).collect::<String>(), generation.apply_message.as_deref().map(|message| format!(" · {message}")).unwrap_or_default())))
                                 .child(Button::new(("review-generation", index), if generation.current { "Current" } else { "Restore for review" })
                                     .tone(ButtonTone::Ghost)
                                     .disabled(generation.current || self.instance_operation_pending)

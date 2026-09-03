@@ -1005,6 +1005,11 @@ async fn inspect_root(
                 current: generation.current,
                 created_at: generation.record.created_at.to_rfc3339(),
                 configuration_digest: generation.record.configuration_digest.clone(),
+                apply_status: generation.apply.as_ref().map(|apply| apply.status.clone()),
+                apply_message: generation
+                    .apply
+                    .as_ref()
+                    .and_then(|apply| apply.message.clone()),
             })
             .collect(),
         drifted,
