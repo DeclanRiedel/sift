@@ -901,6 +901,44 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadConnectionPolicy { profile_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .connection_policy(sift_api_types::ConnectionProfileId(profile_id))
+                        .await
+                        .map_err(|error| format!("loading connection policy failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ConnectionPolicyLoaded { profile_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SaveConnectionPolicy {
+                profile_id,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .update_connection_policy(
+                            sift_api_types::ConnectionProfileId(profile_id),
+                            request,
+                        )
+                        .await
+                        .map_err(|error| format!("saving connection policy failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ConnectionPolicySaved { profile_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()

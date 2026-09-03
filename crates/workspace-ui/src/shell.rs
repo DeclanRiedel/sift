@@ -1664,6 +1664,7 @@ pub enum Modal {
     Keymaps,
     Account,
     ApiTokens,
+    ConnectionPolicy,
     ConnectionUrl,
     DatabaseConnection,
     ConfirmDeleteConnection(ConnectionNavEntry),
@@ -2711,6 +2712,13 @@ pub enum ExecutorCommand {
     RevokeApiToken {
         token_id: sift_api_types::ApiTokenId,
     },
+    LoadConnectionPolicy {
+        profile_id: i64,
+    },
+    SaveConnectionPolicy {
+        profile_id: i64,
+        request: sift_protocol::UpdateConnectionPolicyRequest,
+    },
     CloseSession {
         session_id: sift_protocol::SessionId,
     },
@@ -3422,6 +3430,14 @@ pub enum ExecutorEvent {
     ApiTokenRevoked {
         token_id: sift_api_types::ApiTokenId,
         result: Result<(), String>,
+    },
+    ConnectionPolicyLoaded {
+        profile_id: i64,
+        result: Result<sift_protocol::ConnectionPolicy, String>,
+    },
+    ConnectionPolicySaved {
+        profile_id: i64,
+        result: Result<sift_protocol::ConnectionPolicy, String>,
     },
     SessionResourceClosed {
         result: Result<(), String>,
@@ -9035,10 +9051,15 @@ pub struct WorkspaceShell {
     server_connection_ssh: bool,
     account_pending: bool,
     account_error: Option<String>,
+    connection_policy_schemas_input: Entity<TextInput>,
     api_tokens: Vec<sift_api_types::ApiTokenRow>,
     api_token_plaintext: Option<String>,
     api_tokens_pending: bool,
     api_tokens_error: Option<String>,
+    connection_policy_profile: Option<i64>,
+    connection_policy: Option<sift_protocol::ConnectionPolicy>,
+    connection_policy_pending: bool,
+    connection_policy_error: Option<String>,
     server_sessions: Vec<sift_protocol::SessionInfo>,
     server_sessions_loading: bool,
     server_sessions_error: Option<String>,
@@ -9492,6 +9513,9 @@ impl WorkspaceShell {
         });
         let api_token_name_input =
             cx.new(|cx| TextInput::new("", "Token name", cx).aria_label("API token name"));
+        let connection_policy_schemas_input = cx.new(|cx| {
+            TextInput::new("", "public, catalog.schema", cx).aria_label("Allowed database schemas")
+        });
         let connection_url_input = cx.new(|cx| {
             TextInput::new("", "postgresql://user:password@localhost:5432/database", cx)
                 .aria_label("PostgreSQL connection URL")
@@ -10172,10 +10196,15 @@ impl WorkspaceShell {
             server_connection_ssh: false,
             account_pending: false,
             account_error: None,
+            connection_policy_schemas_input,
             api_tokens: Vec::new(),
             api_token_plaintext: None,
             api_tokens_pending: false,
             api_tokens_error: None,
+            connection_policy_profile: None,
+            connection_policy: None,
+            connection_policy_pending: false,
+            connection_policy_error: None,
             server_sessions: Vec::new(),
             server_sessions_loading: false,
             server_sessions_error: None,
@@ -11306,6 +11335,37 @@ impl WorkspaceShell {
                         self.api_tokens_error = None;
                     }
                     Err(message) => self.api_tokens_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ConnectionPolicyLoaded { profile_id, result }
+            | ExecutorEvent::ConnectionPolicySaved { profile_id, result } => {
+                self.connection_policy_pending = false;
+                match result {
+                    Ok(policy) => {
+                        let schemas = policy
+                            .allowed_schemas
+                            .as_ref()
+                            .map(|schemas| {
+                                schemas
+                                    .iter()
+                                    .map(|selector| match &selector.catalog {
+                                        Some(catalog) => {
+                                            format!("{catalog}.{}", selector.schema)
+                                        }
+                                        None => selector.schema.clone(),
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default();
+                        self.connection_policy_schemas_input
+                            .update(cx, |input, cx| input.set_text(schemas, cx));
+                        self.connection_policy_profile = Some(profile_id);
+                        self.connection_policy = Some(policy);
+                        self.connection_policy_error = None;
+                    }
+                    Err(message) => self.connection_policy_error = Some(message),
                 }
                 cx.notify();
             }
@@ -29972,6 +30032,108 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_connection_policy(&mut self, cx: &mut Context<Self>) {
+        let profile_id = match self.connection_status {
+            ConnectionStatus::Connected { profile_id, .. }
+            | ConnectionStatus::Connecting { profile_id }
+            | ConnectionStatus::Failed { profile_id, .. } => profile_id,
+            ConnectionStatus::Disconnected => {
+                self.show_error_toast("Connect to a database before editing its policy".into(), cx);
+                return;
+            }
+        };
+        self.modal = Some(Modal::ConnectionPolicy);
+        self.connection_policy_profile = Some(profile_id);
+        self.connection_policy_pending = true;
+        self.connection_policy_error = None;
+        if self.executor_sender.as_ref().is_none_or(|sender| {
+            sender
+                .send(ExecutorCommand::LoadConnectionPolicy { profile_id })
+                .is_err()
+        }) {
+            self.connection_policy_pending = false;
+            self.connection_policy_error = Some("Connection policy service is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn toggle_connection_policy_read_only(&mut self, cx: &mut Context<Self>) {
+        if let Some(policy) = &mut self.connection_policy {
+            policy.read_only = !policy.read_only;
+            cx.notify();
+        }
+    }
+
+    fn cycle_connection_policy_role(&mut self, cx: &mut Context<Self>) {
+        if let Some(policy) = &mut self.connection_policy {
+            policy.minimum_tenant_role = match policy.minimum_tenant_role {
+                sift_protocol::TenantRole::Viewer => sift_protocol::TenantRole::Member,
+                sift_protocol::TenantRole::Member => sift_protocol::TenantRole::Admin,
+                sift_protocol::TenantRole::Admin => sift_protocol::TenantRole::Owner,
+                sift_protocol::TenantRole::Owner => sift_protocol::TenantRole::Viewer,
+            };
+            cx.notify();
+        }
+    }
+
+    fn save_connection_policy(&mut self, cx: &mut Context<Self>) {
+        let (Some(profile_id), Some(policy)) = (
+            self.connection_policy_profile,
+            self.connection_policy.clone(),
+        ) else {
+            return;
+        };
+        let schemas = self
+            .connection_policy_schemas_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let allowed_schemas = if schemas.is_empty() {
+            None
+        } else {
+            let parsed = schemas
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    let (catalog, schema) = value
+                        .split_once('.')
+                        .map_or((None, value), |(catalog, schema)| {
+                            (Some(catalog.to_owned()), schema)
+                        });
+                    sift_protocol::SchemaSelector {
+                        catalog,
+                        schema: schema.to_owned(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            Some(parsed)
+        };
+        let request = sift_protocol::UpdateConnectionPolicyRequest {
+            expected_revision: Some(policy.revision),
+            minimum_tenant_role: policy.minimum_tenant_role,
+            read_only: policy.read_only,
+            allowed_ops: policy.allowed_ops,
+            blocked_ops: policy.blocked_ops,
+            allowed_schemas,
+        };
+        self.connection_policy_pending = true;
+        self.connection_policy_error = None;
+        if self.executor_sender.as_ref().is_none_or(|sender| {
+            sender
+                .send(ExecutorCommand::SaveConnectionPolicy {
+                    profile_id,
+                    request,
+                })
+                .is_err()
+        }) {
+            self.connection_policy_pending = false;
+            self.connection_policy_error = Some("Connection policy service is unavailable".into());
+        }
+        cx.notify();
+    }
+
     fn sign_in_with_github(&mut self, cx: &mut Context<Self>) {
         if self.account_pending {
             return;
@@ -37721,6 +37883,7 @@ impl WorkspaceShell {
             let account = matches!(modal, Modal::Account);
             let settings = matches!(modal, Modal::Settings);
             let api_tokens = matches!(modal, Modal::ApiTokens);
+            let connection_policy = matches!(modal, Modal::ConnectionPolicy);
             let themes = matches!(modal, Modal::Themes);
             let keymaps = matches!(modal, Modal::Keymaps);
             let app_bar_modal = matches!(
@@ -37750,6 +37913,7 @@ impl WorkspaceShell {
                 0.0
             } else if settings
                 || api_tokens
+                || connection_policy
                 || themes
                 || keymaps
                 || command_palette
@@ -39978,6 +40142,138 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::ConnectionPolicy => {
+                    let policy = self.connection_policy.clone();
+                    let read_only = policy.as_ref().is_some_and(|policy| policy.read_only);
+                    let role = policy
+                        .as_ref()
+                        .map(|policy| format!("{:?}", policy.minimum_tenant_role))
+                        .unwrap_or_else(|| "Loading…".into());
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Connection policy"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(format!(
+                                            "Profile {}",
+                                            self.connection_policy_profile
+                                                .map_or_else(|| "—".into(), |id| id.to_string())
+                                        )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .p_3()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.subtle_border)
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child("Read-only access")
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child("Block operations that can mutate data."),
+                                        ),
+                                )
+                                .child(
+                                    Button::new(
+                                        "toggle-connection-policy-read-only",
+                                        if read_only { "On" } else { "Off" },
+                                    )
+                                    .tone(if read_only {
+                                        ButtonTone::Accent
+                                    } else {
+                                        ButtonTone::Neutral
+                                    })
+                                    .disabled(policy.is_none() || self.connection_policy_pending)
+                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                        shell.toggle_connection_policy_read_only(cx)
+                                    })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child("Minimum tenant role")
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.muted_text)
+                                                .child("Click the role to cycle the access floor."),
+                                        ),
+                                )
+                                .child(
+                                    Button::new("cycle-connection-policy-role", role)
+                                        .tone(ButtonTone::Neutral)
+                                        .disabled(policy.is_none() || self.connection_policy_pending)
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.cycle_connection_policy_role(cx)
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child("Allowed schemas")
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("Comma-separated schema or catalog.schema names. Empty is unrestricted."),
+                                )
+                                .child(self.connection_policy_schemas_input.clone()),
+                        )
+                        .children(self.connection_policy_error.clone().map(|error| {
+                            div().text_sm().text_color(colors.danger).child(error)
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .child(
+                                    Button::new("save-connection-policy", "Save policy")
+                                        .tone(ButtonTone::Accent)
+                                        .loading(self.connection_policy_pending)
+                                        .disabled(policy.is_none())
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.save_connection_policy(cx)
+                                        })),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 Modal::Settings => {
                     let vim_mode_default = self.vim_mode_default();
                     let dark_theme = self.dark_theme;
@@ -40074,6 +40370,11 @@ impl WorkspaceShell {
                             div().pt_3().border_t_1().border_color(colors.subtle_border).flex().items_center().justify_between().gap_3()
                                 .child(div().flex().flex_col().gap_1().child("API tokens").child(div().text_xs().text_color(colors.muted_text).child("Create and revoke tokens for API clients.")))
                                 .child(Button::new("manage-api-tokens", "Manage…").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_api_tokens(cx)))),
+                        )
+                        .child(
+                            div().flex().items_center().justify_between().gap_3()
+                                .child(div().flex().flex_col().gap_1().child("Connection policy").child(div().text_xs().text_color(colors.muted_text).child("Set role, write, and schema access for the active connection.")))
+                                .child(Button::new("manage-connection-policy", "Manage…").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_connection_policy(cx)))),
                         )
                         .child(toggle_row(
                             "settings-theme",
@@ -45285,6 +45586,7 @@ impl WorkspaceShell {
                 Modal::ServerPicker
                     | Modal::Settings
                     | Modal::ApiTokens
+                    | Modal::ConnectionPolicy
                     | Modal::Themes
                     | Modal::Keymaps
                     | Modal::Account
