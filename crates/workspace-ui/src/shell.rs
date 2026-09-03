@@ -1666,6 +1666,7 @@ pub enum Modal {
     ApiTokens,
     ConnectionPolicy,
     TenantUsage,
+    VcsDiagnostics,
     ConnectionUrl,
     DatabaseConnection,
     ConfirmDeleteConnection(ConnectionNavEntry),
@@ -2730,6 +2731,7 @@ pub enum ExecutorCommand {
     ClearTenantLimits {
         tenant_id: i64,
     },
+    LoadVcsDiagnostics,
     CloseSession {
         session_id: sift_protocol::SessionId,
     },
@@ -3452,6 +3454,7 @@ pub enum ExecutorEvent {
     },
     TenantUsageLoaded(Result<sift_protocol::TenantUsageSnapshot, String>),
     TenantLimitsSaved(Result<sift_protocol::TenantUsageSnapshot, String>),
+    VcsDiagnosticsLoaded(Result<sift_protocol::VcsAdapterDiagnostics, String>),
     SessionResourceClosed {
         result: Result<(), String>,
         active_connection_closed: bool,
@@ -9077,6 +9080,9 @@ pub struct WorkspaceShell {
     tenant_usage: Option<sift_protocol::TenantUsageSnapshot>,
     tenant_usage_pending: bool,
     tenant_usage_error: Option<String>,
+    vcs_diagnostics: Option<sift_protocol::VcsAdapterDiagnostics>,
+    vcs_diagnostics_pending: bool,
+    vcs_diagnostics_error: Option<String>,
     server_sessions: Vec<sift_protocol::SessionInfo>,
     server_sessions_loading: bool,
     server_sessions_error: Option<String>,
@@ -10241,6 +10247,9 @@ impl WorkspaceShell {
             tenant_usage: None,
             tenant_usage_pending: false,
             tenant_usage_error: None,
+            vcs_diagnostics: None,
+            vcs_diagnostics_pending: false,
+            vcs_diagnostics_error: None,
             server_sessions: Vec::new(),
             server_sessions_loading: false,
             server_sessions_error: None,
@@ -11428,6 +11437,17 @@ impl WorkspaceShell {
                         self.tenant_usage_error = None;
                     }
                     Err(message) => self.tenant_usage_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::VcsDiagnosticsLoaded(result) => {
+                self.vcs_diagnostics_pending = false;
+                match result {
+                    Ok(diagnostics) => {
+                        self.vcs_diagnostics = Some(diagnostics);
+                        self.vcs_diagnostics_error = None;
+                    }
+                    Err(message) => self.vcs_diagnostics_error = Some(message),
                 }
                 cx.notify();
             }
@@ -30270,6 +30290,21 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_vcs_diagnostics(&mut self, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::VcsDiagnostics);
+        self.vcs_diagnostics_pending = true;
+        self.vcs_diagnostics_error = None;
+        if self
+            .executor_sender
+            .as_ref()
+            .is_none_or(|sender| sender.send(ExecutorCommand::LoadVcsDiagnostics).is_err())
+        {
+            self.vcs_diagnostics_pending = false;
+            self.vcs_diagnostics_error = Some("VCS diagnostics service is unavailable".into());
+        }
+        cx.notify();
+    }
+
     fn sign_in_with_github(&mut self, cx: &mut Context<Self>) {
         if self.account_pending {
             return;
@@ -38021,6 +38056,7 @@ impl WorkspaceShell {
             let api_tokens = matches!(modal, Modal::ApiTokens);
             let connection_policy = matches!(modal, Modal::ConnectionPolicy);
             let tenant_usage = matches!(modal, Modal::TenantUsage);
+            let vcs_diagnostics = matches!(modal, Modal::VcsDiagnostics);
             let themes = matches!(modal, Modal::Themes);
             let keymaps = matches!(modal, Modal::Keymaps);
             let app_bar_modal = matches!(
@@ -38052,6 +38088,7 @@ impl WorkspaceShell {
                 || api_tokens
                 || connection_policy
                 || tenant_usage
+                || vcs_diagnostics
                 || themes
                 || keymaps
                 || command_palette
@@ -40513,6 +40550,53 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::VcsDiagnostics => {
+                    let diagnostics = self.vcs_diagnostics.clone();
+                    let rows = diagnostics.as_ref().map(|diagnostics| {
+                        let mut rows = vec![
+                            ("Adapter", diagnostics.adapter_id.clone().unwrap_or_else(|| "Not configured".into())),
+                            ("Generation", diagnostics.generation.clone().unwrap_or_else(|| "—".into())),
+                            ("Executable", diagnostics.executable.clone().unwrap_or_else(|| "—".into())),
+                            ("Version", diagnostics.executable_version.clone().unwrap_or_else(|| "—".into())),
+                            ("Network", if diagnostics.network_enabled { "Enabled".into() } else { "Disabled".into() }),
+                            ("Credential helper", if diagnostics.credential_helper_available { "Available".into() } else { "Unavailable".into() }),
+                        ];
+                        if let Some(limits) = &diagnostics.limits {
+                            rows.push(("Timeouts", format!("{}s local · {}s network", limits.local_timeout_secs, limits.network_timeout_secs)));
+                            rows.push(("Output limits", format!("{} bytes output · {} bytes/file", limits.max_output_bytes, limits.max_file_bytes)));
+                            rows.push(("Change limits", format!("{} status · {} commits · {} diff files", limits.max_status_entries, limits.max_history_page, limits.max_diff_files)));
+                        }
+                        rows
+                    }).unwrap_or_default();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("VCS diagnostics"))
+                                .child(Button::new("refresh-vcs-diagnostics", "Refresh").tone(ButtonTone::Ghost).loading(self.vcs_diagnostics_pending).on_click(cx.listener(|shell, _, _, cx| shell.open_vcs_diagnostics(cx)))),
+                        )
+                        .children(diagnostics.as_ref().map(|diagnostics| {
+                            div()
+                                .p_3()
+                                .rounded_sm()
+                                .bg(if diagnostics.healthy { colors.success_muted } else { colors.danger_muted })
+                                .text_color(if diagnostics.healthy { colors.success } else { colors.danger })
+                                .child(if !diagnostics.enabled { "VCS integration is disabled" } else if diagnostics.healthy { "VCS adapter is healthy" } else { "VCS adapter needs attention" })
+                        }))
+                        .child(div().children(rows.into_iter().map(|(label, value)| {
+                            div().min_h(px(36.)).py_1().flex().items_center().gap_3().border_b_1().border_color(colors.subtle_border)
+                                .child(div().w(px(150.)).text_color(colors.muted_text).child(label))
+                                .child(div().min_w_0().flex_1().child(value))
+                        })))
+                        .children(diagnostics.and_then(|diagnostics| diagnostics.diagnostic).map(|message| div().p_3().rounded_sm().bg(colors.active_surface).child(message)))
+                        .children(self.vcs_diagnostics_error.clone().map(|error| div().text_sm().text_color(colors.danger).child(error)))
+                        .into_any_element()
+                }
                 Modal::Settings => {
                     let vim_mode_default = self.vim_mode_default();
                     let dark_theme = self.dark_theme;
@@ -40619,6 +40703,11 @@ impl WorkspaceShell {
                             div().flex().items_center().justify_between().gap_3()
                                 .child(div().flex().flex_col().gap_1().child("Tenant limits").child(div().text_xs().text_color(colors.muted_text).child("Inspect live usage and configure resource ceilings.")))
                                 .child(Button::new("manage-tenant-usage", "Manage…").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_tenant_usage(cx)))),
+                        )
+                        .child(
+                            div().flex().items_center().justify_between().gap_3()
+                                .child(div().flex().flex_col().gap_1().child("VCS diagnostics").child(div().text_xs().text_color(colors.muted_text).child("Inspect adapter health, executable details, and safety limits.")))
+                                .child(Button::new("open-vcs-diagnostics", "Inspect…").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_vcs_diagnostics(cx)))),
                         )
                         .child(toggle_row(
                             "settings-theme",
@@ -45832,6 +45921,7 @@ impl WorkspaceShell {
                     | Modal::ApiTokens
                     | Modal::ConnectionPolicy
                     | Modal::TenantUsage
+                    | Modal::VcsDiagnostics
                     | Modal::Themes
                     | Modal::Keymaps
                     | Modal::Account

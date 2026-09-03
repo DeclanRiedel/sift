@@ -999,6 +999,22 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadVcsDiagnostics => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .vcs_diagnostics()
+                        .await
+                        .map_err(|error| format!("loading VCS diagnostics failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::VcsDiagnosticsLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()
