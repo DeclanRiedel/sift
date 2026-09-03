@@ -11844,6 +11844,20 @@ impl WorkspaceShell {
                         )
                     });
                 }
+                self.selected_instance_credential = self
+                    .selected_instance_credential
+                    .take()
+                    .filter(|slot| {
+                        plan.credentials.iter().any(|credential| {
+                            credential.slot == *slot && credential.readiness != "ready"
+                        })
+                    })
+                    .or_else(|| {
+                        plan.credentials
+                            .iter()
+                            .find(|credential| credential.readiness != "ready")
+                            .map(|credential| credential.slot.clone())
+                    });
                 self.instance_plan = Some(*plan);
                 self.modal = Some(Modal::InstanceSetup);
             }
@@ -31192,8 +31206,9 @@ impl WorkspaceShell {
             return;
         };
         let secret = self.instance_secret_input.read(cx).text().to_owned();
-        if secret.is_empty() {
-            self.instance_operation_error = Some("Credential value is required".into());
+        if secret.is_empty() || secret.len() > 16 * 1024 {
+            self.instance_operation_error =
+                Some("Credential value must be non-empty and at most 16 KiB".into());
             cx.notify();
             return;
         }
@@ -31217,6 +31232,22 @@ impl WorkspaceShell {
             self.instance_secret_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
+        cx.notify();
+    }
+
+    fn select_instance_credential(
+        &mut self,
+        slot: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_instance_credential = Some(slot);
+        self.instance_operation_error = None;
+        self.instance_secret_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.instance_secret_input
+            .focus_handle(cx)
+            .focus(window, cx);
         cx.notify();
     }
 
@@ -41348,9 +41379,8 @@ impl WorkspaceShell {
                             .rounded_sm()
                             .when(selected, |row| row.bg(colors.active_surface))
                             .hover(|row| row.bg(colors.hovered_surface))
-                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                shell.selected_instance_credential = Some(slot.clone());
-                                cx.notify();
+                            .on_click(cx.listener(move |shell, _, window, cx| {
+                                shell.select_instance_credential(slot.clone(), window, cx);
                             }))
                             .child(
                                 div()
@@ -41639,26 +41669,17 @@ impl WorkspaceShell {
                             )
                             .child(div().flex().flex_col().gap_1().children(credential_rows))
                         })
-                        .children(selected_slot.map(|_| {
-                            div()
-                                .flex()
-                                .gap_2()
+                        .children(selected_slot.and_then(|slot| plan.credentials.iter().find(|credential| credential.slot == slot).cloned()).map(|credential| {
+                            div().p_2().rounded_sm().border_1().border_color(colors.subtle_border).bg(colors.surface).flex().flex_col().gap_2()
+                                .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Provide {}", credential.kind.label())))
+                                .child(div().text_xs().text_color(colors.muted_text).child(format!("Used by {} · stored in the destination secret backend, never sift.toml or SQLite", credential.consumer)))
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(colors.subtle_border)
-                                        .child(self.instance_secret_input.clone()),
-                                )
-                                .child(
-                                    Button::new("import-instance-credential", "Import")
-                                        .tone(ButtonTone::Accent)
-                                        .loading(pending)
-                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                            shell.import_instance_credential(cx)
-                                        })),
+                                    div().flex().gap_2()
+                                        .child(div().flex_1().min_w_0().rounded_sm().border_1().border_color(colors.subtle_border).child(self.instance_secret_input.clone()))
+                                        .child(Button::new("import-instance-credential", "Store securely")
+                                            .tone(ButtonTone::Accent)
+                                            .loading(pending)
+                                            .on_click(cx.listener(|shell, _, _, cx| shell.import_instance_credential(cx)))),
                                 )
                         }))
                         .children(self.instance_operation_error.as_ref().map(|error| {
