@@ -1316,6 +1316,58 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadPrincipalKeys => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .principal_keys()
+                        .await
+                        .map_err(|error| format!("loading signing keys failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::PrincipalKeysLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RegisterPrincipalKey { public_key, label } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .register_principal_key(sift_protocol::RegisterPrincipalKeyRequest {
+                            public_key,
+                            label,
+                        })
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("registering signing key failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::PrincipalKeyChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RevokePrincipalKey { key_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .revoke_principal_key(key_id)
+                        .await
+                        .map_err(|error| format!("revoking signing key failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::PrincipalKeyChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()
