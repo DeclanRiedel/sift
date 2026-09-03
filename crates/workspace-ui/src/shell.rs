@@ -1663,6 +1663,7 @@ pub enum Modal {
     Themes,
     Keymaps,
     Account,
+    ApiTokens,
     ConnectionUrl,
     DatabaseConnection,
     ConfirmDeleteConnection(ConnectionNavEntry),
@@ -2702,6 +2703,14 @@ pub enum ExecutorCommand {
     },
     Disconnect,
     LoadSessions,
+    LoadApiTokens,
+    IssueApiToken {
+        name: String,
+        tenant_id: Option<i64>,
+    },
+    RevokeApiToken {
+        token_id: sift_api_types::ApiTokenId,
+    },
     CloseSession {
         session_id: sift_protocol::SessionId,
     },
@@ -3408,6 +3417,12 @@ pub enum ExecutorCommand {
 pub enum ExecutorEvent {
     Connection(ConnectionStatus),
     SessionsLoaded(Result<Vec<sift_protocol::SessionInfo>, String>),
+    ApiTokensLoaded(Result<Vec<sift_api_types::ApiTokenRow>, String>),
+    ApiTokenIssued(Result<sift_api_types::IssueTokenResponse, String>),
+    ApiTokenRevoked {
+        token_id: sift_api_types::ApiTokenId,
+        result: Result<(), String>,
+    },
     SessionResourceClosed {
         result: Result<(), String>,
         active_connection_closed: bool,
@@ -8713,6 +8728,7 @@ pub struct WorkspaceShell {
     server_token_input: Entity<TextInput>,
     account_username_input: Entity<TextInput>,
     account_password_input: Entity<TextInput>,
+    api_token_name_input: Entity<TextInput>,
     connection_url_input: Entity<TextInput>,
     database_name_input: Entity<TextInput>,
     database_host_input: Entity<TextInput>,
@@ -9019,6 +9035,10 @@ pub struct WorkspaceShell {
     server_connection_ssh: bool,
     account_pending: bool,
     account_error: Option<String>,
+    api_tokens: Vec<sift_api_types::ApiTokenRow>,
+    api_token_plaintext: Option<String>,
+    api_tokens_pending: bool,
+    api_tokens_error: Option<String>,
     server_sessions: Vec<sift_protocol::SessionInfo>,
     server_sessions_loading: bool,
     server_sessions_error: Option<String>,
@@ -9470,6 +9490,8 @@ impl WorkspaceShell {
                 .aria_label("Account password")
                 .masked()
         });
+        let api_token_name_input =
+            cx.new(|cx| TextInput::new("", "Token name", cx).aria_label("API token name"));
         let connection_url_input = cx.new(|cx| {
             TextInput::new("", "postgresql://user:password@localhost:5432/database", cx)
                 .aria_label("PostgreSQL connection URL")
@@ -9857,6 +9879,7 @@ impl WorkspaceShell {
             server_token_input,
             account_username_input,
             account_password_input,
+            api_token_name_input,
             connection_url_input,
             database_name_input,
             database_host_input,
@@ -10149,6 +10172,10 @@ impl WorkspaceShell {
             server_connection_ssh: false,
             account_pending: false,
             account_error: None,
+            api_tokens: Vec::new(),
+            api_token_plaintext: None,
+            api_tokens_pending: false,
+            api_tokens_error: None,
             server_sessions: Vec::new(),
             server_sessions_loading: false,
             server_sessions_error: None,
@@ -11241,6 +11268,44 @@ impl WorkspaceShell {
                         self.server_sessions_error = None;
                     }
                     Err(message) => self.server_sessions_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ApiTokensLoaded(result) => {
+                self.api_tokens_pending = false;
+                match result {
+                    Ok(tokens) => {
+                        self.api_tokens = tokens;
+                        self.api_tokens_error = None;
+                    }
+                    Err(message) => self.api_tokens_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ApiTokenIssued(result) => {
+                self.api_tokens_pending = false;
+                match result {
+                    Ok(response) => {
+                        self.api_tokens
+                            .retain(|token| token.id != response.token.id);
+                        self.api_tokens.insert(0, response.token);
+                        self.api_token_plaintext = Some(response.plaintext);
+                        self.api_token_name_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                        self.api_tokens_error = None;
+                    }
+                    Err(message) => self.api_tokens_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ApiTokenRevoked { token_id, result } => {
+                self.api_tokens_pending = false;
+                match result {
+                    Ok(()) => {
+                        self.api_tokens.retain(|token| token.id != token_id);
+                        self.api_tokens_error = None;
+                    }
+                    Err(message) => self.api_tokens_error = Some(message),
                 }
                 cx.notify();
             }
@@ -29853,6 +29918,60 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_api_tokens(&mut self, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::ApiTokens);
+        self.api_token_plaintext = None;
+        self.api_tokens_pending = true;
+        self.api_tokens_error = None;
+        if self
+            .executor_sender
+            .as_ref()
+            .is_none_or(|sender| sender.send(ExecutorCommand::LoadApiTokens).is_err())
+        {
+            self.api_tokens_pending = false;
+            self.api_tokens_error = Some("API token service is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn issue_api_token(&mut self, cx: &mut Context<Self>) {
+        let name = self.api_token_name_input.read(cx).text().trim().to_owned();
+        if name.is_empty() {
+            self.api_tokens_error = Some("Token name is required".into());
+            cx.notify();
+            return;
+        }
+        self.api_tokens_pending = true;
+        self.api_tokens_error = None;
+        let command = ExecutorCommand::IssueApiToken {
+            name,
+            tenant_id: self.selected_tenant_id(),
+        };
+        if self
+            .executor_sender
+            .as_ref()
+            .is_none_or(|sender| sender.send(command).is_err())
+        {
+            self.api_tokens_pending = false;
+            self.api_tokens_error = Some("API token service is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn revoke_api_token(&mut self, token_id: sift_api_types::ApiTokenId, cx: &mut Context<Self>) {
+        self.api_tokens_pending = true;
+        self.api_tokens_error = None;
+        if self.executor_sender.as_ref().is_none_or(|sender| {
+            sender
+                .send(ExecutorCommand::RevokeApiToken { token_id })
+                .is_err()
+        }) {
+            self.api_tokens_pending = false;
+            self.api_tokens_error = Some("API token service is unavailable".into());
+        }
+        cx.notify();
+    }
+
     fn sign_in_with_github(&mut self, cx: &mut Context<Self>) {
         if self.account_pending {
             return;
@@ -37601,6 +37720,7 @@ impl WorkspaceShell {
             let server_picker = matches!(modal, Modal::ServerPicker);
             let account = matches!(modal, Modal::Account);
             let settings = matches!(modal, Modal::Settings);
+            let api_tokens = matches!(modal, Modal::ApiTokens);
             let themes = matches!(modal, Modal::Themes);
             let keymaps = matches!(modal, Modal::Keymaps);
             let app_bar_modal = matches!(
@@ -37629,6 +37749,7 @@ impl WorkspaceShell {
             let card_width = if data_results {
                 0.0
             } else if settings
+                || api_tokens
                 || themes
                 || keymaps
                 || command_palette
@@ -39816,6 +39937,47 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::ApiTokens => {
+                    let rows = self.api_tokens.clone();
+                    div()
+                        .h(px(520.))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("API tokens"))
+                                .child(Button::new("refresh-api-tokens", "Refresh").tone(ButtonTone::Ghost).disabled(self.api_tokens_pending).on_click(cx.listener(|shell, _, _, cx| shell.open_api_tokens(cx)))),
+                        )
+                        .children(self.api_token_plaintext.clone().map(|plaintext| {
+                            let copy = plaintext.clone();
+                            div().p_3().rounded_sm().border_1().border_color(colors.warning).bg(colors.active_surface).flex().flex_col().gap_2()
+                                .child(div().text_sm().text_color(colors.warning).child("Copy this token now. It will not be shown again."))
+                                .child(div().font_family("monospace").text_sm().child(plaintext))
+                                .child(Button::new("copy-issued-api-token", "Copy token").tone(ButtonTone::Accent).on_click(cx.listener(move |shell, _, _, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()));
+                                    shell.show_success_toast("API token copied".into(), cx);
+                                })))
+                        }))
+                        .child(
+                            div().flex().items_center().gap_2()
+                                .child(div().flex_1().child(self.api_token_name_input.clone()))
+                                .child(Button::new("issue-api-token", "Create token").tone(ButtonTone::Accent).loading(self.api_tokens_pending).on_click(cx.listener(|shell, _, _, cx| shell.issue_api_token(cx)))),
+                        )
+                        .children(self.api_tokens_error.clone().map(|error| div().text_sm().text_color(colors.danger).child(error)))
+                        .child(
+                            div().id("api-token-list").flex_1().min_h_0().overflow_y_scroll().children(rows.into_iter().enumerate().map(|(index, token)| {
+                                let token_id = token.id;
+                                div().id(("api-token-row", index)).debug_selector(move || format!("api-token-row-{}", token_id.0)).h(px(48.)).px_2().flex().items_center().gap_3().border_b_1().border_color(colors.subtle_border)
+                                    .child(div().min_w_0().flex_1().flex().flex_col().child(token.name).child(div().text_xs().text_color(colors.muted_text).child(format!("Created {}{}", token.created_at.format("%Y-%m-%d"), token.last_used_at.map(|at| format!(" · used {}", at.format("%Y-%m-%d"))).unwrap_or_default()))))
+                                    .child(Button::new(("revoke-api-token", index), "Revoke").tone(ButtonTone::DangerGhost).disabled(self.api_tokens_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_api_token(token_id, cx))))
+                            }))
+                        )
+                        .into_any_element()
+                }
                 Modal::Settings => {
                     let vim_mode_default = self.vim_mode_default();
                     let dark_theme = self.dark_theme;
@@ -39908,6 +40070,11 @@ impl WorkspaceShell {
                                 },
                             )) as sift_ui::ClickHandler,
                         ))
+                        .child(
+                            div().pt_3().border_t_1().border_color(colors.subtle_border).flex().items_center().justify_between().gap_3()
+                                .child(div().flex().flex_col().gap_1().child("API tokens").child(div().text_xs().text_color(colors.muted_text).child("Create and revoke tokens for API clients.")))
+                                .child(Button::new("manage-api-tokens", "Manage…").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_api_tokens(cx)))),
+                        )
                         .child(toggle_row(
                             "settings-theme",
                             "Dark appearance",
@@ -45117,6 +45284,7 @@ impl WorkspaceShell {
                 modal,
                 Modal::ServerPicker
                     | Modal::Settings
+                    | Modal::ApiTokens
                     | Modal::Themes
                     | Modal::Keymaps
                     | Modal::Account

@@ -855,6 +855,52 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadApiTokens => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .auth_tokens()
+                        .await
+                        .map_err(|error| format!("loading API tokens failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events.send(ExecutorEvent::ApiTokensLoaded(result)).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::IssueApiToken { name, tenant_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .issue_token(sift_api_types::IssueTokenRequest {
+                            name,
+                            tenant_id,
+                            expires_at: None,
+                        })
+                        .await
+                        .map_err(|error| format!("issuing API token failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events.send(ExecutorEvent::ApiTokenIssued(result)).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::RevokeApiToken { token_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .revoke_token(token_id)
+                        .await
+                        .map_err(|error| format!("revoking API token failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ApiTokenRevoked { token_id, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()
