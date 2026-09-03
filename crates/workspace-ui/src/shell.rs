@@ -1310,6 +1310,14 @@ fn build_object_browser_rows(
     rows
 }
 
+fn object_browser_catalogs(snapshot: &sift_protocol::SchemaSnapshot) -> Vec<String> {
+    snapshot
+        .trees
+        .iter()
+        .map(|catalog| catalog.name.clone())
+        .collect()
+}
+
 fn object_browser_context(
     snapshot: &sift_protocol::SchemaSnapshot,
     connection: &ConnectionNavEntry,
@@ -1342,6 +1350,26 @@ fn object_browser_context(
                 last_refreshed_at_ms: None,
             }
         })
+}
+
+fn object_browser_catalog_context(
+    mut context: DatabaseObjectSource,
+    rows: &[ObjectBrowserRow],
+    catalog: Option<&str>,
+) -> DatabaseObjectSource {
+    let Some(catalog) = catalog else {
+        return context;
+    };
+    if let Some(source) = rows
+        .iter()
+        .find(|row| row.source.catalog.as_deref() == Some(catalog))
+        .map(|row| row.source.clone())
+    {
+        source
+    } else {
+        context.catalog = Some(catalog.into());
+        context
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1430,6 +1458,9 @@ struct ObjectBrowserState {
     selected: usize,
     connections: Vec<ConnectionNavEntry>,
     connection_picker_open: bool,
+    catalogs: Vec<String>,
+    catalog: Option<String>,
+    catalog_picker_open: bool,
     object_filter: Option<ObjectGroupKind>,
     loading: bool,
     load_error: Option<String>,
@@ -1438,9 +1469,12 @@ struct ObjectBrowserState {
 impl ObjectBrowserState {
     fn visible_rows(&self) -> impl Iterator<Item = &ObjectBrowserRow> {
         self.rows.iter().filter(|row| {
-            self.object_filter.is_none_or(|filter| {
-                ObjectGroupKind::from_object_kind(row.source.object_kind) == filter
-            })
+            self.catalog
+                .as_ref()
+                .is_none_or(|catalog| row.source.catalog.as_ref() == Some(catalog))
+                && self.object_filter.is_none_or(|filter| {
+                    ObjectGroupKind::from_object_kind(row.source.object_kind) == filter
+                })
         })
     }
 
@@ -1450,6 +1484,23 @@ impl ObjectBrowserState {
 
     fn selected_row(&self) -> Option<&ObjectBrowserRow> {
         self.visible_rows().nth(self.selected)
+    }
+
+    fn select_catalog(&mut self, catalog: String) {
+        self.catalog = Some(catalog.clone());
+        self.selected = 0;
+        self.catalog_picker_open = false;
+        self.connection_picker_open = false;
+        if let Some(source) = self
+            .rows
+            .iter()
+            .find(|row| row.source.catalog.as_ref() == Some(&catalog))
+            .map(|row| row.source.clone())
+        {
+            self.context = source;
+        } else {
+            self.context.catalog = Some(catalog);
+        }
     }
 }
 
@@ -5299,8 +5350,13 @@ impl Pane {
             .is_some_and(|source| is_table_like_object(source.object_kind));
         let row_count = browser.visible_row_count();
         let connection_picker_open = browser.connection_picker_open;
+        let catalog_picker_open = browser.catalog_picker_open;
         let active_profile_id = browser.profile_id;
         let connection_name = browser.context.profile_name.clone();
+        let catalog_name = browser
+            .catalog
+            .clone()
+            .unwrap_or_else(|| "Select database".into());
         let empty_message = if let Some(message) = &browser.load_error {
             message.clone()
         } else if browser.loading {
@@ -5348,6 +5404,45 @@ impl Pane {
                         11.,
                     ))
                     .child(div().min_w_0().truncate().child(connection.name))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let catalog_items = browser
+            .catalogs
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, catalog)| {
+                let selected = browser.catalog.as_ref() == Some(&catalog);
+                let label = catalog.clone();
+                div()
+                    .id(("object-browser-catalog", index))
+                    .debug_selector(move || format!("object-browser-catalog-{index}"))
+                    .role(Role::MenuItem)
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .when(selected, |item| item.bg(colors.active_surface))
+                    .hover(|item| item.bg(colors.hovered_surface))
+                    .on_click(cx.listener(move |pane, _, _, cx| {
+                        if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
+                            browser.select_catalog(catalog.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .child(icon(
+                        IconName::Database,
+                        if selected {
+                            colors.success
+                        } else {
+                            colors.muted_text
+                        },
+                        11.,
+                    ))
+                    .child(div().min_w_0().truncate().child(label))
                     .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -5445,6 +5540,7 @@ impl Pane {
                                                 {
                                                     browser.connection_picker_open =
                                                         !browser.connection_picker_open;
+                                                    browser.catalog_picker_open = false;
                                                 }
                                                 cx.notify();
                                             },
@@ -5488,6 +5584,74 @@ impl Pane {
                                                                 },
                                                             ))
                                                             .children(connection_items),
+                                                    ),
+                                                )
+                                                .with_priority(3),
+                                            ),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_none()
+                                    .child(
+                                        Button::new(
+                                            ("object-browser-catalog-picker", item_id as usize),
+                                            catalog_name,
+                                        )
+                                        .debug_selector("object-browser-catalog-picker")
+                                        .tone(ButtonTone::Neutral)
+                                        .start_icon(IconName::Database)
+                                        .disabled(browser.catalogs.is_empty())
+                                        .on_click(cx.listener(move |pane, _, _, cx| {
+                                            if let Some(browser) =
+                                                pane.object_browsers.get_mut(&item_id)
+                                            {
+                                                browser.catalog_picker_open =
+                                                    !browser.catalog_picker_open;
+                                                browser.connection_picker_open = false;
+                                            }
+                                            cx.notify();
+                                        })),
+                                    )
+                                    .when(catalog_picker_open, |trigger| {
+                                        trigger.child(
+                                            div().absolute().top_full().left_0().child(
+                                                deferred(
+                                                    anchored().anchor(Anchor::TopLeft).child(
+                                                        div()
+                                                            .id("object-browser-catalog-menu")
+                                                            .debug_selector(|| {
+                                                                "object-browser-catalog-menu".into()
+                                                            })
+                                                            .w(px(220.))
+                                                            .p_1()
+                                                            .rounded_sm()
+                                                            .border_1()
+                                                            .border_color(colors.strong_border)
+                                                            .bg(colors.elevated_surface)
+                                                            .shadow_lg()
+                                                            .occlude()
+                                                            .role(Role::Menu)
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                |_, _, cx| cx.stop_propagation(),
+                                                            )
+                                                            .on_mouse_down_out(cx.listener(
+                                                                move |pane, _, _, cx| {
+                                                                    if let Some(browser) = pane
+                                                                        .object_browsers
+                                                                        .get_mut(&item_id)
+                                                                    {
+                                                                        browser
+                                                                            .catalog_picker_open =
+                                                                            false;
+                                                                    }
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                            .children(catalog_items),
                                                     ),
                                                 )
                                                 .with_priority(3),
@@ -17739,14 +17903,20 @@ impl WorkspaceShell {
         let rows = snapshot
             .map(|snapshot| build_object_browser_rows(snapshot, &connection, &instance_id))
             .unwrap_or_default();
+        let catalogs = snapshot.map(object_browser_catalogs).unwrap_or_default();
+        let catalog = catalogs.first().cloned();
         let loading = snapshot.is_none();
         let empty_snapshot =
             sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
-        let context = object_browser_context(
-            snapshot.unwrap_or(&empty_snapshot),
-            &connection,
-            &instance_id,
+        let context = object_browser_catalog_context(
+            object_browser_context(
+                snapshot.unwrap_or(&empty_snapshot),
+                &connection,
+                &instance_id,
+                &rows,
+            ),
             &rows,
+            catalog.as_deref(),
         );
         let item_id = self.next_id;
         self.next_id += 1;
@@ -17768,6 +17938,9 @@ impl WorkspaceShell {
                         selected: 0,
                         connections,
                         connection_picker_open: false,
+                        catalogs,
+                        catalog,
+                        catalog_picker_open: false,
                         object_filter: None,
                         loading,
                         load_error: None,
@@ -17804,6 +17977,7 @@ impl WorkspaceShell {
             .unwrap_or_else(|| "local".into());
         let rows = build_object_browser_rows(snapshot, &connection, &instance_id);
         let context = object_browser_context(snapshot, &connection, &instance_id, &rows);
+        let catalogs = object_browser_catalogs(snapshot);
         let mut connections = self
             .lifecycle
             .tenants
@@ -17824,9 +17998,17 @@ impl WorkspaceShell {
                     .filter(|browser| browser.profile_id == profile_id)
                 {
                     let selected_source = browser.selected_row().map(|row| row.source.clone());
+                    let selected_catalog = browser.catalog.clone();
                     browser.rows = rows.clone();
                     browser.context = context.clone();
                     browser.connections = connections.clone();
+                    browser.catalogs = catalogs.clone();
+                    browser.catalog = selected_catalog
+                        .filter(|catalog| browser.catalogs.contains(catalog))
+                        .or_else(|| browser.catalogs.first().cloned());
+                    if let Some(catalog) = browser.catalog.clone() {
+                        browser.select_catalog(catalog);
+                    }
                     browser.loading = false;
                     browser.load_error = None;
                     browser.selected = selected_source
@@ -17895,14 +18077,23 @@ impl WorkspaceShell {
             .as_ref()
             .map(|snapshot| build_object_browser_rows(snapshot, &connection, &instance_id))
             .unwrap_or_default();
+        let catalogs = snapshot
+            .as_ref()
+            .map(object_browser_catalogs)
+            .unwrap_or_default();
+        let catalog = catalogs.first().cloned();
         let loading = snapshot.is_none();
         let empty_snapshot =
             sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
-        let context = object_browser_context(
-            snapshot.as_ref().unwrap_or(&empty_snapshot),
-            &connection,
-            &instance_id,
+        let context = object_browser_catalog_context(
+            object_browser_context(
+                snapshot.as_ref().unwrap_or(&empty_snapshot),
+                &connection,
+                &instance_id,
+                &rows,
+            ),
             &rows,
+            catalog.as_deref(),
         );
         pane.update(cx, |pane, cx| {
             if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
@@ -17911,6 +18102,9 @@ impl WorkspaceShell {
                 browser.rows = rows;
                 browser.selected = 0;
                 browser.connection_picker_open = false;
+                browser.catalogs = catalogs;
+                browser.catalog = catalog;
+                browser.catalog_picker_open = false;
                 browser.loading = loading;
                 browser.load_error = None;
             }
@@ -53741,6 +53935,16 @@ mod tests {
                     ],
                 }],
             });
+            snapshot.trees.push(sift_protocol::CatalogTree {
+                name: "lab".into(),
+                schemas: vec![sift_protocol::SchemaTree {
+                    name: "public".into(),
+                    objects: vec![sift_protocol::ObjectInfo::new(
+                        "experiments",
+                        sift_protocol::ObjectKind::Table,
+                    )],
+                }],
+            });
             shell.connection_schema = ConnectionSchemaState::Ready {
                 profile_id: 2,
                 snapshot: Box::new(snapshot),
@@ -53750,6 +53954,7 @@ mod tests {
         cx.run_until_parked();
         for selector in [
             "object-browser-connection-picker",
+            "object-browser-catalog-picker",
             "object-browser-open",
             "object-browser-new-table",
             "object-browser-design",
@@ -53765,10 +53970,44 @@ mod tests {
             assert_eq!(item.kind, ItemKind::Schema);
             assert_eq!(item.title, "Objects · Warehouse");
             let browser = pane.object_browsers.get(&item.id).unwrap();
-            assert_eq!(browser.rows.len(), 2);
-            assert_eq!(browser.rows[0].estimated_rows, Some(42));
-            assert_eq!(browser.rows[0].comment.as_deref(), Some("Queued work"));
+            assert_eq!(browser.rows.len(), 3);
+            assert_eq!(browser.catalog.as_deref(), Some("warehouse"));
+            assert_eq!(browser.visible_row_count(), 2);
+            let jobs = browser
+                .rows
+                .iter()
+                .find(|row| row.source.object == "jobs")
+                .unwrap();
+            assert_eq!(jobs.estimated_rows, Some(42));
+            assert_eq!(jobs.comment.as_deref(), Some("Queued work"));
         });
+        let database_picker = cx
+            .debug_bounds("object-browser-catalog-picker")
+            .expect("database picker");
+        cx.simulate_click(database_picker.center(), Modifiers::default());
+        cx.run_until_parked();
+        let lab = cx
+            .debug_bounds("object-browser-catalog-1")
+            .expect("lab database");
+        cx.simulate_click(lab.center(), Modifiers::default());
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item_id = pane.active_item().unwrap().id;
+            let browser = &pane.object_browsers[&item_id];
+            assert_eq!(browser.catalog.as_deref(), Some("lab"));
+            assert_eq!(browser.visible_row_count(), 1);
+            assert_eq!(browser.selected_row().unwrap().source.object, "experiments");
+            assert_eq!(browser.context.catalog.as_deref(), Some("lab"));
+        });
+        let database_picker = cx
+            .debug_bounds("object-browser-catalog-picker")
+            .expect("database picker");
+        cx.simulate_click(database_picker.center(), Modifiers::default());
+        cx.run_until_parked();
+        let warehouse = cx
+            .debug_bounds("object-browser-catalog-0")
+            .expect("warehouse database");
+        cx.simulate_click(warehouse.center(), Modifiers::default());
         let views = cx
             .debug_bounds("object-browser-filter-views")
             .expect("Views filter");
