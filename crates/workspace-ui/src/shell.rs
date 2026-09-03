@@ -25710,6 +25710,7 @@ impl WorkspaceShell {
     /// Called whenever the active pane changes or a modal is dismissed so focus
     /// is never orphaned — an orphaned focus silently drops all keybindings.
     fn focus_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_empty_active_panel_search(cx);
         self.focused_surface = WorkspaceSurface::Editor;
         self.connection_nav_g_pending = false;
         self.pane_input = false;
@@ -25870,6 +25871,69 @@ impl WorkspaceShell {
         self.connections_find_input
             .focus_handle(cx)
             .focus(window, cx);
+        cx.notify();
+    }
+
+    fn dismiss_empty_active_panel_search(&mut self, cx: &mut Context<Self>) {
+        match self.active_left_panel {
+            LeftPanel::Connections
+                if self.connections_find_open
+                    && self
+                        .connections_find_input
+                        .read(cx)
+                        .text()
+                        .trim()
+                        .is_empty() =>
+            {
+                self.connections_find_open = false;
+                self.invalidate_connection_projection();
+            }
+            LeftPanel::Git
+                if self.repository_filter_open
+                    && self
+                        .repository_filter_input
+                        .read(cx)
+                        .text()
+                        .trim()
+                        .is_empty() =>
+            {
+                self.repository_filter_open = false;
+            }
+            LeftPanel::SavedQueries
+                if self.saved_queries_filter_open
+                    && self
+                        .saved_queries_filter_input
+                        .read(cx)
+                        .text()
+                        .trim()
+                        .is_empty() =>
+            {
+                self.saved_queries_filter_open = false;
+            }
+            LeftPanel::QueryOutline
+                if self.query_outline_filter_open
+                    && self
+                        .query_outline_filter_input
+                        .read(cx)
+                        .text()
+                        .trim()
+                        .is_empty() =>
+            {
+                self.query_outline_filter_open = false;
+            }
+            LeftPanel::QueryHistory
+                if self.query_history_filter_open
+                    && self.query_history_input.read(cx).text().trim().is_empty() =>
+            {
+                self.query_history_filter_open = false;
+            }
+            LeftPanel::Collaboration
+            | LeftPanel::Connections
+            | LeftPanel::Git
+            | LeftPanel::SavedQueries
+            | LeftPanel::QueryOutline
+            | LeftPanel::QueryHistory => return,
+        }
         cx.notify();
     }
 
@@ -35032,6 +35096,9 @@ impl WorkspaceShell {
                         shell.focus_active_left_panel_surface(window, cx)
                     }),
                 )
+                .on_mouse_down_out(cx.listener(|shell, _, _, cx| {
+                    shell.dismiss_empty_active_panel_search(cx)
+                }))
             })
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
@@ -48155,6 +48222,12 @@ mod tests {
             assert_eq!(shell.active_pane, 0);
         });
         assert!(cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
+        assert!(cx.update(|window, cx| {
+            !workspace
+                .read(cx)
+                .query_outline_focus_handle
+                .is_focused(window)
+        }));
     }
 
     #[gpui::test]
@@ -53885,6 +53958,34 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("object-peek-definition").is_some());
+    }
+
+    #[gpui::test]
+    fn empty_panel_search_closes_when_focus_leaves(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.active_left_panel = LeftPanel::QueryOutline;
+            shell.left_dock.presentation.open = true;
+            shell.open_query_outline_filter(window, cx);
+            shell.focus_active_pane(window, cx);
+        });
+        workspace.read_with(&cx, |shell, _| {
+            assert!(!shell.query_outline_filter_open);
+        });
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_query_outline_filter(window, cx);
+            shell
+                .query_outline_filter_input
+                .update(cx, |input, cx| input.set_text("jobs", cx));
+            shell.focus_active_pane(window, cx);
+        });
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.query_outline_filter_open);
+        });
     }
 
     #[gpui::test]
