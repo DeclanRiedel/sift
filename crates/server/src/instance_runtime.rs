@@ -121,6 +121,28 @@ impl InstanceRoot {
         config.runtime.state_dir = Some(state_dir.display().to_string());
         config.timeouts.request_secs = self.manifest.server.timeouts.request_secs;
         config.timeouts.shutdown_drain_secs = self.manifest.server.timeouts.shutdown_drain_secs;
+        config.updater.enabled = self.manifest.server.updater.enabled;
+        config.updater.channel = self.manifest.server.updater.channel.clone();
+        config.updater.manifest_url = self.manifest.server.updater.manifest_url.clone();
+        config.updater.signature_url = self.manifest.server.updater.signature_url.clone();
+        config.updater.max_artifact_bytes = self.manifest.server.updater.max_artifact_bytes;
+        config.updater.initial_delay_secs = self.manifest.server.updater.initial_delay_secs;
+        config.updater.check_interval_secs = self.manifest.server.updater.check_interval_secs;
+        config.updater.jitter_secs = self.manifest.server.updater.jitter_secs;
+        config.log.filter = self.manifest.server.log.filter.clone();
+        config.drivers.mock = self.manifest.server.drivers.mock;
+        config.drivers.mock_extra = self.manifest.server.drivers.mock_extra;
+        config.extensions.development_overrides = self
+            .manifest
+            .server
+            .extension_policy
+            .development_overrides
+            .clone();
+        config.extensions.allow_hosted_development = self
+            .manifest
+            .server
+            .extension_policy
+            .allow_hosted_development;
         config.metadata.enabled = true;
         config.metadata.path = Some(state_dir.join("metadata.sqlite3").display().to_string());
         config.metadata.secret_backend = match self.manifest.server.metadata.secret_backend {
@@ -136,6 +158,23 @@ impl InstanceRoot {
         // startup. Never create the legacy implicit local principal here.
         config.metadata.bootstrap_local = false;
         config.metadata.store_sql = self.manifest.server.metadata.store_sql;
+        config.vault.max_label_bytes = usize::try_from(self.manifest.server.vault.max_label_bytes)
+            .context("vault.max_label_bytes does not fit this platform")?;
+        config.vault.max_metadata_bytes =
+            usize::try_from(self.manifest.server.vault.max_metadata_bytes)
+                .context("vault.max_metadata_bytes does not fit this platform")?;
+        config.vault.max_secret_bytes =
+            usize::try_from(self.manifest.server.vault.max_secret_bytes)
+                .context("vault.max_secret_bytes does not fit this platform")?;
+        config.vault.max_vaults_per_tenant = self.manifest.server.vault.max_vaults_per_tenant;
+        config.vault.max_items_per_vault = self.manifest.server.vault.max_items_per_vault;
+        config.vault.max_versions_per_item = self.manifest.server.vault.max_versions_per_item;
+        config.vault.cleanup_batch_size = self.manifest.server.vault.cleanup_batch_size;
+        config.vault.cleanup_interval_secs = self.manifest.server.vault.cleanup_interval_secs;
+        config.vault.cleanup_retry_initial_secs =
+            self.manifest.server.vault.cleanup_retry_initial_secs;
+        config.vault.cleanup_retry_max_secs = self.manifest.server.vault.cleanup_retry_max_secs;
+        config.audit.operation_log_path = self.manifest.server.audit.operation_log_path.clone();
         // Personal local-device instances deliberately use the OS account and
         // verified loopback peer as their zero-sign-in bootstrap guard. Team,
         // network, and hosted-code instances never receive this bypass.
@@ -148,6 +187,36 @@ impl InstanceRoot {
         config.limits.max_http_result_bytes =
             usize::try_from(self.manifest.server.limits.max_http_result_bytes)
                 .context("max_http_result_bytes does not fit this platform")?;
+        config.limits.max_cursors_per_session =
+            usize::try_from(self.manifest.server.limits.max_cursors_per_session)
+                .context("max_cursors_per_session does not fit this platform")?;
+        config.limits.cursor_prefetch_pages =
+            usize::try_from(self.manifest.server.limits.cursor_prefetch_pages)
+                .context("cursor_prefetch_pages does not fit this platform")?;
+        config.limits.cursor_spill_dir = self.manifest.server.limits.cursor_spill_dir.clone();
+        config.limits.cursor_spill_ttl_secs = self.manifest.server.limits.cursor_spill_ttl_secs;
+        config.limits.schema_cache_ttl_secs = self.manifest.server.limits.schema_cache_ttl_secs;
+        config.limits.schema_mssql_poll_secs = self.manifest.server.limits.schema_mssql_poll_secs;
+        config.limits.plan_capture_max_bytes =
+            usize::try_from(self.manifest.server.limits.plan_capture_max_bytes)
+                .context("plan_capture_max_bytes does not fit this platform")?;
+        config.limits.plan_capture_max_per_tenant =
+            self.manifest.server.limits.plan_capture_max_per_tenant;
+        config.limits.plan_capture_max_per_source =
+            self.manifest.server.limits.plan_capture_max_per_source;
+        config.limits.plan_capture_max_age_days =
+            self.manifest.server.limits.plan_capture_max_age_days;
+        config.rate_limits.trusted_local_exempt =
+            self.manifest.server.rate_limits.trusted_local_exempt;
+        config.rate_limits.idle_ttl_secs = self.manifest.server.rate_limits.idle_ttl_secs;
+        config.rate_limits.control = rate_bucket(self.manifest.server.rate_limits.control.as_ref());
+        config.rate_limits.interactive =
+            rate_bucket(self.manifest.server.rate_limits.interactive.as_ref());
+        config.rate_limits.query = rate_bucket(self.manifest.server.rate_limits.query.as_ref());
+        config.rate_limits.heavy_transfer =
+            rate_bucket(self.manifest.server.rate_limits.heavy_transfer.as_ref());
+        config.rate_limits.stream_bytes =
+            rate_bucket(self.manifest.server.rate_limits.stream_bytes.as_ref());
         config.workspaces.enabled = self.manifest.server.workspaces.enabled;
         config.workspaces.roots = self
             .manifest
@@ -187,6 +256,12 @@ impl InstanceRoot {
         config.tenant_limits.ceilings.concurrent_queries = Some(u64::from(
             self.manifest.server.limits.max_concurrent_queries,
         ));
+        config.tenant_limits.trusted_local_unlimited =
+            self.manifest.server.tenant_limits.trusted_local_unlimited;
+        config.tenant_limits.defaults =
+            tenant_resource_limits(&self.manifest.server.tenant_limits.defaults);
+        config.tenant_limits.ceilings =
+            tenant_resource_limits(&self.manifest.server.tenant_limits.ceilings);
         config
             .validate()
             .context("validating realized server settings")?;
@@ -381,6 +456,29 @@ impl InstanceRoot {
             .with_context(|| format!("committing generation: {}", final_dir.display()))?;
         sync_dir(generations)?;
         Ok(record)
+    }
+}
+
+fn rate_bucket(
+    bucket: Option<&sift_instance_config::RateBucketConfig>,
+) -> Option<crate::config::RateBucketConfig> {
+    bucket.map(|bucket| crate::config::RateBucketConfig {
+        refill_per_second: bucket.refill_per_second,
+        burst: bucket.burst,
+        cost: bucket.cost,
+    })
+}
+
+fn tenant_resource_limits(
+    limits: &sift_instance_config::TenantResourceLimits,
+) -> sift_protocol::TenantResourceLimits {
+    sift_protocol::TenantResourceLimits {
+        connection_profiles: limits.connection_profiles,
+        sessions: limits.sessions,
+        connections: limits.connections,
+        concurrent_queries: limits.concurrent_queries,
+        cursors: limits.cursors,
+        retained_result_bytes: limits.retained_result_bytes,
     }
 }
 

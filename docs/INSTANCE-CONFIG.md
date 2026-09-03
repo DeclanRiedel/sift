@@ -110,11 +110,11 @@ effective limits through `/v1/admin/instance/vcs-diagnostics`.
 ## Vault policy
 
 Collaborative vault admission, retention, and cleanup use typed server
-configuration. These defaults can be set in `sift.toml` under `[vault]` or by
-the corresponding `SIFT_VAULT__*` environment variables:
+configuration. These defaults are set in an instance manifest under
+`[server.vault]`:
 
 ```toml
-[vault]
+[server.vault]
 max_label_bytes = 160
 max_metadata_bytes = 32768
 max_secret_bytes = 65536
@@ -132,6 +132,19 @@ Unreferenced secret handles enter the durable cleanup queue and are retried
 with bounded exponential backoff; stored cleanup failures are sanitized and
 never include secret bytes. All limits and intervals must be positive, and the
 maximum retry delay cannot be below the initial delay.
+
+## Configuration ownership
+
+For a locked instance, `sift.toml` is the only editable source of server
+policy and operator-managed resources. The desktop routes changes to the
+relevant manifest section, validates them, shows the resource plan, and applies
+one reviewed generation. It does not mutate a second copy in SQLite.
+
+User content and live workflow state remain interactive: query documents,
+shared rooms, approvals, sessions, results, and per-user credentials are not
+portable server configuration. UI preferences and keymaps remain local to the
+desktop. Secret bytes, generated metadata paths, resolved ports, and generation
+records remain destination-private and never enter the manifest.
 
 ## Security and portability boundary
 

@@ -1431,6 +1431,41 @@ and deferred package/remote automation work are in
 
 ---
 
+## ADR-042 — Manifest-Only Server Control Plane
+
+**Context.** Sift exposed both a reproducible desired-state manifest and
+interactive administration screens for some of the same resources. That made
+ownership ambiguous: an operator could change realized metadata without
+changing the file that was meant to reproduce the server. The manifest also
+omitted operational settings that the runtime accepted through its legacy
+process configuration, so copying an instance did not reproduce all declared
+server behavior.
+
+**Decision.** `sift.toml` is the only editable source of truth for server
+policy and operator-managed resources. The desktop may provide schema-aware
+editing, navigation, validation, planning, credential binding, and apply, but
+it does not provide a second mutable representation of principals, tenant
+memberships, connection profiles, extension admission, or other manifest-owned
+state. Contextual actions on those resources route to the corresponding
+manifest section. Runtime APIs remain authoritative for user content and
+ephemeral workflow state such as documents, rooms, approvals, query sessions,
+and results. Client presentation and keymaps remain local preferences.
+
+Secret bytes, generated state paths, metadata database paths, resolved ports,
+and immutable generation records remain destination-private bindings. They are
+not portable desired state. The generated `sift.lock` is inspectable but never
+edited. Environment variables may bootstrap legacy/non-instance server runs,
+but cannot override a locked instance.
+
+**Consequences.** Every durable operator change has one reviewable diff, one
+validation model, and one apply path. Administration views distinguish
+manifest-owned resources from user/runtime state and offer “Edit in
+`sift.toml`” instead of mutating managed rows. The instance editor and Wiki
+must be generated from or tested against the same manifest schema so docs,
+completion, validation, and runtime realization cannot silently diverge.
+
+---
+
 ## ADR-040 — GPUI Desktop Client With A Server-Only Product Boundary
 
 **Context.** ADR-010 deferred the product UI until the headless server,

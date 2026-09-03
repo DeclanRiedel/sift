@@ -37,7 +37,7 @@ pub enum ConfigError {
     Serialization(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub kind: String,
@@ -62,7 +62,7 @@ pub struct Compatibility {
     pub sift: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub deployment: Deployment,
@@ -81,6 +81,255 @@ pub struct ServerConfig {
     pub workspaces: WorkspaceConfig,
     #[serde(default, skip_serializing_if = "VcsConfig::is_default")]
     pub vcs: VcsConfig,
+    #[serde(default, skip_serializing_if = "UpdaterConfig::is_default")]
+    pub updater: UpdaterConfig,
+    #[serde(default, skip_serializing_if = "LogConfig::is_default")]
+    pub log: LogConfig,
+    #[serde(default, skip_serializing_if = "DriverConfig::is_default")]
+    pub drivers: DriverConfig,
+    #[serde(default, skip_serializing_if = "ExtensionPolicy::is_default")]
+    pub extension_policy: ExtensionPolicy,
+    #[serde(default, skip_serializing_if = "VaultConfig::is_default")]
+    pub vault: VaultConfig,
+    #[serde(default, skip_serializing_if = "AuditConfig::is_default")]
+    pub audit: AuditConfig,
+    #[serde(default, skip_serializing_if = "RateLimitsConfig::is_default")]
+    pub rate_limits: RateLimitsConfig,
+    #[serde(default, skip_serializing_if = "TenantLimitsConfig::is_default")]
+    pub tenant_limits: TenantLimitsConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdaterConfig {
+    pub enabled: bool,
+    pub channel: String,
+    pub manifest_url: Option<String>,
+    pub signature_url: Option<String>,
+    pub max_artifact_bytes: u64,
+    pub initial_delay_secs: u64,
+    pub check_interval_secs: u64,
+    pub jitter_secs: u64,
+}
+
+impl Default for UpdaterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            channel: "stable".into(),
+            manifest_url: None,
+            signature_url: None,
+            max_artifact_bytes: 512 * 1024 * 1024,
+            initial_delay_secs: 30,
+            check_interval_secs: 6 * 60 * 60,
+            jitter_secs: 10 * 60,
+        }
+    }
+}
+
+impl UpdaterConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LogConfig {
+    pub filter: String,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            filter: "sift=info,tower_http=info".into(),
+        }
+    }
+}
+
+impl LogConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct DriverConfig {
+    pub mock: bool,
+    pub mock_extra: bool,
+}
+
+impl DriverConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExtensionPolicy {
+    pub development_overrides: Vec<String>,
+    pub allow_hosted_development: bool,
+}
+
+impl ExtensionPolicy {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VaultConfig {
+    pub max_label_bytes: u64,
+    pub max_metadata_bytes: u64,
+    pub max_secret_bytes: u64,
+    pub max_vaults_per_tenant: u64,
+    pub max_items_per_vault: u64,
+    pub max_versions_per_item: u64,
+    pub cleanup_batch_size: u32,
+    pub cleanup_interval_secs: u64,
+    pub cleanup_retry_initial_secs: u64,
+    pub cleanup_retry_max_secs: u64,
+}
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            max_label_bytes: 160,
+            max_metadata_bytes: 32 * 1024,
+            max_secret_bytes: 64 * 1024,
+            max_vaults_per_tenant: 100,
+            max_items_per_vault: 1_000,
+            max_versions_per_item: 50,
+            cleanup_batch_size: 100,
+            cleanup_interval_secs: 30,
+            cleanup_retry_initial_secs: 30,
+            cleanup_retry_max_secs: 3_600,
+        }
+    }
+}
+
+impl VaultConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuditConfig {
+    pub operation_log_path: Option<String>,
+}
+
+impl AuditConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RateLimitsConfig {
+    pub trusted_local_exempt: bool,
+    pub idle_ttl_secs: u64,
+    pub control: Option<RateBucketConfig>,
+    pub interactive: Option<RateBucketConfig>,
+    pub query: Option<RateBucketConfig>,
+    pub heavy_transfer: Option<RateBucketConfig>,
+    pub stream_bytes: Option<RateBucketConfig>,
+}
+
+impl Default for RateLimitsConfig {
+    fn default() -> Self {
+        Self {
+            trusted_local_exempt: true,
+            idle_ttl_secs: 600,
+            control: Some(RateBucketConfig::new(20.0, 40.0, 1.0)),
+            interactive: Some(RateBucketConfig::new(30.0, 60.0, 1.0)),
+            query: Some(RateBucketConfig::new(10.0, 20.0, 1.0)),
+            heavy_transfer: Some(RateBucketConfig::new(2.0, 4.0, 1.0)),
+            stream_bytes: Some(RateBucketConfig::new(
+                4.0 * 1024.0 * 1024.0,
+                8.0 * 1024.0 * 1024.0,
+                1.0,
+            )),
+        }
+    }
+}
+
+impl RateLimitsConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateBucketConfig {
+    pub refill_per_second: f64,
+    pub burst: f64,
+    pub cost: f64,
+}
+
+impl RateBucketConfig {
+    const fn new(refill_per_second: f64, burst: f64, cost: f64) -> Self {
+        Self {
+            refill_per_second,
+            burst,
+            cost,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TenantLimitsConfig {
+    pub trusted_local_unlimited: bool,
+    pub defaults: TenantResourceLimits,
+    pub ceilings: TenantResourceLimits,
+}
+
+impl Default for TenantLimitsConfig {
+    fn default() -> Self {
+        let defaults = TenantResourceLimits::default();
+        Self {
+            trusted_local_unlimited: true,
+            ceilings: defaults.clone(),
+            defaults,
+        }
+    }
+}
+
+impl TenantLimitsConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TenantResourceLimits {
+    pub connection_profiles: Option<u64>,
+    pub sessions: Option<u64>,
+    pub connections: Option<u64>,
+    pub concurrent_queries: Option<u64>,
+    pub cursors: Option<u64>,
+    pub retained_result_bytes: Option<u64>,
+}
+
+impl Default for TenantResourceLimits {
+    fn default() -> Self {
+        Self {
+            connection_profiles: Some(100),
+            sessions: Some(32),
+            connections: Some(64),
+            concurrent_queries: Some(16),
+            cursors: Some(64),
+            retained_result_bytes: Some(256 * 1024 * 1024),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -219,6 +468,16 @@ pub struct LimitsConfig {
     pub max_http_result_bytes: u64,
     pub max_connections: u32,
     pub max_concurrent_queries: u32,
+    pub max_cursors_per_session: u64,
+    pub cursor_prefetch_pages: u64,
+    pub cursor_spill_dir: Option<String>,
+    pub cursor_spill_ttl_secs: u64,
+    pub schema_cache_ttl_secs: u64,
+    pub schema_mssql_poll_secs: u64,
+    pub plan_capture_max_bytes: u64,
+    pub plan_capture_max_per_tenant: i64,
+    pub plan_capture_max_per_source: i64,
+    pub plan_capture_max_age_days: i64,
 }
 
 impl Default for LimitsConfig {
@@ -228,6 +487,16 @@ impl Default for LimitsConfig {
             max_http_result_bytes: 16 * 1024 * 1024,
             max_connections: 64,
             max_concurrent_queries: 16,
+            max_cursors_per_session: 32,
+            cursor_prefetch_pages: 2,
+            cursor_spill_dir: None,
+            cursor_spill_ttl_secs: 600,
+            schema_cache_ttl_secs: 60,
+            schema_mssql_poll_secs: 30,
+            plan_capture_max_bytes: 8 * 1024 * 1024,
+            plan_capture_max_per_tenant: 5_000,
+            plan_capture_max_per_source: 50,
+            plan_capture_max_age_days: 30,
         }
     }
 }
@@ -882,6 +1151,12 @@ impl ServerConfig {
         if self.mode == RuntimeMode::Container && self.transport == Transport::SshProxy {
             return validation("server.transport", "container mode cannot use ssh-proxy");
         }
+        if self.mode == RuntimeMode::Container && self.updater.enabled {
+            return validation(
+                "server.updater.enabled",
+                "container mode is updated by replacing its image",
+            );
+        }
         if self.metadata.secret_backend == SecretBackend::Memory {
             return validation(
                 "server.metadata.secret_backend",
@@ -914,8 +1189,83 @@ impl ServerConfig {
             || self.limits.max_connections > 10_000
             || self.limits.max_concurrent_queries == 0
             || self.limits.max_concurrent_queries > self.limits.max_connections
+            || self.limits.max_cursors_per_session == 0
+            || self.limits.cursor_prefetch_pages == 0
+            || self.limits.cursor_spill_ttl_secs == 0
+            || self.limits.schema_cache_ttl_secs == 0
+            || self.limits.schema_mssql_poll_secs == 0
+            || self.limits.plan_capture_max_bytes == 0
+            || self.limits.plan_capture_max_bytes > 8 * 1024 * 1024
+            || !(1..=5_000).contains(&self.limits.plan_capture_max_per_tenant)
+            || !(1..=50).contains(&self.limits.plan_capture_max_per_source)
+            || !(1..=30).contains(&self.limits.plan_capture_max_age_days)
         {
             return validation("server.limits", "contains an unsafe or invalid limit");
+        }
+        if self.updater.enabled {
+            if self.updater.channel.is_empty()
+                || !self
+                    .updater
+                    .channel
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                return validation("server.updater.channel", "must be a non-empty safe name");
+            }
+            for (path, value) in [
+                ("server.updater.manifest_url", &self.updater.manifest_url),
+                ("server.updater.signature_url", &self.updater.signature_url),
+            ] {
+                let Some(value) = value else {
+                    return validation(path, "is required when updater is enabled");
+                };
+                validate_https_url(path, value)?;
+            }
+            if self.updater.max_artifact_bytes == 0
+                || self.updater.check_interval_secs == 0
+                || self.updater.jitter_secs > 24 * 60 * 60
+            {
+                return validation("server.updater", "contains an unsafe size or interval");
+            }
+        }
+        if self.vault.max_label_bytes == 0
+            || self.vault.max_metadata_bytes == 0
+            || self.vault.max_secret_bytes == 0
+            || self.vault.max_vaults_per_tenant == 0
+            || self.vault.max_items_per_vault == 0
+            || self.vault.max_versions_per_item == 0
+            || self.vault.cleanup_batch_size == 0
+            || self.vault.cleanup_interval_secs == 0
+            || self.vault.cleanup_retry_initial_secs == 0
+            || self.vault.cleanup_retry_max_secs < self.vault.cleanup_retry_initial_secs
+        {
+            return validation(
+                "server.vault",
+                "limits and intervals must be positive and retry max must not be below retry initial",
+            );
+        }
+        for (name, bucket) in [
+            ("control", self.rate_limits.control.as_ref()),
+            ("interactive", self.rate_limits.interactive.as_ref()),
+            ("query", self.rate_limits.query.as_ref()),
+            ("heavy_transfer", self.rate_limits.heavy_transfer.as_ref()),
+            ("stream_bytes", self.rate_limits.stream_bytes.as_ref()),
+        ] {
+            if let Some(bucket) = bucket {
+                if !bucket.refill_per_second.is_finite()
+                    || bucket.refill_per_second <= 0.0
+                    || !bucket.burst.is_finite()
+                    || bucket.burst <= 0.0
+                    || !bucket.cost.is_finite()
+                    || bucket.cost <= 0.0
+                    || bucket.cost > bucket.burst
+                {
+                    return validation(
+                        format!("server.rate_limits.{name}"),
+                        "refill, burst, and cost must be finite and positive, with cost <= burst",
+                    );
+                }
+            }
         }
         if self.workspaces.enabled && self.workspaces.roots.is_empty() {
             return validation(
