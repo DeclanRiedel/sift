@@ -13,6 +13,13 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
+mod editor;
+
+pub use editor::{
+    manifest_completions, manifest_diagnostics, manifest_hover, manifest_outline,
+    ManifestCompletion, ManifestDiagnostic, ManifestHover, ManifestOutlineItem,
+};
+
 pub const MANIFEST_KIND: &str = "sift-instance";
 pub const LOCK_KIND: &str = "sift-lock";
 pub const FORMAT_VERSION: u32 = 1;
