@@ -1722,6 +1722,7 @@ pub enum Modal {
     ConnectionPolicy,
     TenantUsage,
     VcsDiagnostics,
+    Administration,
     ConnectionUrl,
     DatabaseConnection,
     ConfirmDeleteConnection(ConnectionNavEntry),
@@ -1770,6 +1771,11 @@ pub enum Modal {
     VaultItemDetails,
     ObjectPeek,
     ConfirmDeleteDatabaseObject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdministrationSection {
+    Principals,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2787,6 +2793,32 @@ pub enum ExecutorCommand {
         tenant_id: i64,
     },
     LoadVcsDiagnostics,
+    CreatePrincipal {
+        request: sift_protocol::AdminCreatePasswordPrincipalRequest,
+    },
+    LoadPrincipalAccess {
+        principal_id: i64,
+    },
+    SetPrincipalDisabled {
+        principal_id: i64,
+        disabled: bool,
+    },
+    LinkPasswordIdentity {
+        principal_id: i64,
+        request: sift_protocol::AdminLinkPasswordIdentityRequest,
+    },
+    UnlinkIdentity {
+        principal_id: i64,
+        identity_id: i64,
+    },
+    RevokePrincipalSession {
+        principal_id: i64,
+        session_id: String,
+    },
+    IssuePrincipalPasswordReset {
+        principal_id: i64,
+        identity_id: i64,
+    },
     CloseSession {
         session_id: sift_protocol::SessionId,
     },
@@ -3521,6 +3553,26 @@ pub enum ExecutorEvent {
     TenantUsageLoaded(Result<sift_protocol::TenantUsageSnapshot, String>),
     TenantLimitsSaved(Result<sift_protocol::TenantUsageSnapshot, String>),
     VcsDiagnosticsLoaded(Result<sift_protocol::VcsAdapterDiagnostics, String>),
+    PrincipalCreated(Result<sift_protocol::AuthPrincipal, String>),
+    PrincipalAccessLoaded {
+        principal_id: i64,
+        result: Result<
+            (
+                Vec<sift_protocol::AuthIdentitySummary>,
+                Vec<sift_protocol::AuthSessionSummary>,
+            ),
+            String,
+        >,
+    },
+    PrincipalAdminChanged {
+        principal_id: i64,
+        result: Result<(), String>,
+    },
+    PrincipalIdentityLinked {
+        principal_id: i64,
+        result: Result<sift_protocol::AuthIdentitySummary, String>,
+    },
+    PrincipalPasswordResetIssued(Result<sift_protocol::IssuedPasswordResetResponse, String>),
     SessionResourceClosed {
         result: Result<(), String>,
         active_connection_closed: bool,
@@ -9025,6 +9077,10 @@ pub struct WorkspaceShell {
     account_username_input: Entity<TextInput>,
     account_password_input: Entity<TextInput>,
     api_token_name_input: Entity<TextInput>,
+    administration_section: AdministrationSection,
+    principal_create_inputs: Vec<Entity<TextInput>>,
+    principal_id_input: Entity<TextInput>,
+    principal_link_inputs: Vec<Entity<TextInput>>,
     connection_url_input: Entity<TextInput>,
     database_name_input: Entity<TextInput>,
     database_host_input: Entity<TextInput>,
@@ -9341,6 +9397,11 @@ pub struct WorkspaceShell {
     api_token_plaintext: Option<String>,
     api_tokens_pending: bool,
     api_tokens_error: Option<String>,
+    principal_identities: Vec<sift_protocol::AuthIdentitySummary>,
+    principal_sessions: Vec<sift_protocol::AuthSessionSummary>,
+    principal_admin_pending: bool,
+    principal_admin_error: Option<String>,
+    principal_reset_token: Option<String>,
     connection_policy_profile: Option<i64>,
     connection_policy: Option<sift_protocol::ConnectionPolicy>,
     connection_policy_pending: bool,
@@ -9805,6 +9866,28 @@ impl WorkspaceShell {
         });
         let api_token_name_input =
             cx.new(|cx| TextInput::new("", "Token name", cx).aria_label("API token name"));
+        let principal_create_inputs = vec![
+            cx.new(|cx| TextInput::new("", "Username", cx).aria_label("Principal username")),
+            cx.new(|cx| {
+                TextInput::new("", "Temporary password", cx)
+                    .aria_label("Temporary password")
+                    .masked()
+            }),
+            cx.new(|cx| {
+                TextInput::new("", "Display name", cx).aria_label("Principal display name")
+            }),
+            cx.new(|cx| TextInput::new("", "Email (optional)", cx).aria_label("Principal email")),
+        ];
+        let principal_id_input =
+            cx.new(|cx| TextInput::new("", "Principal ID", cx).aria_label("Principal ID"));
+        let principal_link_inputs = vec![
+            cx.new(|cx| TextInput::new("", "New username", cx).aria_label("Linked username")),
+            cx.new(|cx| {
+                TextInput::new("", "Temporary password", cx)
+                    .aria_label("Linked password")
+                    .masked()
+            }),
+        ];
         let connection_policy_schemas_input = cx.new(|cx| {
             TextInput::new("", "public, catalog.schema", cx).aria_label("Allowed database schemas")
         });
@@ -10218,6 +10301,10 @@ impl WorkspaceShell {
             account_username_input,
             account_password_input,
             api_token_name_input,
+            administration_section: AdministrationSection::Principals,
+            principal_create_inputs,
+            principal_id_input,
+            principal_link_inputs,
             connection_url_input,
             database_name_input,
             database_host_input,
@@ -10520,6 +10607,11 @@ impl WorkspaceShell {
             api_token_plaintext: None,
             api_tokens_pending: false,
             api_tokens_error: None,
+            principal_identities: Vec::new(),
+            principal_sessions: Vec::new(),
+            principal_admin_pending: false,
+            principal_admin_error: None,
+            principal_reset_token: None,
             connection_policy_profile: None,
             connection_policy: None,
             connection_policy_pending: false,
@@ -11729,6 +11821,88 @@ impl WorkspaceShell {
                         self.vcs_diagnostics_error = None;
                     }
                     Err(message) => self.vcs_diagnostics_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::PrincipalCreated(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(principal) => {
+                        self.principal_id_input
+                            .update(cx, |input, cx| input.set_text(principal.id.to_string(), cx));
+                        for input in &self.principal_create_inputs {
+                            input.update(cx, |input, cx| input.set_text("", cx));
+                        }
+                        self.principal_admin_error = None;
+                        self.show_success_toast(
+                            format!("Created principal {}", principal.display_name),
+                            cx,
+                        );
+                        self.load_principal_access(cx);
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::PrincipalAccessLoaded {
+                principal_id: _,
+                result,
+            } => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok((identities, sessions)) => {
+                        self.principal_identities = identities;
+                        self.principal_sessions = sessions;
+                        self.principal_admin_error = None;
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::PrincipalAdminChanged {
+                principal_id,
+                result,
+            } => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(()) => {
+                        self.principal_admin_error = None;
+                        self.send_principal_command(
+                            ExecutorCommand::LoadPrincipalAccess { principal_id },
+                            cx,
+                        );
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::PrincipalIdentityLinked {
+                principal_id,
+                result,
+            } => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(_) => {
+                        for input in &self.principal_link_inputs {
+                            input.update(cx, |input, cx| input.set_text("", cx));
+                        }
+                        self.send_principal_command(
+                            ExecutorCommand::LoadPrincipalAccess { principal_id },
+                            cx,
+                        );
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::PrincipalPasswordResetIssued(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(reset) => {
+                        self.principal_reset_token = Some(reset.token);
+                        self.principal_admin_error = None;
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
                 }
                 cx.notify();
             }
@@ -30504,6 +30678,153 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn open_administration(&mut self, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::Administration);
+        self.administration_section = AdministrationSection::Principals;
+        self.principal_admin_error = None;
+        cx.notify();
+    }
+
+    fn principal_target_id(&self, cx: &App) -> Result<i64, String> {
+        self.principal_id_input
+            .read(cx)
+            .text()
+            .trim()
+            .parse()
+            .map_err(|_| "Enter a numeric principal ID".into())
+    }
+
+    fn send_principal_command(&mut self, command: ExecutorCommand, cx: &mut Context<Self>) {
+        self.principal_admin_pending = true;
+        self.principal_admin_error = None;
+        if self
+            .executor_sender
+            .as_ref()
+            .is_none_or(|sender| sender.send(command).is_err())
+        {
+            self.principal_admin_pending = false;
+            self.principal_admin_error = Some("Principal administration is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn create_principal(&mut self, cx: &mut Context<Self>) {
+        let values = self
+            .principal_create_inputs
+            .iter()
+            .map(|input| input.read(cx).text().trim().to_owned())
+            .collect::<Vec<_>>();
+        if values[0].is_empty() || values[1].is_empty() || values[2].is_empty() {
+            self.principal_admin_error =
+                Some("Username, temporary password, and display name are required".into());
+            cx.notify();
+            return;
+        }
+        self.send_principal_command(
+            ExecutorCommand::CreatePrincipal {
+                request: sift_protocol::AdminCreatePasswordPrincipalRequest {
+                    username: values[0].clone(),
+                    password: values[1].clone(),
+                    display_name: values[2].clone(),
+                    email: (!values[3].is_empty()).then(|| values[3].clone()),
+                    is_instance_admin: false,
+                },
+            },
+            cx,
+        );
+    }
+
+    fn load_principal_access(&mut self, cx: &mut Context<Self>) {
+        match self.principal_target_id(cx) {
+            Ok(principal_id) => self
+                .send_principal_command(ExecutorCommand::LoadPrincipalAccess { principal_id }, cx),
+            Err(error) => {
+                self.principal_admin_error = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
+    fn set_principal_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
+        match self.principal_target_id(cx) {
+            Ok(principal_id) => self.send_principal_command(
+                ExecutorCommand::SetPrincipalDisabled {
+                    principal_id,
+                    disabled,
+                },
+                cx,
+            ),
+            Err(error) => {
+                self.principal_admin_error = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
+    fn link_principal_password(&mut self, cx: &mut Context<Self>) {
+        let Ok(principal_id) = self.principal_target_id(cx).inspect_err(|error| {
+            self.principal_admin_error = Some(error.clone());
+            cx.notify();
+        }) else {
+            return;
+        };
+        let username = self.principal_link_inputs[0]
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let password = self.principal_link_inputs[1].read(cx).text().to_owned();
+        if username.is_empty() || password.is_empty() {
+            self.principal_admin_error =
+                Some("Username and temporary password are required".into());
+            cx.notify();
+            return;
+        }
+        self.send_principal_command(
+            ExecutorCommand::LinkPasswordIdentity {
+                principal_id,
+                request: sift_protocol::AdminLinkPasswordIdentityRequest { username, password },
+            },
+            cx,
+        );
+    }
+
+    fn unlink_principal_identity(&mut self, identity_id: i64, cx: &mut Context<Self>) {
+        if let Ok(principal_id) = self.principal_target_id(cx) {
+            self.send_principal_command(
+                ExecutorCommand::UnlinkIdentity {
+                    principal_id,
+                    identity_id,
+                },
+                cx,
+            );
+        }
+    }
+
+    fn revoke_principal_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        if let Ok(principal_id) = self.principal_target_id(cx) {
+            self.send_principal_command(
+                ExecutorCommand::RevokePrincipalSession {
+                    principal_id,
+                    session_id,
+                },
+                cx,
+            );
+        }
+    }
+
+    fn issue_principal_password_reset(&mut self, identity_id: i64, cx: &mut Context<Self>) {
+        if let Ok(principal_id) = self.principal_target_id(cx) {
+            self.send_principal_command(
+                ExecutorCommand::IssuePrincipalPasswordReset {
+                    principal_id,
+                    identity_id,
+                },
+                cx,
+            );
+        }
+    }
+
     fn issue_api_token(&mut self, cx: &mut Context<Self>) {
         let name = self.api_token_name_input.read(cx).text().trim().to_owned();
         if name.is_empty() {
@@ -38485,6 +38806,7 @@ impl WorkspaceShell {
             let connection_policy = matches!(modal, Modal::ConnectionPolicy);
             let tenant_usage = matches!(modal, Modal::TenantUsage);
             let vcs_diagnostics = matches!(modal, Modal::VcsDiagnostics);
+            let administration = matches!(modal, Modal::Administration);
             let themes = matches!(modal, Modal::Themes);
             let keymaps = matches!(modal, Modal::Keymaps);
             let app_bar_modal = matches!(
@@ -38517,6 +38839,7 @@ impl WorkspaceShell {
                 || connection_policy
                 || tenant_usage
                 || vcs_diagnostics
+                || administration
                 || themes
                 || keymaps
                 || command_palette
@@ -41025,6 +41348,46 @@ impl WorkspaceShell {
                         .children(self.vcs_diagnostics_error.clone().map(|error| div().text_sm().text_color(colors.danger).child(error)))
                         .into_any_element()
                 }
+                Modal::Administration => {
+                    let identities = self.principal_identities.clone();
+                    let sessions = self.principal_sessions.clone();
+                    div().h(px(650.)).flex().flex_col().gap_3()
+                        .child(div().flex().items_center().justify_between()
+                            .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Server administration"))
+                            .child(Button::new("refresh-principal-access", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.load_principal_access(cx)))))
+                        .child(div().flex().gap_1().child(Button::new("admin-principals-tab", "Principals").tone(ButtonTone::Accent)))
+                        .child(div().flex().gap_2().children(self.principal_create_inputs.iter().cloned()).child(Button::new("create-principal", "Create").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_principal(cx)))))
+                        .child(div().pt_2().border_t_1().border_color(colors.subtle_border).flex().items_center().gap_2()
+                            .child(div().w(px(150.)).child(self.principal_id_input.clone()))
+                            .child(Button::new("load-principal", "Inspect").tone(ButtonTone::Neutral).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.load_principal_access(cx))))
+                            .child(Button::new("disable-principal", "Disable").tone(ButtonTone::DangerGhost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.set_principal_disabled(true, cx))))
+                            .child(Button::new("enable-principal", "Enable").tone(ButtonTone::Neutral).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.set_principal_disabled(false, cx)))))
+                        .child(div().flex().gap_2().children(self.principal_link_inputs.iter().cloned()).child(Button::new("link-password-identity", "Link password login").tone(ButtonTone::Neutral).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.link_principal_password(cx)))))
+                        .children(self.principal_reset_token.clone().map(|token| {
+                            let copy = token.clone();
+                            div().p_2().rounded_sm().bg(colors.active_surface).flex().items_center().gap_2()
+                                .child(div().min_w_0().flex_1().truncate().font_family("monospace").text_xs().child(token))
+                                .child(Button::new("copy-principal-reset-token", "Copy reset token").tone(ButtonTone::Accent).on_click(cx.listener(move |shell, _, _, cx| { cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone())); shell.show_success_toast("Reset token copied".into(), cx); })))
+                        }))
+                        .children(self.principal_admin_error.clone().map(|error| div().text_sm().text_color(colors.danger).child(error)))
+                        .child(div().id("principal-access-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_3()
+                            .child(SectionLabel::new("Identities"))
+                            .children(identities.into_iter().enumerate().map(|(index, identity)| {
+                                let identity_id = identity.id;
+                                div().id(("principal-identity", index)).min_h(px(44.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border)
+                                    .child(div().min_w_0().flex_1().flex().flex_col().child(format!("{} · {}", identity.method, identity.subject)).child(div().text_xs().text_color(colors.muted_text).child(format!("{} · identity {}", identity.issuer, identity.id))))
+                                    .child(Button::new(("reset-principal-password", index), "Reset").tone(ButtonTone::Ghost).disabled(identity.method != "password" || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.issue_principal_password_reset(identity_id, cx))))
+                                    .child(Button::new(("unlink-principal-identity", index), "Unlink").tone(ButtonTone::DangerGhost).disabled(self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.unlink_principal_identity(identity_id, cx))))
+                            }))
+                            .child(SectionLabel::new("Auth sessions"))
+                            .children(sessions.into_iter().enumerate().map(|(index, session)| {
+                                let session_id = session.id.clone();
+                                div().id(("principal-session", index)).min_h(px(44.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border)
+                                    .child(div().min_w_0().flex_1().flex().flex_col().child(session.client_label.unwrap_or(session.client_kind)).child(div().text_xs().text_color(colors.muted_text).child(format!("Created {} · expires {}", session.created_at.format("%Y-%m-%d"), session.expires_at.format("%Y-%m-%d")))))
+                                    .child(Button::new(("revoke-principal-session", index), "Revoke").tone(ButtonTone::DangerGhost).disabled(session.revoked_at.is_some() || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_principal_session(session_id.clone(), cx))))
+                            })))
+                        .into_any_element()
+                }
                 Modal::Settings => {
                     let vim_mode_default = self.vim_mode_default();
                     let dark_theme = self.dark_theme;
@@ -41136,6 +41499,11 @@ impl WorkspaceShell {
                             div().flex().items_center().justify_between().gap_3()
                                 .child(div().flex().flex_col().gap_1().child("VCS diagnostics").child(div().text_xs().text_color(colors.muted_text).child("Inspect adapter health, executable details, and safety limits.")))
                                 .child(Button::new("open-vcs-diagnostics", "Inspect…").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_vcs_diagnostics(cx)))),
+                        )
+                        .child(
+                            div().flex().items_center().justify_between().gap_3()
+                                .child(div().flex().flex_col().gap_1().child("Server administration").child(div().text_xs().text_color(colors.muted_text).child("Manage identities, access, approvals, and audit records.")))
+                                .child(Button::new("open-server-administration", "Manage…").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_administration(cx)))),
                         )
                         .child(toggle_row(
                             "settings-theme",
@@ -46362,6 +46730,7 @@ impl WorkspaceShell {
                     | Modal::ConnectionPolicy
                     | Modal::TenantUsage
                     | Modal::VcsDiagnostics
+                    | Modal::Administration
                     | Modal::Themes
                     | Modal::Keymaps
                     | Modal::Account

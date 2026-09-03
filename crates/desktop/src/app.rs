@@ -1073,6 +1073,152 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::CreatePrincipal { request } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .admin_create_principal(request)
+                        .await
+                        .map_err(|error| format!("creating principal failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::PrincipalCreated(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadPrincipalAccess { principal_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => match client.admin_principal_identities(principal_id).await {
+                        Ok(identities) => client
+                            .admin_auth_sessions(principal_id)
+                            .await
+                            .map(|sessions| (identities, sessions))
+                            .map_err(|error| format!("loading principal sessions failed: {error}")),
+                        Err(error) => Err(format!("loading principal identities failed: {error}")),
+                    },
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::PrincipalAccessLoaded {
+                        principal_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SetPrincipalDisabled {
+                principal_id,
+                disabled,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .admin_set_principal_disabled(principal_id, disabled)
+                        .await
+                        .map_err(|error| format!("updating principal failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::PrincipalAdminChanged {
+                        principal_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LinkPasswordIdentity {
+                principal_id,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .admin_link_password_identity(principal_id, request)
+                        .await
+                        .map_err(|error| format!("linking password identity failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::PrincipalIdentityLinked {
+                        principal_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::UnlinkIdentity {
+                principal_id,
+                identity_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .admin_unlink_identity(principal_id, identity_id)
+                        .await
+                        .map_err(|error| format!("unlinking identity failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::PrincipalAdminChanged {
+                        principal_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RevokePrincipalSession {
+                principal_id,
+                session_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .admin_revoke_auth_session(principal_id, &session_id)
+                        .await
+                        .map_err(|error| format!("revoking session failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::PrincipalAdminChanged {
+                        principal_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::IssuePrincipalPasswordReset {
+                principal_id,
+                identity_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .admin_issue_password_reset(principal_id, identity_id)
+                        .await
+                        .map_err(|error| format!("issuing password reset failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::PrincipalPasswordResetIssued(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()
