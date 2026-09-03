@@ -113,18 +113,18 @@ async fn instance_command(arguments: &[String]) -> anyhow::Result<()> {
         }
         "status" => {
             let options = InstanceDestinationOptions::parse(&arguments[1..], false)?;
-            let (_, generation, config) = sift_server::instance_runtime::load_current_config(
+            let applied = sift_server::instance_runtime::load_applied_instance(
                 &options.root,
                 options.state_dir.as_deref(),
             )?;
-            let descriptor_path = config.runtime_state_dir().join("daemon.json");
+            let descriptor_path = applied.config.runtime_state_dir().join("daemon.json");
             let descriptor = match std::fs::symlink_metadata(&descriptor_path) {
                 Ok(metadata) => {
                     if metadata.file_type().is_symlink() || !metadata.is_file() {
                         bail!("daemon descriptor must be a regular non-symlink file");
                     }
                     Some(sift_server::runtime::read_daemon_descriptor(
-                        &config.runtime_state_dir(),
+                        &applied.config.runtime_state_dir(),
                     )?)
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -150,7 +150,7 @@ async fn instance_command(arguments: &[String]) -> anyhow::Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "running": running,
-                    "applied_generation": generation.generation,
+                    "applied_generation": applied.generation.generation,
                     "daemon": descriptor,
                 }))?
             );
@@ -172,12 +172,12 @@ async fn credential_command(arguments: &[String]) -> anyhow::Result<()> {
     match action.as_str() {
         "status" => {
             let options = InstanceDestinationOptions::parse(&arguments[1..], false)?;
-            let (_, _, config) = sift_server::instance_runtime::load_current_config(
+            let applied = sift_server::instance_runtime::load_applied_instance(
                 &options.root,
                 options.state_dir.as_deref(),
             )?;
-            sift_server::instance_runtime::ensure_file_secret_key(&config)?;
-            let store = sift_server::metadata_runtime::build_metadata_store(&config)?
+            sift_server::instance_runtime::ensure_file_secret_key(&applied.config)?;
+            let store = sift_server::metadata_runtime::build_metadata_store(&applied.config)?
                 .context("instance configuration unexpectedly disabled metadata")?;
             println!(
                 "{}",
@@ -187,14 +187,14 @@ async fn credential_command(arguments: &[String]) -> anyhow::Result<()> {
         }
         "import" => {
             let (options, slot, source) = CredentialImportOptions::parse(&arguments[1..])?;
-            let (_, _, config) = sift_server::instance_runtime::load_current_config(
+            let applied = sift_server::instance_runtime::load_applied_instance(
                 &options.root,
                 options.state_dir.as_deref(),
             )?;
-            sift_server::instance_runtime::ensure_file_secret_key(&config)?;
-            let _maintenance = sift_server::runtime::acquire_maintenance_exclusive(&config)
+            sift_server::instance_runtime::ensure_file_secret_key(&applied.config)?;
+            let _maintenance = sift_server::runtime::acquire_maintenance_exclusive(&applied.config)
                 .context("stop the instance before importing credentials")?;
-            let store = sift_server::metadata_runtime::build_metadata_store(&config)?
+            let store = sift_server::metadata_runtime::build_metadata_store(&applied.config)?
                 .context("instance configuration unexpectedly disabled metadata")?;
             let input = read_credential_input(source)?;
             let value: Value = serde_json::from_slice(&input)

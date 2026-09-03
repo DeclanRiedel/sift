@@ -726,10 +726,21 @@ fn prepare_state(state_dir: &Path) -> anyhow::Result<(File, PathBuf)> {
     Ok((lock_file, generations))
 }
 
-pub fn load_current_config(
+/// The single verified input to every instance-aware runtime path.
+///
+/// Construction proves that the source manifest and lock still match the
+/// current immutable generation. Callers must not reconstruct `Config`
+/// independently after this boundary.
+pub struct AppliedInstance {
+    pub root: InstanceRoot,
+    pub generation: GenerationRecord,
+    pub config: Config,
+}
+
+pub fn load_applied_instance(
     root: impl AsRef<Path>,
     state_dir: Option<&Path>,
-) -> anyhow::Result<(InstanceRoot, GenerationRecord, Config)> {
+) -> anyhow::Result<AppliedInstance> {
     let instance = InstanceRoot::open(root)?;
     let state_dir = state_dir
         .map(Path::to_path_buf)
@@ -744,7 +755,11 @@ pub fn load_current_config(
         bail!("server root differs from the applied generation; review and apply it first");
     }
     let config = instance.runtime_config(&state_dir)?;
-    Ok((instance, current, config))
+    Ok(AppliedInstance {
+        root: instance,
+        generation: current,
+        config,
+    })
 }
 
 pub fn ensure_file_secret_key(config: &Config) -> anyhow::Result<()> {
@@ -1018,6 +1033,13 @@ mod tests {
         assert!(first.changed);
         assert!(!second.changed);
         assert_eq!(first.generation, second.generation);
+        let applied = load_applied_instance(&root, Some(&state)).unwrap();
+        assert_eq!(applied.generation.generation, first.generation);
+        assert_eq!(applied.root.manifest, instance.manifest);
+        assert_eq!(
+            applied.config.runtime.state_dir.as_deref(),
+            Some(state.to_str().unwrap())
+        );
         assert!(state.join("generations/1/realization.json").is_file());
         let generations = instance.generations(&state).unwrap();
         assert_eq!(generations.len(), 1);
@@ -1045,7 +1067,7 @@ mod tests {
         let mut manifest = instance.manifest.clone();
         manifest.name = "edited-sift".into();
         std::fs::write(root.join(MANIFEST_FILE), manifest.to_toml_pretty().unwrap()).unwrap();
-        assert!(load_current_config(&root, Some(&state)).is_err());
+        assert!(load_applied_instance(&root, Some(&state)).is_err());
     }
 
     #[test]

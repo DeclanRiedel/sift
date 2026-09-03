@@ -939,11 +939,11 @@ async fn inspect_root(
     }
 
     let credentials = if current.is_some() && !drifted {
-        let (_, _, config) = sift_server::instance_runtime::load_current_config(root, None)
+        let applied = sift_server::instance_runtime::load_applied_instance(root, None)
             .map_err(|error| format!("loading applied instance failed: {error:#}"))?;
-        sift_server::instance_runtime::ensure_file_secret_key(&config)
+        sift_server::instance_runtime::ensure_file_secret_key(&applied.config)
             .map_err(|error| format!("preparing instance secret store failed: {error:#}"))?;
-        let store = sift_server::metadata_runtime::build_metadata_store(&config)
+        let store = sift_server::metadata_runtime::build_metadata_store(&applied.config)
             .map_err(|error| format!("opening instance metadata failed: {error:#}"))?
             .ok_or_else(|| "instance metadata is disabled".to_string())?;
         store
@@ -1217,13 +1217,13 @@ async fn import_root_credential(
     kind: InstanceCredentialKind,
     secret: String,
 ) -> Result<(), String> {
-    let (_, _, config) = sift_server::instance_runtime::load_current_config(root, None)
+    let applied = sift_server::instance_runtime::load_applied_instance(root, None)
         .map_err(|error| format!("loading applied instance failed: {error:#}"))?;
-    sift_server::instance_runtime::ensure_file_secret_key(&config)
+    sift_server::instance_runtime::ensure_file_secret_key(&applied.config)
         .map_err(|error| format!("preparing instance secret store failed: {error:#}"))?;
-    let _maintenance = sift_server::runtime::acquire_maintenance_exclusive(&config)
+    let _maintenance = sift_server::runtime::acquire_maintenance_exclusive(&applied.config)
         .map_err(|error| format!("stop the instance before importing credentials: {error:#}"))?;
-    let store = sift_server::metadata_runtime::build_metadata_store(&config)
+    let store = sift_server::metadata_runtime::build_metadata_store(&applied.config)
         .map_err(|error| format!("opening instance metadata failed: {error:#}"))?
         .ok_or_else(|| "instance metadata is disabled".to_string())?;
     let field = match kind {

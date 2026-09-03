@@ -72,6 +72,13 @@ an isolated state directory, so multiple local roots can run concurrently.
 Use `--state-dir PATH` consistently with apply, status, import, and startup to
 override the platform-native private state location.
 
+Server startup, CLI status and credential commands, and the desktop instance
+view all cross the same applied-instance boundary. That loader verifies the
+editable manifest and lock against the current immutable generation before it
+constructs runtime configuration; no client reconstructs a second runtime
+configuration from `sift.toml` directly. The no-root server configuration path
+is retained only for development and non-instance deployments.
+
 ## Workspace Git policy
 
 Git requires at least one operator-owned workspace root. Its process and

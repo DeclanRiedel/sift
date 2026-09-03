@@ -93,17 +93,19 @@ async fn main() -> anyhow::Result<()> {
                         "--mode cannot override locked instance configuration; edit sift.toml and re-lock"
                     );
                 }
-                let (instance, generation, config) =
-                    sift_server::instance_runtime::load_current_config(
-                        &instance_root,
-                        state_dir.as_deref(),
-                    )
-                    .context("loading applied instance")?;
-                instance_github = Some(instance.manifest.auth.github.clone());
-                configured_instance_root = Some(instance.root.clone());
-                instance_selection =
-                    Some((instance.manifest, instance.lock, generation.generation));
-                config
+                let applied = sift_server::instance_runtime::load_applied_instance(
+                    &instance_root,
+                    state_dir.as_deref(),
+                )
+                .context("loading applied instance")?;
+                instance_github = Some(applied.root.manifest.auth.github.clone());
+                configured_instance_root = Some(applied.root.root.clone());
+                instance_selection = Some((
+                    applied.root.manifest,
+                    applied.root.lock,
+                    applied.generation.generation,
+                ));
+                applied.config
             } else {
                 let mut config = load_config().context("loading config")?;
                 if let Some(mode) = mode {
