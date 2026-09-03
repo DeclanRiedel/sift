@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{collections::BTreeMap, ops::Range};
 
 use crate::{ConfigError, Manifest};
 
@@ -896,29 +896,127 @@ const FIELDS: &[Field] = &[
 ];
 
 pub fn manifest_diagnostics(source: &str) -> Vec<ManifestDiagnostic> {
-    match Manifest::parse(source) {
-        Ok(_) => Vec::new(),
-        Err(ConfigError::ManifestToml(message)) => {
-            let range = toml::from_str::<toml::Value>(source)
-                .err()
-                .and_then(|error| error.span())
-                .unwrap_or(0..source.len().min(1));
-            vec![ManifestDiagnostic {
-                range,
+    let parsed = match toml::from_str::<toml::Value>(source) {
+        Ok(value) => value,
+        Err(error) => {
+            return vec![ManifestDiagnostic {
+                range: error.span().unwrap_or(0..source.len().min(1)),
                 path: None,
-                message: format!("invalid TOML: {message}"),
-            }]
+                message: format!("invalid TOML: {}", error.message()),
+            }];
         }
-        Err(ConfigError::Validation { path, message }) => vec![ManifestDiagnostic {
-            range: find_path_range(source, &path),
-            path: Some(path.clone()),
-            message: format!("{path}: {message}"),
-        }],
-        Err(error) => vec![ManifestDiagnostic {
-            range: 0..source.len().min(1),
-            path: None,
-            message: error.to_string(),
-        }],
+    };
+    let mut diagnostics = Vec::new();
+    collect_schema_diagnostics(source, "", "", &parsed, &mut diagnostics);
+    if let Err(error) = Manifest::parse(source) {
+        let diagnostic = match error {
+            ConfigError::Validation { path, message } => ManifestDiagnostic {
+                range: find_path_range(source, &path),
+                path: Some(path.clone()),
+                message: format!("{path}: {message}"),
+            },
+            error => ManifestDiagnostic {
+                range: 0..source.len().min(1),
+                path: None,
+                message: error.to_string(),
+            },
+        };
+        if !diagnostics.iter().any(|existing| {
+            existing.range == diagnostic.range && existing.message == diagnostic.message
+        }) {
+            diagnostics.push(diagnostic);
+        }
+    }
+    diagnostics.sort_by_key(|diagnostic| diagnostic.range.start);
+    diagnostics
+}
+
+fn collect_schema_diagnostics(
+    source: &str,
+    schema_table: &str,
+    semantic_path: &str,
+    value: &toml::Value,
+    output: &mut Vec<ManifestDiagnostic>,
+) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    for (key, value) in table {
+        let child_schema = join_path(schema_table, key);
+        let child_path = join_path(semantic_path, key);
+        if value.is_table() {
+            collect_schema_diagnostics(source, &child_schema, &child_path, value, output);
+            continue;
+        }
+        if let Some(array) = value
+            .as_array()
+            .filter(|items| items.iter().all(toml::Value::is_table))
+        {
+            for (index, item) in array.iter().enumerate() {
+                collect_schema_diagnostics(
+                    source,
+                    &child_schema,
+                    &format!("{child_path}[{index}]"),
+                    item,
+                    output,
+                );
+            }
+            continue;
+        }
+        let field = FIELDS
+            .iter()
+            .find(|field| field.table == schema_table && field.key == key);
+        let Some(field) = field else {
+            let known_table = FIELDS.iter().any(|field| {
+                field.table == child_schema || field.table.starts_with(&format!("{child_schema}."))
+            });
+            if !known_table {
+                output.push(ManifestDiagnostic {
+                    range: find_path_range(source, &child_path),
+                    path: Some(child_path.clone()),
+                    message: format!("{child_path}: unknown configuration field"),
+                });
+            }
+            continue;
+        };
+        let type_valid =
+            if field.value_type.contains("integer") || field.value_type.contains("bytes") {
+                value.is_integer()
+            } else if field.value_type == "number" {
+                value.is_float() || value.is_integer()
+            } else if field.value_type == "boolean" {
+                value.is_bool()
+            } else if field.value_type.contains("array") {
+                value.is_array()
+            } else {
+                value.is_str()
+            };
+        let message = if !type_valid {
+            Some(format!("expected {}", field.value_type))
+        } else if !field.choices.is_empty()
+            && value
+                .as_str()
+                .is_some_and(|choice| !field.choices.contains(&choice))
+        {
+            Some(format!("expected one of {}", field.choices.join(", ")))
+        } else {
+            None
+        };
+        if let Some(message) = message {
+            output.push(ManifestDiagnostic {
+                range: find_path_range(source, &child_path),
+                path: Some(child_path.clone()),
+                message: format!("{child_path}: {message}"),
+            });
+        }
+    }
+}
+
+fn join_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.into()
+    } else {
+        format!("{parent}.{child}")
     }
 }
 
@@ -1069,15 +1167,37 @@ fn active_table(source: &str, before: usize) -> &str {
 }
 
 fn find_path_range(source: &str, path: &str) -> Range<usize> {
-    let key = path
-        .rsplit('.')
-        .next()
-        .unwrap_or(path)
-        .split('[')
-        .next()
-        .unwrap_or(path);
+    let segments = path.split('.').map(path_segment).collect::<Vec<_>>();
+    let key = segments.last().map_or(path, |segment| segment.0);
+    let desired_table = segments[..segments.len().saturating_sub(1)]
+        .iter()
+        .map(|segment| segment.0)
+        .collect::<Vec<_>>()
+        .join(".");
+    let mut active_table = String::new();
+    let mut array_indices = BTreeMap::<String, usize>::new();
     for (offset, line) in lines_with_offsets(source) {
         let trimmed = line.trim_start();
+        if let Some(table) = trimmed
+            .strip_prefix("[[")
+            .and_then(|value| value.strip_suffix("]]"))
+        {
+            active_table = table.into();
+            let next = array_indices.get(table).map_or(0, |index| index + 1);
+            array_indices.retain(|path, _| !path.starts_with(&format!("{table}.")));
+            array_indices.insert(table.into(), next);
+            continue;
+        }
+        if let Some(table) = trimmed
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+        {
+            active_table = table.into();
+            continue;
+        }
+        if active_table != desired_table || !indices_match(&segments, &array_indices) {
+            continue;
+        }
         if trimmed
             .strip_prefix(key)
             .is_some_and(|tail| tail.trim_start().starts_with('='))
@@ -1087,6 +1207,32 @@ fn find_path_range(source: &str, path: &str) -> Range<usize> {
         }
     }
     0..source.len().min(1)
+}
+
+fn path_segment(segment: &str) -> (&str, Option<usize>) {
+    let Some((name, index)) = segment.split_once('[') else {
+        return (segment, None);
+    };
+    (
+        name,
+        index.strip_suffix(']').and_then(|value| value.parse().ok()),
+    )
+}
+
+fn indices_match(segments: &[(&str, Option<usize>)], observed: &BTreeMap<String, usize>) -> bool {
+    let mut prefix = String::new();
+    for (name, desired) in segments {
+        if !prefix.is_empty() {
+            prefix.push('.');
+        }
+        prefix.push_str(name);
+        if let Some(desired) = desired {
+            if observed.get(&prefix) != Some(desired) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn following_name(source: &str, from: usize) -> Option<String> {
@@ -1135,6 +1281,28 @@ mod tests {
         let diagnostics = manifest_diagnostics(&source);
         assert_eq!(&source[diagnostics[0].range.clone()], "kind");
         assert_eq!(diagnostics[0].path.as_deref(), Some("kind"));
+    }
+
+    #[test]
+    fn diagnostics_report_multiple_independent_schema_errors() {
+        let source = include_str!("../../../examples/reproducible-instance/sift.toml").replace(
+            "name = \"demo-sift\"",
+            "name = \"demo-sift\"\nfirst_bad = true\nsecond_bad = 7",
+        );
+        let paths = manifest_diagnostics(&source)
+            .into_iter()
+            .filter_map(|diagnostic| diagnostic.path)
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"first_bad".into()));
+        assert!(paths.contains(&"second_bad".into()));
+    }
+
+    #[test]
+    fn repeated_resource_diagnostic_targets_the_indexed_item() {
+        let source = "[[connections]]\nname = \"one\"\nprovider = \"postgres\"\n\n[[connections]]\nname = \"two\"\nprovider = \"wrong\"\n";
+        let range = find_path_range(source, "connections[1].provider");
+        assert_eq!(&source[range.clone()], "provider");
+        assert!(range.start > source.find("provider").unwrap());
     }
 
     #[test]
