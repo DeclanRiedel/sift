@@ -631,6 +631,20 @@ enum ResultInspectorView {
     RelationDefinition,
 }
 
+impl ResultInspectorView {
+    const RESULT_VIEWS: [Self; 3] = [Self::Value, Self::Fields, Self::RowJson];
+
+    fn from_number_key(key: &str) -> Option<Self> {
+        match key {
+            "1" => Some(Self::Value),
+            "2" => Some(Self::Fields),
+            "3" => Some(Self::RowJson),
+            "4" => Some(Self::RelationDefinition),
+            _ => None,
+        }
+    }
+}
+
 enum RowJsonFilter {
     Text(String),
     Regex(Regex),
@@ -25730,11 +25744,7 @@ impl WorkspaceShell {
         let Some((item_id, _)) = self.focused_pane_results_item(cx) else {
             return false;
         };
-        let mut views = vec![
-            ResultInspectorView::Value,
-            ResultInspectorView::Fields,
-            ResultInspectorView::RowJson,
-        ];
+        let mut views = ResultInspectorView::RESULT_VIEWS.to_vec();
         if self.focused_database_item(cx).map(|(id, _)| id) == Some(item_id) {
             views.push(ResultInspectorView::RelationDefinition);
         }
@@ -27745,11 +27755,8 @@ impl WorkspaceShell {
                 let handled = match key.as_str() {
                     "h" => self.move_result_inspector_view(-1, cx),
                     "l" => self.move_result_inspector_view(1, cx),
-                    "1" => self.select_result_inspector_view(ResultInspectorView::Fields, cx),
-                    "2" => self.select_result_inspector_view(ResultInspectorView::Value, cx),
-                    "3" => self.select_result_inspector_view(ResultInspectorView::RowJson, cx),
-                    "4" => self
-                        .select_result_inspector_view(ResultInspectorView::RelationDefinition, cx),
+                    "1" | "2" | "3" | "4" => ResultInspectorView::from_number_key(&key)
+                        .is_some_and(|view| self.select_result_inspector_view(view, cx)),
                     "j" if fields_selected => self.move_inspector_field_selection(1, cx),
                     "k" if fields_selected => self.move_inspector_field_selection(-1, cx),
                     "g" if fields_selected && self.inspector_g_pending => {
@@ -33000,7 +33007,7 @@ impl WorkspaceShell {
                                     cx.notify();
                                 }
                             }))
-                            .child("Value"),
+                            .child("1 Value"),
                     )
                     .child(
                         div()
@@ -33030,7 +33037,7 @@ impl WorkspaceShell {
                                     cx.notify();
                                 }
                             }))
-                            .child("Fields"),
+                            .child("2 Fields"),
                     )
                     .child(
                         div()
@@ -33060,7 +33067,7 @@ impl WorkspaceShell {
                                     cx.notify();
                                 }
                             }))
-                            .child("Row JSON"),
+                            .child("3 Row JSON"),
                     )
                     .children(has_relation_definition.then(|| {
                         div()
@@ -33084,7 +33091,7 @@ impl WorkspaceShell {
                                     cx.notify();
                                 }
                             }))
-                            .child("Definition")
+                            .child("4 Definition")
                     }))
                     .child(div().flex_1()),
             )
@@ -48502,7 +48509,7 @@ mod tests {
                 Some(&ResultInspectorView::RowJson)
             );
         });
-        cx.simulate_keystrokes("1 j enter");
+        cx.simulate_keystrokes("2 j enter");
         workspace.read_with(&cx, |shell, cx| {
             assert_eq!(shell.inspector_field_selected, 1);
             let (_, results) = shell.focused_pane_results_item(cx).unwrap();
@@ -48541,7 +48548,7 @@ mod tests {
             let (_, results) = shell.focused_pane_results_item(cx).unwrap();
             results.update(cx, |results, cx| results.select_cell(0, 0, cx));
         });
-        cx.simulate_keystrokes("2 y");
+        cx.simulate_keystrokes("1 y");
         workspace.read_with(&cx, |shell, cx| {
             let (item_id, results) = shell.focused_pane_results_item(cx).unwrap();
             assert_eq!(
@@ -48626,7 +48633,7 @@ mod tests {
         assert!(cx.debug_bounds("table-definition-inspector").is_some());
         assert!(cx.debug_bounds("inspector-result-fields").is_none());
 
-        cx.simulate_keystrokes("1");
+        cx.simulate_keystrokes("2");
         cx.run_until_parked();
         assert!(cx.debug_bounds("table-definition-inspector").is_none());
         assert!(cx.debug_bounds("inspector-result-fields").is_some());
