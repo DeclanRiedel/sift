@@ -8064,9 +8064,11 @@ impl gpui::Render for Pane {
                     Some(item) if item.kind == ItemKind::Configuration => {
                         match self.editors.get(&item.id) {
                             Some(editor) => {
-                                let outline = (item.title == "sift.toml")
-                                    .then(|| editor.read(cx).manifest_outline())
-                                    .unwrap_or_default();
+                                let outline = if item.title == "sift.toml" {
+                                    editor.read(cx).manifest_outline()
+                                } else {
+                                    Vec::new()
+                                };
                                 let outline_editor = editor.clone();
                                 body.child(
                                     div()
@@ -31008,6 +31010,10 @@ impl WorkspaceShell {
         self.open_current_configuration(cx);
     }
 
+    const fn interactive_manifest_mutation_available() -> bool {
+        false
+    }
+
     fn open_instance_lock(&mut self, source: String, cx: &mut Context<Self>) {
         self.modal = None;
         if let Some((pane_index, item_index)) =
@@ -42419,7 +42425,7 @@ impl WorkspaceShell {
                                     .child(Button::new("edit-manifest-principals", "Edit in sift.toml").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.edit_manifest_section("identity.github_principals", cx))))
                             )
                         ))
-                        .when(false && principals, |view| view
+                        .when(Self::interactive_manifest_mutation_available() && principals, |view| view
                             .child(div().flex().gap_2().children(self.principal_create_inputs.iter().cloned()).child(Button::new("create-principal", "Create").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_principal(cx)))))
                             .child(div().pt_2().border_t_1().border_color(colors.subtle_border).flex().items_center().gap_2()
                             .child(div().w(px(150.)).child(self.principal_id_input.clone()))
@@ -42457,7 +42463,7 @@ impl WorkspaceShell {
                                     .child(Button::new("edit-manifest-tenants", "Edit in sift.toml").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.edit_manifest_section("tenants", cx))))
                             )
                         ))
-                        .when(false && tenants, |view| view
+                        .when(Self::interactive_manifest_mutation_available() && tenants, |view| view
                             .child(div().flex().items_center().gap_2()
                                 .child(div().flex_1().child(self.tenant_invite_principal_input.clone()))
                                 .child(Button::new("cycle-invitation-role", format!("{:?}", self.tenant_invitation_role)).tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.cycle_invitation_role(cx))))
@@ -42483,7 +42489,7 @@ impl WorkspaceShell {
                                     .child(Button::new("edit-manifest-github", "Edit in sift.toml").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.edit_manifest_section("auth.github", cx))))
                             )
                         ))
-                        .when(false && self.administration_section == AdministrationSection::Github, |view| view
+                        .when(Self::interactive_manifest_mutation_available() && self.administration_section == AdministrationSection::Github, |view| view
                             .child(div().text_xs().text_color(colors.muted_text).child("Allow a GitHub login to create a new account, or bind its first login to an existing principal."))
                             .child(div().flex().gap_2().children(self.github_allowlist_inputs.iter().cloned()).child(Button::new("create-github-allowlist-entry", "Allow login").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_github_allowlist_entry(cx)))))
                             .child(div().id("github-allowlist").flex_1().min_h_0().overflow_y_scroll().children(github_entries.into_iter().enumerate().map(|(index, entry)| { let entry_id = entry.id.0; let active = entry.revoked_at.is_none() && entry.consumed_at.is_none(); div().id(("github-allowlist-entry", index)).min_h(px(50.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border).child(div().min_w_0().flex_1().flex().flex_col().child(entry.normalized_login).child(div().text_xs().text_color(colors.muted_text).child(entry.target_principal_id.map_or_else(|| "Creates a new principal".into(), |id| format!("Links to principal {}", id.0))))).child(Button::new(("revoke-github-allowlist", index), if active { "Revoke" } else if entry.consumed_at.is_some() { "Used" } else { "Revoked" }).tone(ButtonTone::DangerGhost).disabled(!active || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_github_allowlist_entry(entry_id, cx)))) }))))
