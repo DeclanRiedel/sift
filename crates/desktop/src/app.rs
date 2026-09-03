@@ -1424,6 +1424,120 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadDdlSources { workspace_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .ddl_sources(sift_protocol::WorkspaceId(workspace_id))
+                        .await
+                        .map_err(|error| format!("loading DDL sources failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::DdlSourcesLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadDdlSourceModel { source_id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .ddl_source(sift_protocol::DdlSourceId(source_id))
+                        .await
+                        .map_err(|error| format!("loading DDL source details failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::DdlSourceModelLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateDdlSource {
+                workspace_id,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .create_ddl_source(sift_protocol::WorkspaceId(workspace_id), request)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("creating DDL source failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::DdlSourceChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::UpdateDdlSource { source_id, request } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .update_ddl_source(sift_protocol::DdlSourceId(source_id), request)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("updating DDL source failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::DdlSourceChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::DeleteDdlSource {
+                source_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .delete_ddl_source(
+                            sift_protocol::DdlSourceId(source_id),
+                            sift_api_types::ExpectedDdlSourceRevisionRequest { expected_revision },
+                        )
+                        .await
+                        .map_err(|error| format!("deleting DDL source failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::DdlSourceChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RefreshDdlSource {
+                source_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .refresh_ddl_source(
+                            sift_protocol::DdlSourceId(source_id),
+                            sift_api_types::ExpectedDdlSourceRevisionRequest { expected_revision },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("refreshing DDL source failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::DdlSourceChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::CloseSession { session_id } => {
                 let active_connection_closed = context
                     .as_ref()

@@ -1730,6 +1730,7 @@ pub enum Modal {
     SemanticRename,
     CatalogDiagram,
     CatalogMigration,
+    DdlSources,
     CatalogSnapshots,
     CsvImport,
     TransferRecipes,
@@ -2857,6 +2858,28 @@ pub enum ExecutorCommand {
     LoadOperationAudit {
         cursor: Option<String>,
     },
+    LoadDdlSources {
+        workspace_id: i64,
+    },
+    LoadDdlSourceModel {
+        source_id: i64,
+    },
+    CreateDdlSource {
+        workspace_id: i64,
+        request: sift_api_types::CreateDdlSourceRequest,
+    },
+    UpdateDdlSource {
+        source_id: i64,
+        request: sift_api_types::UpdateDdlSourceRequest,
+    },
+    DeleteDdlSource {
+        source_id: i64,
+        expected_revision: u64,
+    },
+    RefreshDdlSource {
+        source_id: i64,
+        expected_revision: u64,
+    },
     CloseSession {
         session_id: sift_protocol::SessionId,
     },
@@ -3622,6 +3645,9 @@ pub enum ExecutorEvent {
         append: bool,
         result: Result<sift_protocol::CursorPage<sift_api_types::OperationAudit>, String>,
     },
+    DdlSourcesLoaded(Result<Vec<sift_protocol::DdlSource>, String>),
+    DdlSourceModelLoaded(Result<sift_protocol::DdlSourceModel, String>),
+    DdlSourceChanged(Result<(), String>),
     SessionResourceClosed {
         result: Result<(), String>,
         active_connection_closed: bool,
@@ -9134,6 +9160,7 @@ pub struct WorkspaceShell {
     tenant_invite_token_input: Entity<TextInput>,
     tenant_member_input: Entity<TextInput>,
     principal_key_inputs: Vec<Entity<TextInput>>,
+    ddl_source_inputs: Vec<Entity<TextInput>>,
     connection_url_input: Entity<TextInput>,
     database_name_input: Entity<TextInput>,
     database_host_input: Entity<TextInput>,
@@ -9462,6 +9489,11 @@ pub struct WorkspaceShell {
     operation_approvals: Vec<sift_protocol::OperationApproval>,
     operation_audit_rows: Vec<sift_api_types::OperationAudit>,
     operation_audit_cursor: Option<String>,
+    ddl_sources: Vec<sift_protocol::DdlSource>,
+    selected_ddl_source: Option<i64>,
+    selected_ddl_source_mappings: Vec<sift_protocol::DdlSourceMapping>,
+    ddl_sources_pending: bool,
+    ddl_sources_error: Option<String>,
     connection_policy_profile: Option<i64>,
     connection_policy: Option<sift_protocol::ConnectionPolicy>,
     connection_policy_pending: bool,
@@ -9964,6 +9996,14 @@ impl WorkspaceShell {
                     .aria_label("Ed25519 public key")
             }),
         ];
+        let ddl_source_inputs = vec![
+            cx.new(|cx| TextInput::new("", "Source name", cx).aria_label("DDL source name")),
+            cx.new(|cx| TextInput::new("postgres", "Dialect", cx).aria_label("DDL source dialect")),
+            cx.new(|cx| {
+                TextInput::new("", "Root node IDs, comma separated", cx)
+                    .aria_label("DDL source root nodes")
+            }),
+        ];
         let connection_policy_schemas_input = cx.new(|cx| {
             TextInput::new("", "public, catalog.schema", cx).aria_label("Allowed database schemas")
         });
@@ -10385,6 +10425,7 @@ impl WorkspaceShell {
             tenant_invite_token_input,
             tenant_member_input,
             principal_key_inputs,
+            ddl_source_inputs,
             connection_url_input,
             database_name_input,
             database_host_input,
@@ -10699,6 +10740,11 @@ impl WorkspaceShell {
             operation_approvals: Vec::new(),
             operation_audit_rows: Vec::new(),
             operation_audit_cursor: None,
+            ddl_sources: Vec::new(),
+            selected_ddl_source: None,
+            selected_ddl_source_mappings: Vec::new(),
+            ddl_sources_pending: false,
+            ddl_sources_error: None,
             connection_policy_profile: None,
             connection_policy: None,
             connection_policy_pending: false,
@@ -12083,6 +12129,41 @@ impl WorkspaceShell {
                         self.principal_admin_error = None;
                     }
                     Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::DdlSourcesLoaded(result) => {
+                self.ddl_sources_pending = false;
+                match result {
+                    Ok(rows) => {
+                        self.ddl_sources = rows;
+                        self.ddl_sources_error = None;
+                    }
+                    Err(error) => self.ddl_sources_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::DdlSourceModelLoaded(result) => {
+                self.ddl_sources_pending = false;
+                match result {
+                    Ok(model) if self.selected_ddl_source == Some(model.source.id.0) => {
+                        self.selected_ddl_source_mappings = model.mappings;
+                        self.ddl_sources_error = None;
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.ddl_sources_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::DdlSourceChanged(result) => {
+                self.ddl_sources_pending = false;
+                match result {
+                    Ok(()) => {
+                        self.selected_ddl_source = None;
+                        self.selected_ddl_source_mappings.clear();
+                        self.open_ddl_sources(cx);
+                    }
+                    Err(error) => self.ddl_sources_error = Some(error),
                 }
                 cx.notify();
             }
@@ -31167,6 +31248,161 @@ impl WorkspaceShell {
         self.send_principal_command(ExecutorCommand::LoadOperationAudit { cursor }, cx);
     }
 
+    fn open_ddl_sources(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.selected_workspace_id else {
+            self.show_error_toast("Select a workspace first".into(), cx);
+            return;
+        };
+        self.modal = Some(Modal::DdlSources);
+        self.ddl_sources_pending = true;
+        self.ddl_sources_error = None;
+        if self.executor_sender.as_ref().is_none_or(|sender| {
+            sender
+                .send(ExecutorCommand::LoadDdlSources { workspace_id })
+                .is_err()
+        }) {
+            self.ddl_sources_pending = false;
+            self.ddl_sources_error = Some("DDL source service is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn ddl_source_form(
+        &self,
+        cx: &App,
+    ) -> Result<(String, String, Vec<sift_protocol::WorkspaceNodeId>), String> {
+        let name = self.ddl_source_inputs[0].read(cx).text().trim().to_owned();
+        let dialect = self.ddl_source_inputs[1].read(cx).text().trim().to_owned();
+        let roots = self.ddl_source_inputs[2]
+            .read(cx)
+            .text()
+            .split(',')
+            .filter(|part| !part.trim().is_empty())
+            .map(|part| {
+                part.trim()
+                    .parse::<i64>()
+                    .map(sift_protocol::WorkspaceNodeId)
+                    .map_err(|_| "Root node IDs must be comma-separated numbers".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if name.is_empty() || dialect.is_empty() || roots.is_empty() {
+            return Err("Name, dialect, and at least one root node ID are required".into());
+        }
+        Ok((name, dialect, roots))
+    }
+
+    fn save_ddl_source(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.selected_workspace_id else {
+            return;
+        };
+        let (name, dialect_id, roots) = match self.ddl_source_form(cx) {
+            Ok(form) => form,
+            Err(error) => {
+                self.ddl_sources_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let command = if let Some(source) = self
+            .ddl_sources
+            .iter()
+            .find(|source| Some(source.id.0) == self.selected_ddl_source)
+        {
+            ExecutorCommand::UpdateDdlSource {
+                source_id: source.id.0,
+                request: sift_api_types::UpdateDdlSourceRequest {
+                    expected_revision: source.revision,
+                    name,
+                    dialect_id,
+                    roots,
+                    mappings: self.selected_ddl_source_mappings.clone(),
+                },
+            }
+        } else {
+            ExecutorCommand::CreateDdlSource {
+                workspace_id,
+                request: sift_api_types::CreateDdlSourceRequest {
+                    name,
+                    dialect_id,
+                    roots,
+                },
+            }
+        };
+        self.ddl_sources_pending = true;
+        self.ddl_sources_error = None;
+        if self
+            .executor_sender
+            .as_ref()
+            .is_none_or(|sender| sender.send(command).is_err())
+        {
+            self.ddl_sources_pending = false;
+            self.ddl_sources_error = Some("DDL source service is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn select_ddl_source(&mut self, source_id: i64, cx: &mut Context<Self>) {
+        self.selected_ddl_source = Some(source_id);
+        self.selected_ddl_source_mappings.clear();
+        if let Some(source) = self
+            .ddl_sources
+            .iter()
+            .find(|source| source.id.0 == source_id)
+        {
+            let values = [
+                source.name.clone(),
+                source.dialect_id.clone(),
+                source
+                    .roots
+                    .iter()
+                    .map(|id| id.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ];
+            for (input, value) in self.ddl_source_inputs.iter().zip(values) {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+        }
+        if self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::LoadDdlSourceModel { source_id })
+                .is_ok()
+        }) {
+            self.ddl_sources_pending = true;
+        }
+        cx.notify();
+    }
+
+    fn mutate_selected_ddl_source(&mut self, delete: bool, cx: &mut Context<Self>) {
+        let Some(source) = self
+            .ddl_sources
+            .iter()
+            .find(|source| Some(source.id.0) == self.selected_ddl_source)
+        else {
+            return;
+        };
+        let command = if delete {
+            ExecutorCommand::DeleteDdlSource {
+                source_id: source.id.0,
+                expected_revision: source.revision,
+            }
+        } else {
+            ExecutorCommand::RefreshDdlSource {
+                source_id: source.id.0,
+                expected_revision: source.revision,
+            }
+        };
+        self.ddl_sources_pending = true;
+        if self
+            .executor_sender
+            .as_ref()
+            .is_none_or(|sender| sender.send(command).is_err())
+        {
+            self.ddl_sources_pending = false;
+        }
+        cx.notify();
+    }
+
     fn issue_api_token(&mut self, cx: &mut Context<Self>) {
         let name = self.api_token_name_input.read(cx).text().trim().to_owned();
         if name.is_empty() {
@@ -39167,6 +39403,7 @@ impl WorkspaceShell {
             let plan_captures = matches!(modal, Modal::PlanCaptures);
             let catalog_diagram = matches!(modal, Modal::CatalogDiagram);
             let catalog_snapshots = matches!(modal, Modal::CatalogSnapshots);
+            let ddl_sources = matches!(modal, Modal::DdlSources);
             let csv_import = matches!(modal, Modal::CsvImport);
             let transfer_recipes = matches!(modal, Modal::TransferRecipes);
             let instance_setup = matches!(modal, Modal::InstanceSetup);
@@ -39182,6 +39419,7 @@ impl WorkspaceShell {
                 || tenant_usage
                 || vcs_diagnostics
                 || administration
+                || ddl_sources
                 || themes
                 || keymaps
                 || command_palette
@@ -44072,7 +44310,7 @@ impl WorkspaceShell {
                         .gap_3()
                         .w(px(720.))
                         .max_h(px(640.))
-                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Schema baseline migration"))
+                        .child(div().flex().items_center().justify_between().child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Schema baseline migration")).child(Button::new("manage-ddl-sources", "DDL sources…").tone(ButtonTone::Ghost).on_click(cx.listener(|shell, _, _, cx| shell.open_ddl_sources(cx)))))
                         .child(div().text_sm().text_color(colors.muted_text).child(format!("{change_count} change(s) · {statement_count} statement(s)")))
                         .children(self.catalog_migration_error.clone().map(ErrorBanner::new))
                         .children(run_summary)
@@ -44088,6 +44326,17 @@ impl WorkspaceShell {
                             .child(Button::new("cancel-catalog-migration-run", "Stop run").debug_selector("cancel-catalog-migration-run").tone(ButtonTone::DangerGhost).disabled(!run_running || self.catalog_migration_pending).on_click(cx.listener(|shell, _, _, cx| shell.cancel_catalog_migration_run(cx))))
                             .child(Button::new("cancel-catalog-migration", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
                             .child(Button::new("apply-catalog-migration", if self.catalog_migration_pending { "Working…" } else { "Apply migration" }).tone(ButtonTone::DangerMuted).disabled(self.catalog_migration_pending || self.catalog_migration_plan.is_none() || self.catalog_migration_run.is_some()).on_click(cx.listener(|shell, _, _, cx| shell.apply_catalog_migration(cx)))))
+                        .into_any_element()
+                }
+                Modal::DdlSources => {
+                    let rows = self.ddl_sources.clone();
+                    div().w(px(700.)).h(px(580.)).flex().flex_col().gap_3()
+                        .child(div().flex().items_center().justify_between().child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Workspace DDL sources")).child(Button::new("refresh-ddl-sources", "Refresh").tone(ButtonTone::Ghost).loading(self.ddl_sources_pending).on_click(cx.listener(|shell, _, _, cx| shell.open_ddl_sources(cx)))))
+                        .child(div().text_xs().text_color(colors.muted_text).child("Offline schema models used by comparison and migration. Root IDs refer to folders or files in the active workspace."))
+                        .child(div().flex().gap_2().children(self.ddl_source_inputs.iter().cloned()).child(Button::new("save-ddl-source", if self.selected_ddl_source.is_some() { "Save" } else { "Create" }).tone(ButtonTone::Accent).loading(self.ddl_sources_pending).on_click(cx.listener(|shell, _, _, cx| shell.save_ddl_source(cx)))))
+                        .children(self.ddl_sources_error.clone().map(ErrorBanner::new))
+                        .child(div().id("ddl-source-list").flex_1().min_h_0().overflow_y_scroll().children(rows.into_iter().enumerate().map(|(index, source)| { let source_id = source.id.0; let selected = self.selected_ddl_source == Some(source_id); div().id(("ddl-source", index)).min_h(px(52.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border).when(selected, |row| row.bg(colors.active_surface)).on_click(cx.listener(move |shell, _, _, cx| shell.select_ddl_source(source_id, cx))).child(div().min_w_0().flex_1().flex().flex_col().child(source.name).child(div().text_xs().text_color(colors.muted_text).child(format!("{} · {:?} · model r{} · {} diagnostic(s)", source.dialect_id, source.coverage, source.model_revision, source.diagnostic_count)))) })))
+                        .child(div().flex().justify_end().gap_2().child(Button::new("refresh-selected-ddl-source", "Rebuild model").tone(ButtonTone::Neutral).disabled(self.selected_ddl_source.is_none() || self.ddl_sources_pending).on_click(cx.listener(|shell, _, _, cx| shell.mutate_selected_ddl_source(false, cx)))).child(Button::new("delete-selected-ddl-source", "Delete").tone(ButtonTone::DangerGhost).disabled(self.selected_ddl_source.is_none() || self.ddl_sources_pending).on_click(cx.listener(|shell, _, _, cx| shell.mutate_selected_ddl_source(true, cx)))))
                         .into_any_element()
                 }
                 Modal::WorkspaceCreateFile | Modal::WorkspaceCreateFolder => {
@@ -47122,6 +47371,7 @@ impl WorkspaceShell {
                     | Modal::SemanticRename
                     | Modal::CatalogDiagram
                     | Modal::CatalogMigration
+                    | Modal::DdlSources
                     | Modal::CatalogSnapshots
                     | Modal::CsvImport
                     | Modal::WorkspaceReconcile
