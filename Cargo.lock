@@ -7638,6 +7638,7 @@ dependencies = [
 name = "sift-instance-config"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "semver",
  "serde",
  "serde_json",

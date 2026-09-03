@@ -188,11 +188,6 @@ impl MetadataStore {
     ) -> crate::Result<InstanceApplySummary> {
         manifest.validate()?;
         lock.verify(manifest)?;
-        if !manifest.extensions.is_empty() {
-            return Err(MetadataError::InstanceManifestConflict(
-                "extension installation is not yet a realizable v1 resource".into(),
-            ));
-        }
         let configuration_digest = manifest.configuration_digest()?;
         let lock_digest = lock.digest()?;
         let desired_resources = desired_resources(manifest)?;

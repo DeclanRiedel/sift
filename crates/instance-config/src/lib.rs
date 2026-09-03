@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use base64::Engine as _;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -696,6 +697,7 @@ pub struct ExtensionConfig {
     pub artifact: String,
     pub sha256: String,
     pub publisher_key: String,
+    pub publisher_public_key: String,
     #[serde(default)]
     pub grants: Vec<String>,
 }
@@ -739,6 +741,7 @@ pub struct ExtensionLock {
     pub artifact: String,
     pub sha256: String,
     pub publisher_key: String,
+    pub publisher_public_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -868,6 +871,7 @@ impl Manifest {
             extension.artifact = extension.artifact.trim().to_owned();
             extension.sha256 = extension.sha256.trim().to_ascii_lowercase();
             extension.publisher_key = extension.publisher_key.trim().to_owned();
+            extension.publisher_public_key = extension.publisher_public_key.trim().to_owned();
             extension.grants.iter_mut().for_each(|grant| {
                 *grant = grant.trim().to_owned();
             });
@@ -1055,11 +1059,46 @@ impl Manifest {
             })?;
             validate_https_url(&format!("{base}.artifact"), &extension.artifact)?;
             validate_sha256(&format!("{base}.sha256"), &extension.sha256)?;
-            if extension.publisher_key.is_empty() || extension.publisher_key.len() > 512 {
+            validate_sha256(&format!("{base}.publisher_key"), &extension.publisher_key)?;
+            let encoded = extension
+                .publisher_public_key
+                .strip_prefix("base64:")
+                .ok_or_else(|| ConfigError::Validation {
+                    path: format!("{base}.publisher_public_key"),
+                    message: "must use base64:<Ed25519 public key>".into(),
+                })?;
+            let public_key = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| ConfigError::Validation {
+                    path: format!("{base}.publisher_public_key"),
+                    message: "must contain valid base64".into(),
+                })?;
+            if public_key.len() != 32 {
+                return validation(
+                    format!("{base}.publisher_public_key"),
+                    "must decode to a 32-byte Ed25519 public key",
+                );
+            }
+            if sha256_prefixed(&public_key) != extension.publisher_key {
                 return validation(
                     format!("{base}.publisher_key"),
-                    "must be a non-empty bounded publisher key id",
+                    "does not match publisher_public_key",
                 );
+            }
+            if extension.name.split('/').count() != 2 {
+                return validation(
+                    format!("{base}.name"),
+                    "must be a publisher/name extension id",
+                );
+            }
+            for (grant_index, grant) in extension.grants.iter().enumerate() {
+                serde_json::from_value::<sift_protocol::HostCapabilityKind>(
+                    serde_json::Value::String(grant.clone()),
+                )
+                .map_err(|_| ConfigError::Validation {
+                    path: format!("{base}.grants[{grant_index}]"),
+                    message: "is not a supported host capability".into(),
+                })?;
             }
         }
         Ok(())
@@ -1430,6 +1469,7 @@ impl LockFile {
                 artifact: extension.artifact.clone(),
                 sha256: extension.sha256.clone(),
                 publisher_key: extension.publisher_key.clone(),
+                publisher_public_key: extension.publisher_public_key.clone(),
             })
             .collect();
         let mut lock = Self {
@@ -1513,6 +1553,7 @@ impl LockFile {
                     &extension.artifact,
                     &extension.sha256,
                     &extension.publisher_key,
+                    &extension.publisher_public_key,
                 )
             })
             .collect::<Vec<_>>();
@@ -1526,6 +1567,7 @@ impl LockFile {
                     &extension.artifact,
                     &extension.sha256,
                     &extension.publisher_key,
+                    &extension.publisher_public_key,
                 )
             })
             .collect::<Vec<_>>();
@@ -2113,6 +2155,29 @@ enabled = true
             "Server=db.internal;Database=analytics;User ID=sift;Encrypt=true"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn extension_trust_root_is_validated_and_locked() {
+        let public_key = [7_u8; 32];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(public_key);
+        let fingerprint = sha256_prefixed(&public_key);
+        let input = format!(
+            "{VALID}\n[[extensions]]\nname = \"acme/redaction\"\nversion = \"1.2.3\"\nartifact = \"https://example.invalid/redaction.zip\"\nsha256 = \"sha256:{}\"\npublisher_key = \"{fingerprint}\"\npublisher_public_key = \"base64:{encoded}\"\ngrants = [\"database.connect\"]\n",
+            "a".repeat(64)
+        );
+        let manifest = Manifest::parse(&input).unwrap();
+        let lock = LockFile::generate(&manifest, "0.1.0", 1).unwrap();
+        assert_eq!(
+            lock.extensions[0].publisher_public_key,
+            format!("base64:{encoded}")
+        );
+
+        let wrong = input.replace(&fingerprint, &format!("sha256:{}", "b".repeat(64)));
+        assert!(Manifest::parse(&wrong)
+            .unwrap_err()
+            .to_string()
+            .contains("does not match publisher_public_key"));
     }
 
     #[test]

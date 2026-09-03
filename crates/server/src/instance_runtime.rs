@@ -5,8 +5,11 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _};
+use base64::Engine as _;
+use ed25519_dalek::VerifyingKey;
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use sift_instance_config::{
     Deployment, LockFile, Manifest, RuntimeMode as InstanceRuntimeMode, SecretBackend, StaticPlan,
     Transport as InstanceTransport,
@@ -392,6 +395,9 @@ impl InstanceRoot {
             .apply_instance_manifest(&self.manifest, &self.lock, record.generation, allow_destroy)
             .await
             .context("reconciling manifest-managed resources")?;
+        self.realize_extensions(state_dir, &store)
+            .await
+            .context("realizing manifest-managed extensions")?;
 
         if !unchanged {
             write_atomic_private(
@@ -408,6 +414,184 @@ impl InstanceRoot {
             state_dir: state_dir.to_path_buf(),
             metadata: Some(metadata),
         })
+    }
+
+    async fn realize_extensions(
+        &self,
+        state_dir: &Path,
+        store: &sift_metadata::MetadataStore,
+    ) -> anyhow::Result<()> {
+        let package_limits = sift_plugin_host::PackageLimits::default();
+        let registry = sift_plugin_host::ExtensionPackageRegistry::new(
+            state_dir.join("extensions"),
+            package_limits.clone(),
+            store.clone(),
+        );
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .build()
+            .context("building extension artifact client")?;
+        let desired = self
+            .manifest
+            .extensions
+            .iter()
+            .map(|extension| extension.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for current in store.list_extension_selections()? {
+            if !desired.contains(current.extension_id.as_str())
+                && current.lifecycle != sift_protocol::ExtensionLifecycleState::Uninstalled
+            {
+                store.uninstall_extension(&current.extension_id, current.revision)?;
+            }
+        }
+
+        for extension in &self.manifest.extensions {
+            let (publisher, _) = extension
+                .name
+                .split_once('/')
+                .context("validated extension id lost its publisher")?;
+            let public_key_bytes = base64::engine::general_purpose::STANDARD
+                .decode(
+                    extension
+                        .publisher_public_key
+                        .strip_prefix("base64:")
+                        .context("validated publisher key lost its base64 prefix")?,
+                )
+                .context("decoding extension publisher key")?;
+            let public_key_bytes: [u8; 32] = public_key_bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("extension publisher key is not 32 bytes"))?;
+            match store.extension_publisher_key(publisher, &extension.publisher_key) {
+                Ok(existing) if existing.public_key == public_key_bytes => {}
+                Ok(_) => bail!("trusted extension publisher key changed without a new fingerprint"),
+                Err(sift_metadata::MetadataError::ExtensionNotFound(_)) => {
+                    store.put_extension_publisher_key(
+                        &sift_metadata::ExtensionPublisherKey {
+                            publisher: publisher.into(),
+                            fingerprint: extension.publisher_key.clone(),
+                            public_key: public_key_bytes,
+                            valid_from: chrono::Utc::now().to_rfc3339(),
+                            valid_until: None,
+                            revoked_at: None,
+                            revision: 0,
+                        },
+                        None,
+                    )?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+
+            let archive_sha256 = extension
+                .sha256
+                .strip_prefix("sha256:")
+                .expect("validated extension digest");
+            let cached_marker = state_dir
+                .join("extensions/packages")
+                .join(archive_sha256)
+                .join(".archive-sha256");
+            let cached = std::fs::read_to_string(&cached_marker)
+                .is_ok_and(|value| value.trim() == archive_sha256)
+                && store
+                    .selected_extension_package(&extension.name)
+                    .is_ok_and(|package| {
+                        package.selection.selected_archive_sha256 == archive_sha256
+                            && package.version == extension.version
+                    });
+            if !cached {
+                let mut response = client
+                    .get(&extension.artifact)
+                    .send()
+                    .await
+                    .context("downloading extension artifact")?
+                    .error_for_status()
+                    .context("extension artifact request failed")?;
+                if response.url().scheme() != "https" {
+                    bail!("extension artifact redirect left HTTPS");
+                }
+                if response
+                    .content_length()
+                    .is_some_and(|length| length > package_limits.max_archive_bytes)
+                {
+                    bail!("extension artifact exceeds configured package limit");
+                }
+                let temporary = tempfile::NamedTempFile::new_in(state_dir)
+                    .context("creating extension artifact staging file")?;
+                let mut file = tokio::fs::File::from_std(temporary.reopen()?);
+                let mut length = 0_u64;
+                let mut digest = Sha256::new();
+                while let Some(chunk) = response.chunk().await? {
+                    length = length
+                        .checked_add(chunk.len() as u64)
+                        .context("extension artifact length overflow")?;
+                    if length > package_limits.max_archive_bytes {
+                        bail!("extension artifact exceeds configured package limit");
+                    }
+                    digest.update(&chunk);
+                    tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
+                }
+                tokio::io::AsyncWriteExt::flush(&mut file).await?;
+                file.sync_all().await?;
+                let observed = format!("sha256:{:x}", digest.finalize());
+                if observed != extension.sha256 {
+                    bail!("extension artifact SHA-256 does not match sift.lock");
+                }
+
+                let verifying_key = VerifyingKey::from_bytes(&public_key_bytes)
+                    .context("extension publisher key is invalid")?;
+                let installed = registry
+                    .install(
+                        temporary.path(),
+                        sift_plugin_host::SignaturePolicy::RequireAny(std::slice::from_ref(
+                            &verifying_key,
+                        )),
+                        sift_protocol::ExtensionProvenance::Verified,
+                    )
+                    .context("installing verified extension package")?;
+                if installed.validated.manifest.id.to_string() != extension.name
+                    || installed.validated.manifest.version != extension.version
+                {
+                    bail!("extension package identity or version does not match sift.lock");
+                }
+            }
+
+            let current = store.extension_selection(&extension.name)?;
+            let mut revision = current.revision;
+            if current.selected_archive_sha256 != archive_sha256
+                || !current.enabled
+                || current.lifecycle != sift_protocol::ExtensionLifecycleState::Ready
+            {
+                revision = store
+                    .update_extension_selection(sift_metadata::UpdateExtensionSelection {
+                        extension_id: &extension.name,
+                        selected_archive_sha256: Some(archive_sha256),
+                        enabled: true,
+                        lifecycle: sift_protocol::ExtensionLifecycleState::Ready,
+                        isolation: current.isolation,
+                        quarantine_reason: None,
+                        expected_revision: current.revision,
+                    })?
+                    .revision;
+            }
+            if store.extension_grants(&extension.name)? != extension.grants {
+                let grants = extension
+                    .grants
+                    .iter()
+                    .map(|grant| {
+                        serde_json::from_value::<sift_protocol::HostCapabilityKind>(
+                            serde_json::Value::String(grant.clone()),
+                        )
+                        .map(|capability| (capability, "{}".into()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                store.replace_extension_grants(&sift_metadata::ReplaceExtensionGrants {
+                    extension_id: extension.name.clone(),
+                    grants,
+                    expected_revision: revision,
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn stage_generation(

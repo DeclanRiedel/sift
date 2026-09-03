@@ -878,8 +878,14 @@ const FIELDS: &[Field] = &[
     field!(
         "extensions",
         "publisher_key",
-        "string",
-        "Trusted publisher key id."
+        "SHA-256 digest",
+        "Fingerprint of the trusted Ed25519 publisher key."
+    ),
+    field!(
+        "extensions",
+        "publisher_public_key",
+        "base64 key",
+        "Public Ed25519 key used to verify the package signature."
     ),
     field!(
         "extensions",

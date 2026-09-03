@@ -199,7 +199,8 @@
           <tr><td><code>version</code></td><td>Exact semantic version.</td></tr>
           <tr><td><code>artifact</code></td><td>Pinned HTTPS artifact URL.</td></tr>
           <tr><td><code>sha256</code></td><td>Artifact digest.</td></tr>
-          <tr><td><code>publisher_key</code></td><td>Trusted publisher key id.</td></tr>
+          <tr><td><code>publisher_key</code></td><td>SHA-256 fingerprint of the trusted publisher key.</td></tr>
+          <tr><td><code>publisher_public_key</code></td><td><code>base64:</code>-prefixed 32-byte Ed25519 public key. Its fingerprint must equal <code>publisher_key</code>.</td></tr>
           <tr><td><code>grants</code></td><td>Explicit capabilities granted to the extension.</td></tr>
         </tbody></table>
       </section>
