@@ -1318,6 +1318,25 @@ fn object_browser_catalogs(snapshot: &sift_protocol::SchemaSnapshot) -> Vec<Stri
         .collect()
 }
 
+fn object_browser_schemas(rows: &[ObjectBrowserRow], catalog: &str) -> Vec<String> {
+    let mut schemas = rows
+        .iter()
+        .filter(|row| row.source.catalog.as_deref() == Some(catalog))
+        .map(|row| row.source.schema.clone())
+        .collect::<Vec<_>>();
+    schemas.sort_by_key(|schema| {
+        let normalized = schema.to_lowercase();
+        let priority = if matches!(normalized.as_str(), "public" | "dbo") {
+            0
+        } else {
+            1
+        };
+        (priority, normalized)
+    });
+    schemas.dedup();
+    schemas
+}
+
 fn object_browser_context(
     snapshot: &sift_protocol::SchemaSnapshot,
     connection: &ConnectionNavEntry,
@@ -1356,18 +1375,25 @@ fn object_browser_catalog_context(
     mut context: DatabaseObjectSource,
     rows: &[ObjectBrowserRow],
     catalog: Option<&str>,
+    schema: Option<&str>,
 ) -> DatabaseObjectSource {
     let Some(catalog) = catalog else {
         return context;
     };
     if let Some(source) = rows
         .iter()
-        .find(|row| row.source.catalog.as_deref() == Some(catalog))
+        .find(|row| {
+            row.source.catalog.as_deref() == Some(catalog)
+                && schema.is_none_or(|schema| row.source.schema == schema)
+        })
         .map(|row| row.source.clone())
     {
         source
     } else {
         context.catalog = Some(catalog.into());
+        if let Some(schema) = schema {
+            context.schema = schema.into();
+        }
         context
     }
 }
@@ -1461,7 +1487,10 @@ struct ObjectBrowserState {
     catalogs: Vec<String>,
     catalog: Option<String>,
     catalog_picker_open: bool,
-    object_filter: Option<ObjectGroupKind>,
+    schemas: Vec<String>,
+    schema: Option<String>,
+    schema_picker_open: bool,
+    enabled_groups: HashSet<ObjectGroupKind>,
     loading: bool,
     load_error: Option<String>,
 }
@@ -1472,9 +1501,13 @@ impl ObjectBrowserState {
             self.catalog
                 .as_ref()
                 .is_none_or(|catalog| row.source.catalog.as_ref() == Some(catalog))
-                && self.object_filter.is_none_or(|filter| {
-                    ObjectGroupKind::from_object_kind(row.source.object_kind) == filter
-                })
+                && self
+                    .schema
+                    .as_ref()
+                    .is_none_or(|schema| &row.source.schema == schema)
+                && self
+                    .enabled_groups
+                    .contains(&ObjectGroupKind::from_object_kind(row.source.object_kind))
         })
     }
 
@@ -1488,18 +1521,40 @@ impl ObjectBrowserState {
 
     fn select_catalog(&mut self, catalog: String) {
         self.catalog = Some(catalog.clone());
+        self.schemas = object_browser_schemas(&self.rows, &catalog);
+        self.schema = self.schemas.first().cloned();
         self.selected = 0;
         self.catalog_picker_open = false;
+        self.schema_picker_open = false;
         self.connection_picker_open = false;
-        if let Some(source) = self
-            .rows
-            .iter()
-            .find(|row| row.source.catalog.as_ref() == Some(&catalog))
-            .map(|row| row.source.clone())
-        {
-            self.context = source;
+        self.sync_context();
+    }
+
+    fn select_schema(&mut self, schema: String) {
+        self.schema = Some(schema);
+        self.selected = 0;
+        self.schema_picker_open = false;
+        self.connection_picker_open = false;
+        self.catalog_picker_open = false;
+        self.sync_context();
+    }
+
+    fn sync_context(&mut self) {
+        if let Some(source) = self.rows.iter().find(|row| {
+            self.catalog
+                .as_ref()
+                .is_none_or(|catalog| row.source.catalog.as_ref() == Some(catalog))
+                && self
+                    .schema
+                    .as_ref()
+                    .is_none_or(|schema| &row.source.schema == schema)
+        }) {
+            self.context = source.source.clone();
         } else {
-            self.context.catalog = Some(catalog);
+            self.context.catalog = self.catalog.clone();
+            if let Some(schema) = &self.schema {
+                self.context.schema = schema.clone();
+            }
         }
     }
 }
@@ -5386,6 +5441,52 @@ impl Pane {
             "x" => self.object_browser_action('x', cx),
             "i" => self.object_browser_action('i', cx),
             "e" => self.object_browser_action('e', cx),
+            "c" => {
+                if let Some(index) = browser
+                    .connections
+                    .iter()
+                    .position(|connection| connection.id == browser.profile_id)
+                {
+                    let next = (index + 1) % browser.connections.len();
+                    cx.emit(PaneEvent::ObjectBrowserConnectionRequested {
+                        item_id,
+                        profile_id: browser.connections[next].id,
+                    });
+                }
+            }
+            "b" => {
+                if let Some(current) = browser
+                    .catalog
+                    .as_ref()
+                    .and_then(|catalog| browser.catalogs.iter().position(|item| item == catalog))
+                {
+                    let next = (current + 1) % browser.catalogs.len();
+                    browser.select_catalog(browser.catalogs[next].clone());
+                }
+            }
+            "s" => {
+                if let Some(current) = browser
+                    .schema
+                    .as_ref()
+                    .and_then(|schema| browser.schemas.iter().position(|item| item == schema))
+                {
+                    let next = (current + 1) % browser.schemas.len();
+                    browser.select_schema(browser.schemas[next].clone());
+                }
+            }
+            "1" | "2" | "3" | "4" | "5" => {
+                let index = event.keystroke.key.parse::<usize>().unwrap_or(1) - 1;
+                let group = ObjectGroupKind::CANONICAL[index];
+                if !browser.enabled_groups.remove(&group) {
+                    browser.enabled_groups.insert(group);
+                }
+                browser.selected = 0;
+            }
+            "escape" => {
+                browser.connection_picker_open = false;
+                browser.catalog_picker_open = false;
+                browser.schema_picker_open = false;
+            }
             _ => return,
         }
         cx.stop_propagation();
@@ -5414,20 +5515,25 @@ impl Pane {
         let row_count = browser.visible_row_count();
         let connection_picker_open = browser.connection_picker_open;
         let catalog_picker_open = browser.catalog_picker_open;
+        let schema_picker_open = browser.schema_picker_open;
         let active_profile_id = browser.profile_id;
         let connection_name = browser.context.profile_name.clone();
         let catalog_name = browser
             .catalog
             .clone()
             .unwrap_or_else(|| "Select database".into());
+        let schema_name = browser
+            .schema
+            .clone()
+            .unwrap_or_else(|| "Select schema".into());
         let empty_message = if let Some(message) = &browser.load_error {
             message.clone()
         } else if browser.loading {
             format!("Loading objects from {connection_name}…")
-        } else if let Some(filter) = browser.object_filter {
-            format!("No {} in this connection", filter.label().to_lowercase())
+        } else if browser.enabled_groups.is_empty() {
+            "Enable at least one object type above".into()
         } else {
-            "No objects in this connection".into()
+            "No matching objects in this schema".into()
         };
         let connections = browser.connections.clone();
         let connection_items = connections
@@ -5509,29 +5615,73 @@ impl Pane {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        let filter_buttons = std::iter::once((None, "All"))
-            .chain(
-                ObjectGroupKind::CANONICAL
-                    .into_iter()
-                    .map(|group| (Some(group), group.label())),
-            )
+        let schema_items = browser
+            .schemas
+            .clone()
+            .into_iter()
             .enumerate()
-            .map(|(index, (filter, label))| {
-                let selected = browser.object_filter == filter;
-                Button::new(("object-browser-filter", index), label)
-                    .debug_selector(format!("object-browser-filter-{}", label.to_lowercase()))
-                    .tone(if selected {
-                        ButtonTone::Neutral
-                    } else {
-                        ButtonTone::Ghost
-                    })
+            .map(|(index, schema)| {
+                let selected = browser.schema.as_ref() == Some(&schema);
+                let label = schema.clone();
+                div()
+                    .id(("object-browser-schema", index))
+                    .debug_selector(move || format!("object-browser-schema-{index}"))
+                    .role(Role::MenuItem)
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .when(selected, |item| item.bg(colors.active_surface))
+                    .hover(|item| item.bg(colors.hovered_surface))
                     .on_click(cx.listener(move |pane, _, _, cx| {
                         if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
-                            browser.object_filter = filter;
-                            browser.selected = 0;
+                            browser.select_schema(schema.clone());
                         }
                         cx.notify();
                     }))
+                    .child(icon(
+                        IconName::Folder,
+                        if selected {
+                            colors.accent
+                        } else {
+                            colors.muted_text
+                        },
+                        11.,
+                    ))
+                    .child(div().min_w_0().truncate().child(label))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let filter_buttons = ObjectGroupKind::CANONICAL
+            .into_iter()
+            .enumerate()
+            .map(|(index, group)| {
+                let enabled = browser.enabled_groups.contains(&group);
+                Button::new(
+                    ("object-browser-filter", index),
+                    format!("{}  {}", index + 1, group.label()),
+                )
+                .debug_selector(format!(
+                    "object-browser-filter-{}",
+                    group.label().to_lowercase()
+                ))
+                .tone(if enabled {
+                    ButtonTone::Neutral
+                } else {
+                    ButtonTone::Ghost
+                })
+                .start_icon(group.icon())
+                .on_click(cx.listener(move |pane, _, _, cx| {
+                    if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
+                        if !browser.enabled_groups.remove(&group) {
+                            browser.enabled_groups.insert(group);
+                        }
+                        browser.selected = 0;
+                    }
+                    cx.notify();
+                }))
             })
             .collect::<Vec<_>>();
         let toolbar_action = |id: &'static str,
@@ -5565,7 +5715,7 @@ impl Pane {
             .flex_col()
             .child(
                 div()
-                    .h(px(66.))
+                    .h(px(99.))
                     .flex_none()
                     .flex()
                     .flex_col()
@@ -5604,6 +5754,7 @@ impl Pane {
                                                     browser.connection_picker_open =
                                                         !browser.connection_picker_open;
                                                     browser.catalog_picker_open = false;
+                                                    browser.schema_picker_open = false;
                                                 }
                                                 cx.notify();
                                             },
@@ -5674,6 +5825,7 @@ impl Pane {
                                                 browser.catalog_picker_open =
                                                     !browser.catalog_picker_open;
                                                 browser.connection_picker_open = false;
+                                                browser.schema_picker_open = false;
                                             }
                                             cx.notify();
                                         })),
@@ -5724,12 +5876,100 @@ impl Pane {
                             )
                             .child(
                                 div()
+                                    .relative()
+                                    .flex_none()
+                                    .child(
+                                        Button::new(
+                                            ("object-browser-schema-picker", item_id as usize),
+                                            schema_name,
+                                        )
+                                        .debug_selector("object-browser-schema-picker")
+                                        .tone(ButtonTone::Neutral)
+                                        .start_icon(IconName::Folder)
+                                        .disabled(browser.schemas.is_empty())
+                                        .on_click(cx.listener(move |pane, _, _, cx| {
+                                            if let Some(browser) =
+                                                pane.object_browsers.get_mut(&item_id)
+                                            {
+                                                browser.schema_picker_open =
+                                                    !browser.schema_picker_open;
+                                                browser.connection_picker_open = false;
+                                                browser.catalog_picker_open = false;
+                                            }
+                                            cx.notify();
+                                        })),
+                                    )
+                                    .when(schema_picker_open, |trigger| {
+                                        trigger.child(
+                                            div().absolute().top_full().left_0().child(
+                                                deferred(
+                                                    anchored().anchor(Anchor::TopLeft).child(
+                                                        div()
+                                                            .id("object-browser-schema-menu")
+                                                            .debug_selector(|| {
+                                                                "object-browser-schema-menu".into()
+                                                            })
+                                                            .w(px(220.))
+                                                            .max_h(px(320.))
+                                                            .overflow_y_scroll()
+                                                            .p_1()
+                                                            .rounded_sm()
+                                                            .border_1()
+                                                            .border_color(colors.strong_border)
+                                                            .bg(colors.elevated_surface)
+                                                            .shadow_lg()
+                                                            .occlude()
+                                                            .role(Role::Menu)
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                |_, _, cx| cx.stop_propagation(),
+                                                            )
+                                                            .on_mouse_down_out(cx.listener(
+                                                                move |pane, _, _, cx| {
+                                                                    if let Some(browser) = pane
+                                                                        .object_browsers
+                                                                        .get_mut(&item_id)
+                                                                    {
+                                                                        browser.schema_picker_open =
+                                                                            false;
+                                                                    }
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                            .children(schema_items),
+                                                    ),
+                                                )
+                                                .with_priority(3),
+                                            ),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
                                     .flex_none()
                                     .w(px(1.))
                                     .h(px(16.))
                                     .mx_1()
                                     .bg(colors.subtle_border),
                             )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child("c connection · b database · s schema"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h(px(33.))
+                            .w_full()
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .border_t_1()
+                            .border_color(colors.subtle_border)
+                            .child(SectionLabel::new("SHOW"))
                             .children(filter_buttons),
                     )
                     .child(
@@ -5831,7 +6071,11 @@ impl Pane {
                             .filter_map(|index| {
                                 let row = browser.visible_rows().nth(index)?.clone();
                                 let selected = browser.selected == index;
-                                let name = format!("{}.{}", row.source.schema, row.source.object);
+                                let name = row.source.object.clone();
+                                let object_color = ObjectGroupKind::from_object_kind(
+                                    row.source.object_kind,
+                                )
+                                .color(colors);
                                 Some(
                                     div()
                                         .id(("object-browser-row", index))
@@ -5864,7 +6108,11 @@ impl Pane {
                                                 .truncate()
                                                 .child(icon(
                                                     schema_object_kind_icon(row.source.object_kind),
-                                                    colors.muted_text,
+                                                    if selected {
+                                                        object_color
+                                                    } else {
+                                                        colors.muted_text
+                                                    },
                                                     12.,
                                                 ))
                                                 .child(name),
@@ -18176,6 +18424,11 @@ impl WorkspaceShell {
             .unwrap_or_default();
         let catalogs = snapshot.map(object_browser_catalogs).unwrap_or_default();
         let catalog = catalogs.first().cloned();
+        let schemas = catalog
+            .as_deref()
+            .map(|catalog| object_browser_schemas(&rows, catalog))
+            .unwrap_or_default();
+        let schema = schemas.first().cloned();
         let loading = snapshot.is_none();
         let empty_snapshot =
             sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
@@ -18188,6 +18441,7 @@ impl WorkspaceShell {
             ),
             &rows,
             catalog.as_deref(),
+            schema.as_deref(),
         );
         let item_id = self.next_id;
         self.next_id += 1;
@@ -18212,7 +18466,10 @@ impl WorkspaceShell {
                         catalogs,
                         catalog,
                         catalog_picker_open: false,
-                        object_filter: None,
+                        schemas,
+                        schema,
+                        schema_picker_open: false,
+                        enabled_groups: ObjectGroupKind::CANONICAL.into_iter().collect(),
                         loading,
                         load_error: None,
                     },
@@ -18270,6 +18527,7 @@ impl WorkspaceShell {
                 {
                     let selected_source = browser.selected_row().map(|row| row.source.clone());
                     let selected_catalog = browser.catalog.clone();
+                    let selected_schema = browser.schema.clone();
                     browser.rows = rows.clone();
                     browser.context = context.clone();
                     browser.connections = connections.clone();
@@ -18279,6 +18537,11 @@ impl WorkspaceShell {
                         .or_else(|| browser.catalogs.first().cloned());
                     if let Some(catalog) = browser.catalog.clone() {
                         browser.select_catalog(catalog);
+                        if let Some(schema) =
+                            selected_schema.filter(|schema| browser.schemas.contains(schema))
+                        {
+                            browser.select_schema(schema);
+                        }
                     }
                     browser.loading = false;
                     browser.load_error = None;
@@ -18353,6 +18616,11 @@ impl WorkspaceShell {
             .map(object_browser_catalogs)
             .unwrap_or_default();
         let catalog = catalogs.first().cloned();
+        let schemas = catalog
+            .as_deref()
+            .map(|catalog| object_browser_schemas(&rows, catalog))
+            .unwrap_or_default();
+        let schema = schemas.first().cloned();
         let loading = snapshot.is_none();
         let empty_snapshot =
             sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
@@ -18365,6 +18633,7 @@ impl WorkspaceShell {
             ),
             &rows,
             catalog.as_deref(),
+            schema.as_deref(),
         );
         pane.update(cx, |pane, cx| {
             if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
@@ -18376,6 +18645,9 @@ impl WorkspaceShell {
                 browser.catalogs = catalogs;
                 browser.catalog = catalog;
                 browser.catalog_picker_open = false;
+                browser.schemas = schemas;
+                browser.schema = schema;
+                browser.schema_picker_open = false;
                 browser.loading = loading;
                 browser.load_error = None;
             }
@@ -55001,13 +55273,25 @@ mod tests {
                 sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
             snapshot.trees.push(sift_protocol::CatalogTree {
                 name: "warehouse".into(),
-                schemas: vec![sift_protocol::SchemaTree {
-                    name: "public".into(),
-                    objects: vec![
-                        jobs,
-                        sift_protocol::ObjectInfo::new("people", sift_protocol::ObjectKind::View),
-                    ],
-                }],
+                schemas: vec![
+                    sift_protocol::SchemaTree {
+                        name: "public".into(),
+                        objects: vec![
+                            jobs,
+                            sift_protocol::ObjectInfo::new(
+                                "people",
+                                sift_protocol::ObjectKind::View,
+                            ),
+                        ],
+                    },
+                    sift_protocol::SchemaTree {
+                        name: "archive".into(),
+                        objects: vec![sift_protocol::ObjectInfo::new(
+                            "old_jobs",
+                            sift_protocol::ObjectKind::Table,
+                        )],
+                    },
+                ],
             });
             snapshot.trees.push(sift_protocol::CatalogTree {
                 name: "lab".into(),
@@ -55029,6 +55313,7 @@ mod tests {
         for selector in [
             "object-browser-connection-picker",
             "object-browser-catalog-picker",
+            "object-browser-schema-picker",
             "object-browser-open",
             "object-browser-new-table",
             "object-browser-design",
@@ -55044,8 +55329,10 @@ mod tests {
             assert_eq!(item.kind, ItemKind::Schema);
             assert_eq!(item.title, "Objects · Warehouse");
             let browser = pane.object_browsers.get(&item.id).unwrap();
-            assert_eq!(browser.rows.len(), 3);
+            assert_eq!(browser.rows.len(), 4);
             assert_eq!(browser.catalog.as_deref(), Some("warehouse"));
+            assert_eq!(browser.schema.as_deref(), Some("public"));
+            assert_eq!(browser.enabled_groups.len(), 5);
             assert_eq!(browser.visible_row_count(), 2);
             let jobs = browser
                 .rows
@@ -55054,6 +55341,32 @@ mod tests {
                 .unwrap();
             assert_eq!(jobs.estimated_rows, Some(42));
             assert_eq!(jobs.comment.as_deref(), Some("Queued work"));
+        });
+        let schema_picker = cx
+            .debug_bounds("object-browser-schema-picker")
+            .expect("schema picker");
+        cx.simulate_click(schema_picker.center(), Modifiers::default());
+        cx.run_until_parked();
+        let archive = cx
+            .debug_bounds("object-browser-schema-1")
+            .expect("archive schema");
+        cx.simulate_click(archive.center(), Modifiers::default());
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item_id = pane.active_item().unwrap().id;
+            let browser = &pane.object_browsers[&item_id];
+            assert_eq!(browser.schema.as_deref(), Some("archive"));
+            assert_eq!(browser.visible_row_count(), 1);
+            assert_eq!(browser.selected_row().unwrap().source.object, "old_jobs");
+        });
+        cx.simulate_keystrokes("s");
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item_id = pane.active_item().unwrap().id;
+            assert_eq!(
+                pane.object_browsers[&item_id].schema.as_deref(),
+                Some("public")
+            );
         });
         let database_picker = cx
             .debug_bounds("object-browser-catalog-picker")
@@ -55091,12 +55404,9 @@ mod tests {
             let item_id = pane.active_item().unwrap().id;
             let browser = &pane.object_browsers[&item_id];
             assert_eq!(browser.visible_row_count(), 1);
-            assert_eq!(browser.selected_row().unwrap().source.object, "people");
+            assert_eq!(browser.selected_row().unwrap().source.object, "jobs");
         });
-        let all = cx
-            .debug_bounds("object-browser-filter-all")
-            .expect("All filter");
-        cx.simulate_click(all.center(), Modifiers::default());
+        cx.simulate_click(views.center(), Modifiers::default());
         cx.simulate_keystrokes("j");
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
