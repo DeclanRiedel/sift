@@ -323,6 +323,19 @@ impl InstanceRoot {
         Ok(records)
     }
 
+    pub fn generation_manifest(
+        &self,
+        state_dir: &Path,
+        generation: u64,
+    ) -> anyhow::Result<Manifest> {
+        let path = state_dir
+            .join(GENERATIONS_DIR)
+            .join(generation.to_string())
+            .join("normalized-manifest.json");
+        let source = read_bounded(&path)?;
+        serde_json::from_str(&source).context("parsing normalized generation manifest")
+    }
+
     pub fn apply_generation(&self, state_dir: &Path) -> anyhow::Result<ApplyReport> {
         let (_lock_file, generations) = prepare_state(state_dir)?;
 

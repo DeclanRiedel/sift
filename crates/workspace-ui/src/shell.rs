@@ -2025,6 +2025,14 @@ pub struct InstanceResourceChangePresentation {
     pub kind: String,
     pub action: String,
     pub prevent_destroy: bool,
+    pub fields: Vec<InstanceFieldChangePresentation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceFieldChangePresentation {
+    pub path: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41360,25 +41368,35 @@ impl WorkspaceShell {
                             };
                             div()
                                 .id(("instance-resource-change", index))
-                                .h(px(32.))
-                                .px_2()
+                                .min_h(px(32.))
+                                .py_1()
                                 .flex()
-                                .items_center()
-                                .gap_2()
+                                .flex_col()
                                 .border_b_1()
                                 .border_color(colors.subtle_border)
-                                .child(Badge::new(resource.action).tone(tone))
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_xs()
-                                        .font_family("monospace")
-                                        .child(resource.address),
+                                    div().h(px(28.)).px_2().flex().items_center().gap_2()
+                                        .child(Badge::new(resource.action).tone(tone))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_xs()
+                                                .font_family("monospace")
+                                                .child(resource.address),
+                                        )
+                                        .children(resource.prevent_destroy.then(|| {
+                                            Badge::new("protected").tone(Tone::Warning)
+                                        })),
                                 )
-                                .children(resource.prevent_destroy.then(|| {
-                                    Badge::new("protected").tone(Tone::Warning)
+                                .children(resource.fields.into_iter().map(|field| {
+                                    let before = field.before.unwrap_or_else(|| "∅".into());
+                                    let after = field.after.unwrap_or_else(|| "∅".into());
+                                    div().min_h(px(24.)).pl_8().pr_2().flex().items_center().gap_2()
+                                        .text_xs().font_family("monospace")
+                                        .child(div().w(px(150.)).truncate().text_color(colors.muted_text).child(field.path))
+                                        .child(div().min_w_0().flex_1().truncate().child(format!("{before} → {after}")))
                                 }))
                         },
                     );

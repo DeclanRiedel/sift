@@ -8,8 +8,9 @@ use sift_client_sdk::SessionTokenProvider;
 use sift_protocol::{AuthClientKind, AuthTokensResponse, PasswordLoginRequest};
 use sift_workspace_ui::{
     InstanceCommand, InstanceConfigurationPresentation, InstanceCredentialKind,
-    InstanceCredentialPresentation, InstanceManagerEvent, InstancePlanPresentation,
-    InstanceResourceChangePresentation, SavedInstanceRoot, SavedServerKind, SavedServerProfile,
+    InstanceCredentialPresentation, InstanceFieldChangePresentation, InstanceManagerEvent,
+    InstancePlanPresentation, InstanceResourceChangePresentation, SavedInstanceRoot,
+    SavedServerKind, SavedServerProfile,
 };
 
 use crate::app::DesktopServer;
@@ -851,8 +852,18 @@ async fn inspect_root(
         generation.record.configuration_digest != static_plan.configuration_digest
             || generation.record.lock_digest != static_plan.lock_digest
     });
+    let previous_resources = current
+        .map(|generation| {
+            instance
+                .generation_manifest(&state_dir, generation.record.generation)
+                .map(|manifest| manifest_resource_values(&manifest))
+                .map_err(|error| format!("reading applied manifest failed: {error:#}"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let desired_resources = manifest_resource_values(&instance.manifest);
 
-    let resource_changes = if current.is_some() {
+    let mut resource_changes = if current.is_some() {
         let config = instance
             .runtime_config(&state_dir)
             .map_err(|error| format!("realizing instance settings failed: {error:#}"))?;
@@ -865,16 +876,54 @@ async fn inspect_root(
             .plan_instance_manifest(&instance.manifest)
             .map_err(|error| format!("planning managed resources failed: {error}"))?
             .into_iter()
-            .map(|change| InstanceResourceChangePresentation {
-                address: change.address,
-                kind: change.kind,
-                action: format!("{:?}", change.action).to_lowercase(),
-                prevent_destroy: change.prevent_destroy,
+            .map(|change| {
+                let fields = match (
+                    previous_resources.get(&change.address),
+                    desired_resources.get(&change.address),
+                ) {
+                    (Some(before), Some(after)) => manifest_field_changes(before, after),
+                    _ => Vec::new(),
+                };
+                InstanceResourceChangePresentation {
+                    address: change.address,
+                    kind: change.kind,
+                    action: format!("{:?}", change.action).to_lowercase(),
+                    prevent_destroy: change.prevent_destroy,
+                    fields,
+                }
             })
             .collect()
     } else {
         initial_resource_plan(&instance.manifest)
     };
+    if current.is_some() {
+        let extension_addresses = previous_resources
+            .keys()
+            .chain(desired_resources.keys())
+            .filter(|address| address.starts_with("extension."))
+            .collect::<std::collections::BTreeSet<_>>();
+        for address in extension_addresses {
+            let before = previous_resources.get(address);
+            let after = desired_resources.get(address);
+            let action = match (before, after) {
+                (None, Some(_)) => "create",
+                (Some(_), None) => "delete",
+                (Some(before), Some(after)) if before != after => "update",
+                (Some(_), Some(_)) => "unchanged",
+                (None, None) => continue,
+            };
+            resource_changes.push(InstanceResourceChangePresentation {
+                address: address.clone(),
+                kind: "extension".into(),
+                action: action.into(),
+                prevent_destroy: false,
+                fields: match (before, after) {
+                    (Some(before), Some(after)) => manifest_field_changes(before, after),
+                    _ => Vec::new(),
+                },
+            });
+        }
+    }
 
     let credentials = if current.is_some() && !drifted {
         let (_, _, config) = sift_server::instance_runtime::load_current_config(root, None)
@@ -966,6 +1015,9 @@ fn initial_resource_plan(
             connection.lifecycle.prevent_destroy,
         ));
     }
+    for extension in &manifest.extensions {
+        resources.push(("extension", format!("extension.{}", extension.name), false));
+    }
     resources
         .into_iter()
         .map(
@@ -974,9 +1026,109 @@ fn initial_resource_plan(
                 kind: kind.into(),
                 action: "create".into(),
                 prevent_destroy,
+                fields: Vec::new(),
             },
         )
         .collect()
+}
+
+fn manifest_resource_values(
+    manifest: &sift_instance_config::Manifest,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut resources = std::collections::BTreeMap::new();
+    for principal in &manifest.identity.github_principals {
+        resources.insert(
+            format!("principal.{}", principal.name),
+            serde_json::to_value(principal).expect("typed principal serializes"),
+        );
+    }
+    for tenant in &manifest.tenants {
+        resources.insert(
+            format!("tenant.{}", tenant.name),
+            serde_json::to_value(tenant).expect("typed tenant serializes"),
+        );
+        for membership in &tenant.memberships {
+            resources.insert(
+                format!("membership.{}.{}", tenant.name, membership.principal),
+                serde_json::to_value(membership).expect("typed membership serializes"),
+            );
+        }
+    }
+    for connection in &manifest.connections {
+        resources.insert(
+            format!("connection.{}", connection.name),
+            serde_json::to_value(connection).expect("typed connection serializes"),
+        );
+    }
+    for extension in &manifest.extensions {
+        resources.insert(
+            format!("extension.{}", extension.name),
+            serde_json::to_value(extension).expect("typed extension serializes"),
+        );
+    }
+    resources
+}
+
+fn manifest_field_changes(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) -> Vec<InstanceFieldChangePresentation> {
+    let mut changes = Vec::new();
+    collect_manifest_field_changes("", before, after, &mut changes);
+    changes
+}
+
+fn collect_manifest_field_changes(
+    path: &str,
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+    output: &mut Vec<InstanceFieldChangePresentation>,
+) {
+    if before == after {
+        return;
+    }
+    if let (Some(before), Some(after)) = (before.as_object(), after.as_object()) {
+        let keys = before
+            .keys()
+            .chain(after.keys())
+            .collect::<std::collections::BTreeSet<_>>();
+        for key in keys {
+            let child_path = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{path}.{key}")
+            };
+            collect_manifest_field_changes(
+                &child_path,
+                before.get(key).unwrap_or(&serde_json::Value::Null),
+                after.get(key).unwrap_or(&serde_json::Value::Null),
+                output,
+            );
+        }
+        return;
+    }
+    output.push(InstanceFieldChangePresentation {
+        path: path.into(),
+        before: manifest_value_summary(path, before),
+        after: manifest_value_summary(path, after),
+    });
+}
+
+fn manifest_value_summary(path: &str, value: &serde_json::Value) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    if path.ends_with("publisher_public_key") {
+        return Some("[public key]".into());
+    }
+    let mut rendered = match value {
+        serde_json::Value::String(value) => value.clone(),
+        value => value.to_string(),
+    };
+    if rendered.chars().count() > 96 {
+        rendered = format!("{}…", rendered.chars().take(95).collect::<String>());
+    }
+    Some(rendered)
 }
 
 async fn apply_root(
@@ -1476,6 +1628,17 @@ async fn forget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_plan_flattens_changed_fields_and_bounds_values() {
+        let before = serde_json::json!({"policy": {"read_only": false}, "tags": ["old"]});
+        let after = serde_json::json!({"policy": {"read_only": true}, "tags": ["new"]});
+        let changes = manifest_field_changes(&before, &after);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].path, "policy.read_only");
+        assert_eq!(changes[0].before.as_deref(), Some("false"));
+        assert_eq!(changes[0].after.as_deref(), Some("true"));
+    }
 
     #[test]
     fn profile_store_round_trips_without_secret_material() {
