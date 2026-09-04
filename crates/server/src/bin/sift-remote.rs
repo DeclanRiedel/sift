@@ -21,6 +21,8 @@ const MAX_AGENT_OUTPUT: usize = 64 * 1024;
 const SSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const DAEMON_LAUNCH_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
+const REMOTE_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+const ACCESS_RENEWAL_MARGIN: chrono::Duration = chrono::Duration::minutes(2);
 
 #[derive(Debug)]
 struct Options {
@@ -149,12 +151,13 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
     let daemon = probe
         .daemon
         .context("remote daemon did not publish readiness")?;
-    let endpoint = daemon.endpoint.clone();
+    let endpoint = Arc::new(RwLock::new(daemon.endpoint.clone()));
     let listener = TcpListener::bind(("127.0.0.1", options.local_port))
         .await
         .context("binding local remote-proxy listener")?;
     let local_addr = listener.local_addr()?;
     let forward_session = session.clone();
+    let forward_endpoint = Arc::clone(&endpoint);
     let (forward_error_tx, mut forward_error_rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         loop {
@@ -162,10 +165,10 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
                 break;
             };
             let session = forward_session.clone();
-            let endpoint = endpoint.clone();
+            let endpoint = Arc::clone(&forward_endpoint);
             let forward_error_tx = forward_error_tx.clone();
             tokio::spawn(async move {
-                if let Err(error) = forward_connection(session, &endpoint, stream).await {
+                if let Err(error) = forward_connection(session, endpoint, stream).await {
                     let _ = forward_error_tx.send(error);
                 }
             });
@@ -176,6 +179,7 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
     let bootstrap = async {
         eprintln!("sift-remote: issuing remote access capability");
         let capability = issue_capability(&options, &session).await?;
+        *endpoint.write().unwrap() = capability.daemon.endpoint.clone();
         eprintln!("sift-remote: opening authenticated SSH forwarding channel");
         let client = sift_client_sdk::Client::new(&base);
         let negotiated = client.connect().await?;
@@ -203,16 +207,7 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
     })
     .await
     .context("remote bootstrap timed out after daemon readiness")??;
-    let ready = RemoteReady {
-        local_base_url: base,
-        access_token: grant.access_token,
-        access_expires_at: grant.expires_at,
-        principal_id: grant.principal_id,
-        instance_id: negotiated.instance_id,
-        daemon_generation: negotiated.daemon_generation,
-        server_version: negotiated.server_version,
-        selected_protocol: negotiated.selected_protocol,
-    };
+    let ready = remote_ready(&base, negotiated, grant);
     if options.local_update_candidate {
         let config = sift_server::config::load().context("reloading local update configuration")?;
         let updater = sift_server::updater::Updater::from_config(&config)?;
@@ -231,42 +226,75 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
     let renewal_options = Arc::new(options);
     let renewal_session = session.clone();
     let renewal_base = ready.local_base_url.clone();
+    let expected_instance_id = ready.instance_id.clone();
+    let mut daemon_generation = ready.daemon_generation.clone();
+    let renewal_endpoint = Arc::clone(&endpoint);
     tokio::spawn(async move {
         let mut expires_at = ready.access_expires_at;
+        let mut monitor = tokio::time::interval(REMOTE_MONITOR_INTERVAL);
+        monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        monitor.tick().await;
         loop {
-            let delay = (expires_at - chrono::Utc::now() - chrono::Duration::minutes(2))
-                .to_std()
-                .unwrap_or(Duration::from_secs(1));
-            tokio::time::sleep(delay).await;
+            monitor.tick().await;
             let renewed = async {
+                let mut probe = renewal_session
+                    .agent_json::<RemoteProbeResponse>(&[
+                        &renewal_options.remote_binary,
+                        "remote",
+                        "probe",
+                        "--state-dir",
+                        &renewal_options.state_dir,
+                    ])
+                    .await?;
+                if probe.daemon.is_none() {
+                    start_daemon(&renewal_options, &renewal_session).await?;
+                    probe = wait_for_daemon(&renewal_options, &renewal_session).await?;
+                }
+                let observed = probe
+                    .daemon
+                    .context("remote daemon did not publish readiness")?;
+                if observed.instance_id != expected_instance_id {
+                    bail!(
+                        "remote instance identity changed from {expected_instance_id} to {}",
+                        observed.instance_id
+                    );
+                }
+                let renewal_due = expires_at - chrono::Utc::now() <= ACCESS_RENEWAL_MARGIN;
+                if observed.daemon_generation == daemon_generation && !renewal_due {
+                    return anyhow::Ok(None);
+                }
                 let capability = issue_capability(&renewal_options, &renewal_session).await?;
+                if capability.daemon.instance_id != expected_instance_id {
+                    bail!("remote capability was issued by a different instance");
+                }
+                *renewal_endpoint.write().unwrap() = capability.daemon.endpoint.clone();
                 let client = sift_client_sdk::Client::new(&renewal_base);
                 let negotiated = client.connect().await?;
+                if negotiated.instance_id != capability.daemon.instance_id
+                    || negotiated.daemon_generation != capability.daemon.daemon_generation
+                {
+                    bail!("renewed forwarding reached a different remote daemon generation");
+                }
                 let grant = client
                     .exchange_ssh_proxy_capability(capability.capability)
                     .await?;
-                anyhow::Ok(RemoteReady {
-                    local_base_url: renewal_base.clone(),
-                    access_token: grant.access_token,
-                    access_expires_at: grant.expires_at,
-                    principal_id: grant.principal_id,
-                    instance_id: negotiated.instance_id,
-                    daemon_generation: negotiated.daemon_generation,
-                    server_version: negotiated.server_version,
-                    selected_protocol: negotiated.selected_protocol,
-                })
+                anyhow::Ok(Some(remote_ready(&renewal_base, negotiated, grant)))
             }
             .await;
             match renewed {
-                Ok(ready) => {
+                Ok(Some(ready)) => {
                     expires_at = ready.access_expires_at;
+                    daemon_generation.clone_from(&ready.daemon_generation);
                     if write_secret_json(&ready).is_err() {
                         return;
                     }
                 }
+                Ok(None) => {}
                 Err(error) => {
                     tracing::warn!(%error, "SSH access-grant renewal failed");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if error.to_string().contains("instance identity changed") {
+                        return;
+                    }
                 }
             }
         }
@@ -274,6 +302,23 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
 
     tokio::signal::ctrl_c().await?;
     Ok(())
+}
+
+fn remote_ready(
+    local_base_url: &str,
+    negotiated: sift_protocol::HandshakeResponse,
+    grant: sift_protocol::SshProxyAccessGrant,
+) -> RemoteReady {
+    RemoteReady {
+        local_base_url: local_base_url.to_owned(),
+        access_token: grant.access_token,
+        access_expires_at: grant.expires_at,
+        principal_id: grant.principal_id,
+        instance_id: negotiated.instance_id,
+        daemon_generation: negotiated.daemon_generation,
+        server_version: negotiated.server_version,
+        selected_protocol: negotiated.selected_protocol,
+    }
 }
 
 async fn issue_capability(
@@ -463,22 +508,27 @@ async fn select_local_server(options: &Options) -> anyhow::Result<(PathBuf, bool
 
 async fn forward_connection(
     session: SshSession,
-    endpoint: &str,
+    endpoint: Arc<RwLock<String>>,
     stream: TcpStream,
 ) -> anyhow::Result<()> {
-    // Data channels deliberately use a dedicated connection. A stalled or
-    // degraded control master must not turn an accepted local TCP connection
-    // into an unbounded HTTP wait.
+    session.ensure_master().await?;
+    let endpoint = endpoint.read().unwrap().clone();
     let mut command = Command::new("ssh");
-    let mut child = command
+    command
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
         .arg("ConnectTimeout=10")
         .arg("-o")
         .arg("ConnectionAttempts=1")
+        .arg("-o")
+        .arg("ClearAllForwardings=yes");
+    if session.multiplex.load(Ordering::Acquire) {
+        command.arg("-S").arg(session.control_socket.as_ref());
+    }
+    let mut child = command
         .arg("-W")
-        .arg(endpoint)
+        .arg(&endpoint)
         .arg(session.destination.as_ref())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -597,6 +647,12 @@ impl SshSession {
             .arg(self.control_socket.as_ref())
             .arg("-o")
             .arg("ControlPersist=60")
+            .arg("-o")
+            .arg("ServerAliveInterval=15")
+            .arg("-o")
+            .arg("ServerAliveCountMax=3")
+            .arg("-o")
+            .arg("TCPKeepAlive=yes")
             .arg("-f")
             .arg("-N")
             .arg(self.destination.as_ref())

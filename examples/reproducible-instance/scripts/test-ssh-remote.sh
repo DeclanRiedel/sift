@@ -20,6 +20,7 @@ helper_binary="$binary_dir/sift-remote"
 server_binary="$binary_dir/sift-server"
 scratch=$(mktemp -d)
 sshd_pid=
+rolling_pid=
 remote_state=".cache/sift-ssh-remote-test-$$"
 remote_binary="$remote_state/bin/sift-server"
 test_user=$(id -un)
@@ -29,6 +30,10 @@ scp_bin=$(command -v scp)
 test_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 
 cleanup() {
+  if [[ -n ${rolling_pid:-} ]]; then
+    kill -INT "$rolling_pid" 2>/dev/null || true
+    wait "$rolling_pid" 2>/dev/null || true
+  fi
   if [[ -s $scratch/ssh_config ]]; then
     "$ssh_bin" -F "$scratch/ssh_config" sift-ssh-good \
       "python3 -c 'import json,os,signal; p=\"$remote_state/runtime/daemon.json\"; os.path.exists(p) and os.kill(json.load(open(p))[\"pid\"], signal.SIGTERM)' ; rm -rf $remote_state" \
@@ -206,18 +211,37 @@ SIFT_TEST_DISABLE_MASTER=1 run_helper "$scratch/fallback.json"
 test "$(jq -r .instance_id "$scratch/fallback.json")" = "$first_instance"
 test "$(jq -r .daemon_generation "$scratch/fallback.json")" = "$first_generation"
 
+# Keep one helper alive while the remote daemon disappears. Its authenticated
+# monitor must restart the daemon, roll the ephemeral forwarding endpoint, and
+# publish a replacement grant without requiring the desktop to recreate the
+# SSH profile.
+"$helper_binary" sift-ssh-good \
+  --local-server-binary "$server_binary" \
+  --state-dir "$remote_state" \
+  --remote-binary "$remote_binary" \
+  >"$scratch/rolling.jsonl" 2>"$scratch/rolling.err" &
+rolling_pid=$!
+for _ in $(seq 1 "$((ready_timeout_secs * 10))"); do
+  if [[ $(wc -l <"$scratch/rolling.jsonl") -ge 1 ]]; then
+    break
+  fi
+  sleep 0.1
+done
+test "$(jq -r .instance_id "$scratch/rolling.jsonl")" = "$first_instance"
 remote_pid=$(
   "$ssh_bin" -F "$scratch/ssh_config" sift-ssh-good \
     "python3 -c 'import json; print(json.load(open(\"$remote_state/runtime/daemon.json\"))[\"pid\"])'"
 )
 "$ssh_bin" -F "$scratch/ssh_config" sift-ssh-good "kill $remote_pid"
-for _ in $(seq 1 50); do
-  if ! "$ssh_bin" -F "$scratch/ssh_config" sift-ssh-good "kill -0 $remote_pid" 2>/dev/null; then
+for _ in $(seq 1 "$((ready_timeout_secs * 10))"); do
+  if [[ $(wc -l <"$scratch/rolling.jsonl") -ge 2 ]]; then
     break
   fi
   sleep 0.1
 done
-rm -f "$scratch/restarted.json"
-run_helper "$scratch/restarted.json"
-test "$(jq -r .instance_id "$scratch/restarted.json")" = "$first_instance"
-test "$(jq -r .daemon_generation "$scratch/restarted.json")" != "$first_generation"
+second_ready=$(sed -n '2p' "$scratch/rolling.jsonl")
+test -n "$second_ready"
+test "$(jq -r .instance_id <<<"$second_ready")" = "$first_instance"
+test "$(jq -r .daemon_generation <<<"$second_ready")" != "$first_generation"
+kill -INT "$rolling_pid"
+wait "$rolling_pid"
