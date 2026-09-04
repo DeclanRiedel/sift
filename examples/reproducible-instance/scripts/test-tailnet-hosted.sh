@@ -5,6 +5,7 @@ remote_device=${1:?usage: test-tailnet-hosted.sh user@tailnet-device [workspace]
 workspace=${2:-$(pwd)}
 profile=${SIFT_SSH_REMOTE_PROFILE:-debug}
 server_binary="$workspace/target/$profile/sift-server"
+admin_binary="$workspace/target/$profile/sift-admin"
 scratch=$(mktemp -d)
 server_pid=
 serve_owned=0
@@ -32,8 +33,8 @@ if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$remote_device" \
   echo "the remote device must be reachable non-interactively and provide bash, curl, jq, and python3" >&2
   exit 2
 fi
-if [[ ! -x $server_binary ]]; then
-  echo "build sift-server for the $profile profile first" >&2
+if [[ ! -x $server_binary || ! -x $admin_binary ]]; then
+  echo "build the sift-server binary suite for the $profile profile first" >&2
   exit 2
 fi
 if [[ $(tailscale serve status --json) != '{}' ]]; then
@@ -50,6 +51,7 @@ fi
 origin="https://$tailnet_name"
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 token=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+password=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
 python3 -c 'import secrets,sys; open(sys.argv[1], "w").write(secrets.token_hex(32))' "$scratch/secret.key"
 chmod 600 "$scratch/secret.key"
 
@@ -71,6 +73,9 @@ server_environment=(
 )
 
 env "${server_environment[@]}" "$server_binary" migrate apply >"$scratch/migrate.log" 2>&1
+printf '%s\n' "$password" | env "${server_environment[@]}" "$admin_binary" \
+  bootstrap-admin tailnet-probe --display-name "Tailnet Probe" --password-stdin \
+  >"$scratch/admin.log" 2>&1
 
 start_server() {
   env "${server_environment[@]}" "$server_binary" >"$scratch/server.log" 2>&1 &
@@ -105,7 +110,7 @@ stop_server() {
 probe_from_remote() {
   local expected_instance=$1
   local payload="$scratch/remote-input"
-  printf '%s\n%s\n' "$token" "$expected_instance" >"$payload"
+  printf '%s\n%s\n%s\n' "$token" "$expected_instance" "$password" >"$payload"
   chmod 600 "$payload"
   local remote_payload
   remote_payload=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$remote_device" 'umask 077; mktemp')
@@ -128,6 +133,7 @@ trap 'rm -rf "$scratch"; rm -f "$payload"' EXIT
 chmod 700 "$scratch"
 IFS= read -r token <"$payload"
 expected_instance=$(sed -n '2p' "$payload")
+password=$(sed -n '3p' "$payload")
 handshake=$(curl -fsS --connect-timeout 5 --max-time 15 -X POST \
   -H 'content-type: application/json' \
   -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":1,"maximum":1}}' \
@@ -144,6 +150,34 @@ curl -fsS --connect-timeout 5 --max-time 15 --config "$scratch/curl-auth" \
   -H "x-sift-protocol-version: $protocol" \
   "$origin/v1/auth/whoami" >"$scratch/whoami.json"
 jq -e '.principal.id > 0 and (.memberships | length > 0)' "$scratch/whoami.json" >/dev/null
+printf '%s' "$password" | python3 -c '
+import json, sys
+json.dump({"username":"tailnet-probe","password":sys.stdin.read(),"client_kind":"native","client_label":"tailnet validation"}, sys.stdout)
+' >"$scratch/login.json"
+curl -fsS --connect-timeout 5 --max-time 15 \
+  -X POST -H 'content-type: application/json' \
+  -H "x-sift-protocol-version: $protocol" \
+  --data-binary "@$scratch/login.json" "$origin/v1/auth/login" >"$scratch/session-one.json"
+jq -e '.access_token != null and .refresh_token != null' "$scratch/session-one.json" >/dev/null
+jq -r .refresh_token "$scratch/session-one.json" | python3 -c '
+import json, sys
+json.dump({"refresh_token":sys.stdin.read().rstrip("\n")}, sys.stdout)
+' >"$scratch/refresh.json"
+curl -fsS --connect-timeout 5 --max-time 15 \
+  -X POST -H 'content-type: application/json' \
+  -H "x-sift-protocol-version: $protocol" \
+  --data-binary "@$scratch/refresh.json" "$origin/v1/auth/refresh" >"$scratch/session-two.json"
+first_access=$(jq -r .access_token "$scratch/session-one.json")
+second_access=$(jq -r .access_token "$scratch/session-two.json")
+printf 'header = "Authorization: Bearer %s"\n' "$first_access" >"$scratch/curl-old-session"
+test "$(curl -sS --connect-timeout 5 --max-time 15 -o /dev/null -w '%{http_code}' \
+  --config "$scratch/curl-old-session" -H "x-sift-protocol-version: $protocol" \
+  "$origin/v1/auth/whoami")" = 401
+printf 'header = "Authorization: Bearer %s"\n' "$second_access" >"$scratch/curl-auth"
+chmod 600 "$scratch/curl-old-session" "$scratch/curl-auth"
+curl -fsS --connect-timeout 5 --max-time 15 --config "$scratch/curl-auth" \
+  -H "x-sift-protocol-version: $protocol" \
+  "$origin/v1/auth/whoami" >"$scratch/whoami.json"
 tenant_id=$(jq -r '.memberships[0].tenant_id' "$scratch/whoami.json")
 room=$(curl -fsS --connect-timeout 5 --max-time 15 --config "$scratch/curl-auth" \
   -X POST -H 'content-type: application/json' \
@@ -151,15 +185,18 @@ room=$(curl -fsS --connect-timeout 5 --max-time 15 --config "$scratch/curl-auth"
   -d "{\"tenant_id\":$tenant_id,\"name\":\"tailnet transport probe\",\"kind\":\"shared\"}" \
   "$origin/v1/metadata/rooms")
 room_id=$(jq -r .id <<<"$room")
-python3 - "$origin" "$room_id" "$token" "$protocol" <<'PY'
+python3 - "$origin" "$room_id" "$scratch/session-two.json" "$protocol" <<'PY'
 import base64
+import json
 import os
 import socket
 import ssl
 import sys
 import urllib.parse
 
-origin, room_id, token, protocol = sys.argv[1:]
+origin, room_id, session_path, protocol = sys.argv[1:]
+with open(session_path, encoding="utf-8") as session_file:
+    token = json.load(session_file)["access_token"]
 url = urllib.parse.urlsplit(origin)
 port = url.port or 443
 key = base64.b64encode(os.urandom(16)).decode("ascii")
@@ -197,6 +234,12 @@ PY
 curl -fsS --connect-timeout 5 --max-time 15 --config "$scratch/curl-auth" \
   -X DELETE -H "x-sift-protocol-version: $protocol" \
   "$origin/v1/metadata/rooms/$room_id" >/dev/null
+curl -fsS --connect-timeout 5 --max-time 15 --config "$scratch/curl-auth" \
+  -X POST -H "x-sift-protocol-version: $protocol" \
+  "$origin/v1/auth/logout" >/dev/null
+test "$(curl -sS --connect-timeout 5 --max-time 15 -o /dev/null -w '%{http_code}' \
+  --config "$scratch/curl-auth" -H "x-sift-protocol-version: $protocol" \
+  "$origin/v1/auth/whoami")" = 401
 REMOTE_SCRIPT
 }
 
