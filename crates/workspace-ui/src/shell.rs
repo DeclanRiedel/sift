@@ -6317,12 +6317,12 @@ impl Pane {
             )
             .child(
                 div()
-                    .h(px(28.))
+                    .h(px(30.))
                     .flex_none()
                     .px_3()
                     .flex()
                     .items_center()
-                    .gap_3()
+                    .gap_4()
                     .border_b_1()
                     .border_color(colors.subtle_border)
                     .bg(colors.panel)
@@ -6371,23 +6371,24 @@ impl Pane {
                                         .debug_selector(move || {
                                             format!("object-browser-row-{index}")
                                         })
-                                        .h(px(30.))
+                                        .h(px(34.))
                                         .px_3()
                                         .flex()
                                         .items_center()
-                                        .gap_3()
+                                        .gap_4()
                                         .border_b_1()
                                         .border_color(colors.subtle_border)
                                         .when(selected, |row| row.bg(colors.active_surface))
                                         .when(!selected, |row| {
                                             row.hover(|row| row.bg(colors.hovered_surface))
                                         })
-                                        .on_click(cx.listener(move |pane, _, _, cx| {
+                                        .on_click(cx.listener(move |pane, _, window, cx| {
                                             if let Some(browser) =
                                                 pane.object_browsers.get_mut(&item_id)
                                             {
                                                 browser.selected = index;
                                             }
+                                            pane.focus_handle.focus(window, cx);
                                             cx.notify();
                                         }))
                                         .child(
@@ -6400,11 +6401,7 @@ impl Pane {
                                                 .truncate()
                                                 .child(icon(
                                                     schema_object_kind_icon(row.source.object_kind),
-                                                    if selected {
-                                                        object_color
-                                                    } else {
-                                                        colors.muted_text
-                                                    },
+                                                    object_color,
                                                     12.,
                                                 ))
                                                 .child(name),
@@ -57254,6 +57251,17 @@ mod tests {
             assert_eq!(browser.rows.len(), 1);
             assert_eq!(browser.rows[0].source.object, "events");
             assert_eq!(browser.context.profile_name, "Analytics");
+        });
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds("object-browser-row-0")
+            .expect("loaded object row");
+        cx.simulate_click(row.center(), Modifiers::default());
+        cx.simulate_keystrokes("enter");
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert_eq!(pane.active_item().unwrap().title, "public.events");
+            assert_eq!(pane.items.first().unwrap().title, "objs");
         });
     }
 
