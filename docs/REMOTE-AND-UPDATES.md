@@ -40,9 +40,15 @@ For a private Tailnet, Tailscale Serve can own the HTTPS boundary while Sift
 stays on loopback:
 
 ```console
+sudo tailscale set --operator=$USER
 tailscale serve --bg http://127.0.0.1:7474
 tailscale serve status
 ```
+
+The one-time operator assignment lets the signed-in OS account manage Serve
+without running Sift or its validation commands as root. Initial certificate
+issuance can take a short while; do not declare the service ready until its
+HTTPS `/v1/ready` response succeeds.
 
 Use the HTTPS MagicDNS origin reported by Serve in `public_base_url` and in the
 desktop's hosted-server profile. Tailscale access policy controls which
