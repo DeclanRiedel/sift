@@ -593,6 +593,15 @@ pub struct ExecuteTransferRecipeRequest {
     pub create_table: bool,
     #[serde(default)]
     pub conflict_policy: Option<sift_protocol::CsvConflictPolicy>,
+    /// Validate and plan without writing rows or creating artifacts.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Zero-based data-row checkpoint for resuming a previously interrupted import.
+    #[serde(default)]
+    pub resume_from_row: u64,
+    /// Per-column SQL type overrides used only when creating the target table.
+    #[serde(default)]
+    pub type_mappings: std::collections::BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for ExecuteTransferRecipeRequest {
@@ -607,6 +616,12 @@ impl std::fmt::Debug for ExecuteTransferRecipeRequest {
             .field("sheet", &self.sheet)
             .field("create_table", &self.create_table)
             .field("conflict_policy", &self.conflict_policy)
+            .field("dry_run", &self.dry_run)
+            .field("resume_from_row", &self.resume_from_row)
+            .field(
+                "type_mapping_columns",
+                &self.type_mappings.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }

@@ -26,6 +26,12 @@ pub struct CsvImportRequest {
     pub create_table: bool,
     #[serde(default)]
     pub conflict_policy: CsvConflictPolicy,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub resume_from_row: u64,
+    #[serde(default)]
+    pub type_mappings: std::collections::BTreeMap<String, String>,
 }
 
 fn default_true() -> bool {
@@ -65,4 +71,12 @@ pub struct CsvImportResponse {
     pub table_created: bool,
     pub rows_inserted: u64,
     pub rows_skipped: u64,
+    /// Number of source data rows validated, including skipped conflicts.
+    #[serde(default)]
+    pub rows_validated: u64,
+    /// First source row not covered by this completed response.
+    #[serde(default)]
+    pub resume_from_row: u64,
+    #[serde(default)]
+    pub dry_run: bool,
 }

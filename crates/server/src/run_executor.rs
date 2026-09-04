@@ -281,6 +281,9 @@ async fn execute_run(
                     sheet: None,
                     create_table: false,
                     conflict_policy: None,
+                    dry_run: false,
+                    resume_from_row: 0,
+                    type_mappings: Default::default(),
                 },
             );
             let result = tokio::select! {
@@ -302,6 +305,11 @@ async fn execute_run(
                         "info",
                         &format!("transfer artifact {} published", artifact.id.0),
                     )?;
+                }
+                Some(Ok(sift_protocol::TransferExecutionResult::Validated { .. })) => {
+                    return Err(ApiError::BadRequest(
+                        "scheduled transfer recipes cannot run as dry-runs".into(),
+                    ));
                 }
                 Some(Ok(_)) | Some(Err(_)) => {
                     metadata.update_run_step(

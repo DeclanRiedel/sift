@@ -119,6 +119,9 @@ async fn csv_import_skip_reports_inserted_and_duplicate_rows() {
         null_value: Some("NULL".into()),
         create_table: false,
         conflict_policy: CsvConflictPolicy::Skip,
+        dry_run: false,
+        resume_from_row: 0,
+        type_mappings: Default::default(),
     };
     let response = router
         .clone()
@@ -150,6 +153,9 @@ async fn csv_import_skip_reports_inserted_and_duplicate_rows() {
         null_value: Some("NULL".into()),
         create_table: false,
         conflict_policy: CsvConflictPolicy::Abort,
+        dry_run: false,
+        resume_from_row: 0,
+        type_mappings: Default::default(),
     };
     let invalid_response = router
         .clone()

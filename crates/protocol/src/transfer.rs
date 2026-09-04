@@ -55,6 +55,16 @@ pub struct WorkspaceArtifact {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TransferExecutionResult {
-    Artifact { artifact: WorkspaceArtifact },
-    Import { result: crate::CsvImportResponse },
+    Artifact {
+        artifact: WorkspaceArtifact,
+    },
+    Import {
+        result: crate::CsvImportResponse,
+    },
+    /// Validation completed without reading/writing database rows or artifacts.
+    Validated {
+        direction: TransferDirection,
+        format_id: String,
+        resume_from_row: u64,
+    },
 }

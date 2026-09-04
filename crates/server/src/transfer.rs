@@ -23,6 +23,16 @@ pub async fn execute_recipe(
             "session belongs to another principal".into(),
         ));
     }
+    if request.dry_run && recipe.direction == TransferDirection::Export {
+        if request.sql.as_deref().is_none_or(str::is_empty) {
+            return Err(ApiError::BadRequest("export SQL is required".into()));
+        }
+        return Ok(TransferExecutionResult::Validated {
+            direction: recipe.direction,
+            format_id: recipe.format_id.clone(),
+            resume_from_row: request.resume_from_row,
+        });
+    }
     if recipe.direction == TransferDirection::Import {
         if recipe.source != TransferEndpoint::Upload || recipe.sink != TransferEndpoint::Table {
             return Err(ApiError::BadRequest(
@@ -59,6 +69,9 @@ pub async fn execute_recipe(
                 null_value: Some("NULL".into()),
                 create_table: request.create_table,
                 conflict_policy: request.conflict_policy.unwrap_or_default(),
+                dry_run: request.dry_run,
+                resume_from_row: request.resume_from_row,
+                type_mappings: request.type_mappings,
             },
         )
         .await?;

@@ -3557,6 +3557,9 @@ pub enum ExecutorCommand {
         sheet: Option<String>,
         create_table: bool,
         conflict_policy: sift_protocol::CsvConflictPolicy,
+        dry_run: bool,
+        resume_from_row: u64,
+        type_mappings: std::collections::BTreeMap<String, String>,
     },
     CancelTransferRecipe {
         generation: u64,
@@ -14491,6 +14494,11 @@ impl WorkspaceShell {
                                 "Transfer imported {} row(s) into {}",
                                 result.rows_inserted, result.table
                             ),
+                            sift_protocol::TransferExecutionResult::Validated {
+                                format_id, ..
+                            } => {
+                                format!("Transfer {format_id} configuration validated")
+                            }
                         };
                         self.transfer_execution_result = Some(result);
                         self.transfer_recipes_error = None;
@@ -25328,6 +25336,33 @@ impl WorkspaceShell {
             .to_owned();
         self.transfer_execution_generation = self.transfer_execution_generation.wrapping_add(1);
         let generation = self.transfer_execution_generation;
+        let reliability = self
+            .transfer_recipes
+            .iter()
+            .find(|recipe| recipe.id == recipe_id)
+            .map(|recipe| &recipe.options);
+        let dry_run = reliability
+            .and_then(|options| options.get("dry_run"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let resume_from_row = reliability
+            .and_then(|options| options.get("resume_from_row"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let type_mappings = reliability
+            .and_then(|options| options.get("type_mappings"))
+            .and_then(serde_json::Value::as_object)
+            .map(|mappings| {
+                mappings
+                    .iter()
+                    .filter_map(|(column, sql_type)| {
+                        sql_type
+                            .as_str()
+                            .map(|sql_type| (column.clone(), sql_type.into()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         self.transfer_execution_pending = sender
             .send(ExecutorCommand::ExecuteTransferRecipe {
                 generation,
@@ -25338,6 +25373,9 @@ impl WorkspaceShell {
                 sheet: (!sheet.is_empty()).then_some(sheet),
                 create_table: self.transfer_import_create_table,
                 conflict_policy: self.transfer_import_conflict_policy,
+                dry_run,
+                resume_from_row,
+                type_mappings,
             })
             .is_ok();
         self.transfer_execution_result = None;
@@ -30111,6 +30149,9 @@ impl WorkspaceShell {
             null_value: Some("NULL".into()),
             create_table: preview.create_table,
             conflict_policy: preview.conflict_policy,
+            dry_run: false,
+            resume_from_row: 0,
+            type_mappings: Default::default(),
         };
         if sender.send(ExecutorCommand::ImportCsv { request }).is_ok() {
             self.modal = None;
@@ -47221,6 +47262,13 @@ impl WorkspaceShell {
                         sift_protocol::TransferExecutionResult::Import { result } => format!(
                             "Imported {} row(s), skipped {} · {}",
                             result.rows_inserted, result.rows_skipped, result.table
+                        ),
+                        sift_protocol::TransferExecutionResult::Validated {
+                            direction,
+                            format_id,
+                            resume_from_row,
+                        } => format!(
+                            "Validated {direction:?} · {format_id} · resume row {resume_from_row}"
                         ),
                     });
                     let field = |label: &'static str, input: Entity<TextInput>| {

@@ -4740,6 +4740,9 @@ async fn run_query_executor(
                 sheet,
                 create_table,
                 conflict_policy,
+                dry_run,
+                resume_from_row,
+                type_mappings,
             } => {
                 let Some(opened) = context.as_ref() else {
                     let _ = events.send(ExecutorEvent::TransferRecipeExecutionFinished {
@@ -4766,6 +4769,9 @@ async fn run_query_executor(
                         sheet,
                         create_table,
                         conflict_policy: Some(conflict_policy),
+                        dry_run,
+                        resume_from_row,
+                        type_mappings,
                     };
                     let result = tokio::select! {
                         result = client.execute_transfer_recipe(recipe_id, request) => result

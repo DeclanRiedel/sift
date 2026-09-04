@@ -39,8 +39,33 @@ pub async fn import(
     let engine = entry.driver.engine();
     let table = qualified_table(&request.table, engine)?;
 
+    validate_type_mappings(&request, &prepared)?;
+    if request.resume_from_row > 0 && request.conflict_policy == CsvConflictPolicy::Abort {
+        return Err(ApiError::BadRequest(
+            "resumed imports require conflict_policy=skip for row-safe replay".into(),
+        ));
+    }
+    let row_count = prepared.records.len() as u64;
+    if request.resume_from_row > row_count {
+        return Err(ApiError::BadRequest(
+            "resume_from_row exceeds the input row count".into(),
+        ));
+    }
+    if request.dry_run {
+        return Ok(CsvImportResponse {
+            table: request.table,
+            columns: prepared.columns,
+            table_created: false,
+            rows_inserted: 0,
+            rows_skipped: 0,
+            rows_validated: row_count,
+            resume_from_row: row_count,
+            dry_run: true,
+        });
+    }
+
     if request.create_table {
-        let ddl = create_table_sql(&table, &prepared.columns, engine);
+        let ddl = create_table_sql(&table, &prepared.columns, engine, &request.type_mappings);
         store
             .execute_http_as(
                 session,
@@ -73,6 +98,7 @@ pub async fn import(
                 &table,
                 &prepared,
                 &target_types,
+                request.resume_from_row,
             )
             .await?
         }
@@ -84,7 +110,35 @@ pub async fn import(
         table_created: request.create_table,
         rows_inserted,
         rows_skipped,
+        rows_validated: row_count,
+        resume_from_row: row_count,
+        dry_run: false,
     })
+}
+
+fn validate_type_mappings(request: &CsvImportRequest, prepared: &PreparedCsv) -> ApiResult<()> {
+    for (column, sql_type) in &request.type_mappings {
+        if !prepared
+            .columns
+            .iter()
+            .any(|candidate| candidate.name == *column)
+        {
+            return Err(ApiError::BadRequest(format!(
+                "type mapping references unknown column `{column}`"
+            )));
+        }
+        if sql_type.is_empty()
+            || sql_type.len() > 128
+            || sql_type.contains(';')
+            || sql_type.contains("--")
+            || sql_type.contains("/*")
+        {
+            return Err(ApiError::BadRequest(format!(
+                "type mapping for `{column}` is not a safe SQL type"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn prepare(request: &CsvImportRequest) -> ApiResult<PreparedCsv> {
@@ -223,14 +277,21 @@ fn merge_types(left: InferredCsvType, right: InferredCsvType) -> InferredCsvType
     }
 }
 
-fn create_table_sql(table: &str, columns: &[InferredCsvColumn], engine: Engine) -> String {
+fn create_table_sql(
+    table: &str,
+    columns: &[InferredCsvColumn],
+    engine: Engine,
+    mappings: &std::collections::BTreeMap<String, String>,
+) -> String {
     let definitions = columns
         .iter()
         .map(|column| {
             format!(
                 "{} {} {}",
                 quote_ident(&column.name, engine),
-                inferred_sql(column.inferred_type, engine),
+                mappings
+                    .get(&column.name)
+                    .map_or(inferred_sql(column.inferred_type, engine), String::as_str),
                 if column.nullable { "NULL" } else { "NOT NULL" }
             )
         })
@@ -328,6 +389,7 @@ async fn ingest_skip(
     table: &str,
     prepared: &PreparedCsv,
     target_types: &[String],
+    resume_from_row: u64,
 ) -> ApiResult<(u64, u64)> {
     let column_sql = prepared
         .columns
@@ -337,7 +399,7 @@ async fn ingest_skip(
         .join(", ");
     let mut inserted = 0u64;
     let mut skipped = 0u64;
-    for record in &prepared.records {
+    for record in prepared.records.iter().skip(resume_from_row as usize) {
         let mut params = Vec::new();
         let values = record
             .iter()
@@ -546,6 +608,9 @@ mod tests {
             null_value: Some("NULL".into()),
             create_table: true,
             conflict_policy: CsvConflictPolicy::Abort,
+            dry_run: false,
+            resume_from_row: 0,
+            type_mappings: Default::default(),
         }
     }
 
@@ -583,5 +648,32 @@ mod tests {
             cast_placeholder(Engine::SqlServer, 2, "decimal(38,10)"),
             "CAST(@P2 AS decimal(38,10))"
         );
+    }
+
+    #[test]
+    fn explicit_type_mappings_are_bounded_and_identifier_scoped() {
+        let mut request = request("id,name\n1,Alice\n");
+        let prepared = prepare(&request).unwrap();
+        request
+            .type_mappings
+            .insert("id".into(), "numeric(20,0)".into());
+        validate_type_mappings(&request, &prepared).unwrap();
+        let ddl = create_table_sql(
+            "public.people",
+            &prepared.columns,
+            Engine::Postgres,
+            &request.type_mappings,
+        );
+        assert!(ddl.contains("\"id\" numeric(20,0)"));
+
+        request
+            .type_mappings
+            .insert("name".into(), "text; DROP TABLE people".into());
+        assert!(validate_type_mappings(&request, &prepared).is_err());
+        request.type_mappings.clear();
+        request
+            .type_mappings
+            .insert("missing".into(), "text".into());
+        assert!(validate_type_mappings(&request, &prepared).is_err());
     }
 }
