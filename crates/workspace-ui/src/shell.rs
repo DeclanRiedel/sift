@@ -5659,13 +5659,18 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         let item_id = item.id;
-        if let Some(index) = self.object_browsers.iter().find_map(|(id, browser)| {
-            (browser.profile_id == state.profile_id)
-                .then(|| self.items.iter().position(|item| item.id == *id))
-                .flatten()
-        }) {
+        if let Some(index) = self
+            .object_browsers
+            .keys()
+            .find_map(|id| self.items.iter().position(|item| item.id == *id))
+        {
             self.object_browsers.insert(self.items[index].id, state);
-            self.activate_item(index, true);
+            self.items[index].title = "objs".into();
+            if index != 0 {
+                let item = self.items.remove(index);
+                self.items.insert(0, item);
+            }
+            self.activate_item(0, true);
         } else {
             if !self.replace_new_pane_placeholder() {
                 if let Some(current) = self.active_item().map(|item| item.id) {
@@ -5673,8 +5678,8 @@ impl Pane {
                     self.forward_items.clear();
                 }
             }
-            self.items.push(item);
-            self.active_item = self.items.len() - 1;
+            self.items.insert(0, item);
+            self.active_item = 0;
             self.object_browsers.insert(item_id, state);
         }
         self.pending_close_item = None;
@@ -6342,10 +6347,11 @@ impl Pane {
                 )
             })
             .when(row_count > 0, |view| {
-                view.child(uniform_list(
-                    ("object-browser-rows", item_id as usize),
-                    row_count,
-                    cx.processor(move |pane, range: Range<usize>, _, cx| {
+                view.child(
+                    uniform_list(
+                        ("object-browser-rows", item_id as usize),
+                        row_count,
+                        cx.processor(move |pane, range: Range<usize>, _, cx| {
                         let colors = cx.theme().colors;
                         let Some(browser) = pane.object_browsers.get(&item_id) else {
                             return Vec::new();
@@ -6362,6 +6368,9 @@ impl Pane {
                                 Some(
                                     div()
                                         .id(("object-browser-row", index))
+                                        .debug_selector(move || {
+                                            format!("object-browser-row-{index}")
+                                        })
                                         .h(px(30.))
                                         .px_3()
                                         .flex()
@@ -6428,8 +6437,12 @@ impl Pane {
                                 )
                             })
                             .collect()
-                    }),
-                ))
+                        }),
+                    )
+                    .flex_1()
+                    .min_h_0()
+                    .w_full(),
+                )
             })
             .into_any_element()
     }
@@ -6637,6 +6650,13 @@ impl Pane {
         let Some(from) = self.items.iter().position(|item| item.id == item_id) else {
             return;
         };
+        let object_browser = self.object_browsers.contains_key(&item_id);
+        let pinned_count = self.object_browsers.len();
+        let to = if object_browser {
+            0
+        } else {
+            to.max(pinned_count)
+        };
         if to > self.items.len() || from == to || from + 1 == to {
             return;
         }
@@ -6691,6 +6711,7 @@ impl Pane {
         cx: &mut Context<Self>,
     ) {
         let item_id = transfer.item.id;
+        let object_browser = transfer.object_browser.is_some();
         if let Some(editor) = transfer.editor {
             self.editor_subscriptions.insert(
                 item_id,
@@ -6730,9 +6751,14 @@ impl Pane {
         if let Some(results) = transfer.results {
             self.attach_results(item_id, results, cx);
         }
-        let insertion_index = insertion_index
-            .unwrap_or(self.items.len())
-            .min(self.items.len());
+        let insertion_index = if object_browser {
+            0
+        } else {
+            insertion_index
+                .unwrap_or(self.items.len())
+                .max(self.object_browsers.len())
+                .min(self.items.len())
+        };
         self.items.insert(insertion_index, transfer.item);
         self.active_item = insertion_index;
         self.tab_scroll_handle.scroll_to_item(insertion_index);
@@ -17753,12 +17779,14 @@ impl WorkspaceShell {
                 let object_name = target.object.clone();
                 let open_target = target.clone();
                 let favorite_target = target.clone();
+                let favorite_hover_group = format!("database-object-favorite-{row_index}");
                 let is_favorite = self
                     .favorite_database_objects
                     .contains(&self.database_object_bookmark(&target));
                 base(depth)
                     .id(("schema-object-row", row_index))
                     .debug_selector(|| "database-object-row".into())
+                    .group(favorite_hover_group.clone())
                     .text_color(if can_preview {
                         colors.text
                     } else {
@@ -17810,6 +17838,13 @@ impl WorkspaceShell {
                                 "Remove favorite object"
                             } else {
                                 "Favorite object"
+                            })
+                            .when(!self.show_favorite_database_objects, |button| {
+                                button
+                                    .invisible()
+                                    .group_hover(favorite_hover_group.clone(), |style| {
+                                        style.visible()
+                                    })
                             })
                             .hover(|button| button.bg(colors.active_surface))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -19101,7 +19136,6 @@ impl WorkspaceShell {
             return;
         };
         let profile_id = connection.id;
-        let profile_name = connection.name.clone();
         let instance_id = self
             .selected_instance_id
             .clone()
@@ -19145,7 +19179,7 @@ impl WorkspaceShell {
                     ItemPresentation {
                         id: item_id,
                         kind: ItemKind::Schema,
-                        title: format!("Objects · {profile_name}"),
+                        title: "objs".into(),
                         dirty: false,
                         source: None,
                         last_result: None,
@@ -19350,7 +19384,7 @@ impl WorkspaceShell {
                 browser.load_error = None;
             }
             if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
-                item.title = format!("Objects · {}", connection.name);
+                item.title = "objs".into();
             }
             cx.notify();
         });
@@ -57077,7 +57111,8 @@ mod tests {
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().unwrap();
             assert_eq!(item.kind, ItemKind::Schema);
-            assert_eq!(item.title, "Objects · Warehouse");
+            assert_eq!(item.title, "objs");
+            assert_eq!(pane.items.first().map(|item| item.id), Some(item.id));
             let browser = pane.object_browsers.get(&item.id).unwrap();
             assert_eq!(browser.rows.len(), 4);
             assert_eq!(browser.catalog.as_deref(), Some("warehouse"));
@@ -57092,6 +57127,10 @@ mod tests {
             assert_eq!(jobs.estimated_rows, Some(42));
             assert_eq!(jobs.comment.as_deref(), Some("Queued work"));
         });
+        assert!(
+            cx.debug_bounds("object-browser-row-0").is_some(),
+            "visible object rows must receive layout space"
+        );
         let schema_picker = cx
             .debug_bounds("object-browser-schema-picker")
             .expect("schema picker");
@@ -57181,7 +57220,7 @@ mod tests {
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().unwrap();
-            assert_eq!(item.title, "Objects · Analytics");
+            assert_eq!(item.title, "objs");
             let browser = &pane.object_browsers[&item.id];
             assert_eq!(browser.profile_id, 3);
             assert!(browser.rows.is_empty());
@@ -57259,7 +57298,11 @@ mod tests {
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().expect("Objects tab");
-            assert_eq!(item.title, "Objects · Primary");
+            assert_eq!(item.title, "objs");
+            assert_eq!(
+                pane.items.first().map(|candidate| candidate.id),
+                Some(item.id)
+            );
             let browser = &pane.object_browsers[&item.id];
             assert!(browser.loading);
             assert!(browser.rows.is_empty());
