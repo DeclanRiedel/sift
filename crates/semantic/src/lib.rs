@@ -14,8 +14,8 @@ use sift_protocol::{
     StatementKind, StatementSelection, TextEdit, TextRange, WorkspaceEdit,
 };
 use sqlparser::ast::{
-    Expr, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, Statement as SqlStatement,
-    TableFactor,
+    Expr, FromTable, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr,
+    Statement as SqlStatement, TableFactor, TableWithJoins,
 };
 use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
@@ -381,13 +381,24 @@ impl SemanticRegistry {
         revision: u64,
         catalog: &CatalogBindingView,
     ) -> Result<DiagnosticsResponse, Error> {
-        let (source, mut diagnostics) = {
+        let (source, statements, dialect_id, mut diagnostics) = {
             let registry = self.inner.lock().unwrap();
             let document = registry.documents.get(&id).ok_or(Error::NotFound)?;
             ensure_scope(document, scope)?;
             ensure_revision(document, revision)?;
-            (Arc::clone(&document.source), document.diagnostics.clone())
+            (
+                Arc::clone(&document.source),
+                document.statements.clone(),
+                document.dialect_id.clone(),
+                document.diagnostics.clone(),
+            )
         };
+        diagnostics.extend(inspect_query_safety(
+            &source,
+            &statements,
+            &dialect_id,
+            revision,
+        ));
         let mut binder = bind_catalog_references(&source, revision, catalog);
         let incomplete = !catalog.complete;
         diagnostics.append(&mut binder);
@@ -1372,6 +1383,202 @@ impl BindingToken {
     const fn is_dot(&self) -> bool {
         matches!(self.kind, BindingTokenKind::Dot)
     }
+}
+
+/// Run valid-but-dangerous SQL inspections only after the editor's semantic
+/// debounce. The statements remain executable; warnings make their broad
+/// effect visible without introducing a client-side SQL parser.
+fn inspect_query_safety(
+    source: &str,
+    statements: &[SemanticStatement],
+    dialect_id: &sift_protocol::DialectId,
+    revision: u64,
+) -> Vec<SemanticDiagnostic> {
+    let Ok(flavor) = dialect_flavor(dialect_id) else {
+        return Vec::new();
+    };
+    let dialect: Box<dyn Dialect> = match flavor {
+        Flavor::Postgres => Box::new(PostgreSqlDialect {}),
+        Flavor::Tsql => Box::new(MsSqlDialect {}),
+    };
+    let mut diagnostics = Vec::new();
+    for statement in statements.iter().filter(|statement| !statement.recovered) {
+        let range = statement.executable_range;
+        let sql = &source[range.start as usize..range.end as usize];
+        let Ok(parsed) = Parser::parse_sql(&*dialect, sql) else {
+            continue;
+        };
+        for parsed_statement in &parsed {
+            inspect_statement_safety(parsed_statement, range, revision, &mut diagnostics);
+            if diagnostics.len() >= MAX_DIAGNOSTICS {
+                return diagnostics;
+            }
+        }
+    }
+    diagnostics
+}
+
+fn inspect_statement_safety(
+    statement: &SqlStatement,
+    range: TextRange,
+    revision: u64,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    match statement {
+        SqlStatement::Update {
+            selection: None, ..
+        } => push_safety_diagnostic(
+            diagnostics,
+            revision,
+            "unsafe_update_without_where",
+            "UPDATE has no WHERE clause and can modify every row",
+            range,
+        ),
+        SqlStatement::Delete(delete) if delete.selection.is_none() => push_safety_diagnostic(
+            diagnostics,
+            revision,
+            "unsafe_delete_without_where",
+            "DELETE has no WHERE clause and can remove every row",
+            range,
+        ),
+        SqlStatement::Query(query) => inspect_query_joins(query, range, revision, diagnostics),
+        SqlStatement::Update { table, from, .. } => {
+            inspect_table_with_joins(table, range, revision, diagnostics);
+            if let Some(from) = from {
+                inspect_table_with_joins(from, range, revision, diagnostics);
+            }
+        }
+        SqlStatement::Delete(delete) => {
+            let from = match &delete.from {
+                FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from) => from,
+            };
+            inspect_from_joins(from, range, revision, diagnostics);
+            if let Some(using) = &delete.using {
+                inspect_from_joins(using, range, revision, diagnostics);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn inspect_query_joins(
+    query: &Query,
+    range: TextRange,
+    revision: u64,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            inspect_query_joins(&cte.query, range, revision, diagnostics);
+        }
+    }
+    inspect_set_expr(&query.body, range, revision, diagnostics);
+}
+
+fn inspect_set_expr(
+    expression: &SetExpr,
+    range: TextRange,
+    revision: u64,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    match expression {
+        SetExpr::Select(select) => {
+            inspect_from_joins(&select.from, range, revision, diagnostics);
+            for from in &select.from {
+                inspect_nested_factor(&from.relation, range, revision, diagnostics);
+                for join in &from.joins {
+                    inspect_nested_factor(&join.relation, range, revision, diagnostics);
+                }
+            }
+        }
+        SetExpr::Query(query) => inspect_query_joins(query, range, revision, diagnostics),
+        SetExpr::SetOperation { left, right, .. } => {
+            inspect_set_expr(left, range, revision, diagnostics);
+            inspect_set_expr(right, range, revision, diagnostics);
+        }
+        _ => {}
+    }
+}
+
+fn inspect_nested_factor(
+    factor: &TableFactor,
+    range: TextRange,
+    revision: u64,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    match factor {
+        TableFactor::Derived { subquery, .. } => {
+            inspect_query_joins(subquery, range, revision, diagnostics)
+        }
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => inspect_table_with_joins(table_with_joins, range, revision, diagnostics),
+        _ => {}
+    }
+}
+
+fn inspect_from_joins(
+    from: &[TableWithJoins],
+    range: TextRange,
+    revision: u64,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    if from.len() > 1 {
+        push_safety_diagnostic(
+            diagnostics,
+            revision,
+            "cartesian_join",
+            "comma-separated FROM sources produce a Cartesian join",
+            range,
+        );
+    }
+    for table in from {
+        inspect_table_with_joins(table, range, revision, diagnostics);
+    }
+}
+
+fn inspect_table_with_joins(
+    table: &TableWithJoins,
+    range: TextRange,
+    revision: u64,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    for join in &table.joins {
+        let cartesian = matches!(join.join_operator, JoinOperator::CrossJoin)
+            || matches!(
+                join_constraint(&join.join_operator),
+                Some(JoinConstraint::None)
+            );
+        if cartesian {
+            push_safety_diagnostic(
+                diagnostics,
+                revision,
+                "cartesian_join",
+                "JOIN has no matching condition and produces a Cartesian join",
+                range,
+            );
+        }
+    }
+}
+
+fn push_safety_diagnostic(
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+    revision: u64,
+    code: &str,
+    message: &str,
+    range: TextRange,
+) {
+    let ordinal = diagnostics.len();
+    diagnostics.push(SemanticDiagnostic {
+        id: format!("{revision}:safety:{ordinal}"),
+        severity: DiagnosticSeverity::Warning,
+        code: code.into(),
+        message: message.into(),
+        range,
+        related_ranges: Vec::new(),
+        source: "safety".into(),
+        quick_fix_ids: Vec::new(),
+    });
 }
 
 fn bind_catalog_references(
@@ -4034,6 +4241,67 @@ mod tests {
             &CatalogBindingView::new(sift_protocol::CatalogRevision(1), false, Vec::new()),
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn safety_diagnostics_flag_broad_mutations_and_cartesian_joins() {
+        let registry = SemanticRegistry::default();
+        let scope = DocumentScope {
+            session: 17,
+            connection: 4,
+        };
+        let source = concat!(
+            "update users set email = 'x';",
+            "delete from orders;",
+            "select * from users cross join orders;",
+            "select * from users, orders;",
+            "update users set email = 'safe' where id = 1;",
+            "select * from users join orders on users.id = orders.id;"
+        );
+        let state = registry
+            .create(
+                scope,
+                dialect("sift/postgresql"),
+                source.into(),
+                None,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let diagnostics = registry
+            .diagnostics_with_catalog(
+                scope,
+                state.document_id,
+                state.revision,
+                &CatalogBindingView::new(sift_protocol::CatalogRevision(1), false, Vec::new()),
+            )
+            .unwrap()
+            .diagnostics;
+
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "unsafe_update_without_where")
+                .count(),
+            1
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "unsafe_delete_without_where")
+                .count(),
+            1
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "cartesian_join")
+                .count(),
+            2
+        );
+        assert!(diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.source == "safety")
+            .all(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning));
     }
 
     #[test]
