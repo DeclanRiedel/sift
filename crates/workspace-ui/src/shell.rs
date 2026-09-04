@@ -2623,10 +2623,14 @@ struct CsvImportPreviewState {
 #[derive(Debug, Clone)]
 struct ResultCellEditTarget {
     item_id: u64,
-    column: String,
-    original: sift_protocol::Value,
-    original_row: Vec<(String, sift_protocol::Value)>,
+    cells: Vec<crate::results::SelectedCellEdit>,
     source: DatabaseObjectSource,
+}
+
+impl ResultCellEditTarget {
+    fn primary(&self) -> &crate::results::SelectedCellEdit {
+        &self.cells[0]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -29887,8 +29891,9 @@ impl WorkspaceShell {
             return;
         };
         self.focused_surface = WorkspaceSurface::Results;
-        let Some(selected) = results.read(cx).selected_cell_edit() else {
-            self.show_toast("Select one result cell to edit".into(), cx);
+        let selected_cells = results.read(cx).selected_cell_edits();
+        let Some(selected) = selected_cells.first() else {
+            self.show_toast("Select a cell or cell range to edit".into(), cx);
             return;
         };
         if self
@@ -29914,9 +29919,7 @@ impl WorkspaceShell {
         let json_cell = matches!(&selected.original, sift_protocol::Value::Json(_));
         self.result_cell_edit_target = Some(ResultCellEditTarget {
             item_id,
-            column: selected.column,
-            original: selected.original,
-            original_row: selected.original_row,
+            cells: selected_cells,
             source,
         });
         self.result_edit_pending = false;
@@ -30346,32 +30349,43 @@ impl WorkspaceShell {
             return self.staged_result_change_count() > 0;
         };
         let text = self.result_cell_edit_input.read(cx).text().to_string();
-        let value = match Self::parse_result_cell_value(&target.original, &text) {
-            Ok(value) => value,
+        let values = match target
+            .cells
+            .iter()
+            .map(|cell| {
+                Self::parse_result_cell_value(&cell.original, &text)
+                    .map(|value| (cell.clone(), value))
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(values) => values,
             Err(message) => {
                 self.result_edit_error = Some(message);
                 cx.notify();
                 return false;
             }
         };
-        let existing = self.staged_result_edits.iter().position(|edit| {
-            edit.item_id == target.item_id
-                && edit.column == target.column
-                && edit.original_row == target.original_row
-        });
-        if let Some(index) = existing {
-            self.staged_result_edits.remove(index);
+        let mut staged = self.staged_result_edits.clone();
+        for (cell, value) in values {
+            if let Some(index) = staged.iter().position(|edit| {
+                edit.item_id == target.item_id
+                    && edit.column == cell.column
+                    && edit.original_row == cell.original_row
+            }) {
+                staged.remove(index);
+            }
+            if value != cell.original {
+                staged.push(StagedResultEdit {
+                    item_id: target.item_id,
+                    column: cell.column,
+                    original: cell.original,
+                    value,
+                    original_row: cell.original_row,
+                    source: target.source.clone(),
+                });
+            }
         }
-        if value != target.original {
-            self.staged_result_edits.push(StagedResultEdit {
-                item_id: target.item_id,
-                column: target.column,
-                original: target.original,
-                value,
-                original_row: target.original_row,
-                source: target.source,
-            });
-        }
+        self.staged_result_edits = staged;
         self.pending_edit_set = None;
         self.result_edit_plan = None;
         self.result_edit_conflicts.clear();
@@ -39953,7 +39967,8 @@ impl WorkspaceShell {
                                                 |edit| {
                                                     format!(
                                                         "Edit JSON · {}.{}",
-                                                        edit.source.object, edit.column
+                                                        edit.source.object,
+                                                        edit.primary().column
                                                     )
                                                 },
                                             )),
@@ -40077,7 +40092,21 @@ impl WorkspaceShell {
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .child(target.map_or_else(
                                             || "Review staged table changes".into(),
-                                            |edit| format!("Edit {}.{}", edit.source.object, edit.column),
+                                            |edit| {
+                                                if edit.cells.len() == 1 {
+                                                    format!(
+                                                        "Edit {}.{}",
+                                                        edit.source.object,
+                                                        edit.primary().column
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "Edit {} selected cells · {}",
+                                                        edit.cells.len(),
+                                                        edit.source.object
+                                                    )
+                                                }
+                                            },
                                         )),
                                 )
                                 .child(
@@ -40107,7 +40136,7 @@ impl WorkspaceShell {
                                         .text_color(colors.muted_text)
                                         .child(format!(
                                             "Original: {} · Enter NULL to store a null value",
-                                            render_value(&edit.original).text
+                                            render_value(&edit.primary().original).text
                                         ))
                                 }))
                                 .children((!staged_edits.is_empty() || !staged_deletes.is_empty()).then(|| {
@@ -48506,6 +48535,60 @@ mod tests {
                 display_text: "10.20.0.2".into(),
             }
         );
+    }
+
+    #[gpui::test]
+    fn range_cell_edit_stages_same_value_for_every_selected_cell(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            let first_row = vec![
+                ("id".into(), sift_protocol::Value::Int64(1)),
+                ("state".into(), sift_protocol::Value::Text("open".into())),
+            ];
+            let second_row = vec![
+                ("id".into(), sift_protocol::Value::Int64(2)),
+                ("state".into(), sift_protocol::Value::Text("closed".into())),
+            ];
+            shell.result_cell_edit_target = Some(ResultCellEditTarget {
+                item_id: 7,
+                cells: vec![
+                    crate::results::SelectedCellEdit {
+                        column: "state".into(),
+                        original: sift_protocol::Value::Text("open".into()),
+                        original_row: first_row,
+                    },
+                    crate::results::SelectedCellEdit {
+                        column: "state".into(),
+                        original: sift_protocol::Value::Text("closed".into()),
+                        original_row: second_row,
+                    },
+                ],
+                source: DatabaseObjectSource {
+                    instance_id: "local".into(),
+                    tenant_id: 1,
+                    profile_id: 2,
+                    profile_name: "demo/postgres".into(),
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    catalog: Some("sifttest".into()),
+                    schema: "audit".into(),
+                    object: "events".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                    last_refreshed_at_ms: None,
+                },
+            });
+            shell
+                .result_cell_edit_input
+                .update(cx, |input, cx| input.set_text("archived", cx));
+
+            assert!(shell.stage_current_result_edit(cx));
+            assert_eq!(shell.staged_result_edits.len(), 2);
+            assert!(shell
+                .staged_result_edits
+                .iter()
+                .all(|edit| { edit.value == sift_protocol::Value::Text("archived".into()) }));
+        });
     }
 
     #[test]

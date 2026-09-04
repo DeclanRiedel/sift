@@ -162,6 +162,7 @@ pub(crate) struct ResultFieldInspectorRow {
     pub included: bool,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct SelectedCellEdit {
     pub column: String,
     pub original: Value,
@@ -1254,10 +1255,7 @@ impl ResultsView {
         self.placement
     }
 
-    pub(crate) fn selected_cell_edit(&self) -> Option<SelectedCellEdit> {
-        let GridSelection::Cell { row, column } = self.selected? else {
-            return None;
-        };
+    fn cell_edit_at(&self, row: usize, column: usize) -> Option<SelectedCellEdit> {
         let data = self.state.ready()?;
         let selected = data.rows.get(row)?.values.get(column)?.clone();
         let column_name = data.columns.get(column)?.name.clone();
@@ -1272,6 +1270,43 @@ impl ResultsView {
             original: selected,
             original_row,
         })
+    }
+
+    pub(crate) fn selected_cell_edits(&self) -> Vec<SelectedCellEdit> {
+        let Some(selection) = self.selected else {
+            return Vec::new();
+        };
+        let coordinates = match selection {
+            GridSelection::Cell { row, column } => vec![(row, column)],
+            GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                focus_row,
+                focus_column,
+            } => {
+                let (rows, columns) =
+                    self.range_coordinates(anchor_row, anchor_column, focus_row, focus_column);
+                let focus = (focus_row, focus_column);
+                std::iter::once(focus)
+                    .chain(
+                        rows.into_iter()
+                            .flat_map(|row| {
+                                columns.iter().copied().map(move |column| (row, column))
+                            })
+                            .filter(move |coordinate| *coordinate != focus),
+                    )
+                    .collect()
+            }
+            GridSelection::Row(_) | GridSelection::Column(_) | GridSelection::All => Vec::new(),
+        };
+        coordinates
+            .into_iter()
+            .filter_map(|(row, column)| self.cell_edit_at(row, column))
+            .collect()
+    }
+
+    pub(crate) fn selected_cell_edit(&self) -> Option<SelectedCellEdit> {
+        self.selected_cell_edits().into_iter().next()
     }
 
     pub(crate) fn pasted_cell_edits(&self, text: &str) -> Result<Vec<PastedCellEdit>, String> {
@@ -1601,8 +1636,14 @@ impl ResultsView {
         text: String,
         cx: &mut Context<Self>,
     ) -> Option<FocusHandle> {
-        let GridSelection::Cell { row, column } = self.selected? else {
-            return None;
+        let (row, column) = match self.selected? {
+            GridSelection::Cell { row, column } => (row, column),
+            GridSelection::Range {
+                focus_row,
+                focus_column,
+                ..
+            } => (focus_row, focus_column),
+            GridSelection::Row(_) | GridSelection::Column(_) | GridSelection::All => return None,
         };
         let input = cx.new(|cx| {
             TextInput::new(text, "New cell value", cx).aria_label("Edit selected result cell")
@@ -1626,8 +1667,17 @@ impl ResultsView {
     }
 
     pub(crate) fn mark_selected_cell_editing(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(GridSelection::Cell { row, column }) = self.selected else {
+        let Some(selection) = self.selected else {
             return false;
+        };
+        let (row, column) = match selection {
+            GridSelection::Cell { row, column } => (row, column),
+            GridSelection::Range {
+                focus_row,
+                focus_column,
+                ..
+            } => (focus_row, focus_column),
+            GridSelection::Row(_) | GridSelection::Column(_) | GridSelection::All => return false,
         };
         self.editing_cell = Some((row, column));
         cx.notify();
@@ -3368,7 +3418,10 @@ impl ResultsView {
     }
 
     fn edit_selected_cell(&mut self, _: &EditSelectedCell, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.selected, Some(GridSelection::Cell { .. })) {
+        if matches!(
+            self.selected,
+            Some(GridSelection::Cell { .. } | GridSelection::Range { .. })
+        ) {
             cx.emit(ResultsEvent::EditSelectedCellRequested);
         }
     }
@@ -7396,6 +7449,13 @@ mod tests {
                 view.selected_text_with_headers().as_deref(),
                 Some("name\trank\nneo\t1\ntrinity\t2")
             );
+            let selected_edits = view.selected_cell_edits();
+            assert_eq!(selected_edits.len(), 4);
+            assert_eq!(selected_edits[0].column, "rank");
+            assert_eq!(selected_edits[0].original, Value::Int64(2));
+            assert!(view.begin_selected_cell_edit("2".into(), cx).is_some());
+            assert_eq!(view.editing_cell, Some((1, 1)));
+            view.finish_inline_cell_edit(cx);
             let visual_edits = view.pasted_cell_edits("NULL\tNULL\nNULL\tNULL").unwrap();
             assert_eq!(visual_edits.len(), 4);
             assert!(visual_edits.iter().all(|edit| edit.text == "NULL"));
