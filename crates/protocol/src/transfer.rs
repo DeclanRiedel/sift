@@ -60,6 +60,8 @@ pub enum TransferExecutionResult {
     },
     Import {
         result: crate::CsvImportResponse,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quarantine_artifact: Option<WorkspaceArtifact>,
     },
     /// Validation completed without reading/writing database rows or artifacts.
     Validated {

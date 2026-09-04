@@ -83,7 +83,8 @@ pub use crdt::{
     RoomConnectionId, RoomResultId,
 };
 pub use csv_import::{
-    CsvConflictPolicy, CsvImportRequest, CsvImportResponse, InferredCsvColumn, InferredCsvType,
+    CsvConflictPolicy, CsvImportRequest, CsvImportResponse, CsvQuarantinedRow, InferredCsvColumn,
+    InferredCsvType,
 };
 pub use edit::{
     ApplyEditsRequest, ApplyEditsResult, CellEdit, EditConflict, EditOutcome, EditPlan, EditSet,

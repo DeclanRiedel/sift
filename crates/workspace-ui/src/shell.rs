@@ -14490,10 +14490,12 @@ impl WorkspaceShell {
                                     artifact.id.0, artifact.byte_len
                                 )
                             }
-                            sift_protocol::TransferExecutionResult::Import { result } => format!(
-                                "Transfer imported {} row(s) into {}",
-                                result.rows_inserted, result.table
-                            ),
+                            sift_protocol::TransferExecutionResult::Import { result, .. } => {
+                                format!(
+                                    "Transfer imported {} row(s) into {}",
+                                    result.rows_inserted, result.table
+                                )
+                            }
                             sift_protocol::TransferExecutionResult::Validated {
                                 format_id, ..
                             } => {
@@ -25234,7 +25236,8 @@ impl WorkspaceShell {
     fn toggle_transfer_conflict_policy(&mut self, cx: &mut Context<Self>) {
         self.transfer_import_conflict_policy = match self.transfer_import_conflict_policy {
             sift_protocol::CsvConflictPolicy::Abort => sift_protocol::CsvConflictPolicy::Skip,
-            sift_protocol::CsvConflictPolicy::Skip => sift_protocol::CsvConflictPolicy::Abort,
+            sift_protocol::CsvConflictPolicy::Skip => sift_protocol::CsvConflictPolicy::Quarantine,
+            sift_protocol::CsvConflictPolicy::Quarantine => sift_protocol::CsvConflictPolicy::Abort,
         };
         cx.notify();
     }
@@ -30127,7 +30130,8 @@ impl WorkspaceShell {
         };
         preview.conflict_policy = match preview.conflict_policy {
             sift_protocol::CsvConflictPolicy::Abort => sift_protocol::CsvConflictPolicy::Skip,
-            sift_protocol::CsvConflictPolicy::Skip => sift_protocol::CsvConflictPolicy::Abort,
+            sift_protocol::CsvConflictPolicy::Skip => sift_protocol::CsvConflictPolicy::Quarantine,
+            sift_protocol::CsvConflictPolicy::Quarantine => sift_protocol::CsvConflictPolicy::Abort,
         };
         cx.notify();
     }
@@ -47259,7 +47263,7 @@ impl WorkspaceShell {
                             artifact.byte_len,
                             artifact.digest
                         ),
-                        sift_protocol::TransferExecutionResult::Import { result } => format!(
+                        sift_protocol::TransferExecutionResult::Import { result, .. } => format!(
                             "Imported {} row(s), skipped {} · {}",
                             result.rows_inserted, result.rows_skipped, result.table
                         ),

@@ -8,6 +8,14 @@ pub enum CsvConflictPolicy {
     #[default]
     Abort,
     Skip,
+    /// Continue and retain a row-number/error report for every rejected row.
+    Quarantine,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CsvQuarantinedRow {
+    pub row_number: u64,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -79,4 +87,6 @@ pub struct CsvImportResponse {
     pub resume_from_row: u64,
     #[serde(default)]
     pub dry_run: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantined_rows: Vec<CsvQuarantinedRow>,
 }

@@ -61,6 +61,7 @@ pub async fn import(
             rows_validated: row_count,
             resume_from_row: row_count,
             dry_run: true,
+            quarantined_rows: Vec::new(),
         });
     }
 
@@ -75,12 +76,12 @@ pub async fn import(
             .await?;
     }
 
-    let (rows_inserted, rows_skipped) = match request.conflict_policy {
+    let (rows_inserted, rows_skipped, quarantined_rows) = match request.conflict_policy {
         CsvConflictPolicy::Abort => {
             let rows = ingest_abort(store, entry, &request, &prepared).await?;
-            (rows, 0)
+            (rows, 0, Vec::new())
         }
-        CsvConflictPolicy::Skip => {
+        CsvConflictPolicy::Skip | CsvConflictPolicy::Quarantine => {
             let target_types = if request.create_table {
                 prepared
                     .columns
@@ -90,6 +91,7 @@ pub async fn import(
             } else {
                 target_column_types(store, session, connection, &request.table, &prepared).await?
             };
+            let quarantine = request.conflict_policy == CsvConflictPolicy::Quarantine;
             ingest_skip(
                 store,
                 session,
@@ -99,6 +101,7 @@ pub async fn import(
                 &prepared,
                 &target_types,
                 request.resume_from_row,
+                quarantine,
             )
             .await?
         }
@@ -113,6 +116,7 @@ pub async fn import(
         rows_validated: row_count,
         resume_from_row: row_count,
         dry_run: false,
+        quarantined_rows,
     })
 }
 
@@ -390,7 +394,8 @@ async fn ingest_skip(
     prepared: &PreparedCsv,
     target_types: &[String],
     resume_from_row: u64,
-) -> ApiResult<(u64, u64)> {
+    quarantine: bool,
+) -> ApiResult<(u64, u64, Vec<sift_protocol::CsvQuarantinedRow>)> {
     let column_sql = prepared
         .columns
         .iter()
@@ -399,7 +404,13 @@ async fn ingest_skip(
         .join(", ");
     let mut inserted = 0u64;
     let mut skipped = 0u64;
-    for record in prepared.records.iter().skip(resume_from_row as usize) {
+    let mut quarantined = Vec::new();
+    for (index, record) in prepared
+        .records
+        .iter()
+        .enumerate()
+        .skip(resume_from_row as usize)
+    {
         let mut params = Vec::new();
         let values = record
             .iter()
@@ -420,13 +431,27 @@ async fn ingest_skip(
                 "BEGIN TRY {insert}; SELECT CAST(1 AS bigint) AS sift_inserted; END TRY BEGIN CATCH IF ERROR_NUMBER() IN (2601, 2627) SELECT CAST(0 AS bigint) AS sift_inserted; ELSE THROW; END CATCH"
             ),
         };
-        let response = store
+        let response = match store
             .execute_http_as(
                 session,
                 execute_request(connection, sql, params),
                 sift_protocol::OperationKind::ImportCsv,
             )
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if quarantine => {
+                skipped += 1;
+                let mut reason = error.to_string();
+                reason.truncate(reason.floor_char_boundary(240));
+                quarantined.push(sift_protocol::CsvQuarantinedRow {
+                    row_number: index as u64,
+                    reason,
+                });
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let did_insert = match engine {
             Engine::Postgres => response.affected_rows.unwrap_or(0) > 0,
             Engine::SqlServer => {
@@ -443,9 +468,15 @@ async fn ingest_skip(
             inserted += 1;
         } else {
             skipped += 1;
+            if quarantine {
+                quarantined.push(sift_protocol::CsvQuarantinedRow {
+                    row_number: index as u64,
+                    reason: "constraint conflict".into(),
+                });
+            }
         }
     }
-    Ok((inserted, skipped))
+    Ok((inserted, skipped, quarantined))
 }
 
 fn cast_placeholder(engine: Engine, index: usize, target_type: &str) -> String {

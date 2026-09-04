@@ -75,7 +75,23 @@ pub async fn execute_recipe(
             },
         )
         .await?;
-        return Ok(TransferExecutionResult::Import { result });
+        let quarantine_artifact = if result.quarantined_rows.is_empty() {
+            None
+        } else {
+            let report = serde_json::to_vec_pretty(&result.quarantined_rows)
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+            Some(metadata.create_workspace_artifact(
+                recipe.workspace_id,
+                actor,
+                "application/json",
+                report,
+                Some(chrono::Utc::now() + chrono::Duration::days(7)),
+            )?)
+        };
+        return Ok(TransferExecutionResult::Import {
+            result,
+            quarantine_artifact,
+        });
     }
     if recipe.source != TransferEndpoint::Query || recipe.sink != TransferEndpoint::Artifact {
         return Err(ApiError::BadRequest(
