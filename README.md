@@ -8,8 +8,6 @@ possibly more in the future.
 Run it locally or host the same server for a team. Connections, schema,
 queries, results, history, audit, and collaboration share one versioned API.
 
-<br clear="left">
-
 Built entirely to my taste but you may use it too.
 
 ## Goals
