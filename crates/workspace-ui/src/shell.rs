@@ -1337,6 +1337,20 @@ fn object_browser_schemas(rows: &[ObjectBrowserRow], catalog: &str) -> Vec<Strin
     schemas
 }
 
+fn preferred_object_browser_catalog(
+    catalogs: &[String],
+    rows: &[ObjectBrowserRow],
+) -> Option<String> {
+    catalogs
+        .iter()
+        .find(|catalog| {
+            rows.iter()
+                .any(|row| row.source.catalog.as_ref() == Some(*catalog))
+        })
+        .or_else(|| catalogs.first())
+        .cloned()
+}
+
 fn object_browser_context(
     snapshot: &sift_protocol::SchemaSnapshot,
     connection: &ConnectionNavEntry,
@@ -5810,6 +5824,11 @@ impl Pane {
                     ButtonTone::Ghost
                 })
                 .start_icon(group.icon())
+                .start_icon_color(if enabled {
+                    group.color(colors)
+                } else {
+                    colors.muted_text
+                })
                 .on_click(cx.listener(move |pane, _, _, cx| {
                     if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
                         if !browser.enabled_groups.remove(&group) {
@@ -5852,7 +5871,7 @@ impl Pane {
             .flex_col()
             .child(
                 div()
-                    .h(px(99.))
+                    .h(px(66.))
                     .flex_none()
                     .flex()
                     .flex_col()
@@ -5861,11 +5880,14 @@ impl Pane {
                     .bg(colors.toolbar)
                     .child(
                         div()
+                            .id(("object-browser-controls", item_id as usize))
                             .h(px(33.))
                             .w_full()
                             .px_2()
                             .flex()
                             .items_center()
+                            .justify_start()
+                            .overflow_x_scroll()
                             .gap_1()
                             .child(SectionLabel::new("CONNECTION"))
                             .child(
@@ -5880,9 +5902,10 @@ impl Pane {
                                             ),
                                             connection_name,
                                         )
-                                        .debug_selector("object-browser-connection-picker")
+                                                                                .debug_selector("object-browser-connection-picker")
                                         .tone(ButtonTone::Neutral)
                                         .start_icon(IconName::Database)
+                                        .start_icon_color(colors.success)
                                         .on_click(cx.listener(
                                             move |pane, _, _, cx| {
                                                 if let Some(browser) =
@@ -5954,6 +5977,7 @@ impl Pane {
                                         .debug_selector("object-browser-catalog-picker")
                                         .tone(ButtonTone::Neutral)
                                         .start_icon(IconName::Database)
+                                        .start_icon_color(colors.success)
                                         .disabled(browser.catalogs.is_empty())
                                         .on_click(cx.listener(move |pane, _, _, cx| {
                                             if let Some(browser) =
@@ -6023,6 +6047,7 @@ impl Pane {
                                         .debug_selector("object-browser-schema-picker")
                                         .tone(ButtonTone::Neutral)
                                         .start_icon(IconName::Folder)
+                                        .start_icon_color(colors.accent)
                                         .disabled(browser.schemas.is_empty())
                                         .on_click(cx.listener(move |pane, _, _, cx| {
                                             if let Some(browser) =
@@ -6089,23 +6114,6 @@ impl Pane {
                                     .mx_1()
                                     .bg(colors.subtle_border),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child("c connection · b database · s schema"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .h(px(33.))
-                            .w_full()
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .border_t_1()
-                            .border_color(colors.subtle_border)
                             .child(SectionLabel::new("SHOW"))
                             .children(filter_buttons),
                     )
@@ -6147,7 +6155,6 @@ impl Pane {
                         !table_selected,
                         selected_source.clone(),
                     ))
-                    .child(div().flex_1())
                     .child(toolbar_action(
                         "object-browser-import",
                         "Import…",
@@ -18892,13 +18899,13 @@ impl WorkspaceShell {
             .map(|snapshot| build_object_browser_rows(snapshot, &connection, &instance_id))
             .unwrap_or_default();
         let catalogs = snapshot.map(object_browser_catalogs).unwrap_or_default();
-        let catalog = catalogs.first().cloned();
+        let catalog = preferred_object_browser_catalog(&catalogs, &rows);
         let schemas = catalog
             .as_deref()
             .map(|catalog| object_browser_schemas(&rows, catalog))
             .unwrap_or_default();
         let schema = schemas.first().cloned();
-        let loading = snapshot.is_none();
+        let loading = snapshot.is_none_or(|snapshot| snapshot.trees.is_empty());
         let empty_snapshot =
             sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
         let context = object_browser_catalog_context(
@@ -19003,7 +19010,9 @@ impl WorkspaceShell {
                     browser.catalogs = catalogs.clone();
                     browser.catalog = selected_catalog
                         .filter(|catalog| browser.catalogs.contains(catalog))
-                        .or_else(|| browser.catalogs.first().cloned());
+                        .or_else(|| {
+                            preferred_object_browser_catalog(&browser.catalogs, &browser.rows)
+                        });
                     if let Some(catalog) = browser.catalog.clone() {
                         browser.select_catalog(catalog);
                         if let Some(schema) =
@@ -19084,13 +19093,15 @@ impl WorkspaceShell {
             .as_ref()
             .map(object_browser_catalogs)
             .unwrap_or_default();
-        let catalog = catalogs.first().cloned();
+        let catalog = preferred_object_browser_catalog(&catalogs, &rows);
         let schemas = catalog
             .as_deref()
             .map(|catalog| object_browser_schemas(&rows, catalog))
             .unwrap_or_default();
         let schema = schemas.first().cloned();
-        let loading = snapshot.is_none();
+        let loading = snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.trees.is_empty());
         let empty_snapshot =
             sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
         let context = object_browser_catalog_context(
@@ -33211,6 +33222,7 @@ impl WorkspaceShell {
             CommandId::RenameSqlSymbol => self.open_semantic_rename(window, cx),
             CommandId::SearchSchema => self.open_schema_search(window, cx),
             CommandId::SearchData => self.open_data_search(window, cx),
+            CommandId::OpenObjects => self.open_active_connection_objects(window, cx),
             CommandId::ImportCsv => {
                 self.csv_import_target = None;
                 self.prompt_csv_import(cx)
@@ -56332,6 +56344,10 @@ mod tests {
             let mut snapshot =
                 sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
             snapshot.trees.push(sift_protocol::CatalogTree {
+                name: "empty".into(),
+                schemas: Vec::new(),
+            });
+            snapshot.trees.push(sift_protocol::CatalogTree {
                 name: "warehouse".into(),
                 schemas: vec![
                     sift_protocol::SchemaTree {
@@ -56367,7 +56383,11 @@ mod tests {
                 profile_id: 2,
                 snapshot: Box::new(snapshot),
             };
-            shell.open_active_connection_objects(window, cx);
+            assert!(shell
+                .command_specs(cx)
+                .iter()
+                .any(|command| command.id == CommandId::OpenObjects && command.enabled()));
+            shell.run_command(CommandId::OpenObjects, window, cx);
         });
         cx.run_until_parked();
         for selector in [
@@ -56434,7 +56454,7 @@ mod tests {
         cx.simulate_click(database_picker.center(), Modifiers::default());
         cx.run_until_parked();
         let lab = cx
-            .debug_bounds("object-browser-catalog-1")
+            .debug_bounds("object-browser-catalog-2")
             .expect("lab database");
         cx.simulate_click(lab.center(), Modifiers::default());
         workspace.read_with(&cx, |shell, cx| {
@@ -56452,7 +56472,7 @@ mod tests {
         cx.simulate_click(database_picker.center(), Modifiers::default());
         cx.run_until_parked();
         let warehouse = cx
-            .debug_bounds("object-browser-catalog-0")
+            .debug_bounds("object-browser-catalog-1")
             .expect("warehouse database");
         cx.simulate_click(warehouse.center(), Modifiers::default());
         let views = cx
@@ -56554,7 +56574,12 @@ mod tests {
                 profile_id: 7,
                 name: "Primary".into(),
             };
-            shell.connection_schema = ConnectionSchemaState::Unavailable;
+            shell.connection_schema = ConnectionSchemaState::Ready {
+                profile_id: 7,
+                snapshot: Box::new(sift_protocol::SchemaSnapshot::empty(
+                    sift_protocol::SchemaScope::shallow(),
+                )),
+            };
             shell.open_active_connection_objects(window, cx);
         });
         assert!(matches!(

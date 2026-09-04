@@ -330,6 +330,7 @@ pub struct Button {
     disabled: bool,
     loading: bool,
     start_icon: Option<IconName>,
+    start_icon_color: Option<Hsla>,
     key_binding: Option<SharedString>,
     debug_selector: Option<SharedString>,
     on_click: Option<ClickHandler>,
@@ -346,6 +347,7 @@ impl Button {
             disabled: false,
             loading: false,
             start_icon: None,
+            start_icon_color: None,
             key_binding: None,
             debug_selector: None,
             on_click: None,
@@ -370,6 +372,11 @@ impl Button {
 
     pub fn start_icon(mut self, name: impl Into<Option<IconName>>) -> Self {
         self.start_icon = name.into();
+        self
+    }
+
+    pub fn start_icon_color(mut self, color: Hsla) -> Self {
+        self.start_icon_color = Some(color);
         self
     }
 
@@ -444,6 +451,7 @@ impl RenderOnce for Button {
         } else {
             (background, foreground)
         };
+        let start_icon_color = self.start_icon_color.unwrap_or(foreground);
         let bordered = matches!(self.tone, ButtonTone::Neutral) && !self.disabled;
         let debug_selector = self.debug_selector.clone();
         let mut button = div()
@@ -471,7 +479,7 @@ impl RenderOnce for Button {
             })
             .when(!bordered, |el| el.bg(background))
             .when_some(self.start_icon, |el, name| {
-                el.child(icon(name, foreground, 13.))
+                el.child(icon(name, start_icon_color, 13.))
             })
             .child(div().min_w_0().truncate().child(self.label.clone()))
             .children(self.key_binding.map(KeyBinding::new));
