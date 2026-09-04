@@ -630,6 +630,43 @@ impl QueryHistoryStatusFilter {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueryPerformanceSummary {
+    timed_runs: usize,
+    average_ms: i64,
+    p95_ms: i64,
+    total_rows: i64,
+    failures: usize,
+}
+
+fn query_performance_summary(entries: &[sift_api_types::QueryHistory]) -> QueryPerformanceSummary {
+    let mut durations = entries
+        .iter()
+        .filter_map(|entry| entry.duration_ms)
+        .collect::<Vec<_>>();
+    durations.sort_unstable();
+    let timed_runs = durations.len();
+    let average_ms = if timed_runs == 0 {
+        0
+    } else {
+        durations.iter().sum::<i64>() / timed_runs as i64
+    };
+    let p95_ms = timed_runs
+        .checked_sub(1)
+        .map(|last| durations[last * 95 / 100])
+        .unwrap_or(0);
+    QueryPerformanceSummary {
+        timed_runs,
+        average_ms,
+        p95_ms,
+        total_rows: entries.iter().filter_map(|entry| entry.row_count).sum(),
+        failures: entries
+            .iter()
+            .filter(|entry| matches!(entry.status, sift_api_types::QueryStatus::Error))
+            .count(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SavedQueryPanelEdit {
     Rename(sift_api_types::SavedQueryId),
     Tags(sift_api_types::SavedQueryId),
@@ -39268,6 +39305,7 @@ impl WorkspaceShell {
                 |dock_view| {
                     let entries = self.filtered_query_history(cx);
                     let entry_count = entries.len();
+                    let performance = query_performance_summary(&entries);
                     dock_view
                         .child(
                             div()
@@ -39359,6 +39397,25 @@ impl WorkspaceShell {
                                         }))
                                         .child(filter.label())
                                 })),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "query-performance-summary".into())
+                                .h(px(28.))
+                                .px_3()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child(format!("avg {} ms", performance.average_ms))
+                                .child(format!("p95 {} ms", performance.p95_ms))
+                                .child(format!("{} rows", performance.total_rows))
+                                .child(format!("{} failed", performance.failures))
+                                .when(performance.timed_runs == 0, |row| row.opacity(0.55)),
                         )
                         .when(self.query_history_filter_open, |panel| {
                             panel.child(
@@ -48635,6 +48692,39 @@ fn highlight_fuzzy_ranges(
 mod tests {
     use super::*;
     use gpui::{point, EntityInputHandler, Modifiers, TestAppContext, VisualTestContext};
+
+    #[test]
+    fn query_performance_history_reports_average_p95_rows_and_failures() {
+        let entry = |id, duration_ms, row_count, status| sift_api_types::QueryHistory {
+            id: sift_api_types::QueryHistoryId(id),
+            principal_id: sift_api_types::PrincipalId(1),
+            room_id: None,
+            connection_profile_id: None,
+            sql_text: "select 1".into(),
+            started_at: chrono::Utc::now(),
+            duration_ms: Some(duration_ms),
+            row_count: Some(row_count),
+            status,
+            error_code: None,
+            error_message: None,
+            variable_descriptors: Vec::new(),
+        };
+        let entries = vec![
+            entry(1, 10, 2, sift_api_types::QueryStatus::Ok),
+            entry(2, 20, 3, sift_api_types::QueryStatus::Ok),
+            entry(3, 100, 0, sift_api_types::QueryStatus::Error),
+        ];
+        assert_eq!(
+            query_performance_summary(&entries),
+            QueryPerformanceSummary {
+                timed_runs: 3,
+                average_ms: 43,
+                p95_ms: 20,
+                total_rows: 5,
+                failures: 1,
+            }
+        );
+    }
 
     fn ranked_candidate(
         label: &str,
