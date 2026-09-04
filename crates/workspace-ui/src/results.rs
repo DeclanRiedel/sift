@@ -189,6 +189,30 @@ pub struct SelectedValue {
     pub value: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultCopyFormat {
+    Csv,
+    Json,
+    Sql,
+    Markdown,
+}
+
+impl ResultCopyFormat {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Csv => "CSV",
+            Self::Json => "JSON",
+            Self::Sql => "SQL VALUES",
+            Self::Markdown => "Markdown",
+        }
+    }
+}
+
+struct SelectionMatrix<'a> {
+    columns: Vec<&'a str>,
+    rows: Vec<Vec<&'a Value>>,
+}
+
 fn value_for_row_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Null | Value::TypedNull { .. } => serde_json::Value::Null,
@@ -223,6 +247,146 @@ fn value_for_row_json(value: &Value) -> serde_json::Value {
         Value::Json(value) => value.clone(),
         Value::Native { display_text, .. } => display_text.clone().into(),
     }
+}
+
+fn format_delimited(selection: &SelectionMatrix<'_>, delimiter: char) -> String {
+    let separator = delimiter.to_string();
+    std::iter::once(
+        selection
+            .columns
+            .iter()
+            .map(|value| csv_field(value, delimiter))
+            .collect::<Vec<_>>()
+            .join(&separator),
+    )
+    .chain(selection.rows.iter().map(|row| {
+        row.iter()
+            .map(|value| csv_field(&render_value(value).text, delimiter))
+            .collect::<Vec<_>>()
+            .join(&separator)
+    }))
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+fn csv_field(value: &str, delimiter: char) -> String {
+    if value.contains(delimiter)
+        || value.contains('"')
+        || value.contains('\n')
+        || value.contains('\r')
+    {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_json(selection: &SelectionMatrix<'_>) -> String {
+    let mut occurrences = HashMap::<&str, usize>::new();
+    let keys = selection
+        .columns
+        .iter()
+        .map(|column| {
+            let count = occurrences.entry(column).or_default();
+            *count += 1;
+            if *count == 1 {
+                (*column).to_string()
+            } else {
+                format!("{column}_{}", *count)
+            }
+        })
+        .collect::<Vec<_>>();
+    let rows = selection
+        .rows
+        .iter()
+        .map(|row| {
+            keys.iter()
+                .zip(row)
+                .map(|(key, value)| (key.clone(), value_for_row_json(value)))
+                .collect::<serde_json::Map<_, _>>()
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&rows).expect("protocol values always map to serializable JSON")
+}
+
+fn format_sql_values(selection: &SelectionMatrix<'_>) -> String {
+    let columns = selection
+        .columns
+        .iter()
+        .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = selection
+        .rows
+        .iter()
+        .map(|row| {
+            format!(
+                "({})",
+                row.iter()
+                    .map(|value| sql_literal(value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n  ");
+    format!("-- columns: {columns}\nVALUES\n  {rows};")
+}
+
+fn sql_literal(value: &Value) -> String {
+    match value {
+        Value::Null | Value::TypedNull { .. } => "NULL".into(),
+        Value::Bool(value) => if *value { "TRUE" } else { "FALSE" }.into(),
+        Value::Int16(value) => value.to_string(),
+        Value::Int32(value) => value.to_string(),
+        Value::Int64(value) => value.to_string(),
+        Value::Float32(value) => value.to_string(),
+        Value::Float64(value) => value.to_string(),
+        Value::Decimal(value) => value.clone(),
+        Value::Blob(value) => {
+            let mut encoded = String::with_capacity(value.len() * 2);
+            for byte in value {
+                use std::fmt::Write as _;
+                write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+            }
+            format!("X'{encoded}'")
+        }
+        Value::Json(value) => quote_sql_string(&value.to_string()),
+        other => quote_sql_string(&render_value(other).text),
+    }
+}
+
+fn quote_sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn format_markdown(selection: &SelectionMatrix<'_>) -> String {
+    let row = |values: Vec<String>| format!("| {} |", values.join(" | "));
+    std::iter::once(row(selection
+        .columns
+        .iter()
+        .map(|column| markdown_cell(column))
+        .collect()))
+    .chain(std::iter::once(row(selection
+        .columns
+        .iter()
+        .map(|_| "---".into())
+        .collect())))
+    .chain(selection.rows.iter().map(|values| {
+        row(values
+            .iter()
+            .map(|value| markdown_cell(&render_value(value).text))
+            .collect())
+    }))
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+fn markdown_cell(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace(['\r', '\n'], "<br>")
 }
 
 #[derive(Debug, Clone)]
@@ -3671,6 +3835,18 @@ impl ResultsView {
         }
     }
 
+    pub(crate) fn copy_selected_as_to_clipboard(
+        &self,
+        format: ResultCopyFormat,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(text) = self.selected_text_as(format) else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        true
+    }
+
     fn range_coordinates(
         &self,
         anchor_row: usize,
@@ -3801,6 +3977,62 @@ impl ResultsView {
             .join("\t");
         self.selected_text()
             .map(|values| format!("{headers}\n{values}"))
+    }
+
+    fn selected_text_as(&self, format: ResultCopyFormat) -> Option<String> {
+        let selection = self.selection_matrix()?;
+        Some(match format {
+            ResultCopyFormat::Csv => format_delimited(&selection, ','),
+            ResultCopyFormat::Json => format_json(&selection),
+            ResultCopyFormat::Sql => format_sql_values(&selection),
+            ResultCopyFormat::Markdown => format_markdown(&selection),
+        })
+    }
+
+    fn selection_matrix(&self) -> Option<SelectionMatrix<'_>> {
+        let data = self.state.ready()?;
+        let selection = self.selected?;
+        let visible = self.visible_column_indices();
+        let (rows, columns) = match selection {
+            GridSelection::Cell { row, column } => (vec![row], vec![column]),
+            GridSelection::Range {
+                anchor_row,
+                anchor_column,
+                focus_row,
+                focus_column,
+            } => self.range_coordinates(anchor_row, anchor_column, focus_row, focus_column),
+            GridSelection::Row(row) => (vec![row], visible),
+            GridSelection::Column(column) => (self.display_rows.to_vec(), vec![column]),
+            GridSelection::All => (self.display_rows.to_vec(), visible),
+        };
+        if rows.is_empty() || columns.is_empty() {
+            return None;
+        }
+        let column_names = columns
+            .iter()
+            .filter_map(|column| data.columns.get(*column).map(|column| column.name.as_str()))
+            .collect::<Vec<_>>();
+        if column_names.len() != columns.len() {
+            return None;
+        }
+        let values = rows
+            .iter()
+            .filter_map(|row| {
+                let source = data.rows.get(*row)?;
+                columns
+                    .iter()
+                    .map(|column| {
+                        self.staged_cells
+                            .get(&(*row, *column))
+                            .or_else(|| source.values.get(*column))
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .collect::<Vec<_>>();
+        (!values.is_empty()).then_some(SelectionMatrix {
+            columns: column_names,
+            rows: values,
+        })
     }
 
     fn cell_color(colors: ThemeColors, class: CellClass) -> gpui::Hsla {
@@ -7535,6 +7767,47 @@ mod tests {
                     focus_column: 0,
                 }),
                 "v G extends to the last displayed row"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn selected_results_copy_to_structured_formats(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(ExecuteResponse {
+                    cursor_id: sift_protocol::CursorId(1),
+                    columns: vec![
+                        column("name", PrimitiveType::Text, Nullability::Nullable),
+                        column("rank", PrimitiveType::Int32, Nullability::NotNullable),
+                    ],
+                    schema_digest: "copy".into(),
+                    rows: vec![Row::new(vec![
+                        Value::Text("Neo, The One".into()),
+                        Value::Int32(1),
+                    ])],
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                    has_more: false,
+                }),
+                cx,
+            );
+            view.set_selection(GridSelection::All, cx);
+            assert_eq!(
+                view.selected_text_as(ResultCopyFormat::Csv).as_deref(),
+                Some("name,rank\n\"Neo, The One\",1")
+            );
+            assert_eq!(
+                view.selected_text_as(ResultCopyFormat::Markdown).as_deref(),
+                Some("| name | rank |\n| --- | --- |\n| Neo, The One | 1 |")
+            );
+            assert!(view
+                .selected_text_as(ResultCopyFormat::Json)
+                .is_some_and(|text| text.contains("\"rank\": 1")));
+            assert_eq!(
+                view.selected_text_as(ResultCopyFormat::Sql).as_deref(),
+                Some("-- columns: \"name\", \"rank\"\nVALUES\n  ('Neo, The One', 1);")
             );
         });
     }

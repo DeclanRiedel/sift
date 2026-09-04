@@ -25,8 +25,8 @@ use crate::editor::{
 };
 use crate::repository::{RepositoryIndexAction, RepositoryProjection, RepositoryRow};
 use crate::results::{
-    render_value, ResultPlacement, ResultState, ResultTab, ResultsEvent, ResultsView,
-    StreamCompletion, StreamProgress, StreamUpdate,
+    render_value, ResultCopyFormat, ResultPlacement, ResultState, ResultTab, ResultsEvent,
+    ResultsView, StreamCompletion, StreamProgress, StreamUpdate,
 };
 use crate::settings::{
     EditorMode, KeyboardProfile, KeymapSettings, NavigationHints, QueryResultsPlacement,
@@ -27278,6 +27278,21 @@ impl WorkspaceShell {
         }
     }
 
+    fn copy_active_result_as(&mut self, format: ResultCopyFormat, cx: &mut Context<Self>) {
+        let Some(results) = self.focused_pane_results(cx) else {
+            self.show_toast("Active tab has no result surface".into(), cx);
+            return;
+        };
+        let copied = results.update(cx, |results, cx| {
+            results.copy_selected_as_to_clipboard(format, cx)
+        });
+        if copied {
+            self.show_toast(format!("Copied selection as {}", format.label()), cx);
+        } else {
+            self.show_toast("Highlight result fields before copying".into(), cx);
+        }
+    }
+
     fn focus_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(results) = self.focused_pane_results(cx) else {
             self.show_toast("Active tab has no result surface".into(), cx);
@@ -33413,6 +33428,12 @@ impl WorkspaceShell {
             CommandId::ShowRelationDefinition => self.show_active_relation_definition(window, cx),
             CommandId::ShowResultRowJson => self.show_active_result_row_json(window, cx),
             CommandId::CopyResultWithHeaders => self.copy_active_result_with_headers(cx),
+            CommandId::CopyResultAsCsv => self.copy_active_result_as(ResultCopyFormat::Csv, cx),
+            CommandId::CopyResultAsJson => self.copy_active_result_as(ResultCopyFormat::Json, cx),
+            CommandId::CopyResultAsSql => self.copy_active_result_as(ResultCopyFormat::Sql, cx),
+            CommandId::CopyResultAsMarkdown => {
+                self.copy_active_result_as(ResultCopyFormat::Markdown, cx)
+            }
             CommandId::FocusResults => self.focus_results(window, cx),
             CommandId::FocusProblems => self.show_global_problems(window, cx),
             CommandId::FocusAutomations => self.focus_automations(window, cx),
