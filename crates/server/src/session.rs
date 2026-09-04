@@ -147,6 +147,8 @@ struct SessionStoreInner {
     search_indexes: DashMap<ConnectionId, (Arc<crate::search::SearchIndex>, Instant)>,
     /// Process-local parsed SQL document state (ADR-032).
     semantic: sift_semantic::SemanticRegistry,
+    /// Operator-owned formatter policy from sift.toml.
+    formatting: RwLock<sift_protocol::FormatOptions>,
     /// Revision state for normalized catalog graphs. The graph payload itself
     /// lives in `SchemaCache`; this map makes equal content retain a stable
     /// revision and advances revisions only on normalized change (ADR-033).
@@ -328,6 +330,7 @@ impl SessionStore {
                 schema_cache: SchemaCache::default(),
                 search_indexes: DashMap::new(),
                 semantic: sift_semantic::SemanticRegistry::default(),
+                formatting: RwLock::new(sift_protocol::FormatOptions::default()),
                 catalog_revisions: DashMap::new(),
                 migration_plans: DashMap::new(),
                 migration_runs: DashMap::new(),
@@ -383,6 +386,7 @@ impl SessionStore {
                 schema_cache: SchemaCache::default(),
                 search_indexes: DashMap::new(),
                 semantic: sift_semantic::SemanticRegistry::default(),
+                formatting: RwLock::new(sift_protocol::FormatOptions::default()),
                 catalog_revisions: DashMap::new(),
                 migration_plans: DashMap::new(),
                 migration_runs: DashMap::new(),
@@ -579,6 +583,10 @@ impl SessionStore {
     pub fn set_request_timeout(&self, timeout: Duration) {
         let ms = timeout.as_millis().min(u64::MAX as u128) as u64;
         self.inner.request_timeout_ms.store(ms, Ordering::Relaxed);
+    }
+
+    pub fn set_formatting(&self, options: sift_protocol::FormatOptions) {
+        *self.inner.formatting.write().unwrap() = options;
     }
 
     fn request_timeout(&self) -> Duration {
@@ -4622,7 +4630,7 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
         document: sift_protocol::SemanticDocumentId,
-        request: sift_protocol::FormatSqlRequest,
+        mut request: sift_protocol::FormatSqlRequest,
     ) -> ApiResult<sift_protocol::WorkspaceEdit> {
         self.authorize_connection_operation(
             session_id,
@@ -4631,6 +4639,7 @@ impl SessionStore {
             None,
             &[],
         )?;
+        request.options = self.inner.formatting.read().unwrap().clone();
         let registry = self.inner.semantic.clone();
         let scope = semantic_scope(session_id, conn_id);
         self.run_semantic(move |canceled| registry.format(scope, document, request, canceled))

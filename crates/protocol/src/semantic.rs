@@ -292,6 +292,12 @@ impl Default for FormatOptions {
     }
 }
 
+impl FormatOptions {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FormatSqlRequest {

@@ -83,6 +83,8 @@ pub struct Config {
     pub audit: AuditConfig,
     /// Result-size limits for synchronous responses.
     pub limits: LimitsConfig,
+    /// Instance-wide SQL formatter defaults. Clients cannot silently diverge.
+    pub formatting: sift_protocol::FormatOptions,
     /// General authenticated API rate limits.
     pub rate_limits: RateLimitsConfig,
     /// Default and operator-maximum per-tenant resource limits.
@@ -395,6 +397,7 @@ impl Default for Config {
             vault: VaultConfig::default(),
             audit: AuditConfig::default(),
             limits: LimitsConfig::default(),
+            formatting: sift_protocol::FormatOptions::default(),
             rate_limits: RateLimitsConfig::default(),
             tenant_limits: TenantLimitsConfig::default(),
             workspaces: WorkspaceProjectionConfig::default(),

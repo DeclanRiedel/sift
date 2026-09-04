@@ -16,6 +16,9 @@ bind = "auto-loopback"
 request_secs = 30
 shutdown_drain_secs = 60
 
+[server.formatting]
+keyword_case = "upper"
+
 [server.metadata]
 secret_backend = "file"
 store_sql = false

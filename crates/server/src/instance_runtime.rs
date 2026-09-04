@@ -135,6 +135,7 @@ impl InstanceRoot {
         config.runtime.state_dir = Some(state_dir.display().to_string());
         config.timeouts.request_secs = self.manifest.server.timeouts.request_secs;
         config.timeouts.shutdown_drain_secs = self.manifest.server.timeouts.shutdown_drain_secs;
+        config.formatting = self.manifest.server.formatting.clone();
         config.updater.enabled = self.manifest.server.updater.enabled;
         config.updater.channel = self.manifest.server.updater.channel.clone();
         config.updater.manifest_url = self.manifest.server.updater.manifest_url.clone();

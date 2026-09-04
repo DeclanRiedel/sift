@@ -157,6 +157,13 @@ const FIELDS: &[Field] = &[
         BOOL
     ),
     field!(
+        "server.formatting",
+        "keyword_case",
+        "enum",
+        "SQL keyword case used by every client.",
+        &["preserve", "upper", "lower"]
+    ),
+    field!(
         "server.limits",
         "max_http_result_rows",
         "integer",

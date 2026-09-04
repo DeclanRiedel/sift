@@ -194,6 +194,7 @@ async fn main() -> anyhow::Result<()> {
         SessionStore::new(registry)
     };
     sessions.set_request_timeout(std::time::Duration::from_secs(cfg.timeouts.request_secs));
+    sessions.set_formatting(cfg.formatting.clone());
     sessions.set_store_sql(cfg.metadata.store_sql);
     sessions.set_result_limits(
         cfg.limits.max_http_result_rows,

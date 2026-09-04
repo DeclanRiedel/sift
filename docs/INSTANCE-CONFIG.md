@@ -116,6 +116,20 @@ effective limits through `/v1/admin/instance/vcs-diagnostics`.
 
 ## Vault policy
 
+## SQL formatting
+
+Formatting is server policy so local and remote clients produce identical SQL.
+Set the keyword style once in `sift.toml`; `preserve`, `upper`, and `lower` are
+supported:
+
+```toml
+[server.formatting]
+keyword_case = "upper"
+```
+
+The semantic formatter preserves quoted identifiers, string bodies, comments,
+and recovered statements while applying this rule.
+
 Collaborative vault admission, retention, and cleanup use typed server
 configuration. These defaults are set in an instance manifest under
 `[server.vault]`:

@@ -86,6 +86,12 @@ pub struct ServerConfig {
     pub metadata: MetadataConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Instance-wide SQL formatting policy applied by the semantic service.
+    #[serde(
+        default,
+        skip_serializing_if = "sift_protocol::FormatOptions::is_default"
+    )]
+    pub formatting: sift_protocol::FormatOptions,
     #[serde(default, skip_serializing_if = "WorkspaceConfig::is_default")]
     pub workspaces: WorkspaceConfig,
     #[serde(default, skip_serializing_if = "VcsConfig::is_default")]
