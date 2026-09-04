@@ -7706,14 +7706,37 @@ async fn run_room_document(
 async fn wait_for_server_loss(
     client: &sift_client_sdk::Client,
 ) -> Result<(), sift_workspace_ui::DegradedReason> {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-    interval.tick().await;
+    let established_generation = client
+        .connect()
+        .await
+        .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?
+        .daemon_generation;
+    let mut health = tokio::time::interval(std::time::Duration::from_secs(2));
+    health.tick().await;
+    let mut generation = tokio::time::interval(std::time::Duration::from_secs(15));
+    generation.tick().await;
     loop {
-        interval.tick().await;
-        if client.health().await.is_err() {
-            return Err(sift_workspace_ui::DegradedReason::Offline);
+        tokio::select! {
+            _ = health.tick() => {
+                if client.health().await.is_err() {
+                    return Err(sift_workspace_ui::DegradedReason::Offline);
+                }
+            }
+            _ = generation.tick() => {
+                let observed = client
+                    .probe_handshake()
+                    .await
+                    .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?;
+                if daemon_generation_changed(&established_generation, &observed.daemon_generation) {
+                    return Err(sift_workspace_ui::DegradedReason::Offline);
+                }
+            }
         }
     }
+}
+
+fn daemon_generation_changed(established: &str, observed: &str) -> bool {
+    established != observed
 }
 
 async fn wait_to_reconnect(
@@ -7774,6 +7797,18 @@ mod tests {
         assert_eq!(reconnect_delay(1), std::time::Duration::from_millis(100));
         assert_eq!(reconnect_delay(2), std::time::Duration::from_millis(200));
         assert_eq!(reconnect_delay(99), std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn hosted_generation_rollover_invalidates_live_sessions() {
+        assert!(!daemon_generation_changed(
+            "generation-one",
+            "generation-one"
+        ));
+        assert!(daemon_generation_changed(
+            "generation-one",
+            "generation-two"
+        ));
     }
 
     #[test]

@@ -1037,46 +1037,52 @@ impl Client {
         Ok(self.negotiated().await?.clone())
     }
 
+    /// Perform an uncached handshake to detect a rolling/restarted daemon
+    /// behind an otherwise healthy proxy endpoint.
+    pub async fn probe_handshake(&self) -> Result<HandshakeResponse> {
+        self.fetch_handshake().await
+    }
+
     async fn negotiated(&self) -> Result<&HandshakeResponse> {
         self.handshake
-            .get_or_try_init(|| async {
-                let response = self
-                    .http
-                    .post(self.url("/v1/handshake"))
-                    .json(&HandshakeRequest {
-                        client_version: env!("CARGO_PKG_VERSION").into(),
-                        client_kind: HandshakeClientKind::Sdk,
-                        protocol: ProtocolRange::exact(PROTOCOL_VERSION_NUMBER),
-                    })
-                    .send()
-                    .await?;
-                let status = response.status();
-                if !status.is_success() {
-                    return Err(server_error(response).await);
-                }
-                let selected = response
-                    .headers()
-                    .get(PROTOCOL_VERSION_HEADER)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        Error::Protocol(
-                            "handshake response omitted X-Sift-Protocol-Version".into(),
-                        )
-                    })?;
-                let body: HandshakeResponse = response.json().await?;
-                if selected != body.selected_protocol.to_string()
-                    || body.selected_protocol != PROTOCOL_VERSION_NUMBER
-                    || !body.protocol.is_valid()
-                {
-                    return Err(Error::Protocol(format!(
-                        "invalid handshake selection: header={selected}, body={}, server_range={}-{}",
-                        body.selected_protocol, body.protocol.minimum, body.protocol.maximum
-                    )));
-                }
-                Ok(body)
-            })
+            .get_or_try_init(|| self.fetch_handshake())
             .await
+    }
+
+    async fn fetch_handshake(&self) -> Result<HandshakeResponse> {
+        let response = self
+            .http
+            .post(self.url("/v1/handshake"))
+            .json(&HandshakeRequest {
+                client_version: env!("CARGO_PKG_VERSION").into(),
+                client_kind: HandshakeClientKind::Sdk,
+                protocol: ProtocolRange::exact(PROTOCOL_VERSION_NUMBER),
+            })
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(server_error(response).await);
+        }
+        let selected = response
+            .headers()
+            .get(PROTOCOL_VERSION_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                Error::Protocol("handshake response omitted X-Sift-Protocol-Version".into())
+            })?;
+        let body: HandshakeResponse = response.json().await?;
+        if selected != body.selected_protocol.to_string()
+            || body.selected_protocol != PROTOCOL_VERSION_NUMBER
+            || !body.protocol.is_valid()
+        {
+            return Err(Error::Protocol(format!(
+                "invalid handshake selection: header={selected}, body={}, server_range={}-{}",
+                body.selected_protocol, body.protocol.minimum, body.protocol.maximum
+            )));
+        }
+        Ok(body)
     }
 
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
