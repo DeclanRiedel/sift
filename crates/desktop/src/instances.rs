@@ -1442,7 +1442,7 @@ async fn connect(
         has_saved_token: remember_token && token.is_some(),
     };
     let target = DesktopServer::remote(profile.clone(), token.clone());
-    let target = match session {
+    let target = match session.clone() {
         Some(session) => target.with_session_tokens(session)?,
         None => target,
     };
@@ -1450,6 +1450,11 @@ async fn connect(
     let handshake = test_client(&client, "server").await?;
     verify_instance_identity(expected_instance_id.as_deref(), &handshake.instance_id)?;
     profile.expected_instance_id = Some(handshake.instance_id);
+    let target = DesktopServer::remote(profile.clone(), token.clone());
+    let target = match session {
+        Some(session) => target.with_session_tokens(session)?,
+        None => target,
+    };
 
     if remember_token {
         if let Some(token) = token.as_deref() {

@@ -53,6 +53,7 @@ pub enum DesktopServer {
     Remote {
         client: Client,
         instance: sift_workspace_ui::InstanceSpec,
+        expected_instance_id: Option<String>,
     },
 }
 
@@ -80,6 +81,7 @@ impl DesktopServer {
                         base_url: remote.base_url,
                         kind: sift_workspace_ui::InstanceKind::Hosted,
                     },
+                    expected_instance_id: None,
                 }
             }
             (None, None) => Self::local(runtime_state_dir),
@@ -91,6 +93,7 @@ impl DesktopServer {
         profile: sift_workspace_ui::SavedServerProfile,
         token: Option<String>,
     ) -> Self {
+        let expected_instance_id = profile.expected_instance_id.clone();
         let mut client = Client::new(&profile.base_url);
         if let Some(token) = token {
             client = client.with_bearer_token(token);
@@ -115,6 +118,7 @@ impl DesktopServer {
                     sift_workspace_ui::InstanceKind::Hosted
                 },
             },
+            expected_instance_id,
         }
     }
 
@@ -149,9 +153,14 @@ impl DesktopServer {
             Self::Local(_) | Self::Configured { .. } => {
                 Err("Local Sift uses its built-in identity".into())
             }
-            Self::Remote { instance, .. } => Ok(Self::Remote {
+            Self::Remote {
+                instance,
+                expected_instance_id,
+                ..
+            } => Ok(Self::Remote {
                 client: Client::new(&instance.base_url).with_session_tokens(session_tokens),
                 instance: instance.clone(),
+                expected_instance_id: expected_instance_id.clone(),
             }),
         }
     }
@@ -161,9 +170,14 @@ impl DesktopServer {
             Self::Local(_) | Self::Configured { .. } => {
                 Err("Local Sift uses its built-in identity".into())
             }
-            Self::Remote { instance, .. } => Ok(Self::Remote {
+            Self::Remote {
+                instance,
+                expected_instance_id,
+                ..
+            } => Ok(Self::Remote {
                 client: Client::new(&instance.base_url),
                 instance: instance.clone(),
+                expected_instance_id: expected_instance_id.clone(),
             }),
         }
     }
@@ -178,6 +192,31 @@ impl DesktopServer {
             },
             Self::Configured { instance, .. } => instance.clone(),
             Self::Remote { instance, .. } => instance.clone(),
+        }
+    }
+
+    fn fresh_transport(&self) -> Self {
+        match self {
+            Self::Remote {
+                client,
+                instance,
+                expected_instance_id,
+            } => Self::Remote {
+                client: client.fresh_transport(),
+                instance: instance.clone(),
+                expected_instance_id: expected_instance_id.clone(),
+            },
+            local => local.clone(),
+        }
+    }
+
+    fn expected_instance_id(&self) -> Option<&str> {
+        match self {
+            Self::Remote {
+                expected_instance_id,
+                ..
+            } => expected_instance_id.as_deref(),
+            Self::Local(_) | Self::Configured { .. } => None,
         }
     }
 
@@ -466,6 +505,7 @@ impl SiftWindow {
             );
         });
         std::mem::drop(runtime.spawn(supervise_instances(
+            target_sender.clone(),
             target_receiver.clone(),
             restored_workspace_id,
             sender,
@@ -7293,6 +7333,7 @@ async fn load_capabilities(opened: &QueryContext) -> ExecutorEvent {
 }
 
 async fn supervise_instances(
+    targets_sender: tokio::sync::watch::Sender<DesktopServer>,
     mut targets: tokio::sync::watch::Receiver<DesktopServer>,
     mut restored_workspace_id: Option<i64>,
     sender: tokio::sync::mpsc::UnboundedSender<sift_workspace_ui::LifecycleEvent>,
@@ -7303,7 +7344,14 @@ async fn supervise_instances(
         if sender.is_closed() {
             return;
         }
-        let server = targets.borrow().clone();
+        let mut server = targets.borrow().clone();
+        if attempt > 0 {
+            server = server.fresh_transport();
+            if targets_sender.send(server.clone()).is_err() {
+                return;
+            }
+            targets.borrow_and_update();
+        }
         let _local_server_lease = server.acquire_local_lease();
         let instance = server.instance();
         let client = match server.client().await {
@@ -7321,6 +7369,25 @@ async fn supervise_instances(
                 continue;
             }
         };
+        if let Some(expected) = server.expected_instance_id() {
+            if let Ok(handshake) = client.connect().await {
+                if handshake.instance_id != expected {
+                    let _ = sender.send(sift_workspace_ui::LifecycleEvent::Phase(
+                        sift_workspace_ui::ConnectionPhase::Degraded(
+                            sift_workspace_ui::DegradedReason::Server(format!(
+                                "Server identity changed (expected {expected}, received {})",
+                                handshake.instance_id
+                            )),
+                        ),
+                    ));
+                    if targets.changed().await.is_err() {
+                        return;
+                    }
+                    restored_workspace_id = None;
+                    continue;
+                }
+            }
+        }
         let load =
             sift_workspace_ui::load_instance(client.clone(), instance.clone(), sender.clone());
         let loaded = match tokio::select! {

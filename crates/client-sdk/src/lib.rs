@@ -1017,6 +1017,20 @@ impl Client {
         }
     }
 
+    /// Reuse endpoint credentials and connection-pool policy while forcing a
+    /// new protocol/instance handshake. Desktop supervisors use this after a
+    /// confirmed transport loss so daemon generations and server-side session
+    /// handles are never carried across a restart.
+    pub fn fresh_transport(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            token: self.token.clone(),
+            session_tokens: self.session_tokens.clone(),
+            http: self.http.clone(),
+            handshake: std::sync::Arc::new(tokio::sync::OnceCell::new()),
+        }
+    }
+
     /// Eagerly negotiate compatibility and return the selected server
     /// contract. Normal methods perform this lazily and share the same result.
     pub async fn connect(&self) -> Result<HandshakeResponse> {
