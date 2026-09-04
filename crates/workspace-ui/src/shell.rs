@@ -2406,6 +2406,9 @@ pub enum PaneEvent {
         item_id: u64,
     },
     ResultSelectionChanged,
+    GridLayoutChanged {
+        item_id: u64,
+    },
     OpenResultRowJsonRequested {
         item_id: u64,
     },
@@ -4566,6 +4569,7 @@ impl Pane {
                 cx.emit(PaneEvent::CancelResultCellEditRequested { item_id })
             }
             ResultsEvent::SelectionChanged => cx.emit(PaneEvent::ResultSelectionChanged),
+            ResultsEvent::GridLayoutChanged => cx.emit(PaneEvent::GridLayoutChanged { item_id }),
             ResultsEvent::RowJsonViewerChanged => cx.emit(PaneEvent::ResultSelectionChanged),
             ResultsEvent::OpenSelectedRowJsonRequested => {
                 cx.emit(PaneEvent::OpenResultRowJsonRequested { item_id })
@@ -9244,6 +9248,7 @@ pub struct WorkspaceShell {
     explorer_view_name_input: Entity<TextInput>,
     explorer_view_menu_open: bool,
     explorer_views: Vec<crate::presentation::ExplorerViewPresentation>,
+    grid_layouts: HashMap<String, crate::presentation::GridLayoutPresentation>,
     repository_filter_input: Entity<TextInput>,
     repository_filter_open: bool,
     saved_queries_focus_handle: FocusHandle,
@@ -9851,6 +9856,7 @@ impl WorkspaceShell {
         let show_favorite_database_objects = state.show_favorite_database_objects;
         let show_recent_database_objects = state.show_recent_database_objects;
         let explorer_views = state.explorer_views.clone();
+        let grid_layouts = state.grid_layouts.clone();
         let explorer_object_kinds = state.explorer_object_kinds.clone();
         let vim_mode_default = settings.editor.default_mode == EditorMode::Vim;
         // Install the process-wide theme first so every child entity reads the
@@ -10487,6 +10493,7 @@ impl WorkspaceShell {
             explorer_view_name_input,
             explorer_view_menu_open: false,
             explorer_views,
+            grid_layouts,
             repository_filter_input,
             repository_filter_open: false,
             saved_queries_focus_handle: cx.focus_handle(),
@@ -20507,6 +20514,23 @@ impl WorkspaceShell {
                 break;
             }
         }
+        if refreshed {
+            let results = self
+                .panes
+                .iter()
+                .find_map(|pane| pane.read(cx).results.get(&item_id).cloned());
+            if let Some(results) = results {
+                let layout = results
+                    .read(cx)
+                    .grid_layout()
+                    .and_then(|(signature, _)| self.grid_layouts.get(&signature).cloned());
+                if let Some(layout) = layout {
+                    results.update(cx, |results, cx| {
+                        results.apply_grid_layout(&layout, cx);
+                    });
+                }
+            }
+        }
         self.sync_staged_result_cells(item_id, cx);
         // Bounded HTTP results have no cursor to correlate with.
         self.record_result_reference(item_id, &state, None, cx);
@@ -26664,6 +26688,7 @@ impl WorkspaceShell {
                 .flat_map(|group| group.object_kinds().iter().copied())
                 .collect(),
             explorer_views: self.explorer_views.clone(),
+            grid_layouts: self.grid_layouts.clone(),
             ..PresentationState::default()
         }
     }
@@ -27783,6 +27808,14 @@ impl WorkspaceShell {
                 self.cancel_result_cell_edit(emitter, *item_id, window, cx);
             }
             PaneEvent::ResultSelectionChanged => cx.notify(),
+            PaneEvent::GridLayoutChanged { item_id } => {
+                if let Some(results) = emitter.read(cx).results.get(item_id) {
+                    if let Some((signature, layout)) = results.read(cx).grid_layout() {
+                        self.grid_layouts.insert(signature, layout);
+                        self.persist(cx);
+                    }
+                }
+            }
             PaneEvent::OpenResultRowJsonRequested { item_id } => {
                 self.show_result_row_json(*item_id, window, cx)
             }

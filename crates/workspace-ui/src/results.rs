@@ -932,6 +932,7 @@ pub enum ResultsEvent {
     },
     CancelCellEdit,
     SelectionChanged,
+    GridLayoutChanged,
     RowJsonViewerChanged,
     OpenSelectedRowJsonRequested,
     ReviewOutcomeUnknownRequested,
@@ -2700,6 +2701,7 @@ impl ResultsView {
         let width = width.clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH).round();
         if *current != width {
             *current = width;
+            cx.emit(ResultsEvent::GridLayoutChanged);
             cx.notify();
         }
     }
@@ -3216,6 +3218,7 @@ impl ResultsView {
         {
             self.selected = None;
         }
+        cx.emit(ResultsEvent::GridLayoutChanged);
         cx.notify();
     }
 
@@ -3233,6 +3236,7 @@ impl ResultsView {
         {
             self.selected = None;
         }
+        cx.emit(ResultsEvent::GridLayoutChanged);
         cx.notify();
     }
 
@@ -3279,7 +3283,85 @@ impl ResultsView {
         let column = self.column_order.remove(source_position);
         self.column_order
             .insert(target_position.min(self.column_order.len()), column);
+        cx.emit(ResultsEvent::GridLayoutChanged);
         cx.notify();
+    }
+
+    pub(crate) fn grid_layout(
+        &self,
+    ) -> Option<(String, crate::presentation::GridLayoutPresentation)> {
+        let data = self.state.ready()?;
+        if data.columns.is_empty() {
+            return None;
+        }
+        let signature = data
+            .columns
+            .iter()
+            .map(|column| format!("{}:{}", column.name, column.type_label))
+            .collect::<Vec<_>>()
+            .join("\u{1f}");
+        let name = |index: usize| data.columns.get(index).map(|column| column.name.clone());
+        let order = self
+            .column_order
+            .iter()
+            .filter_map(|index| name(*index))
+            .collect();
+        let widths = self
+            .column_widths
+            .iter()
+            .enumerate()
+            .filter_map(|(index, width)| name(index).map(|name| (name, *width)))
+            .collect();
+        let hidden = self
+            .included_columns
+            .iter()
+            .enumerate()
+            .filter(|(_, included)| !**included)
+            .filter_map(|(index, _)| name(index))
+            .collect();
+        Some((
+            signature,
+            crate::presentation::GridLayoutPresentation {
+                order,
+                widths,
+                hidden,
+            },
+        ))
+    }
+
+    pub(crate) fn apply_grid_layout(
+        &mut self,
+        layout: &crate::presentation::GridLayoutPresentation,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(data) = self.state.ready() else {
+            return false;
+        };
+        let by_name = data
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| (column.name.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        let mut order = layout
+            .order
+            .iter()
+            .filter_map(|name| by_name.get(name.as_str()).copied())
+            .collect::<Vec<_>>();
+        for index in 0..data.columns.len() {
+            if !order.contains(&index) {
+                order.push(index);
+            }
+        }
+        self.column_order = order;
+        for (index, column) in data.columns.iter().enumerate() {
+            if let Some(width) = layout.widths.get(&column.name) {
+                self.column_widths[index] = width.clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH).round();
+            }
+            self.included_columns[index] = !layout.hidden.contains(&column.name);
+        }
+        cx.notify();
+        true
     }
 
     fn move_selection(&mut self, row_delta: isize, column_delta: isize, cx: &mut Context<Self>) {

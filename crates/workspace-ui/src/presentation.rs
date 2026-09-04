@@ -25,6 +25,15 @@ pub struct ExplorerViewPresentation {
     pub object_kinds: Vec<sift_protocol::ObjectKind>,
 }
 
+/// A schema-drift-tolerant result-grid layout. Columns are addressed by name;
+/// unknown saved columns are ignored and new columns are appended visibly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GridLayoutPresentation {
+    pub order: Vec<String>,
+    pub widths: HashMap<String, f32>,
+    pub hidden: Vec<String>,
+}
+
 fn all_explorer_object_kinds() -> Vec<sift_protocol::ObjectKind> {
     use sift_protocol::ObjectKind;
     vec![
@@ -359,6 +368,10 @@ pub struct PresentationState {
     pub explorer_object_kinds: Vec<sift_protocol::ObjectKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub explorer_views: Vec<ExplorerViewPresentation>,
+    /// Automatic layouts keyed by the ordered name/type signature returned by
+    /// the database. Values contain presentation only, never result data.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub grid_layouts: HashMap<String, GridLayoutPresentation>,
 }
 
 impl Default for PresentationState {
@@ -419,6 +432,7 @@ impl Default for PresentationState {
             show_recent_database_objects: true,
             explorer_object_kinds: all_explorer_object_kinds(),
             explorer_views: Vec::new(),
+            grid_layouts: HashMap::new(),
         }
     }
 }
@@ -631,6 +645,23 @@ mod tests {
             .items[0]
             .last_result
             .is_none());
+    }
+
+    #[test]
+    fn grid_layouts_round_trip_without_result_values() {
+        let mut state = PresentationState::default();
+        state.grid_layouts.insert(
+            "id:int\u{1f}name:text".into(),
+            GridLayoutPresentation {
+                order: vec!["name".into(), "id".into()],
+                widths: HashMap::from([("name".into(), 240.0)]),
+                hidden: vec!["id".into()],
+            },
+        );
+        let encoded = state.encode().unwrap();
+        let decoded = PresentationState::decode(&encoded);
+        assert_eq!(decoded.grid_layouts, state.grid_layouts);
+        assert!(!String::from_utf8(encoded).unwrap().contains("result_rows"));
     }
 
     #[test]
