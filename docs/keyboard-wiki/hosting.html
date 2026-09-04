@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hosting Sift</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="doc-tabs" aria-label="Sift documentation">
+          <a href="index.html">Keyboard</a>
+          <a href="configuration.html">Sift configuration</a>
+          <a class="active" href="hosting.html">Hosting</a>
+        </div>
+        <h1>Hosting Sift</h1>
+        <p>
+          Keep the desktop local while Sift and its database connections run
+          elsewhere. Use HTTPS for a shared server or SSH for direct access to
+          one remote machine.
+        </p>
+      </header>
+
+      <nav>
+        <a href="#choose">Choose a path</a>
+        <a href="#https">HTTPS</a>
+        <a href="#ssh">SSH</a>
+        <a href="#recovery">Recovery</a>
+      </nav>
+
+      <section id="choose">
+        <h2>Choose a path</h2>
+        <table class="compact">
+          <thead><tr><th>Path</th><th>Use it when</th></tr></thead>
+          <tbody>
+            <tr><td>Hosted HTTPS</td><td>Several people or devices need one stable Sift instance.</td></tr>
+            <tr><td>Direct SSH</td><td>You can already SSH to the machine and do not want to expose a Sift port.</td></tr>
+          </tbody>
+        </table>
+        <p class="note">
+          Database credentials stay in the server's configured secret store.
+          They never belong in <code>sift.toml</code>, URLs, shell arguments, or
+          desktop presentation state.
+        </p>
+      </section>
+
+      <section id="https">
+        <h2>Hosted HTTPS</h2>
+        <p>
+          Configure <code>transport = "network"</code>, disable loopback bypass,
+          select a durable metadata secret backend, and set
+          <code>public_base_url</code> to the exact HTTPS origin. Keep Sift bound
+          to loopback when the TLS proxy is on the same host. The proxy must
+          forward both HTTP and WebSocket upgrades without rewriting
+          <code>/v1</code>.
+        </p>
+        <p>For a private Tailnet, Tailscale Serve provides the HTTPS boundary:</p>
+        <pre><code>sudo tailscale set --operator=$USER
+tailscale serve --bg http://127.0.0.1:7474
+tailscale serve status</code></pre>
+        <p>
+          Wait for the HTTPS <code>/v1/ready</code> endpoint before connecting;
+          first certificate issuance may take a moment. In Sift, use
+          <kbd>&lt;leader&gt; d c</kbd>, choose a hosted server, and enter the HTTPS
+          origin. Plain HTTP is accepted only for loopback.
+        </p>
+      </section>
+
+      <section id="ssh">
+        <h2>Direct SSH</h2>
+        <p>
+          Open the server picker with <kbd>&lt;leader&gt; d c</kbd>, choose SSH, and
+          enter a destination already understood by your system OpenSSH client,
+          such as <code>user@host</code> or an SSH config alias. Sift preserves
+          your host-key, agent, jump-host, and authentication policy.
+        </p>
+        <p>
+          The helper installs or reuses a compatible remote server, starts a
+          private daemon, and forwards it to a local loopback port. Closing the
+          desktop tunnel leaves durable remote state alive; reconnecting opens
+          a fresh authenticated grant.
+        </p>
+      </section>
+
+      <section id="recovery">
+        <h2>Recovery and identity</h2>
+        <table class="compact">
+          <thead><tr><th>Event</th><th>Expected behaviour</th></tr></thead>
+          <tbody>
+            <tr><td>Network interruption</td><td>Sift reconnects with bounded, jittered backoff.</td></tr>
+            <tr><td>Server restart</td><td>The instance stays the same; process-local sessions, connections, cursors, and sockets reopen.</td></tr>
+            <tr><td>Different instance id</td><td>Sift refuses the replacement. Forget and add it again only when the change is intentional.</td></tr>
+            <tr><td>Expired login</td><td>Interactive sessions refresh automatically and persist rotated credentials in the OS vault.</td></tr>
+          </tbody>
+        </table>
+        <p>
+          Operators can run the real two-device checks with
+          <code>test-tailnet-hosted.sh user@device</code> or
+          <code>test-ssh-device.sh user@host</code>. Both checks clean up only
+          temporary state they created.
+        </p>
+      </section>
+
+      <footer>
+        Full deployment and update details are in
+        <code>docs/REMOTE-AND-UPDATES.md</code>.
+      </footer>
+    </main>
+  </body>
+</html>

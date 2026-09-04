@@ -36,6 +36,7 @@ footer {
   gap: 4px;
   margin-bottom: 28px;
   border-bottom: 1px solid var(--border);
+  overflow-x: auto;
 }
 
 .doc-tabs a {
@@ -44,6 +45,7 @@ footer {
   text-decoration: none;
   border: 1px solid transparent;
   border-bottom: 0;
+  white-space: nowrap;
 }
 
 .doc-tabs a.active {
@@ -129,6 +131,14 @@ kbd {
   color: var(--accent);
   font-family: monospace;
   font-weight: bold;
+}
+
+pre {
+  overflow-x: auto;
+  margin: 0 0 20px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  background: #151515;
 }
 
 footer {

@@ -12,6 +12,7 @@
         <div class="doc-tabs" aria-label="Sift documentation">
           <a class="active" href="index.html">Keyboard</a>
           <a href="configuration.html">Sift configuration</a>
+          <a href="hosting.html">Hosting</a>
         </div>
         <h1>Sift keyboard defaults</h1>
         <p>
@@ -36,7 +37,6 @@
 
       <nav>
         <a href="#leader">Leader commands</a>
-        <a href="#profiles">Keymap profiles</a>
         <a href="#editor">Editor</a>
         <a href="#panes">Panes</a>
         <a href="#results">Results</a>
@@ -161,21 +161,6 @@
             <tr><td><code>&lt;leader&gt; w l</code></td><td>Focus pane right</td></tr>
           </tbody>
         </table>
-      </section>
-
-      <section id="profiles">
-        <h2>Keymap profiles</h2>
-        <table>
-          <thead><tr><th>Profile</th><th>IDE leader</th><th>Standard IDE shortcuts</th></tr></thead>
-          <tbody>
-            <tr><td>Vim</td><td>Enabled</td><td>Disabled</td></tr>
-            <tr><td>Hybrid</td><td>Enabled</td><td>Enabled</td></tr>
-            <tr><td>Standard</td><td>Disabled</td><td>Enabled</td></tr>
-          </tbody>
-        </table>
-        <p>The editor default is configured separately as Vim or Standard.</p>
-        <p>Profiles choose which input systems are enabled. Custom IDE leader
-          sequences are stored separately in <code>keymaps.json</code>.</p>
       </section>
 
       <section id="editor">
