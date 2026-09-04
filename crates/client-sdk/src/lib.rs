@@ -396,6 +396,7 @@ use sift_protocol::{
 pub struct SessionTokenProvider {
     tokens: std::sync::Arc<tokio::sync::RwLock<AuthTokensResponse>>,
     refresh_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl std::fmt::Debug for SessionTokenProvider {
@@ -412,7 +413,14 @@ impl SessionTokenProvider {
         Self {
             tokens: std::sync::Arc::new(tokio::sync::RwLock::new(tokens)),
             refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            revision: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Monotonically increases whenever a refresh rotates the token pair.
+    /// Credential stores can use this to avoid rewriting unchanged secrets.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Copy the current token pair for storage in a platform credential vault.
@@ -436,6 +444,8 @@ impl SessionTokenProvider {
 
     async fn replace(&self, tokens: AuthTokensResponse) {
         *self.tokens.write().await = tokens;
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     pub async fn reauthenticate_session_websocket(
@@ -1029,6 +1039,12 @@ impl Client {
             http: self.http.clone(),
             handshake: std::sync::Arc::new(tokio::sync::OnceCell::new()),
         }
+    }
+
+    /// Return the shared interactive-session provider, when this client uses
+    /// one. Clones observe the same refresh rotations.
+    pub fn session_token_provider(&self) -> Option<SessionTokenProvider> {
+        self.session_tokens.clone()
     }
 
     /// Eagerly negotiate compatibility and return the selected server
@@ -5266,9 +5282,13 @@ mod tests {
     #[tokio::test]
     async fn session_token_provider_rotates_and_redacts() {
         let provider = SessionTokenProvider::new(tokens("access-one", "refresh-one"));
+        let clone = provider.clone();
+        assert_eq!(provider.revision(), 0);
         assert_eq!(provider.access_token().await, "access-one");
         assert!(!format!("{provider:?}").contains("access-one"));
         provider.replace(tokens("access-two", "refresh-two")).await;
+        assert_eq!(provider.revision(), 1);
+        assert_eq!(clone.revision(), 1);
         assert_eq!(provider.access_token().await, "access-two");
         assert_eq!(provider.refresh_token().await, "refresh-two");
         let snapshot = provider.snapshot().await;

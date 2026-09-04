@@ -182,6 +182,17 @@ impl DesktopServer {
         }
     }
 
+    pub(crate) fn hosted_session(&self) -> Option<(String, SessionTokenProvider)> {
+        let Self::Remote {
+            client, instance, ..
+        } = self
+        else {
+            return None;
+        };
+        let profile_id = instance.id.strip_prefix("hosted:")?.to_owned();
+        Some((profile_id, client.session_token_provider()?))
+    }
+
     pub(crate) fn instance(&self) -> sift_workspace_ui::InstanceSpec {
         match self {
             Self::Local(_) => sift_workspace_ui::InstanceSpec {

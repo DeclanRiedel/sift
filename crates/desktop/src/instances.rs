@@ -252,6 +252,9 @@ pub async fn run_instance_manager(
     // window is currently connected to. This lets one desktop supervise
     // several isolated auto-loopback instances without conflating UI state.
     let mut configured_targets = std::collections::HashMap::new();
+    let mut persisted_session_revisions = std::collections::HashMap::new();
+    let mut session_persistence = tokio::time::interval(std::time::Duration::from_secs(1));
+    session_persistence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut ssh_supervisor: Option<tokio::task::JoinHandle<()>> = None;
     annotate_saved_tokens(&mut profiles, &credentials).await;
     if let Some(profile) = restored_profile_id
@@ -300,7 +303,40 @@ pub async fn run_instance_manager(
     let _ = channels
         .events
         .send(InstanceManagerEvent::Roots(roots.clone()));
-    while let Some(command) = channels.commands.recv().await {
+    loop {
+        let command = tokio::select! {
+            command = channels.commands.recv() => {
+                let Some(command) = command else {
+                    break;
+                };
+                command
+            }
+            _ = session_persistence.tick() => {
+                let hosted_session = {
+                    let target = channels.targets.borrow();
+                    target.hosted_session()
+                };
+                if let Some((profile_id, provider)) = hosted_session {
+                    let revision = provider.revision();
+                    if persisted_session_revisions.get(&profile_id) != Some(&revision) {
+                        match credentials.put_session(&profile_id, &provider).await {
+                            Ok(()) => {
+                                // Snapshotting may have raced another rotation. Record the
+                                // latest revision so the next tick only writes when needed.
+                                persisted_session_revisions
+                                    .insert(profile_id, provider.revision());
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "sift-desktop: persisting refreshed hosted session failed: {error}"
+                                );
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+        };
         let (authentication, result) = match command {
             InstanceCommand::UseLocal => {
                 if let Some(task) = ssh_supervisor.take() {
@@ -559,7 +595,7 @@ pub async fn run_instance_manager(
                 let _ = channels
                     .events
                     .send(InstanceManagerEvent::AuthenticationPending);
-                (true, refresh_session(&channels.targets).await)
+                (true, refresh_session(&channels.targets, &credentials).await)
             }
             InstanceCommand::SignOut { everywhere } => {
                 let _ = channels
@@ -1372,13 +1408,19 @@ async fn sign_out(
 
 async fn refresh_session(
     targets: &tokio::sync::watch::Sender<DesktopServer>,
+    credentials: &DesktopCredentialStore,
 ) -> Result<ManagerOutcome, String> {
     let server = targets.borrow().clone();
+    let profile_id = auth_profile_id(&server)?;
     let client = server.client().await?;
     client
         .refresh_session()
         .await
         .map_err(|error| format!("refreshing the account session failed: {error}"))?;
+    let provider = client
+        .session_token_provider()
+        .ok_or_else(|| "This server does not have an interactive session to refresh".to_string())?;
+    credentials.put_session(&profile_id, &provider).await?;
     let identity = client
         .whoami()
         .await
