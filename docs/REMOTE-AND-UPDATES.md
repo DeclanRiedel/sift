@@ -15,6 +15,59 @@ Runtime mode does not change deployment or authorization policy:
 | Long-lived local or SSH server | `daemon` | `loopback`, `network`, or `ssh-proxy` | Explicit restart/bootstrap activates |
 | Immutable image | `container` | `loopback` or `network` | Container orchestrator; self-update is refused |
 
+## Host on a network
+
+Network-hosted Sift has two transport boundaries: the server listens on HTTP,
+and an operator-owned reverse proxy publishes a stable HTTPS origin. Prefer a
+loopback server bind when the proxy runs on the same host. The proxy must pass
+ordinary HTTP requests and WebSocket upgrades on the same origin without
+rewriting `/v1`; Sift negotiates and checks its protocol version on both.
+
+A persistent hosted instance uses `transport = "network"`, disables loopback
+bypass, uses a durable metadata secret backend, and sets its public base URL to
+the exact external HTTPS origin. Team mode additionally uses closed
+registration and never bootstraps identity from the connecting OS account.
+Run `sift instance validate`, `lock`, `plan`, and `apply`, import every reported
+credential slot locally on the server, and run `sift-server migrate apply`
+before the first start or an upgrade that requests an explicit migration.
+
+TLS certificates and proxy configuration are host infrastructure, not secret
+material in `sift.toml`. Do not expose Sift's cleartext listener on an
+untrusted interface, put credentials in a URL, or disable certificate or host
+name verification. The desktop accepts plain HTTP only for loopback origins.
+
+For a private Tailnet, Tailscale Serve can own the HTTPS boundary while Sift
+stays on loopback:
+
+```console
+tailscale serve --bg http://127.0.0.1:7474
+tailscale serve status
+```
+
+Use the HTTPS MagicDNS origin reported by Serve in `public_base_url` and in the
+desktop's hosted-server profile. Tailscale access policy controls which
+devices can reach that origin; Sift authentication and tenant/room policy
+still control what an accepted device may do. Stop publishing with
+`tailscale serve reset` only when that Serve configuration belongs to Sift.
+
+The desktop pins the immutable instance id on first successful connection. A
+later daemon generation is expected and rebuilds process-local sessions,
+connections, cursors, transactions, and sockets; a different instance id is
+treated as server replacement and requires forgetting and adding the profile
+again. Interactive access and room WebSockets refresh before expiry, and
+rotated refresh credentials are persisted back to the OS credential vault.
+
+Maintainers can validate the HTTPS, auth, room WebSocket, restart, and identity
+path from a second Tailnet device with:
+
+```console
+cargo build -p sift-server --bins
+examples/reproducible-instance/scripts/test-tailnet-hosted.sh user@device
+```
+
+The check refuses to overwrite an existing Tailscale Serve configuration and
+removes only the temporary server and Serve state it created.
+
 ## Connect through SSH
 
 Build or install `sift-server` and `sift-remote` beside one another, then run:
@@ -64,6 +117,17 @@ rooms, profiles, history, and audit survive. A changed daemon generation means
 sessions, connections, transactions, cursors, presence, and result references
 must be reopened. An interrupted write has an unknown outcome unless its API
 can prove an idempotent result; clients must not replay it automatically.
+
+The desktop's SSH profile owns the helper lifecycle. It renews short-lived
+grants, detects a remote daemon restart even while the forwarding process is
+still alive, and publishes a fresh client transport so stale process-local
+handles are not reused. Test the real two-device bootstrap and recovery path
+with an SSH destination already authorized by the user's OpenSSH policy:
+
+```console
+cargo build -p sift-server --bins
+examples/reproducible-instance/scripts/test-ssh-device.sh user@host
+```
 
 ## Configure signed staging
 
