@@ -67,7 +67,7 @@ pub use status_bar::StatusBar;
 
 use app_bar::AppBarMenu;
 use catalog_diagram::CatalogDiagramState;
-use database_monitor::{DatabaseMonitorState, DatabaseMonitorView};
+use database_monitor::{DatabaseAlertKind, DatabaseMonitorState, DatabaseMonitorView};
 pub use pane_layout::SplitDirection;
 
 const PALETTE_VISIBLE_ROWS: usize = 10;

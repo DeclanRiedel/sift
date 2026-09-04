@@ -142,6 +142,22 @@ pub(super) fn render_bottom_panel(
                                 },
                             )),
                         )
+                        .child(
+                            Button::new(
+                                "monitor-view-alerts",
+                                format!("Alerts {}", shell.database_monitor.alert_count()),
+                            )
+                            .tone(if view == DatabaseMonitorView::Alerts {
+                                ButtonTone::Neutral
+                            } else {
+                                ButtonTone::Ghost
+                            })
+                            .on_click(cx.listener(
+                                |shell, _, _, cx| {
+                                    shell.set_database_monitor_view(DatabaseMonitorView::Alerts, cx)
+                                },
+                            )),
+                        )
                 })),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {
@@ -286,7 +302,8 @@ pub(super) fn render_bottom_panel(
                         .overflow_y_scroll()
                         .children(processes.iter().cloned().map(|process| {
                             let expanded = selected_process == Some(process.process.process_id);
-                            render_database_process_row(process, expanded, cx)
+                            let alert = shell.database_monitor.alert(process.process.process_id);
+                            render_database_process_row(process, expanded, alert, cx)
                         })),
                 )
                 .children(shell.database_monitor.request().error().map(|message| {
@@ -301,10 +318,10 @@ pub(super) fn render_bottom_panel(
                         && shell.database_monitor.request().error().is_none(),
                     |panel| {
                         panel.child(div().p_4().text_center().child(
-                            if shell.database_monitor.view() == DatabaseMonitorView::Locks {
-                                "No waiting or blocking sessions."
-                            } else {
-                                "No database activity reported."
+                            match shell.database_monitor.view() {
+                                DatabaseMonitorView::Locks => "No waiting or blocking sessions.",
+                                DatabaseMonitorView::Alerts => "No database health alerts.",
+                                DatabaseMonitorView::Activity => "No database activity reported.",
                             },
                         ))
                     },
@@ -956,6 +973,7 @@ fn database_process_rows(processes: &[sift_protocol::DatabaseProcess]) -> Vec<Da
 fn render_database_process_row(
     row: DatabaseProcessRow,
     expanded: bool,
+    alert: Option<DatabaseAlertKind>,
     cx: &mut Context<WorkspaceShell>,
 ) -> gpui::AnyElement {
     let colors = cx.theme().colors;
@@ -1009,6 +1027,9 @@ fn render_database_process_row(
                 .gap_3()
                 .cursor_pointer()
                 .when(row.block_depth > 0, |row| row.bg(colors.warning_muted))
+                .when(alert == Some(DatabaseAlertKind::DeadlockRisk), |row| {
+                    row.bg(colors.danger_muted)
+                })
                 .when(expanded, |row| row.bg(colors.active_surface))
                 .on_click(
                     cx.listener(move |shell, _, _, cx| {
@@ -1042,6 +1063,13 @@ fn render_database_process_row(
                         .font_family("monospace")
                         .child(statement),
                 )
+                .children(alert.map(|alert| {
+                    Badge::new(alert.label()).tone(if alert == DatabaseAlertKind::DeadlockRisk {
+                        Tone::Danger
+                    } else {
+                        Tone::Warning
+                    })
+                }))
                 .child(
                     div().w(px(84.)).flex().justify_end().child(
                         Button::new(("terminate-process", process_id as usize), "Terminate")
