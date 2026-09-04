@@ -229,6 +229,7 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
     let expected_instance_id = ready.instance_id.clone();
     let mut daemon_generation = ready.daemon_generation.clone();
     let renewal_endpoint = Arc::clone(&endpoint);
+    let (monitor_failure_tx, mut monitor_failure_rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         let mut expires_at = ready.access_expires_at;
         let mut monitor = tokio::time::interval(REMOTE_MONITOR_INTERVAL);
@@ -286,6 +287,8 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
                     expires_at = ready.access_expires_at;
                     daemon_generation.clone_from(&ready.daemon_generation);
                     if write_secret_json(&ready).is_err() {
+                        let _ = monitor_failure_tx
+                            .send("desktop closed the SSH capability stream".to_owned());
                         return;
                     }
                 }
@@ -293,6 +296,7 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
                 Err(error) => {
                     tracing::warn!(%error, "SSH access-grant renewal failed");
                     if error.to_string().contains("instance identity changed") {
+                        let _ = monitor_failure_tx.send(error.to_string());
                         return;
                     }
                 }
@@ -300,8 +304,15 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
         }
     });
 
-    tokio::signal::ctrl_c().await?;
-    Ok(())
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            Ok(())
+        }
+        failure = monitor_failure_rx.recv() => {
+            bail!("SSH remote monitor stopped: {}", failure.unwrap_or_else(|| "monitor channel closed".into()))
+        }
+    }
 }
 
 fn remote_ready(

@@ -18,6 +18,7 @@ use crate::config::{validate_base_url, validate_token};
 
 const PROFILE_VERSION: u32 = 1;
 const KEYCHAIN_SERVICE: &str = "sift-desktop";
+const MAX_SSH_HELPER_DIAGNOSTICS: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct InstanceStore {
@@ -1613,8 +1614,7 @@ async fn connect_ssh(
         let stderr_task = child.stderr.take().map(|stderr| {
             tokio::spawn(async move {
                 let mut stderr = tokio::io::BufReader::new(stderr);
-                let mut sink = Vec::new();
-                let _ = stderr.read_to_end(&mut sink).await;
+                let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
             })
         });
         while let Ok(Some(line)) = lines.next_line().await {
@@ -1645,13 +1645,21 @@ async fn connect_ssh(
 
 async fn ssh_helper_failure(child: &mut tokio::process::Child, summary: &str) -> String {
     let _ = child.kill().await;
-    let mut detail = String::new();
+    let mut detail = Vec::new();
     if let Some(mut stderr) = child.stderr.take() {
-        let _ = stderr.read_to_string(&mut detail).await;
+        let _ = (&mut stderr)
+            .take((MAX_SSH_HELPER_DIAGNOSTICS + 1) as u64)
+            .read_to_end(&mut detail)
+            .await;
     }
+    let truncated = detail.len() > MAX_SSH_HELPER_DIAGNOSTICS;
+    detail.truncate(MAX_SSH_HELPER_DIAGNOSTICS);
+    let detail = String::from_utf8_lossy(&detail);
     let detail = detail.trim();
     if detail.is_empty() {
         summary.to_owned()
+    } else if truncated {
+        format!("{summary}: {detail}… [diagnostics truncated]")
     } else {
         format!("{summary}: {detail}")
     }
