@@ -7365,6 +7365,7 @@ async fn supervise_instances(
         }
         let _local_server_lease = server.acquire_local_lease();
         let instance = server.instance();
+        let reconnect_seed = format!("{}:{}", instance.id, std::process::id());
         let client = match server.client().await {
             Ok(client) => client,
             Err(message) => {
@@ -7374,7 +7375,7 @@ async fn supervise_instances(
                     ),
                 ));
                 attempt = attempt.saturating_add(1);
-                if !wait_to_reconnect(attempt, &sender).await {
+                if !wait_to_reconnect(attempt, &reconnect_seed, &sender).await {
                     return;
                 }
                 continue;
@@ -7413,7 +7414,7 @@ async fn supervise_instances(
             Some(Ok(loaded)) => loaded,
             Some(Err(sift_workspace_ui::DegradedReason::Offline)) => {
                 attempt = attempt.saturating_add(1);
-                if !wait_to_reconnect(attempt, &sender).await {
+                if !wait_to_reconnect(attempt, &reconnect_seed, &sender).await {
                     return;
                 }
                 continue;
@@ -7482,7 +7483,7 @@ async fn supervise_instances(
             }
             _ => {
                 attempt = attempt.saturating_add(1);
-                if !wait_to_reconnect(attempt, &sender).await {
+                if !wait_to_reconnect(attempt, &reconnect_seed, &sender).await {
                     return;
                 }
             }
@@ -7752,6 +7753,7 @@ fn daemon_generation_changed(established: &str, observed: &str) -> bool {
 
 async fn wait_to_reconnect(
     attempt: u32,
+    seed: &str,
     sender: &tokio::sync::mpsc::UnboundedSender<sift_workspace_ui::LifecycleEvent>,
 ) -> bool {
     if sender
@@ -7762,13 +7764,21 @@ async fn wait_to_reconnect(
     {
         return false;
     }
-    tokio::time::sleep(reconnect_delay(attempt)).await;
+    tokio::time::sleep(reconnect_delay(attempt, seed)).await;
     !sender.is_closed()
 }
 
-fn reconnect_delay(attempt: u32) -> std::time::Duration {
+fn reconnect_delay(attempt: u32, seed: &str) -> std::time::Duration {
     let exponent = attempt.saturating_sub(1).min(5);
-    std::time::Duration::from_millis(100_u64.saturating_mul(1_u64 << exponent).min(3_000))
+    let base_ms = 100_u64.saturating_mul(1_u64 << exponent).min(2_400);
+    let jitter_span = base_ms / 4;
+    let entropy = seed
+        .bytes()
+        .chain(attempt.to_le_bytes())
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            hash.wrapping_mul(0x100_0000_01b3) ^ u64::from(byte)
+        });
+    std::time::Duration::from_millis((base_ms + entropy % (jitter_span + 1)).min(3_000))
 }
 
 impl gpui::Render for SiftWindow {
@@ -7805,9 +7815,13 @@ mod tests {
 
     #[test]
     fn server_restart_backoff_is_bounded_and_resets_per_ready_cycle() {
-        assert_eq!(reconnect_delay(1), std::time::Duration::from_millis(100));
-        assert_eq!(reconnect_delay(2), std::time::Duration::from_millis(200));
-        assert_eq!(reconnect_delay(99), std::time::Duration::from_secs(3));
+        assert!((100..=125).contains(&reconnect_delay(1, "instance-a").as_millis()));
+        assert!((200..=250).contains(&reconnect_delay(2, "instance-a").as_millis()));
+        assert_ne!(
+            reconnect_delay(3, "instance-a"),
+            reconnect_delay(3, "instance-b")
+        );
+        assert!(reconnect_delay(99, "instance-a") <= std::time::Duration::from_secs(3));
     }
 
     #[test]

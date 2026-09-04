@@ -842,11 +842,23 @@ impl PersistentRoomClient {
     }
 
     async fn wait_before_reconnect(&mut self) {
-        let exponent = self.reconnect_attempt.min(6);
-        let delay_ms = 100_u64.saturating_mul(1_u64 << exponent).min(5_000);
+        let delay = reconnect_delay(self.reconnect_attempt, &self.client_id);
         self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        tokio::time::sleep(delay).await;
     }
+}
+
+fn reconnect_delay(attempt: u32, seed: &str) -> std::time::Duration {
+    let exponent = attempt.min(6);
+    let base_ms = 100_u64.saturating_mul(1_u64 << exponent).min(4_000);
+    let jitter_span = base_ms / 4;
+    let entropy = seed
+        .bytes()
+        .chain(attempt.to_le_bytes())
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            hash.wrapping_mul(0x100_0000_01b3) ^ u64::from(byte)
+        });
+    std::time::Duration::from_millis((base_ms + entropy % (jitter_span + 1)).min(5_000))
 }
 
 fn reconnectable_client_error(error: &Error) -> bool {
@@ -5340,6 +5352,17 @@ mod tests {
             _ => panic!("expected typed WebSocket handshake rejection"),
         }
         server.await.unwrap();
+    }
+
+    #[test]
+    fn room_reconnect_backoff_is_bounded_and_client_jittered() {
+        let first = reconnect_delay(0, "desktop-a");
+        assert!((100..=125).contains(&first.as_millis()));
+        assert_ne!(
+            reconnect_delay(3, "desktop-a"),
+            reconnect_delay(3, "desktop-b")
+        );
+        assert!(reconnect_delay(99, "desktop-a") <= std::time::Duration::from_secs(5));
     }
 
     #[test]
