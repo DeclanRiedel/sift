@@ -6317,7 +6317,9 @@ impl Pane {
             )
             .child(
                 div()
+                    .debug_selector(|| "object-browser-column-header".into())
                     .h(px(30.))
+                    .w_full()
                     .flex_none()
                     .px_3()
                     .flex()
@@ -6329,11 +6331,38 @@ impl Pane {
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(colors.muted_text)
-                    .child(div().min_w_0().flex_1().child("NAME"))
-                    .child(div().w(px(110.)).child("TYPE"))
-                    .child(div().w(px(80.)).text_right().child("ROWS"))
-                    .child(div().w(px(155.)).child("MODIFIED"))
-                    .child(div().w(px(220.)).child("COMMENT")),
+                    .child(
+                        div()
+                            .debug_selector(|| "object-browser-header-name".into())
+                            .min_w_0()
+                            .flex_1()
+                            .child("NAME"),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "object-browser-header-type".into())
+                            .w(px(110.))
+                            .child("TYPE"),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "object-browser-header-rows".into())
+                            .w(px(80.))
+                            .text_right()
+                            .child("ROWS"),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "object-browser-header-modified".into())
+                            .w(px(155.))
+                            .child("MODIFIED"),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "object-browser-header-comment".into())
+                            .w(px(220.))
+                            .child("COMMENT"),
+                    ),
             )
             .when(row_count == 0, |view| {
                 view.child(
@@ -6372,6 +6401,7 @@ impl Pane {
                                             format!("object-browser-row-{index}")
                                         })
                                         .h(px(34.))
+                                        .w_full()
                                         .px_3()
                                         .flex()
                                         .items_center()
@@ -6393,6 +6423,9 @@ impl Pane {
                                         }))
                                         .child(
                                             div()
+                                                .debug_selector(move || {
+                                                    format!("object-browser-row-{index}-name")
+                                                })
                                                 .min_w_0()
                                                 .flex_1()
                                                 .flex()
@@ -6408,23 +6441,41 @@ impl Pane {
                                         )
                                         .child(
                                             div()
+                                                .debug_selector(move || {
+                                                    format!("object-browser-row-{index}-type")
+                                                })
                                                 .w(px(110.))
                                                 .truncate()
                                                 .child(format!("{:?}", row.source.object_kind)),
                                         )
-                                        .child(div().w(px(80.)).text_right().child(
-                                            row.estimated_rows.map_or_else(
-                                                || "—".into(),
-                                                |rows| rows.to_string(),
-                                            ),
-                                        ))
                                         .child(
-                                            div().w(px(155.)).truncate().child(
-                                                row.modified_at.unwrap_or_else(|| "—".into()),
-                                            ),
+                                            div()
+                                                .debug_selector(move || {
+                                                    format!("object-browser-row-{index}-rows")
+                                                })
+                                                .w(px(80.))
+                                                .text_right()
+                                                .child(row.estimated_rows.map_or_else(
+                                                    || "—".into(),
+                                                    |rows| rows.to_string(),
+                                                )),
                                         )
                                         .child(
                                             div()
+                                                .debug_selector(move || {
+                                                    format!("object-browser-row-{index}-modified")
+                                                })
+                                                .w(px(155.))
+                                                .truncate()
+                                                .child(
+                                                    row.modified_at.unwrap_or_else(|| "—".into()),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .debug_selector(move || {
+                                                    format!("object-browser-row-{index}-comment")
+                                                })
                                                 .w(px(220.))
                                                 .truncate()
                                                 .text_color(colors.muted_text)
@@ -57128,6 +57179,50 @@ mod tests {
             cx.debug_bounds("object-browser-row-0").is_some(),
             "visible object rows must receive layout space"
         );
+        let header = cx
+            .debug_bounds("object-browser-column-header")
+            .expect("object browser header");
+        let row = cx
+            .debug_bounds("object-browser-row-0")
+            .expect("object browser row");
+        assert_eq!(row.left(), header.left());
+        assert_eq!(row.right(), header.right());
+        for (column, header_selector, row_selector) in [
+            (
+                "name",
+                "object-browser-header-name",
+                "object-browser-row-0-name",
+            ),
+            (
+                "type",
+                "object-browser-header-type",
+                "object-browser-row-0-type",
+            ),
+            (
+                "rows",
+                "object-browser-header-rows",
+                "object-browser-row-0-rows",
+            ),
+            (
+                "modified",
+                "object-browser-header-modified",
+                "object-browser-row-0-modified",
+            ),
+            (
+                "comment",
+                "object-browser-header-comment",
+                "object-browser-row-0-comment",
+            ),
+        ] {
+            let header = cx
+                .debug_bounds(header_selector)
+                .unwrap_or_else(|| panic!("{column} header"));
+            let row = cx
+                .debug_bounds(row_selector)
+                .unwrap_or_else(|| panic!("{column} row"));
+            assert_eq!(row.left(), header.left(), "{column} left edge");
+            assert_eq!(row.right(), header.right(), "{column} right edge");
+        }
         let schema_picker = cx
             .debug_bounds("object-browser-schema-picker")
             .expect("schema picker");
