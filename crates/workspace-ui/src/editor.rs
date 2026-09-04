@@ -3714,8 +3714,12 @@ impl Element for QueryEditorElement {
         }
         .min(displayed_lines.len());
 
-        for display_index in visible_start..visible_end {
-            let line_index = displayed_lines[display_index];
+        for (display_index, &line_index) in displayed_lines
+            .iter()
+            .enumerate()
+            .take(visible_end)
+            .skip(visible_start)
+        {
             let offset = line_starts[line_index];
             let line_end = line_starts
                 .get(line_index + 1)

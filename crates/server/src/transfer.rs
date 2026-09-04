@@ -25,7 +25,7 @@ pub async fn execute_recipe(
         ));
     }
     if request.dry_run && recipe.direction == TransferDirection::Export {
-        if request.sql.as_deref().is_none_or(str::is_empty) {
+        if request.sql.as_deref().map_or(true, str::is_empty) {
             return Err(ApiError::BadRequest("export SQL is required".into()));
         }
         return Ok(TransferExecutionResult::Validated {
@@ -285,7 +285,7 @@ fn json_lines_to_parquet(jsonl: &[u8]) -> ApiResult<Vec<u8>> {
         .map_err(|_| ApiError::Internal("query JSON was not UTF-8".into()))?
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line))
+        .map(serde_json::from_str::<serde_json::Map<String, serde_json::Value>>)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| ApiError::Internal(format!("invalid query JSON: {error}")))?;
     let first = rows

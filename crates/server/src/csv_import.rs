@@ -94,14 +94,16 @@ pub async fn import(
             let quarantine = request.conflict_policy == CsvConflictPolicy::Quarantine;
             ingest_skip(
                 store,
-                session,
-                connection,
-                engine,
-                &table,
                 &prepared,
-                &target_types,
-                request.resume_from_row,
-                quarantine,
+                SkipIngest {
+                    session,
+                    connection,
+                    engine,
+                    table: &table,
+                    target_types: &target_types,
+                    resume_from_row: request.resume_from_row,
+                    quarantine,
+                },
             )
             .await?
         }
@@ -385,17 +387,30 @@ async fn ingest_abort(
         .await
 }
 
-async fn ingest_skip(
-    store: &SessionStore,
+struct SkipIngest<'a> {
     session: SessionId,
     connection: ConnectionId,
     engine: Engine,
-    table: &str,
-    prepared: &PreparedCsv,
-    target_types: &[String],
+    table: &'a str,
+    target_types: &'a [String],
     resume_from_row: u64,
     quarantine: bool,
+}
+
+async fn ingest_skip(
+    store: &SessionStore,
+    prepared: &PreparedCsv,
+    options: SkipIngest<'_>,
 ) -> ApiResult<(u64, u64, Vec<sift_protocol::CsvQuarantinedRow>)> {
+    let SkipIngest {
+        session,
+        connection,
+        engine,
+        table,
+        target_types,
+        resume_from_row,
+        quarantine,
+    } = options;
     let column_sql = prepared
         .columns
         .iter()
@@ -443,7 +458,11 @@ async fn ingest_skip(
             Err(error) if quarantine => {
                 skipped += 1;
                 let mut reason = error.to_string();
-                reason.truncate(reason.floor_char_boundary(240));
+                let mut end = reason.len().min(240);
+                while !reason.is_char_boundary(end) {
+                    end -= 1;
+                }
+                reason.truncate(end);
                 quarantined.push(sift_protocol::CsvQuarantinedRow {
                     row_number: index as u64,
                     reason,
