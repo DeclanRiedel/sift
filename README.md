@@ -1,63 +1,34 @@
-# sift
+<img align="left" src="crates/desktop/assets/sift-icon.png" width="180" alt="Sift icon">
 
-Sift is a database server and desktop client written in Rust. It supports
-PostgreSQL and SQL Server.
+# Sift
 
-> **Project status: active development.** No release date, release candidate,
-> beta milestone, or release-ready feature set has been declared. Checked plan
-> items mean that a scoped implementation exists; they do not imply product
-> completeness, platform certification, support commitments, or distribution
-> readiness. The current missing-feature inventory lives in
-> [`docs/PLANS/ide-parity-and-provider-extensibility.md`](docs/PLANS/ide-parity-and-provider-extensibility.md).
-> In design documents, `v1` names a wire or file-format version and
-> `graduated` means an engineering decision passed its stated evidence gate;
-> neither term announces a product release.
+A fast, Vim-like SQL workspace built in Rust for PostgreSQL, SQL Server, and
+possibly more in the future.
 
-The server manages connections, query sessions, schema data, query execution,
-history, audit records, and shared rooms. Clients use its versioned HTTP and
-WebSocket API.
+Run it locally or host the same server for a team. Connections, schema,
+queries, results, history, audit, and collaboration share one versioned API.
 
-The same server can run beside a local desktop client or as a daemon for
-multiple users. Shared query text is synchronized between room members.
-Results, schemas, sessions, and connections remain on the server.
+<br clear="left">
 
-Desktop preferences are stored in a local `settings.toml`. See
-[`docs/SETTINGS.md`](docs/SETTINGS.md).
+Built entirely to my taste but you may use it too.
 
 ## Goals
 
-1. Keep product behavior in the server and expose it through the public API.
-2. Support local single-user and hosted multi-user use with the same server.
-3. Support shared rooms, query editing, connections, and results.
-4. Keep query execution and navigation responsive with cursors, caching,
-   prefetching, and connection pools.
+1. Keep product behaviour in the server and expose it through the public API.
+2. Use one server for local and hosted workflows.
+3. Make editing, navigation, execution, and collaboration feel immediate.
+4. Stay responsive through cursors, caching, prefetching, and pooling.
 5. Keep the protocol versioned and usable by third-party clients.
 
-## Documentation
+## Docs
 
-- [`docs/PLANS/ide-parity-and-provider-extensibility.md`](docs/PLANS/ide-parity-and-provider-extensibility.md) —
-  canonical missing-feature inventory
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — design decisions
-- [`docs/PLANS/phase-m-gpui-desktop.md`](docs/PLANS/phase-m-gpui-desktop.md) —
-  remaining desktop architecture and validation work
-- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — desktop frame and memory budgets
-- [`docs/INSTANCE-CONFIG.md`](docs/INSTANCE-CONFIG.md) — instance configuration
-- [`docs/REMOTE-AND-UPDATES.md`](docs/REMOTE-AND-UPDATES.md) — remote use and
-  updates
-- [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — extensions
-- [`docs/keyboard-wiki/index.html`](docs/keyboard-wiki/index.html) — keyboard
-  language defaults and rollout reference
+- [Instance configuration](docs/INSTANCE-CONFIG.md)
+- [Keyboard reference](docs/keyboard-wiki/index.html)
+- [Extensions](docs/EXTENSIONS.md)
 
 ## License
 
-Copyright © 2026 Declan Riedel.
-
-Sift is licensed under the
-[GNU Affero General Public License, version 3 only](LICENSE)
-(`AGPL-3.0-only`). If you modify Sift and make the modified program available
-for users to interact with over a network, the license requires you to offer
-those users the corresponding source code.
-
-Third-party components retain their own compatible licenses and notices. In
-particular, the vendored Qlementine icons are MIT-licensed; their attribution
-and license are in [`crates/ui/assets/icons`](crates/ui/assets/icons/README.md).
+Copyright © 2026 Declan Riedel. Licensed under
+[AGPL-3.0-only](LICENSE). Network users of a modified version must receive its
+corresponding source. Third-party assets retain their own licenses; Qlementine
+icon attribution lives in [crates/ui/assets/icons](crates/ui/assets/icons/README.md).
