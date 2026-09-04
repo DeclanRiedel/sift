@@ -105,7 +105,44 @@ pub(super) fn render_bottom_panel(
                                 ),
                             )
                     }),
-                ),
+                )
+                .children((shell.active_bottom_tool == BottomTool::Monitor).then(|| {
+                    let view = shell.database_monitor.view();
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Button::new("monitor-view-activity", "Activity")
+                                .tone(if view == DatabaseMonitorView::Activity {
+                                    ButtonTone::Neutral
+                                } else {
+                                    ButtonTone::Ghost
+                                })
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.set_database_monitor_view(
+                                        DatabaseMonitorView::Activity,
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(
+                            Button::new(
+                                "monitor-view-locks",
+                                format!("Locks {}", shell.database_monitor.lock_process_count()),
+                            )
+                            .tone(if view == DatabaseMonitorView::Locks {
+                                ButtonTone::Neutral
+                            } else {
+                                ButtonTone::Ghost
+                            })
+                            .on_click(cx.listener(
+                                |shell, _, _, cx| {
+                                    shell.set_database_monitor_view(DatabaseMonitorView::Locks, cx)
+                                },
+                            )),
+                        )
+                })),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {
             let transaction = shell.transaction_state.transaction().map(|transaction| {
@@ -191,7 +228,8 @@ pub(super) fn render_bottom_panel(
                     })
                     .children(savepoints)
             });
-            let processes = database_process_rows(shell.database_monitor.processes());
+            let visible_processes = shell.database_monitor.visible_processes();
+            let processes = database_process_rows(&visible_processes);
             let selected_process = shell.database_monitor.selected();
             div()
                 .flex()
@@ -258,16 +296,17 @@ pub(super) fn render_bottom_panel(
                         .child(message.to_string())
                 }))
                 .when(
-                    shell.database_monitor.processes().is_empty()
+                    visible_processes.is_empty()
                         && !shell.database_monitor.request().loading()
                         && shell.database_monitor.request().error().is_none(),
                     |panel| {
-                        panel.child(
-                            div()
-                                .p_4()
-                                .text_center()
-                                .child("No database activity reported."),
-                        )
+                        panel.child(div().p_4().text_center().child(
+                            if shell.database_monitor.view() == DatabaseMonitorView::Locks {
+                                "No waiting or blocking sessions."
+                            } else {
+                                "No database activity reported."
+                            },
+                        ))
                     },
                 )
                 .into_any_element()

@@ -67,7 +67,7 @@ pub use status_bar::StatusBar;
 
 use app_bar::AppBarMenu;
 use catalog_diagram::CatalogDiagramState;
-use database_monitor::DatabaseMonitorState;
+use database_monitor::{DatabaseMonitorState, DatabaseMonitorView};
 pub use pane_layout::SplitDirection;
 
 const PALETTE_VISIBLE_ROWS: usize = 10;
@@ -25345,6 +25345,11 @@ impl WorkspaceShell {
             self.database_monitor
                 .fail_loading("Database executor is unavailable");
         }
+        cx.notify();
+    }
+
+    fn set_database_monitor_view(&mut self, view: DatabaseMonitorView, cx: &mut Context<Self>) {
+        self.database_monitor.set_view(view);
         cx.notify();
     }
 
