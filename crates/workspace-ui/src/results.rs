@@ -7452,7 +7452,7 @@ mod tests {
             let selected_edits = view.selected_cell_edits();
             assert_eq!(selected_edits.len(), 4);
             assert_eq!(selected_edits[0].column, "rank");
-            assert_eq!(selected_edits[0].original, Value::Int64(2));
+            assert_eq!(selected_edits[0].original, Value::Int32(2));
             assert!(view.begin_selected_cell_edit("2".into(), cx).is_some());
             assert_eq!(view.editing_cell, Some((1, 1)));
             view.finish_inline_cell_edit(cx);
