@@ -18784,6 +18784,58 @@ impl WorkspaceShell {
         }
     }
 
+    fn open_table_auxiliary_designer(
+        &mut self,
+        item_id: u64,
+        section: TableDefinitionSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(TableDefinitionState::Ready {
+            source,
+            graph,
+            table_id,
+        }) = self.table_definitions.get(&item_id)
+        else {
+            return;
+        };
+        let source = source.clone();
+        let first_column = table_columns(graph, table_id)
+            .first()
+            .map(|column| ddl_quote_identifier(&source.provider_id, &column.name))
+            .unwrap_or_else(|| ddl_quote_identifier(&source.provider_id, "replace_column"));
+        let schema = ddl_quote_identifier(&source.provider_id, &source.schema);
+        let table = ddl_quote_identifier(&source.provider_id, &source.object);
+        let qualified = format!("{schema}.{table}");
+        let (title, sql) = match section {
+            TableDefinitionSection::Indexes => (
+                "new-index.sql",
+                format!(
+                    "-- Review with EXPLAIN before applying to a busy table.\nCREATE INDEX {} ON {qualified} ({first_column});\n",
+                    ddl_quote_identifier(&source.provider_id, &format!("{}_idx", source.object))
+                ),
+            ),
+            TableDefinitionSection::Relations => (
+                "new-foreign-key.sql",
+                format!(
+                    "ALTER TABLE {qualified}\n    ADD CONSTRAINT {} FOREIGN KEY ({first_column})\n    REFERENCES {schema}.{} ({});\n",
+                    ddl_quote_identifier(&source.provider_id, &format!("{}_fk", source.object)),
+                    ddl_quote_identifier(&source.provider_id, "replace_table"),
+                    ddl_quote_identifier(&source.provider_id, "replace_column")
+                ),
+            ),
+            TableDefinitionSection::Triggers => {
+                let mut trigger = source.clone();
+                trigger.object = format!("{}_trigger", source.object);
+                trigger.object_kind = sift_protocol::ObjectKind::Trigger;
+                let Some(sql) = object_designer_sql(&trigger) else { return };
+                ("new-trigger.sql", sql)
+            }
+            _ => return,
+        };
+        self.open_sql_scratch(title.into(), sql, window, cx);
+    }
+
     fn open_table_detail_ddl(
         &mut self,
         item_id: u64,
@@ -36058,6 +36110,46 @@ impl WorkspaceShell {
                             )
                             .into_any_element(),
                     );
+                } else if matches!(
+                    section,
+                    TableDefinitionSection::Indexes
+                        | TableDefinitionSection::Relations
+                        | TableDefinitionSection::Triggers
+                ) {
+                    let label = match section {
+                        TableDefinitionSection::Indexes => "New index",
+                        TableDefinitionSection::Relations => "New foreign key",
+                        TableDefinitionSection::Triggers => "New trigger",
+                        _ => unreachable!(),
+                    };
+                    right_actions.push(
+                        div()
+                            .id("new-table-detail-object-focus")
+                            .tab_index(0)
+                            .focus(|style| style.bg(colors.hovered_surface))
+                            .on_key_down(cx.listener(
+                                move |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                    if !event.keystroke.modifiers.modified()
+                                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                    {
+                                        shell.open_table_auxiliary_designer(
+                                            item_id, section, window, cx,
+                                        );
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .child(
+                                Button::new("new-table-detail-object", label)
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(move |shell, _, window, cx| {
+                                        shell.open_table_auxiliary_designer(
+                                            item_id, section, window, cx,
+                                        )
+                                    })),
+                            )
+                            .into_any_element(),
+                    );
                 }
                 let section_navigation = div()
                     .h(px(30.))
@@ -48692,6 +48784,32 @@ fn highlight_fuzzy_ranges(
 mod tests {
     use super::*;
     use gpui::{point, EntityInputHandler, Modifiers, TestAppContext, VisualTestContext};
+
+    fn object_source(kind: sift_protocol::ObjectKind) -> DatabaseObjectSource {
+        DatabaseObjectSource {
+            instance_id: "local".into(),
+            tenant_id: 1,
+            profile_id: 2,
+            profile_name: "demo/postgres".into(),
+            provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+            catalog: Some("lab".into()),
+            schema: "public".into(),
+            object: "events".into(),
+            object_kind: kind,
+            last_refreshed_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn object_design_templates_are_dialect_scoped_and_reviewable() {
+        let sequence =
+            object_designer_sql(&object_source(sift_protocol::ObjectKind::Sequence)).unwrap();
+        assert!(sequence.contains("ALTER SEQUENCE \"public\".\"events\""));
+        let trigger =
+            object_designer_sql(&object_source(sift_protocol::ObjectKind::Trigger)).unwrap();
+        assert!(trigger.contains("CREATE OR REPLACE TRIGGER"));
+        assert!(object_designer_sql(&object_source(sift_protocol::ObjectKind::View)).is_none());
+    }
 
     #[test]
     fn query_performance_history_reports_average_p95_rows_and_failures() {
