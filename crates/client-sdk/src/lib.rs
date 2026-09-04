@@ -681,6 +681,7 @@ impl SessionWebSocket {
 
 pub struct RoomWebSocket {
     socket: TransportWebSocket,
+    pending: std::collections::VecDeque<sift_protocol::RoomServerMessage>,
 }
 
 /// Room transport that reconnects, re-attaches, and replays CRDT discovery
@@ -776,6 +777,9 @@ impl PersistentRoomClient {
         if self.socket.is_none() {
             self.reconnect(replica).await?;
         }
+        self.client
+            .maintain_room_websocket(self.socket.as_mut().expect("socket established"))
+            .await?;
         if let Err(error) = self
             .socket
             .as_mut()
@@ -854,6 +858,9 @@ impl RoomWebSocket {
     }
 
     pub async fn next(&mut self) -> Result<sift_protocol::RoomServerMessage> {
+        if let Some(message) = self.pending.pop_front() {
+            return Ok(message);
+        }
         next_room_ws(&mut self.socket).await
     }
 
@@ -882,17 +889,21 @@ impl RoomWebSocket {
             access_token: sift_protocol::RedactedString(access_token.into()),
         })
         .await?;
-        match self.next().await? {
-            sift_protocol::RoomServerMessage::Authenticated { expires_at } => Ok(expires_at),
-            sift_protocol::RoomServerMessage::Error { message } => Err(Error::Protocol(message)),
-            sift_protocol::RoomServerMessage::RateLimited { retry_after_ms } => {
-                Err(Error::Protocol(format!(
-                    "room WebSocket rate limited for {retry_after_ms}ms"
-                )))
+        loop {
+            match next_room_ws(&mut self.socket).await? {
+                sift_protocol::RoomServerMessage::Authenticated { expires_at } => {
+                    return Ok(expires_at)
+                }
+                sift_protocol::RoomServerMessage::Error { message } => {
+                    return Err(Error::Protocol(message))
+                }
+                sift_protocol::RoomServerMessage::RateLimited { retry_after_ms } => {
+                    return Err(Error::Protocol(format!(
+                        "room WebSocket rate limited for {retry_after_ms}ms"
+                    )))
+                }
+                other => self.pending.push_back(other),
             }
-            other => Err(Error::Protocol(format!(
-                "expected room WebSocket authentication acknowledgement, got {other:?}"
-            ))),
         }
     }
 
@@ -4765,7 +4776,27 @@ impl Client {
         }
         let (socket, response) = connect_websocket(request).await?;
         validate_ws_response_protocol(&response, selected).map_err(Error::Protocol)?;
-        Ok(RoomWebSocket { socket })
+        Ok(RoomWebSocket {
+            socket,
+            pending: std::collections::VecDeque::new(),
+        })
+    }
+
+    /// Refresh an interactive hosted session and renew an established room
+    /// socket before its original authentication lease expires. Static API
+    /// tokens and SSH grants are replaced by their owning supervisors.
+    pub async fn maintain_room_websocket(&self, socket: &mut RoomWebSocket) -> Result<()> {
+        let Some(provider) = &self.session_tokens else {
+            return Ok(());
+        };
+        if !provider.access_needs_refresh().await {
+            return Ok(());
+        }
+        self.refresh_session_if_needed().await?;
+        provider
+            .reauthenticate_room_websocket(socket)
+            .await
+            .map(|_| ())
     }
 
     pub async fn listen_notifications(

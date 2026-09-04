@@ -229,6 +229,7 @@ fn degraded(error: &ClientError) -> DegradedReason {
         }
         ClientError::Server { status, .. } => degraded_http_status(status.as_u16())
             .unwrap_or_else(|| DegradedReason::Server(error.to_string())),
+        ClientError::Protocol(message) if message == "websocket closed" => DegradedReason::Offline,
         ClientError::Protocol(_) => DegradedReason::IncompatibleProtocol,
         other => DegradedReason::Server(other.to_string()),
     }
@@ -434,14 +435,29 @@ pub async fn stream_room_presence(
         tokio::select! {
             message = socket.next() => {
                 let message = message.map_err(|error| degraded(&error))?;
+                if let RoomServerMessage::Error { message } = &message {
+                    return Err(room_error_reason(message));
+                }
                 if sender.send(PresenceEvent::Message(message)).is_err() {
                     return Ok(());
                 }
             }
             _ = heartbeat.tick() => {
+                client
+                    .maintain_room_websocket(&mut socket)
+                    .await
+                    .map_err(|error| degraded(&error))?;
                 socket.heartbeat().await.map_err(|error| degraded(&error))?;
             }
         }
+    }
+}
+
+fn room_error_reason(message: &str) -> DegradedReason {
+    if message.contains("authentication") || message.contains("membership") {
+        DegradedReason::AccessRevoked
+    } else {
+        DegradedReason::Server(message.to_owned())
     }
 }
 
@@ -644,5 +660,13 @@ mod tests {
             Some(DegradedReason::AccessRevoked)
         );
         assert_eq!(degraded_http_status(503), None);
+        assert_eq!(
+            room_error_reason("authentication lease or room membership was revoked"),
+            DegradedReason::AccessRevoked
+        );
+        assert_eq!(
+            degraded(&ClientError::Protocol("websocket closed".into())),
+            DegradedReason::Offline
+        );
     }
 }
