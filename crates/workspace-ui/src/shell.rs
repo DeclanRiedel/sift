@@ -179,6 +179,31 @@ fn ddl_quote_identifier(provider_id: &sift_protocol::ProviderId, identifier: &st
     }
 }
 
+fn object_designer_sql(source: &DatabaseObjectSource) -> Option<String> {
+    let schema = ddl_quote_identifier(&source.provider_id, &source.schema);
+    let object = ddl_quote_identifier(&source.provider_id, &source.object);
+    let qualified = format!("{schema}.{object}");
+    let postgres = source.provider_id.as_str().contains("postgres");
+    match source.object_kind {
+        sift_protocol::ObjectKind::Sequence => Some(if postgres {
+            format!("-- Review the current sequence DDL before execution.\nALTER SEQUENCE {qualified}\n    INCREMENT BY 1\n    NO MINVALUE\n    NO MAXVALUE\n    CACHE 1;\n")
+        } else {
+            format!("-- Review the current sequence DDL before execution.\nALTER SEQUENCE {qualified}\n    INCREMENT BY 1\n    NO CACHE;\n")
+        }),
+        sift_protocol::ObjectKind::Trigger => Some(if postgres {
+            format!("-- Replace the function and timing/event after reviewing the object DDL.\nCREATE OR REPLACE TRIGGER {object}\n    BEFORE INSERT ON {schema}.replace_table\n    FOR EACH ROW\n    EXECUTE FUNCTION {schema}.replace_trigger_function();\n")
+        } else {
+            format!("-- Replace the table and body after reviewing the object DDL.\nCREATE OR ALTER TRIGGER {qualified}\nON {schema}.replace_table\nAFTER INSERT\nAS\nBEGIN\n    SET NOCOUNT ON;\nEND;\n")
+        }),
+        sift_protocol::ObjectKind::Type => Some(if postgres {
+            format!("-- PostgreSQL enum evolution is additive; replace the value deliberately.\nALTER TYPE {qualified} ADD VALUE 'new_value';\n")
+        } else {
+            format!("-- SQL Server alias types cannot be altered in place. Create a replacement,\n-- migrate dependants, then drop the old type after review.\nCREATE TYPE {schema}.replace_type FROM nvarchar(255) NULL;\n")
+        }),
+        _ => None,
+    }
+}
+
 fn table_preview_sql(
     provider_id: &sift_protocol::ProviderId,
     schema: &str,
@@ -19298,12 +19323,38 @@ impl WorkspaceShell {
         );
     }
 
-    fn design_object_browser_table(
+    fn design_object_browser_object(
         &mut self,
         source: &DatabaseObjectSource,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !matches!(
+            source.object_kind,
+            sift_protocol::ObjectKind::Table | sift_protocol::ObjectKind::PartitionedTable
+        ) {
+            let Some(sql) = object_designer_sql(source) else {
+                self.show_toast(
+                    format!(
+                        "{:?} does not have an editable designer yet",
+                        source.object_kind
+                    ),
+                    cx,
+                );
+                return;
+            };
+            self.open_sql_scratch(
+                format!(
+                    "design-{}-{}.sql",
+                    format!("{:?}", source.object_kind).to_ascii_lowercase(),
+                    source.object
+                ),
+                sql,
+                window,
+                cx,
+            );
+            return;
+        }
         let Some(target) = self.database_target_from_source(source) else {
             return;
         };
@@ -27721,7 +27772,7 @@ impl WorkspaceShell {
             }
             PaneEvent::ObjectBrowserDesignRequested { source } => {
                 self.active_pane = index;
-                self.design_object_browser_table(source, window, cx);
+                self.design_object_browser_object(source, window, cx);
             }
             PaneEvent::ObjectBrowserDeleteRequested { source } => {
                 self.active_pane = index;
