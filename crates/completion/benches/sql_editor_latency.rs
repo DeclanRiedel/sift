@@ -83,6 +83,26 @@ fn benchmarks(criterion: &mut Criterion) {
     criterion.bench_function("warm_completion_100k_catalog", |bencher| {
         bencher.iter(|| complete_with_dictionary(&request, &dictionary, Engine::Postgres));
     });
+    let empty_source_request = CompletionRequest {
+        sql: "select * from ".into(),
+        cursor: 14,
+        limit: Some(50),
+    };
+    criterion.bench_function("empty_source_completion_100k_catalog", |bencher| {
+        bencher.iter(|| {
+            complete_with_dictionary(&empty_source_request, &dictionary, Engine::Postgres)
+        });
+    });
+    let unresolved_column_request = CompletionRequest {
+        sql: "select missing.i from relation_000001".into(),
+        cursor: 16,
+        limit: Some(50),
+    };
+    criterion.bench_function("unresolved_qualifier_100k_catalog", |bencher| {
+        bencher.iter(|| {
+            complete_with_dictionary(&unresolved_column_request, &dictionary, Engine::Postgres)
+        });
+    });
 
     let source = semantic_document(8_000);
     criterion.bench_function("semantic_full_8000_lines", |bencher| {

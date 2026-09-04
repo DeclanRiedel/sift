@@ -30,16 +30,17 @@ pub fn rank(
     limit: usize,
 ) -> Vec<CompletionCandidate> {
     let prefix = ctx.prefix_lower.as_str();
-    let mut out: Vec<CompletionCandidate> = Vec::new();
+    let candidate_budget = limit.saturating_mul(8).clamp(64, 1_600);
+    let mut out: Vec<CompletionCandidate> = Vec::with_capacity(candidate_budget.min(256));
 
     match &ctx.context {
         CompletionContext::Statement => {
             push_keywords(&mut out, engine, prefix, /*context_bonus=*/ 40);
-            push_tables_and_views(&mut out, dict, prefix, engine, /*bonus=*/ 10);
-            push_routines(&mut out, dict, prefix, engine, /*bonus=*/ 10);
+            push_tables_and_views(&mut out, dict, prefix, engine, 10, candidate_budget);
+            push_routines(&mut out, dict, prefix, engine, 10, candidate_budget);
         }
         CompletionContext::ExpectingTable => {
-            push_tables_and_views(&mut out, dict, prefix, engine, /*bonus=*/ 60);
+            push_tables_and_views(&mut out, dict, prefix, engine, 60, candidate_budget);
             push_local_relations(&mut out, ctx, prefix, /*bonus=*/ 70);
             push_schemas(&mut out, dict, prefix, /*bonus=*/ 30);
             push_keywords(&mut out, engine, prefix, /*bonus=*/ 5);
@@ -63,13 +64,13 @@ pub fn rank(
                         // CTEs, temporary relations, and incomplete shallow
                         // snapshots may not resolve to one catalog object.
                         // Useful unqualified candidates beat an empty popup.
-                        push_all_columns(&mut out, dict, prefix, /*bonus=*/ 20);
+                        push_all_columns(&mut out, dict, prefix, 20, candidate_budget);
                         push_functions(&mut out, engine, prefix, /*bonus=*/ 10);
                     }
                 }
                 None => {
                     if !push_relation_columns(&mut out, ctx, dict, prefix, /*bonus=*/ 70) {
-                        push_all_columns(&mut out, dict, prefix, /*bonus=*/ 20);
+                        push_all_columns(&mut out, dict, prefix, 20, candidate_budget);
                     }
                     push_functions(&mut out, engine, prefix, /*bonus=*/ 30);
                     push_keywords(&mut out, engine, prefix, /*bonus=*/ 5);
@@ -96,9 +97,9 @@ pub fn rank(
         }
         CompletionContext::Unknown => {
             push_keywords(&mut out, engine, prefix, /*bonus=*/ 20);
-            push_tables_and_views(&mut out, dict, prefix, engine, /*bonus=*/ 20);
-            push_routines(&mut out, dict, prefix, engine, /*bonus=*/ 20);
-            push_all_columns(&mut out, dict, prefix, /*bonus=*/ 20);
+            push_tables_and_views(&mut out, dict, prefix, engine, 20, candidate_budget);
+            push_routines(&mut out, dict, prefix, engine, 20, candidate_budget);
+            push_all_columns(&mut out, dict, prefix, 20, candidate_budget);
         }
     }
 
@@ -259,11 +260,9 @@ fn push_tables_and_views(
     prefix: &str,
     engine: Engine,
     bonus: i32,
+    budget: usize,
 ) {
-    for obj in table_view_candidates(dict, prefix) {
-        if !is_table_source(obj.kind) {
-            continue;
-        }
+    for obj in table_view_candidates(dict, prefix).take(budget) {
         if let Some(cand) = object_candidate(obj, dict, prefix, engine, bonus, false) {
             out.push(cand);
         }
@@ -322,15 +321,11 @@ fn push_routines(
     prefix: &str,
     engine: Engine,
     bonus: i32,
+    budget: usize,
 ) {
-    for object in &dict.objects {
-        if matches!(
-            object.kind,
-            ObjectKind::Procedure | ObjectKind::ScalarFunction | ObjectKind::TableValuedFunction
-        ) {
-            if let Some(candidate) = object_candidate(object, dict, prefix, engine, bonus, false) {
-                out.push(candidate);
-            }
+    for object in indexed_object_candidates(dict, &dict.routines_by_name, prefix).take(budget) {
+        if let Some(candidate) = object_candidate(object, dict, prefix, engine, bonus, false) {
+            out.push(candidate);
         }
     }
 }
@@ -349,9 +344,32 @@ fn push_all_columns(
     dict: &Dictionary,
     prefix: &str,
     bonus: i32,
+    budget: usize,
 ) {
-    for obj in &dict.objects {
-        push_columns(out, obj, prefix, bonus);
+    let start = if prefix.is_empty() {
+        0
+    } else {
+        dict.columns_by_name.partition_point(|(object, column)| {
+            dict.objects[*object].columns[*column].name_lower.as_str() < prefix
+        })
+    };
+    for (object_index, column_index) in dict.columns_by_name[start..]
+        .iter()
+        .take_while(|(object, column)| {
+            prefix.is_empty()
+                || dict.objects[*object].columns[*column]
+                    .name_lower
+                    .starts_with(prefix)
+        })
+        .take(budget)
+    {
+        let object = &dict.objects[*object_index];
+        let column = &object.columns[*column_index];
+        let Some(match_score) = score_match_with_lower(&column.name, &column.name_lower, prefix)
+        else {
+            continue;
+        };
+        out.push(column_candidate(column, object, match_score + bonus));
     }
 }
 
@@ -518,16 +536,22 @@ fn table_view_candidates<'a>(
     dict: &'a Dictionary,
     prefix: &str,
 ) -> Box<dyn Iterator<Item = &'a ObjectEntry> + 'a> {
+    indexed_object_candidates(dict, &dict.table_sources_by_name, prefix)
+}
+
+fn indexed_object_candidates<'a>(
+    dict: &'a Dictionary,
+    index: &'a [usize],
+    prefix: &str,
+) -> Box<dyn Iterator<Item = &'a ObjectEntry> + 'a> {
     if prefix.is_empty() {
-        return Box::new(dict.objects.iter());
+        return Box::new(index.iter().map(|idx| &dict.objects[*idx]));
     }
-    let start = dict
-        .objects_by_name
-        .partition_point(|idx| dict.objects[*idx].name_lower.as_str() < prefix);
-    let end = dict.objects_by_name[start..]
-        .partition_point(|idx| dict.objects[*idx].name_lower.starts_with(prefix));
+    let start = index.partition_point(|idx| dict.objects[*idx].name_lower.as_str() < prefix);
+    let end =
+        index[start..].partition_point(|idx| dict.objects[*idx].name_lower.starts_with(prefix));
     Box::new(
-        dict.objects_by_name[start..start + end]
+        index[start..start + end]
             .iter()
             .map(|idx| &dict.objects[*idx]),
     )

@@ -55,9 +55,15 @@ pub struct Dictionary {
     /// after the alias resolves to `users` — we look `users` up here
     /// without knowing its schema).
     pub by_name: HashMap<String, Vec<usize>>,
-    /// Object indices sorted by lowercased object name. Used for O(log n)
-    /// prefix windows in the common table/object completion path.
-    pub objects_by_name: Vec<usize>,
+    /// Queryable source objects only, avoiding a full catalog walk for every
+    /// keystroke when a snapshot also contains constraints and other objects.
+    pub table_sources_by_name: Vec<usize>,
+    /// Callable objects only, sorted by name.
+    pub routines_by_name: Vec<usize>,
+    /// `(object index, column index)` sorted by the lowercased column name.
+    /// This keeps incomplete/unknown qualifier fallback bounded on wide
+    /// schemas instead of walking every column in the connected database.
+    pub columns_by_name: Vec<(usize, usize)>,
 }
 
 impl Dictionary {
@@ -78,14 +84,35 @@ impl Dictionary {
         let by_qualified = build_qualified_index(&objects);
         let by_catalog_qualified = build_catalog_qualified_index(&objects);
         let by_name = build_name_index(&objects);
-        let objects_by_name = build_sorted_name_index(&objects);
+        let table_sources_by_name = build_filtered_name_index(&objects, |kind| {
+            matches!(
+                kind,
+                ObjectKind::Table
+                    | ObjectKind::View
+                    | ObjectKind::MaterializedView
+                    | ObjectKind::PartitionedTable
+                    | ObjectKind::ForeignTable
+                    | ObjectKind::TableValuedFunction
+            )
+        });
+        let routines_by_name = build_filtered_name_index(&objects, |kind| {
+            matches!(
+                kind,
+                ObjectKind::Procedure
+                    | ObjectKind::ScalarFunction
+                    | ObjectKind::TableValuedFunction
+            )
+        });
+        let columns_by_name = build_sorted_column_index(&objects);
         Self {
             schemas,
             objects,
             by_qualified,
             by_catalog_qualified,
             by_name,
-            objects_by_name,
+            table_sources_by_name,
+            routines_by_name,
+            columns_by_name,
         }
     }
 
@@ -141,6 +168,42 @@ impl Dictionary {
     }
 }
 
+fn build_filtered_name_index(
+    objects: &[ObjectEntry],
+    include: impl Fn(ObjectKind) -> bool,
+) -> Vec<usize> {
+    let mut out = objects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, object)| include(object.kind).then_some(index))
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        objects[*left]
+            .name_lower
+            .cmp(&objects[*right].name_lower)
+            .then_with(|| objects[*left].name.cmp(&objects[*right].name))
+    });
+    out
+}
+
+fn build_sorted_column_index(objects: &[ObjectEntry]) -> Vec<(usize, usize)> {
+    let mut out = objects
+        .iter()
+        .enumerate()
+        .flat_map(|(object_index, object)| {
+            (0..object.columns.len()).map(move |column_index| (object_index, column_index))
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|(left_object, left_column), (right_object, right_column)| {
+        let left = &objects[*left_object].columns[*left_column];
+        let right = &objects[*right_object].columns[*right_column];
+        left.name_lower
+            .cmp(&right.name_lower)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    out
+}
+
 fn object_entry(obj: &ObjectInfo, catalog: Option<&str>, schema: Option<&str>) -> ObjectEntry {
     let columns = obj
         .columns
@@ -167,17 +230,6 @@ fn object_entry(obj: &ObjectInfo, catalog: Option<&str>, schema: Option<&str>) -
         comment: obj.comment.clone(),
         columns,
     }
-}
-
-fn build_sorted_name_index(objects: &[ObjectEntry]) -> Vec<usize> {
-    let mut out: Vec<usize> = (0..objects.len()).collect();
-    out.sort_by(|a, b| {
-        objects[*a]
-            .name_lower
-            .cmp(&objects[*b].name_lower)
-            .then_with(|| objects[*a].name.cmp(&objects[*b].name))
-    });
-    out
 }
 
 fn type_display(t: &sift_protocol::TypeRef) -> String {
