@@ -53,29 +53,27 @@ token=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
 python3 -c 'import secrets,sys; open(sys.argv[1], "w").write(secrets.token_hex(32))' "$scratch/secret.key"
 chmod 600 "$scratch/secret.key"
 
-with_server_env() {
-  env \
-    SIFT_DEPLOYMENT=personal \
-    SIFT_TRANSPORT=network \
-    SIFT_MODE=in-process \
-    SIFT_BIND="127.0.0.1:$port" \
-    SIFT_RUNTIME__STATE_DIR="$scratch/runtime" \
-    SIFT_AUTH__LOOPBACK_BYPASS=false \
-    SIFT_AUTH__BEARER_TOKEN="$token" \
-    SIFT_AUTH__PUBLIC_BASE_URL="$origin" \
-    SIFT_METADATA__ENABLED=true \
-    SIFT_METADATA__PATH="$scratch/metadata.sqlite" \
-    SIFT_METADATA__SECRET_BACKEND=file \
-    SIFT_METADATA__SECRET_KEY_FILE="$scratch/secret.key" \
-    SIFT_METADATA__BOOTSTRAP_LOCAL=true \
-    SIFT_DRIVERS__MOCK=true \
-    "$@"
-}
+server_environment=(
+  SIFT_DEPLOYMENT=personal
+  SIFT_TRANSPORT=network
+  SIFT_MODE=in-process
+  "SIFT_BIND=127.0.0.1:$port"
+  "SIFT_RUNTIME__STATE_DIR=$scratch/runtime"
+  SIFT_AUTH__LOOPBACK_BYPASS=false
+  "SIFT_AUTH__BEARER_TOKEN=$token"
+  "SIFT_AUTH__PUBLIC_BASE_URL=$origin"
+  SIFT_METADATA__ENABLED=true
+  "SIFT_METADATA__PATH=$scratch/metadata.sqlite"
+  SIFT_METADATA__SECRET_BACKEND=file
+  "SIFT_METADATA__SECRET_KEY_FILE=$scratch/secret.key"
+  SIFT_METADATA__BOOTSTRAP_LOCAL=true
+  SIFT_DRIVERS__MOCK=true
+)
 
-with_server_env "$server_binary" migrate apply >"$scratch/migrate.log" 2>&1
+env "${server_environment[@]}" "$server_binary" migrate apply >"$scratch/migrate.log" 2>&1
 
 start_server() {
-  with_server_env "$server_binary" >"$scratch/server.log" 2>&1 &
+  env "${server_environment[@]}" "$server_binary" >"$scratch/server.log" 2>&1 &
   server_pid=$!
   for _ in $(seq 1 300); do
     if curl -fsS --connect-timeout 1 --max-time 2 "http://127.0.0.1:$port/v1/ready" 2>/dev/null | jq -e '.ready == true' >/dev/null 2>&1; then
@@ -95,7 +93,12 @@ start_server() {
 
 stop_server() {
   kill -TERM "$server_pid"
-  wait "$server_pid"
+  local status=0
+  wait "$server_pid" || status=$?
+  if [[ $status != 0 && $status != 143 ]]; then
+    echo "hosted test server exited unexpectedly during restart (status $status)" >&2
+    exit 1
+  fi
   server_pid=
 }
 
@@ -207,6 +210,29 @@ if ! timeout 20s tailscale serve --bg --yes "http://127.0.0.1:$port" \
   echo "Tailscale Serve could not be enabled within 20 seconds" >&2
   exit 1
 fi
+https_ready=0
+for attempt in $(seq 1 180); do
+  if curl -fsS --connect-timeout 2 --max-time 5 "$origin/v1/ready" 2>/dev/null \
+    | jq -e '.ready == true' >/dev/null 2>&1; then
+    https_ready=1
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$scratch/server.log" >&2
+    echo "hosted test server exited while waiting for Tailnet HTTPS" >&2
+    exit 1
+  fi
+  if (( attempt % 10 == 0 )); then
+    echo "waiting for Tailnet certificate and HTTPS listener (${attempt}s/180s)" >&2
+  fi
+  sleep 1
+done
+if [[ $https_ready != 1 ]]; then
+  tailscale status >&2 || true
+  tailscale serve status >&2 || true
+  echo "Tailnet HTTPS did not become ready within 180 seconds" >&2
+  exit 1
+fi
 first=$(curl -fsS -X POST \
   -H 'content-type: application/json' \
   -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":1,"maximum":1}}' \
@@ -223,8 +249,16 @@ second=$(curl -fsS -X POST \
   -H 'content-type: application/json' \
   -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":1,"maximum":1}}' \
   "http://127.0.0.1:$port/v1/handshake")
-test "$(jq -r .instance_id <<<"$second")" = "$first_instance"
-test "$(jq -r .daemon_generation <<<"$second")" != "$first_generation"
+second_instance=$(jq -r .instance_id <<<"$second")
+second_generation=$(jq -r .daemon_generation <<<"$second")
+if [[ $second_instance != "$first_instance" ]]; then
+  echo "hosted restart changed immutable instance identity" >&2
+  exit 1
+fi
+if [[ $second_generation == "$first_generation" ]]; then
+  echo "hosted restart reused daemon generation $first_generation" >&2
+  exit 1
+fi
 echo "Probing the restarted generation from $remote_device" >&2
 probe_from_remote "$first_instance"
 
