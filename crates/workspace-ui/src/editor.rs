@@ -3,7 +3,13 @@
 //! undo/redo, statement targeting, and find — kept free of GPUI so it is fully
 //! unit-testable. The view renders it and bridges platform text/IME input.
 
-use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    ops::Range,
+    sync::Arc,
+    time::Duration,
+};
 
 use gpui::{
     actions, div, fill, outline, point, prelude::*, px, size, App, BorderStyle, Bounds,
@@ -951,6 +957,7 @@ actions!(
         ExitInsertMode,
         Complete,
         ExpandStar,
+        ToggleFold,
         FormatDocument,
         ApplyQuickFix,
         FindUsages,
@@ -1078,6 +1085,7 @@ pub struct QueryEditor {
     find_cache: RefCell<FindMatchCache>,
     snippet_tabstops: Vec<Range<usize>>,
     snippet_tabstop_index: usize,
+    folded_lines: Vec<Range<usize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1132,6 +1140,7 @@ impl QueryEditor {
             find_cache: RefCell::new(FindMatchCache::default()),
             snippet_tabstops: Vec::new(),
             snippet_tabstop_index: 0,
+            folded_lines: Vec::new(),
         }
     }
 
@@ -1799,6 +1808,61 @@ impl QueryEditor {
         self.request_semantic(SemanticRequestKind::Format { range }, cx);
     }
 
+    fn toggle_fold(&mut self, _: &ToggleFold, _: &mut Window, cx: &mut Context<Self>) {
+        if self.language != EditorLanguage::Sql {
+            return;
+        }
+        let cursor_line = self.document.line_of_offset(self.document.cursor());
+        if let Some(index) = self
+            .folded_lines
+            .iter()
+            .position(|range| range.start == cursor_line || range.contains(&cursor_line))
+        {
+            self.folded_lines.remove(index);
+            cx.notify();
+            return;
+        }
+        let Some(range) = foldable_line_range(&self.document) else {
+            self.semantic
+                .set_notice(Some("No multiline SQL block at the cursor.".into()));
+            cx.notify();
+            return;
+        };
+        let starts = self.document.line_starts();
+        let fold_line_end = starts
+            .get(range.start + 1)
+            .map_or(self.document.text().len(), |next| next.saturating_sub(1));
+        self.document
+            .set_selection(fold_line_end..fold_line_end, false);
+        if let Some(vim) = self.vim.as_mut() {
+            vim.set_cursor(self.document.text(), fold_line_end);
+        }
+        self.folded_lines.push(range);
+        self.folded_lines.sort_by_key(|range| range.start);
+        self.reveal_cursor();
+        cx.notify();
+    }
+
+    fn display_line_sources(&self) -> Vec<usize> {
+        (0..self.document.line_count())
+            .filter(|line| {
+                !self
+                    .folded_lines
+                    .iter()
+                    .any(|range| *line > range.start && *line < range.end)
+            })
+            .collect()
+    }
+
+    fn display_line_for_source(&self, source_line: usize) -> usize {
+        let visible_source = self.folded_lines.iter().find_map(|range| {
+            (source_line > range.start && source_line < range.end).then_some(range.start)
+        });
+        let source_line = visible_source.unwrap_or(source_line);
+        self.display_line_sources()
+            .partition_point(|line| *line < source_line)
+    }
+
     fn apply_quick_fix(&mut self, _: &ApplyQuickFix, _: &mut Window, cx: &mut Context<Self>) {
         if self.read_only {
             return;
@@ -1973,6 +2037,7 @@ impl QueryEditor {
 
     fn edited_with_auto_completion(&mut self, allow_auto_completion: bool, cx: &mut Context<Self>) {
         self.marked_range = None;
+        self.folded_lines.clear();
         self.revision = self.revision.wrapping_add(1);
         let mut cache = self.line_cache.borrow_mut();
         match self.document.last_change {
@@ -2125,6 +2190,9 @@ impl QueryEditor {
     }
 
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        let cursor_line = self.document.line_of_offset(self.document.cursor());
+        self.folded_lines
+            .retain(|range| cursor_line <= range.start || cursor_line >= range.end);
         self.reveal_cursor();
         self.cursor_blink.update(cx, CursorBlink::pause);
         if !self.cursor_event_pending {
@@ -2149,7 +2217,8 @@ impl QueryEditor {
             return;
         }
         let line = self.document.line_of_offset(self.document.cursor());
-        let caret_top = EDITOR_VERTICAL_INSET + EDITOR_LINE_HEIGHT * line as f32;
+        let display_line = self.display_line_for_source(line);
+        let caret_top = EDITOR_VERTICAL_INSET + EDITOR_LINE_HEIGHT * display_line as f32;
         let caret_bottom = caret_top + EDITOR_LINE_HEIGHT;
         let mut offset = self.scroll_handle.offset();
         let visible_top = -offset.y;
@@ -2159,7 +2228,7 @@ impl QueryEditor {
         } else if caret_bottom > visible_bottom - EDITOR_VERTICAL_INSET {
             offset.y = -(caret_bottom + EDITOR_VERTICAL_INSET - viewport.size.height);
         }
-        let line_count = self.document.line_count();
+        let line_count = self.display_line_sources().len();
         let content_height = EDITOR_VERTICAL_INSET * 2. + EDITOR_LINE_HEIGHT * line_count as f32;
         let max_scroll = (content_height - viewport.size.height).max(px(0.));
         offset.y = offset.y.min(px(0.)).max(-max_scroll);
@@ -2546,19 +2615,16 @@ impl QueryEditor {
         }
         let offset = self.scroll_handle.offset();
         let content_y = position.y - viewport.top() - offset.y - EDITOR_VERTICAL_INSET;
-        let line_count = self.document.text().split('\n').count().max(1);
+        let displayed_lines = self.display_line_sources();
+        let line_count = displayed_lines.len().max(1);
         let content_height = EDITOR_LINE_HEIGHT * line_count as f32;
         if content_y < px(0.) || content_y >= content_height {
             return None;
         }
-        let line = (f32::from(content_y) / f32::from(EDITOR_LINE_HEIGHT)) as usize;
-        let line_start = self
-            .document
-            .text()
-            .match_indices('\n')
-            .take(line)
-            .last()
-            .map_or(0, |(offset, _)| offset + 1);
+        let display_line = (f32::from(content_y) / f32::from(EDITOR_LINE_HEIGHT)) as usize;
+        let line = *displayed_lines.get(display_line)?;
+        let starts = self.document.line_starts();
+        let line_start = *starts.get(line)?;
         let line_end = self.document.text()[line_start..]
             .find('\n')
             .map_or(self.document.text().len(), |offset| line_start + offset);
@@ -2604,7 +2670,8 @@ impl QueryEditor {
         if content_y < px(0.) {
             return None;
         }
-        let line = (f32::from(content_y) / f32::from(EDITOR_LINE_HEIGHT)) as usize;
+        let display_line = (f32::from(content_y) / f32::from(EDITOR_LINE_HEIGHT)) as usize;
+        let line = *self.display_line_sources().get(display_line)?;
         let starts = self.document.line_starts();
         let start = *starts.get(line)?;
         let end = starts
@@ -2632,13 +2699,14 @@ impl QueryEditor {
     fn caret_content_origin(&self) -> Option<(Pixels, Pixels)> {
         let cursor = self.document.cursor();
         let (line, line_start) = self.line_of(cursor);
+        let display_line = self.display_line_for_source(line);
         let layout = self
             .line_layouts
-            .get(line.checked_sub(self.visible_line_start)?)?;
+            .get(display_line.checked_sub(self.visible_line_start)?)?;
         let x = layout.x_for_index(cursor.saturating_sub(line_start));
         Some((
             EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET + x,
-            EDITOR_VERTICAL_INSET + self.line_height * (line + 1) as f32,
+            EDITOR_VERTICAL_INSET + self.line_height * (display_line + 1) as f32,
         ))
     }
 
@@ -3279,11 +3347,12 @@ impl EntityInputHandler for QueryEditor {
     ) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range_utf16);
         let (line, line_start) = self.line_of(range.start);
+        let display_line = self.display_line_for_source(line);
         let layout = self
             .line_layouts
-            .get(line.checked_sub(self.visible_line_start)?)?;
+            .get(display_line.checked_sub(self.visible_line_start)?)?;
         let x = layout.x_for_index(range.start - line_start);
-        let top = bounds.top() + self.line_height * line as f32;
+        let top = bounds.top() + self.line_height * display_line as f32;
         Some(Bounds::from_corners(
             point(bounds.left() + x, top),
             point(bounds.left() + x, top + self.line_height),
@@ -3422,6 +3491,7 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::execute_document))
             .on_action(cx.listener(Self::complete))
             .on_action(cx.listener(Self::expand_star))
+            .on_action(cx.listener(Self::toggle_fold))
             .on_action(cx.listener(Self::format_document))
             .on_action(cx.listener(Self::apply_quick_fix))
             .on_action(cx.listener(Self::find_usages))
@@ -3517,6 +3587,14 @@ struct QueryEditorElement {
     editor: Entity<QueryEditor>,
 }
 
+fn foldable_line_range(document: &QueryDocument) -> Option<Range<usize>> {
+    let statement = document.active_statement()?;
+    let start = document.line_of_offset(statement.start);
+    let end_offset = statement.end.saturating_sub(1).max(statement.start);
+    let end = document.line_of_offset(end_offset).saturating_add(1);
+    (end > start.saturating_add(1)).then_some(start..end)
+}
+
 struct EditorPrepaint {
     lines: Vec<(usize, ShapedLine)>,
     line_numbers: Vec<(usize, ShapedLine)>,
@@ -3560,7 +3638,7 @@ impl Element for QueryEditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let line_count = self.editor.read(cx).document.line_count();
+        let line_count = self.editor.read(cx).display_line_sources().len();
         let mut style = Style::default();
         style.size.width = gpui::relative(1.).into();
         style.size.height =
@@ -3600,6 +3678,7 @@ impl Element for QueryEditorElement {
         let mut lines = Vec::new();
         let mut line_numbers = Vec::new();
         let line_starts = editor.document.line_starts();
+        let displayed_lines = editor.display_line_sources();
         let mut selections = Vec::new();
         let mut find_quads = Vec::new();
         let mut usage_quads = Vec::new();
@@ -3613,7 +3692,7 @@ impl Element for QueryEditorElement {
             point(text_left, text_top),
             size(
                 (bounds.size.width - EDITOR_GUTTER_WIDTH - EDITOR_TEXT_INSET).max(px(0.)),
-                EDITOR_LINE_HEIGHT * line_starts.len().max(1) as f32,
+                EDITOR_LINE_HEIGHT * displayed_lines.len().max(1) as f32,
             ),
         );
         let scroll_top = -editor.scroll_handle.offset().y;
@@ -3624,7 +3703,7 @@ impl Element for QueryEditorElement {
             0
         }
         .saturating_sub(2)
-        .min(line_starts.len().saturating_sub(1));
+        .min(displayed_lines.len().saturating_sub(1));
         let visible_end = if viewport.size.height > px(0.) {
             ((f32::from((scroll_top + viewport.size.height - EDITOR_VERTICAL_INSET).max(px(0.)))
                 / f32::from(line_height))
@@ -3633,15 +3712,29 @@ impl Element for QueryEditorElement {
         } else {
             100
         }
-        .min(line_starts.len());
+        .min(displayed_lines.len());
 
-        for line_index in visible_start..visible_end {
+        for display_index in visible_start..visible_end {
+            let line_index = displayed_lines[display_index];
             let offset = line_starts[line_index];
             let line_end = line_starts
                 .get(line_index + 1)
                 .map_or(text.len(), |next| next.saturating_sub(1));
-            let line = &text[offset..line_end];
-            let cached = editor.line_cache.borrow().lines.get(&line_index).cloned();
+            let source_line = &text[offset..line_end];
+            let folded = editor
+                .folded_lines
+                .iter()
+                .any(|range| range.start == line_index);
+            let folded_line;
+            let line = if folded {
+                folded_line = format!("{}  …", source_line.trim_end());
+                folded_line.as_str()
+            } else {
+                source_line
+            };
+            let cached = (!folded)
+                .then(|| editor.line_cache.borrow().lines.get(&line_index).cloned())
+                .flatten();
             let shaped = if let Some(line) = cached {
                 line
             } else {
@@ -3652,11 +3745,13 @@ impl Element for QueryEditorElement {
                     &runs,
                     None,
                 );
-                editor
-                    .line_cache
-                    .borrow_mut()
-                    .lines
-                    .insert(line_index, shaped.clone());
+                if !folded {
+                    editor
+                        .line_cache
+                        .borrow_mut()
+                        .lines
+                        .insert(line_index, shaped.clone());
+                }
                 shaped
             };
             let number_color = if cursor >= offset && cursor <= line_end {
@@ -3674,12 +3769,12 @@ impl Element for QueryEditorElement {
                 strikethrough: None,
             }];
             line_numbers.push((
-                line_index,
+                display_index,
                 window
                     .text_system()
                     .shape_line(number.into(), font_size, &number_runs, None),
             ));
-            let top = text_top + line_height * line_index as f32;
+            let top = text_top + line_height * display_index as f32;
 
             if let Some(diagnostic) = editor
                 .semantic
@@ -3825,17 +3920,18 @@ impl Element for QueryEditorElement {
                 });
             }
 
-            lines.push((line_index, shaped));
+            lines.push((display_index, shaped));
         }
 
         {
             let mut cache = editor.line_cache.borrow_mut();
             if cache.lines.len() > 512 {
-                let keep_start = visible_start.saturating_sub(128);
-                let keep_end = (visible_end + 128).min(line_starts.len());
-                cache
-                    .lines
-                    .retain(|line, _| *line >= keep_start && *line < keep_end);
+                let keep = displayed_lines[visible_start.saturating_sub(128)
+                    ..(visible_end + 128).min(displayed_lines.len())]
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>();
+                cache.lines.retain(|line, _| keep.contains(line));
             }
         }
 
@@ -5810,6 +5906,23 @@ fn sql_presentation_runs_cover_text_and_classify_keywords() {
     assert!(runs
         .iter()
         .any(|run| run.color == theme.colors.syntax_comment));
+}
+
+#[test]
+fn multiline_statements_fold_without_changing_document_offsets() {
+    let mut document =
+        QueryDocument::with_random_peer("select\n  id,\n  name\nfrom users;\nselect 2;");
+    document.set_selection(0..0, false);
+    assert_eq!(foldable_line_range(&document), Some(0..4));
+
+    let mut visible = (0..document.line_count()).collect::<Vec<_>>();
+    let folded = 0..4;
+    visible.retain(|line| *line <= folded.start || *line >= folded.end);
+    assert_eq!(visible, vec![0, 4]);
+    assert_eq!(
+        document.text(),
+        "select\n  id,\n  name\nfrom users;\nselect 2;"
+    );
 }
 
 #[test]

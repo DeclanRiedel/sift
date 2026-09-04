@@ -33424,6 +33424,9 @@ impl WorkspaceShell {
             CommandId::FormatSql => {
                 self.dispatch_active_editor_action(&crate::editor::FormatDocument, window, cx)
             }
+            CommandId::ToggleCodeFold => {
+                self.dispatch_active_editor_action(&crate::editor::ToggleFold, window, cx)
+            }
             CommandId::ApplySqlQuickFix => {
                 self.dispatch_active_editor_action(&crate::editor::ApplyQuickFix, window, cx)
             }
