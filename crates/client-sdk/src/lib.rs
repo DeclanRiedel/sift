@@ -457,6 +457,8 @@ pub enum Error {
     },
     #[error("websocket error: {0}")]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("{0} timed out")]
+    Timeout(&'static str),
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("json error: {0}")]
@@ -827,8 +829,10 @@ impl PersistentRoomClient {
 }
 
 fn reconnectable_client_error(error: &Error) -> bool {
-    matches!(error, Error::WebSocket(_) | Error::Transport(_))
-        || matches!(error, Error::Protocol(message) if message == "websocket closed")
+    matches!(
+        error,
+        Error::WebSocket(_) | Error::Transport(_) | Error::Timeout(_)
+    ) || matches!(error, Error::Protocol(message) if message == "websocket closed")
 }
 
 impl RoomWebSocket {
@@ -979,11 +983,18 @@ fn doc_err(error: sift_doc::DocError) -> Error {
 
 impl Client {
     pub fn new(base: impl Into<String>) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .pool_max_idle_per_host(16)
+            .build()
+            .expect("building the bounded Sift HTTP client");
         Self {
             base: base.into().trim_end_matches('/').to_string(),
             token: None,
             session_tokens: None,
-            http: reqwest::Client::new(),
+            http,
             handshake: std::sync::Arc::new(tokio::sync::OnceCell::new()),
         }
     }
@@ -4700,7 +4711,7 @@ impl Client {
                 })?,
             );
         }
-        let (socket, response) = tokio_tungstenite::connect_async(request).await?;
+        let (socket, response) = connect_websocket(request).await?;
         validate_ws_response_protocol(&response, selected).map_err(Error::Protocol)?;
         Ok(SessionWebSocket { socket })
     }
@@ -4719,7 +4730,7 @@ impl Client {
                 })?,
             );
         }
-        let (socket, response) = tokio_tungstenite::connect_async(request).await?;
+        let (socket, response) = connect_websocket(request).await?;
         validate_ws_response_protocol(&response, selected).map_err(Error::Protocol)?;
         Ok(RoomWebSocket { socket })
     }
@@ -4746,7 +4757,7 @@ impl Client {
                     .map_err(|e| Error::Protocol(format!("invalid bearer token header: {e}")))?,
             );
         }
-        let (mut ws, response) = tokio_tungstenite::connect_async(request).await?;
+        let (mut ws, response) = connect_websocket(request).await?;
         validate_ws_response_protocol(&response, selected).map_err(Error::Protocol)?;
         let request_id = "sdk-listen".to_string();
         ws.send(Message::Text(
@@ -4962,6 +4973,44 @@ fn insert_ws_protocol_header(
     Ok(())
 }
 
+async fn connect_websocket(
+    request: tokio_tungstenite::tungstenite::http::Request<()>,
+) -> Result<(
+    TransportWebSocket,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+)> {
+    let connected = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .map_err(|_| Error::Timeout("WebSocket connection"))?;
+    match connected {
+        Ok(connected) => Ok(connected),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            let status = response.status();
+            let retry_after_secs = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok());
+            let body = response.body().as_deref().unwrap_or_default();
+            let mut error = serde_json::from_slice::<ApiErrorResponse>(body).unwrap_or_else(|_| {
+                ApiErrorResponse {
+                    kind: "websocket_handshake_error".into(),
+                    message: String::from_utf8_lossy(body).into_owned(),
+                    correlation_id: None,
+                    retry_after_secs: None,
+                    edit_conflict: None,
+                }
+            });
+            error.retry_after_secs = error.retry_after_secs.or(retry_after_secs);
+            Err(Error::Server { status, error })
+        }
+        Err(error) => Err(Error::WebSocket(error)),
+    }
+}
+
 fn validate_ws_response_protocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
     expected: u32,
@@ -5140,6 +5189,39 @@ mod tests {
         let snapshot = provider.snapshot().await;
         assert_eq!(snapshot.access_token, "access-two");
         assert_eq!(snapshot.refresh_token, "refresh-two");
+    }
+
+    #[tokio::test]
+    async fn websocket_handshake_rejections_preserve_http_status() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = r#"{"kind":"unauthorized","message":"sign in again"}"#;
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let request = format!("ws://{address}/v1/ws")
+            .into_client_request()
+            .unwrap();
+        match connect_websocket(request).await {
+            Err(Error::Server { status, error }) => {
+                assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+                assert_eq!(error.kind, "unauthorized");
+                assert_eq!(error.message, "sign in again");
+            }
+            _ => panic!("expected typed WebSocket handshake rejection"),
+        }
+        server.await.unwrap();
     }
 
     #[test]

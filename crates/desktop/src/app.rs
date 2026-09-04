@@ -6525,7 +6525,7 @@ fn send_execution_error(
 ) {
     let transport = matches!(
         &error,
-        ClientError::Transport(_) | ClientError::WebSocket(_)
+        ClientError::Transport(_) | ClientError::WebSocket(_) | ClientError::Timeout(_)
     );
     let message = match error {
         ClientError::Server { error, .. } => error.message,

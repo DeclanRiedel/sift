@@ -224,7 +224,9 @@ impl LifecycleProjection {
 
 fn degraded(error: &ClientError) -> DegradedReason {
     match error {
-        ClientError::Transport(_) | ClientError::WebSocket(_) => DegradedReason::Offline,
+        ClientError::Transport(_) | ClientError::WebSocket(_) | ClientError::Timeout(_) => {
+            DegradedReason::Offline
+        }
         ClientError::Server { status, .. } => degraded_http_status(status.as_u16())
             .unwrap_or_else(|| DegradedReason::Server(error.to_string())),
         ClientError::Protocol(_) => DegradedReason::IncompatibleProtocol,
