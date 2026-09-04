@@ -395,6 +395,7 @@ use sift_protocol::{
 #[derive(Clone)]
 pub struct SessionTokenProvider {
     tokens: std::sync::Arc<tokio::sync::RwLock<AuthTokensResponse>>,
+    refresh_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for SessionTokenProvider {
@@ -410,6 +411,7 @@ impl SessionTokenProvider {
     pub fn new(tokens: AuthTokensResponse) -> Self {
         Self {
             tokens: std::sync::Arc::new(tokio::sync::RwLock::new(tokens)),
+            refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -425,6 +427,11 @@ impl SessionTokenProvider {
 
     async fn refresh_token(&self) -> String {
         self.tokens.read().await.refresh_token.clone()
+    }
+
+    async fn access_needs_refresh(&self) -> bool {
+        self.tokens.read().await.access_expires_at - chrono::Utc::now()
+            <= chrono::Duration::seconds(60)
     }
 
     async fn replace(&self, tokens: AuthTokensResponse) {
@@ -1086,14 +1093,40 @@ impl Client {
         let provider = self.session_tokens.as_ref().ok_or_else(|| {
             Error::Protocol("client has no interactive session token provider".into())
         })?;
-        let tokens: AuthTokensResponse = self
-            .post(
-                "/v1/auth/refresh",
-                &RefreshAuthRequest {
-                    refresh_token: Some(provider.refresh_token().await),
-                },
-            )
+        let _guard = provider.refresh_lock.lock().await;
+        self.refresh_session_unlocked(provider).await
+    }
+
+    async fn refresh_session_if_needed(&self) -> Result<()> {
+        let Some(provider) = &self.session_tokens else {
+            return Ok(());
+        };
+        if !provider.access_needs_refresh().await {
+            return Ok(());
+        }
+        let _guard = provider.refresh_lock.lock().await;
+        if provider.access_needs_refresh().await {
+            self.refresh_session_unlocked(provider).await?;
+        }
+        Ok(())
+    }
+
+    async fn refresh_session_unlocked(&self, provider: &SessionTokenProvider) -> Result<()> {
+        let selected = self.negotiated().await?.selected_protocol;
+        let response = self
+            .http
+            .post(self.url("/v1/auth/refresh"))
+            .header(PROTOCOL_VERSION_HEADER, selected.to_string())
+            .json(&RefreshAuthRequest {
+                refresh_token: Some(provider.refresh_token().await),
+            })
+            .send()
             .await?;
+        validate_response_protocol(&response, selected).map_err(Error::Protocol)?;
+        if !response.status().is_success() {
+            return Err(server_error(response).await);
+        }
+        let tokens: AuthTokensResponse = response.json().await?;
         provider.replace(tokens).await;
         Ok(())
     }
@@ -4703,7 +4736,7 @@ impl Client {
         let mut request = self.ws_url(session).into_client_request()?;
         let selected = self.negotiated().await?.selected_protocol;
         insert_ws_protocol_header(&mut request, selected).map_err(Error::Protocol)?;
-        if let Some(token) = self.current_bearer().await {
+        if let Some(token) = self.current_bearer().await? {
             request.headers_mut().insert(
                 "authorization",
                 format!("Bearer {token}").parse().map_err(|error| {
@@ -4722,7 +4755,7 @@ impl Client {
         let mut request = self.room_ws_url(room).into_client_request()?;
         let selected = self.negotiated().await?.selected_protocol;
         insert_ws_protocol_header(&mut request, selected).map_err(Error::Protocol)?;
-        if let Some(token) = self.current_bearer().await {
+        if let Some(token) = self.current_bearer().await? {
             request.headers_mut().insert(
                 "authorization",
                 format!("Bearer {token}").parse().map_err(|error| {
@@ -4749,7 +4782,7 @@ impl Client {
         let mut request = self.ws_url(session).into_client_request()?;
         let selected = self.negotiated().await?.selected_protocol;
         insert_ws_protocol_header(&mut request, selected).map_err(Error::Protocol)?;
-        if let Some(token) = self.current_bearer().await {
+        if let Some(token) = self.current_bearer().await? {
             request.headers_mut().insert(
                 "authorization",
                 format!("Bearer {token}")
@@ -4922,7 +4955,7 @@ impl Client {
     ) -> Result<reqwest::Response> {
         let selected = self.negotiated().await?.selected_protocol;
         request = request.header(PROTOCOL_VERSION_HEADER, selected.to_string());
-        if let Some(token) = self.current_bearer().await {
+        if let Some(token) = self.current_bearer().await? {
             request = request.bearer_auth(token);
         }
         let response = request.send().await?;
@@ -4934,11 +4967,12 @@ impl Client {
         format!("{}{}", self.base, path)
     }
 
-    async fn current_bearer(&self) -> Option<String> {
+    async fn current_bearer(&self) -> Result<Option<String>> {
         if let Some(provider) = &self.session_tokens {
-            return Some(provider.access_token().await);
+            self.refresh_session_if_needed().await?;
+            return Ok(Some(provider.access_token().await));
         }
-        self.token.clone()
+        Ok(self.token.clone())
     }
 }
 
@@ -5189,6 +5223,19 @@ mod tests {
         let snapshot = provider.snapshot().await;
         assert_eq!(snapshot.access_token, "access-two");
         assert_eq!(snapshot.refresh_token, "refresh-two");
+    }
+
+    #[tokio::test]
+    async fn session_tokens_refresh_before_the_network_deadline() {
+        let mut fresh = tokens("access", "refresh");
+        fresh.access_expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+        let provider = SessionTokenProvider::new(fresh);
+        assert!(!provider.access_needs_refresh().await);
+
+        let mut expiring = provider.snapshot().await;
+        expiring.access_expires_at = chrono::Utc::now() + chrono::Duration::seconds(30);
+        provider.replace(expiring).await;
+        assert!(provider.access_needs_refresh().await);
     }
 
     #[tokio::test]
