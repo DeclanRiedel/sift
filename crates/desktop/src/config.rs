@@ -218,8 +218,23 @@ pub(crate) fn validate_base_url(value: &str) -> Result<String, String> {
             "server URL must be an origin without credentials, path, query, or fragment".into(),
         );
     }
+    if url.scheme() == "http" && !is_loopback_host(&url) {
+        return Err(
+            "network-hosted Sift URLs must use HTTPS; use SSH mode for an encrypted Tailnet/OpenSSH tunnel"
+                .into(),
+        );
+    }
     url.set_path("");
     Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+fn is_loopback_host(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
 }
 
 fn read_token(path: &Path) -> Result<String, String> {
@@ -264,7 +279,7 @@ mod tests {
     fn command_line_server_builds_remote_config() {
         let config = DesktopConfig::from_options(
             &args(&[
-                "--server-url=http://192.168.1.10:7474/",
+                "--server-url=http://127.0.0.1:7474/",
                 "--server-name",
                 "Lab",
             ]),
@@ -272,7 +287,7 @@ mod tests {
         )
         .unwrap();
         let remote = config.remote.unwrap();
-        assert_eq!(remote.base_url, "http://192.168.1.10:7474");
+        assert_eq!(remote.base_url, "http://127.0.0.1:7474");
         assert_eq!(remote.name, "Lab");
         assert!(remote.bearer_token().is_none());
     }
@@ -321,6 +336,7 @@ mod tests {
             "http://user@sift.lan",
             "http://sift.lan/v1",
             "http://sift.lan?token=secret",
+            "http://192.168.1.10:7474",
         ] {
             assert!(DesktopConfig::from_options(
                 &args(&["--server-url", url]),

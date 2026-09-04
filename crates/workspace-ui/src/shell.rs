@@ -2106,6 +2106,11 @@ pub struct SavedServerProfile {
     pub kind: SavedServerKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_state_dir: Option<String>,
+    /// Immutable identity observed through the negotiated handshake. A saved
+    /// bookmark must not silently follow a replacement server at the same
+    /// URL or SSH destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_instance_id: Option<String>,
     #[serde(default, skip_serializing)]
     pub has_saved_token: bool,
 }
@@ -56128,6 +56133,7 @@ mod tests {
             base_url: "https://sift.example.test".into(),
             kind: SavedServerKind::Hosted,
             ssh_state_dir: None,
+            expected_instance_id: None,
             has_saved_token: true,
         };
         workspace.update(&mut cx, |shell, cx| {

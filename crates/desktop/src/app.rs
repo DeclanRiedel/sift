@@ -7767,6 +7767,7 @@ mod tests {
             base_url: "https://sift.lan".into(),
             kind: sift_workspace_ui::SavedServerKind::Hosted,
             ssh_state_dir: None,
+            expected_instance_id: None,
             has_saved_token: true,
         };
         assert_eq!(

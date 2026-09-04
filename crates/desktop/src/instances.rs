@@ -1417,6 +1417,7 @@ async fn connect(
         .as_deref()
         .and_then(|id| profiles.iter().find(|profile| profile.id == id));
     let had_saved_token = existing.is_some_and(|profile| profile.has_saved_token);
+    let expected_instance_id = existing.and_then(|profile| profile.expected_instance_id.clone());
     let profile_id = existing
         .map(|profile| profile.id.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -1430,12 +1431,13 @@ async fn connect(
         None if session.is_none() && had_saved_token => credentials.get(&profile_id).await?,
         None => None,
     };
-    let profile = SavedServerProfile {
+    let mut profile = SavedServerProfile {
         id: profile_id.clone(),
         name: name.clone(),
         base_url,
         kind: SavedServerKind::Hosted,
         ssh_state_dir: None,
+        expected_instance_id: expected_instance_id.clone(),
         has_saved_token: remember_token && token.is_some(),
     };
     let target = DesktopServer::remote(profile.clone(), token.clone());
@@ -1444,7 +1446,9 @@ async fn connect(
         None => target,
     };
     let client = target.client().await?;
-    test_client(&client, "server").await?;
+    let handshake = test_client(&client, "server").await?;
+    verify_instance_identity(expected_instance_id.as_deref(), &handshake.instance_id)?;
+    profile.expected_instance_id = Some(handshake.instance_id);
 
     if remember_token {
         if let Some(token) = token.as_deref() {
@@ -1559,6 +1563,14 @@ async fn connect_ssh(
         format!("decoding SSH helper readiness failed: {error}; output: {first}")
     })?;
 
+    let expected_instance_id = requested_id.as_deref().and_then(|id| {
+        profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .and_then(|profile| profile.expected_instance_id.clone())
+    });
+    verify_instance_identity(expected_instance_id.as_deref(), &ready.instance_id)?;
+    let pinned_instance_id = ready.instance_id.clone();
     let profile_id = requested_id
         .filter(|id| profiles.iter().any(|profile| profile.id == *id))
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -1568,10 +1580,12 @@ async fn connect_ssh(
         base_url: ready.local_base_url.clone(),
         kind: SavedServerKind::Ssh,
         ssh_state_dir: Some(state_dir.clone()),
+        expected_instance_id: Some(pinned_instance_id.clone()),
         has_saved_token: false,
     };
     let target = DesktopServer::remote(runtime_profile, Some(ready.access_token));
-    test_client(&target.client().await?, "SSH server").await?;
+    let handshake = test_client(&target.client().await?, "SSH server").await?;
+    verify_instance_identity(Some(&pinned_instance_id), &handshake.instance_id)?;
 
     let saved = SavedServerProfile {
         id: profile_id.clone(),
@@ -1579,6 +1593,7 @@ async fn connect_ssh(
         base_url: destination,
         kind: SavedServerKind::Ssh,
         ssh_state_dir: Some(state_dir.clone()),
+        expected_instance_id: Some(pinned_instance_id.clone()),
         has_saved_token: false,
     };
     if let Some(index) = profiles.iter().position(|profile| profile.id == profile_id) {
@@ -1606,12 +1621,16 @@ async fn connect_ssh(
             let Ok(ready) = serde_json::from_str::<sift_protocol::RemoteReady>(&line) else {
                 continue;
             };
+            if verify_instance_identity(Some(&pinned_instance_id), &ready.instance_id).is_err() {
+                break;
+            }
             let profile = SavedServerProfile {
                 id: profile_id.clone(),
                 name: renewal_name.clone(),
                 base_url: ready.local_base_url,
                 kind: SavedServerKind::Ssh,
                 ssh_state_dir: Some(state_dir.clone()),
+                expected_instance_id: Some(pinned_instance_id.clone()),
                 has_saved_token: false,
             };
             let _ = renewal_targets.send(DesktopServer::remote(profile, Some(ready.access_token)));
@@ -1638,9 +1657,12 @@ async fn ssh_helper_failure(child: &mut tokio::process::Child, summary: &str) ->
     }
 }
 
-async fn test_client(client: &sift_client_sdk::Client, label: &str) -> Result<(), String> {
+async fn test_client(
+    client: &sift_client_sdk::Client,
+    label: &str,
+) -> Result<sift_protocol::HandshakeResponse, String> {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        client
+        let handshake = client
             .connect()
             .await
             .map_err(|error| format!("{label} handshake failed: {error}"))?;
@@ -1654,10 +1676,19 @@ async fn test_client(client: &sift_client_sdk::Client, label: &str) -> Result<()
             }
             Err(error) => return Err(format!("{label} authentication failed: {error}")),
         }
-        Ok(())
+        Ok(handshake)
     })
     .await
     .map_err(|_| format!("{label} connection test timed out after 10 seconds"))?
+}
+
+fn verify_instance_identity(expected: Option<&str>, actual: &str) -> Result<(), String> {
+    if let Some(expected) = expected.filter(|expected| *expected != actual) {
+        return Err(format!(
+            "server identity changed (expected {expected}, received {actual}); forget and add the server again only if this replacement is intentional"
+        ));
+    }
+    Ok(())
 }
 
 async fn forget(
@@ -1698,6 +1729,7 @@ mod tests {
             base_url: "https://sift.lan".into(),
             kind: SavedServerKind::Hosted,
             ssh_state_dir: None,
+            expected_instance_id: Some("instance-one".into()),
             has_saved_token: true,
         };
         store.save(std::slice::from_ref(&profile)).unwrap();
@@ -1706,7 +1738,20 @@ mod tests {
         assert!(!json.contains("token"));
         let loaded = store.load();
         assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].expected_instance_id.as_deref(),
+            Some("instance-one")
+        );
         assert!(!loaded[0].has_saved_token);
+    }
+
+    #[test]
+    fn saved_server_identity_must_not_drift() {
+        assert!(verify_instance_identity(None, "instance-one").is_ok());
+        assert!(verify_instance_identity(Some("instance-one"), "instance-one").is_ok());
+        let error = verify_instance_identity(Some("instance-one"), "instance-two").unwrap_err();
+        assert!(error.contains("server identity changed"));
+        assert!(error.contains("forget and add the server again"));
     }
 
     #[test]
@@ -1719,6 +1764,7 @@ mod tests {
             base_url: "https://sift.lan".into(),
             kind: SavedServerKind::Hosted,
             ssh_state_dir: None,
+            expected_instance_id: None,
             has_saved_token: false,
         };
         let root = SavedInstanceRoot {
@@ -1755,6 +1801,7 @@ mod tests {
                 base_url: "https://sift.invalid".into(),
                 kind: SavedServerKind::Hosted,
                 ssh_state_dir: None,
+                expected_instance_id: None,
                 has_saved_token: false,
             },
             None,
