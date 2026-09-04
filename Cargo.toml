@@ -117,6 +117,9 @@ toml = "0.8"
 toml_edit = "0.22"
 url = "2"
 percent-encoding = "2"
+arrow-array = "59.3.0"
+arrow-schema = "59.3.0"
+parquet = { version = "59.3.0", default-features = false, features = ["arrow", "snap"] }
 zip = { version = "2", default-features = false, features = ["aes-crypto", "deflate"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "tds73", "chrono"] }

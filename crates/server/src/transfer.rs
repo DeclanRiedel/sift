@@ -4,6 +4,7 @@ use sift_protocol::{
     CsvImportRequest, ExportFormat, ExportRequest, TransferDirection, TransferEndpoint,
     TransferExecutionResult, TransferRecipe,
 };
+use std::sync::Arc;
 
 use crate::error::{ApiError, ApiResult};
 use crate::formatter_extension::FormatterPhase;
@@ -97,6 +98,43 @@ pub async fn execute_recipe(
         return Err(ApiError::BadRequest(
             "this recipe is not a query-to-artifact export".into(),
         ));
+    }
+    if recipe.format_id == "parquet" {
+        let stream = sessions
+            .export_stream(
+                request.session_id,
+                request.connection_id,
+                ExportRequest {
+                    sql: request
+                        .sql
+                        .ok_or_else(|| ApiError::BadRequest("export SQL is required".into()))?,
+                    params: request.params,
+                    format: ExportFormat::JsonLines,
+                    header: false,
+                    null_display: None,
+                },
+            )
+            .await?;
+        futures::pin_mut!(stream);
+        let mut jsonl = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| ApiError::Internal(error.to_string()))?;
+            if jsonl.len().saturating_add(chunk.len()) > MAX_ARTIFACT_BYTES {
+                return Err(ApiError::BadRequest(
+                    "transfer artifact exceeds 64 MiB".into(),
+                ));
+            }
+            jsonl.extend_from_slice(&chunk);
+        }
+        let content = json_lines_to_parquet(&jsonl)?;
+        let artifact = metadata.create_workspace_artifact(
+            recipe.workspace_id,
+            actor,
+            "application/vnd.apache.parquet",
+            content,
+            Some(chrono::Utc::now() + chrono::Duration::hours(24)),
+        )?;
+        return Ok(TransferExecutionResult::Artifact { artifact });
     }
     let format = bundled_format(&recipe.format_id);
     if format.is_none() {
@@ -236,6 +274,61 @@ pub async fn execute_recipe(
         )
         .map_err(ApiError::from)?;
     Ok(TransferExecutionResult::Artifact { artifact })
+}
+
+fn json_lines_to_parquet(jsonl: &[u8]) -> ApiResult<Vec<u8>> {
+    use arrow_array::{ArrayRef, RecordBatch, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+
+    let rows = std::str::from_utf8(jsonl)
+        .map_err(|_| ApiError::Internal("query JSON was not UTF-8".into()))?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ApiError::Internal(format!("invalid query JSON: {error}")))?;
+    let first = rows
+        .first()
+        .ok_or_else(|| ApiError::BadRequest("Parquet export requires at least one row".into()))?;
+    let columns = first.keys().cloned().collect::<Vec<_>>();
+    let schema = Arc::new(Schema::new(
+        columns
+            .iter()
+            .map(|name| Field::new(name, DataType::Utf8, true))
+            .collect::<Vec<_>>(),
+    ));
+    let arrays = columns
+        .iter()
+        .map(|name| {
+            let values = rows.iter().map(|row| {
+                row.get(name).and_then(|value| {
+                    if value.is_null() {
+                        None
+                    } else {
+                        Some(
+                            value
+                                .as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| value.to_string()),
+                        )
+                    }
+                })
+            });
+            Arc::new(StringArray::from_iter(values)) as ArrayRef
+        })
+        .collect::<Vec<_>>();
+    let batch = RecordBatch::try_new(schema.clone(), arrays)
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let mut writer = ArrowWriter::try_new(std::io::Cursor::new(Vec::new()), schema, None)
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let cursor = writer
+        .into_inner()
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    Ok(cursor.into_inner())
 }
 
 fn bundled_format(id: &str) -> Option<ExportFormat> {
@@ -481,5 +574,22 @@ mod tests {
         let csv = xlsx_to_csv(&workbook, "Results").unwrap();
         assert_eq!(String::from_utf8(csv).unwrap(), "name,\"=SUM(1,1)\"\n");
         assert!(xlsx_to_csv(&workbook, "Missing").is_err());
+    }
+
+    #[test]
+    fn parquet_export_is_readable_and_preserves_null_rows() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let encoded =
+            json_lines_to_parquet(b"{\"id\":1,\"name\":\"Alice\"}\n{\"id\":2,\"name\":null}\n")
+                .unwrap();
+        assert!(encoded.starts_with(b"PAR1") && encoded.ends_with(b"PAR1"));
+        let mut reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(encoded))
+            .unwrap()
+            .build()
+            .unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.num_columns(), 2);
     }
 }
