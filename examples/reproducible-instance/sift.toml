@@ -18,6 +18,7 @@ shutdown_drain_secs = 60
 
 [server.formatting]
 keyword_case = "upper"
+insert_trailing_semicolon = false
 
 [server.metadata]
 secret_backend = "file"

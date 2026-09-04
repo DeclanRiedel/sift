@@ -462,7 +462,7 @@ impl SemanticRegistry {
             .map(|statement| statement.full_range)
             .collect::<Vec<_>>();
         let flavor = dialect_flavor(&dialect_id)?;
-        let edits = keyword_case_edits(
+        let mut edits = keyword_case_edits(
             &source,
             actual_range,
             &protected,
@@ -470,6 +470,25 @@ impl SemanticRegistry {
             request.options.keyword_case,
             canceled,
         )?;
+        if request.options.insert_trailing_semicolon {
+            for statement in &intersecting {
+                if statement.recovered {
+                    continue;
+                }
+                let end = statement.executable_range.end as usize;
+                let full_end = statement.full_range.end as usize;
+                if !source[end..full_end].contains(';') {
+                    edits.push(TextEdit {
+                        range: TextRange {
+                            start: statement.executable_range.end,
+                            end: statement.executable_range.end,
+                        },
+                        new_text: ";".into(),
+                    });
+                }
+            }
+            edits.sort_by_key(|edit| (edit.range.start, edit.range.end));
+        }
         Ok(WorkspaceEdit {
             documents: vec![DocumentEdit {
                 document_id: id,
@@ -4181,6 +4200,43 @@ mod tests {
             )
             .unwrap();
         assert!(second.documents[0].edits.is_empty());
+    }
+
+    #[test]
+    fn formatter_can_insert_missing_statement_terminators() {
+        let registry = SemanticRegistry::default();
+        let scope = DocumentScope {
+            session: 1,
+            connection: 1,
+        };
+        let state = registry
+            .create(
+                scope,
+                dialect("sift/postgresql"),
+                "select 1".into(),
+                None,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let result = registry
+            .format(
+                scope,
+                state.document_id,
+                FormatSqlRequest {
+                    revision: 1,
+                    range: None,
+                    options: sift_protocol::FormatOptions {
+                        insert_trailing_semicolon: true,
+                        ..Default::default()
+                    },
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(result.documents[0]
+            .edits
+            .iter()
+            .any(|edit| { edit.range == TextRange { start: 8, end: 8 } && edit.new_text == ";" }));
     }
 
     #[test]

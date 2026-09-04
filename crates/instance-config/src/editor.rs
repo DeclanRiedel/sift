@@ -164,6 +164,13 @@ const FIELDS: &[Field] = &[
         &["preserve", "upper", "lower"]
     ),
     field!(
+        "server.formatting",
+        "insert_trailing_semicolon",
+        "boolean",
+        "Terminate each complete SQL statement during formatting.",
+        BOOL
+    ),
+    field!(
         "server.limits",
         "max_http_result_rows",
         "integer",

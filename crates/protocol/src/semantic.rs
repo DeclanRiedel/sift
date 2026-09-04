@@ -278,6 +278,9 @@ pub enum KeywordCase {
 pub struct FormatOptions {
     #[serde(default = "default_keyword_case")]
     pub keyword_case: KeywordCase,
+    /// Insert a semicolon after each complete statement that lacks one.
+    #[serde(default)]
+    pub insert_trailing_semicolon: bool,
 }
 
 fn default_keyword_case() -> KeywordCase {
@@ -288,6 +291,7 @@ impl Default for FormatOptions {
     fn default() -> Self {
         Self {
             keyword_case: default_keyword_case(),
+            insert_trailing_semicolon: false,
         }
     }
 }

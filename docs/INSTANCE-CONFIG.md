@@ -125,10 +125,13 @@ supported:
 ```toml
 [server.formatting]
 keyword_case = "upper"
+insert_trailing_semicolon = false
 ```
 
 The semantic formatter preserves quoted identifiers, string bodies, comments,
-and recovered statements while applying this rule.
+and recovered statements while applying these rules. Enable
+`insert_trailing_semicolon` when the instance requires explicit statement
+terminators.
 
 Collaborative vault admission, retention, and cleanup use typed server
 configuration. These defaults are set in an instance manifest under
