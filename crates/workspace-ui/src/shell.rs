@@ -307,6 +307,64 @@ fn table_node_id(
     })
 }
 
+fn foreign_key_pick_location(
+    graph: &sift_protocol::CatalogGraph,
+    table_id: &sift_protocol::CatalogObjectId,
+    column_name: &str,
+) -> Option<(sift_protocol::ObjectPath, String)> {
+    let source_column = graph.data.nodes.iter().find(|node| {
+        node.kind == sift_protocol::CatalogNodeKind::Column
+            && node.parent_id.as_ref() == Some(table_id)
+            && node.name.eq_ignore_ascii_case(column_name)
+    })?;
+    let (target_table_id, target_column_id) = graph.data.edges.iter().find_map(|edge| {
+        if edge.kind != sift_protocol::CatalogEdgeKind::ForeignKey {
+            return None;
+        }
+        let target_table = edge.to.as_ref()?;
+        edge.column_pairs
+            .iter()
+            .find(|pair| pair.from == source_column.id)
+            .map(|pair| (target_table, &pair.to))
+    })?;
+    let target_table = graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| &node.id == target_table_id)?;
+    let target_column = graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| &node.id == target_column_id)?;
+    let schema = target_table.parent_id.as_ref().and_then(|parent| {
+        graph
+            .data
+            .nodes
+            .iter()
+            .find(|candidate| &candidate.id == parent)
+    });
+    let catalog = schema
+        .and_then(|schema| schema.parent_id.as_ref())
+        .and_then(|parent| {
+            graph
+                .data
+                .nodes
+                .iter()
+                .find(|candidate| &candidate.id == parent)
+        });
+    Some((
+        sift_protocol::ObjectPath {
+            catalog: catalog.map(|node| node.name.clone()),
+            schema: schema.map(|node| node.name.clone()),
+            name: target_table.name.clone(),
+            kind: Some(sift_protocol::ObjectKind::Table),
+            routine_args: None,
+        },
+        target_column.name.clone(),
+    ))
+}
+
 fn table_detail_nodes<'a>(
     graph: &'a sift_protocol::CatalogGraph,
     table_id: &sift_protocol::CatalogObjectId,
@@ -2639,6 +2697,13 @@ struct ResultCellEditTarget {
     item_id: u64,
     cells: Vec<crate::results::SelectedCellEdit>,
     source: DatabaseObjectSource,
+}
+
+#[derive(Debug, Clone)]
+struct ForeignKeyPickTarget {
+    edit: ResultCellEditTarget,
+    table: sift_protocol::ObjectPath,
+    column: String,
 }
 
 impl ResultCellEditTarget {
@@ -9592,6 +9657,7 @@ pub struct WorkspaceShell {
     schema_search_filters: HashSet<ObjectGroupKind>,
     data_search_generation: u64,
     data_search_state: DataSearchState,
+    foreign_key_pick_target: Option<ForeignKeyPickTarget>,
     table_definitions: HashMap<u64, TableDefinitionState>,
     table_definition_sections: HashMap<u64, TableDefinitionSection>,
     pending_object_ddl: HashSet<u64>,
@@ -10825,6 +10891,7 @@ impl WorkspaceShell {
                 .collect(),
             data_search_generation: 0,
             data_search_state: DataSearchState::Idle,
+            foreign_key_pick_target: None,
             table_definitions: HashMap::new(),
             table_definition_sections: HashMap::new(),
             pending_object_ddl: HashSet::new(),
@@ -16136,7 +16203,11 @@ impl WorkspaceShell {
             cx.notify();
             return;
         }
-        let tables = self.searchable_tables();
+        let tables = self
+            .foreign_key_pick_target
+            .as_ref()
+            .map(|target| vec![target.table.clone()])
+            .unwrap_or_else(|| self.searchable_tables());
         if tables.is_empty() {
             self.data_search_state = DataSearchState::Failed(
                 "No searchable tables are available in the loaded schema".into(),
@@ -16147,9 +16218,20 @@ impl WorkspaceShell {
         let request = sift_protocol::DataSearchRequest {
             scope: sift_protocol::DataSearchScope::Tables { tables },
             query,
-            per_table_limit: Some(10),
-            max_tables: Some(20),
-            columns: None,
+            per_table_limit: Some(if self.foreign_key_pick_target.is_some() {
+                50
+            } else {
+                10
+            }),
+            max_tables: Some(if self.foreign_key_pick_target.is_some() {
+                1
+            } else {
+                20
+            }),
+            columns: self
+                .foreign_key_pick_target
+                .as_ref()
+                .map(|target| vec![target.column.clone()]),
         };
         let sent = self.executor_sender.as_ref().is_some_and(|sender| {
             sender
@@ -29275,6 +29357,7 @@ impl WorkspaceShell {
     }
 
     fn open_data_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.foreign_key_pick_target = None;
         if !matches!(self.connection_status, ConnectionStatus::Connected { .. }) {
             self.show_toast(
                 "Connect to a database before searching table data".into(),
@@ -29287,6 +29370,113 @@ impl WorkspaceShell {
             return;
         }
         self.open_command_palette_with_query("$", window, cx);
+    }
+
+    fn open_foreign_key_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.get(self.active_pane).cloned() else {
+            return;
+        };
+        let Some(item) = pane.read(cx).active_item().cloned() else {
+            return;
+        };
+        let Some(source) = pane.read(cx).database_source(item.id) else {
+            self.show_toast("Foreign-key picking is available for table data".into(), cx);
+            return;
+        };
+        let Some(results) = pane.read(cx).results.get(&item.id).cloned() else {
+            return;
+        };
+        let cells = results.read(cx).selected_cell_edits();
+        let Some(first) = cells.first() else {
+            self.show_toast("Select a foreign-key cell first".into(), cx);
+            return;
+        };
+        if cells.iter().any(|cell| cell.column != first.column) {
+            self.show_toast(
+                "Foreign-key picking requires one selected column".into(),
+                cx,
+            );
+            return;
+        }
+        let location = match self.table_definitions.get(&item.id) {
+            Some(TableDefinitionState::Ready {
+                graph, table_id, ..
+            }) => foreign_key_pick_location(graph, table_id, &first.column),
+            _ => {
+                self.request_table_definition(item.id, source.clone(), cx);
+                self.show_toast("Loading table relationships; try again shortly".into(), cx);
+                return;
+            }
+        };
+        let Some((table, column)) = location else {
+            self.show_toast(
+                format!("{} is not a catalog-proven foreign key", first.column),
+                cx,
+            );
+            return;
+        };
+        self.foreign_key_pick_target = Some(ForeignKeyPickTarget {
+            edit: ResultCellEditTarget {
+                item_id: item.id,
+                cells,
+                source,
+            },
+            table,
+            column,
+        });
+        self.data_search_state = DataSearchState::Idle;
+        self.data_search_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.modal = Some(Modal::DataSearch);
+        self.data_search_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn choose_foreign_key_hit(
+        &mut self,
+        hit: sift_protocol::DataSearchHit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.foreign_key_pick_target.take() else {
+            return;
+        };
+        let Some(index) = hit
+            .columns
+            .iter()
+            .position(|column| column.eq_ignore_ascii_case(&target.column))
+        else {
+            self.show_error_toast("Referenced key was absent from the selected row".into(), cx);
+            return;
+        };
+        let Some(value) = hit.row.values.get(index) else {
+            self.show_error_toast("Referenced row had an invalid value layout".into(), cx);
+            return;
+        };
+        let item_id = target.edit.item_id;
+        self.result_cell_edit_target = Some(target.edit);
+        let text = render_value(value).text;
+        if !self.stage_result_cell_text(&text, cx) {
+            self.show_error_toast(
+                self.result_edit_error
+                    .clone()
+                    .unwrap_or_else(|| "Referenced value has an incompatible type".into()),
+                cx,
+            );
+            return;
+        }
+        self.sync_staged_result_cells(item_id, cx);
+        self.result_cell_edit_target = None;
+        self.modal = None;
+        self.data_search_state = DataSearchState::Idle;
+        self.focus_results(window, cx);
+        self.show_toast(
+            format!(
+                "Foreign-key value staged for {} cell(s)",
+                self.staged_result_change_count()
+            ),
+            cx,
+        );
     }
 
     fn capture_catalog_snapshot(&mut self, cx: &mut Context<Self>) {
@@ -33131,6 +33321,7 @@ impl WorkspaceShell {
             }
         }
         if self.modal == Some(Modal::DataSearch) {
+            self.foreign_key_pick_target = None;
             self.data_search_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
@@ -33434,6 +33625,7 @@ impl WorkspaceShell {
             CommandId::CopyResultAsMarkdown => {
                 self.copy_active_result_as(ResultCopyFormat::Markdown, cx)
             }
+            CommandId::PickForeignKeyValue => self.open_foreign_key_picker(window, cx),
             CommandId::FocusResults => self.focus_results(window, cx),
             CommandId::FocusProblems => self.show_global_problems(window, cx),
             CommandId::FocusAutomations => self.focus_automations(window, cx),
@@ -39688,6 +39880,7 @@ impl WorkspaceShell {
                 }
                 Modal::DataSearch => {
                     let state = self.data_search_state.clone();
+                    let picking_foreign_key = self.foreign_key_pick_target.is_some();
                     let (hits, summary) = match &state {
                         DataSearchState::Ready { response, .. } => (
                             response.hits.clone(),
@@ -39748,6 +39941,7 @@ impl WorkspaceShell {
                                     .flex_col()
                                     .gap_2()
                                     .children(hits.into_iter().enumerate().map(|(index, hit)| {
+                                        let pick_hit = hit.clone();
                                         let table = [
                                             hit.table.catalog.as_deref(),
                                             hit.table.schema.as_deref(),
@@ -39795,13 +39989,32 @@ impl WorkspaceShell {
                                                         },
                                                     )),
                                             )
+                                            .when(picking_foreign_key, |row| {
+                                                row.cursor_pointer()
+                                                    .hover(|row| row.bg(colors.hovered_surface))
+                                                    .on_click(cx.listener(
+                                                        move |shell, _, window, cx| {
+                                                            shell.choose_foreign_key_hit(
+                                                                pick_hit.clone(),
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        },
+                                                    ))
+                                            })
                                     })),
                             )
                         })
                         .when(!has_hits, |modal| {
                             let (message, color) = match state {
                                 DataSearchState::Idle => (
-                                    "Type to search text-like columns across loaded tables".into(),
+                                    if picking_foreign_key {
+                                        "Type to search the referenced key, then select a row"
+                                            .into()
+                                    } else {
+                                        "Type to search text-like columns across loaded tables"
+                                            .into()
+                                    },
                                     colors.muted_text,
                                 ),
                                 DataSearchState::Loading => {
@@ -48968,6 +49181,84 @@ mod tests {
                 edges: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn foreign_key_picker_resolves_the_referenced_table_and_column() {
+        use sift_protocol::{
+            CatalogColumnPair, CatalogCompleteness, CatalogEdge, CatalogEdgeCertainty,
+            CatalogEdgeKind, CatalogNode, CatalogNodeDetails, CatalogNodeKind, CatalogObjectId,
+            ColumnMetadata, PrimitiveType, TypeRef,
+        };
+        let mut graph = table_graph();
+        let node = |id: &str,
+                    kind: CatalogNodeKind,
+                    name: &str,
+                    parent: &str,
+                    details: CatalogNodeDetails| CatalogNode {
+            id: CatalogObjectId(id.into()),
+            native_id: None,
+            kind,
+            name: name.into(),
+            qualified_name: format!("sifttest.lab.{name}"),
+            parent_id: Some(CatalogObjectId(parent.into())),
+            ordinal: None,
+            definition_digest: None,
+            completeness: CatalogCompleteness::Complete,
+            details,
+            extra: Default::default(),
+        };
+        graph.data.nodes.extend([
+            node(
+                "column-team",
+                CatalogNodeKind::Column,
+                "team_id",
+                "table",
+                CatalogNodeDetails::Column {
+                    column: ColumnMetadata::new(
+                        "team_id",
+                        TypeRef::Primitive(PrimitiveType::Int64),
+                    ),
+                },
+            ),
+            node(
+                "table-teams",
+                CatalogNodeKind::Table,
+                "teams",
+                "schema",
+                CatalogNodeDetails::Object { routine_args: None },
+            ),
+            node(
+                "column-team-id",
+                CatalogNodeKind::Column,
+                "id",
+                "table-teams",
+                CatalogNodeDetails::Column {
+                    column: ColumnMetadata::new("id", TypeRef::Primitive(PrimitiveType::Int64)),
+                },
+            ),
+        ]);
+        graph.data.edges.push(CatalogEdge {
+            from: CatalogObjectId("constraint-team".into()),
+            to: Some(CatalogObjectId("table-teams".into())),
+            kind: CatalogEdgeKind::ForeignKey,
+            certainty: CatalogEdgeCertainty::CatalogProven,
+            referenced_path: None,
+            column_pairs: vec![CatalogColumnPair {
+                from: CatalogObjectId("column-team".into()),
+                to: CatalogObjectId("column-team-id".into()),
+            }],
+        });
+
+        let (table, column) =
+            foreign_key_pick_location(&graph, &CatalogObjectId("table".into()), "team_id").unwrap();
+        assert_eq!(table.catalog.as_deref(), Some("sifttest"));
+        assert_eq!(table.schema.as_deref(), Some("lab"));
+        assert_eq!(table.name, "teams");
+        assert_eq!(column, "id");
+        assert!(
+            foreign_key_pick_location(&graph, &CatalogObjectId("table".into()), "name").is_none()
+        );
     }
 
     fn table_graph_with_details() -> sift_protocol::CatalogGraph {
