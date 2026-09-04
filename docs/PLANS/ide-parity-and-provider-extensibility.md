@@ -87,8 +87,8 @@ delete, import, and export workflows.
 - [x] Snippets and templates
 - [x] SQL variables
 - [ ] Multi-cursor editing
-- [ ] Code folding
-- [ ] Configurable formatting rules
+- [x] Code folding
+- [x] Configurable formatting rules
 
 ### SQL intelligence
 
