@@ -62,9 +62,26 @@ and intersecting ceilings.
 
 ### SSH helper lifecycle
 
-- [ ] Drain helper stderr from spawn, retaining only bounded diagnostics, so
+- [x] Drain helper stderr from spawn, retaining only bounded diagnostics, so
   bootstrap cannot block on a full pipe before it emits readiness.
-- [ ] Bound readiness lines on initial connect and renewal, reject non-loopback
+- [x] Bound readiness lines on initial connect and renewal, reject non-loopback
   forwarding URLs before sending credentials, and never echo token-bearing JSON
   in a parse error. Own the drain task through cancellation and early returns.
-- [ ] Bound control-master shutdown as well as startup and ordinary commands.
+- [x] Bound control-master shutdown as well as startup and ordinary commands.
+
+Evidence: two desktop output tests passed, covering IPv4/IPv6 loopback, invalid
+and oversized readiness, redacted parse failures, and draining three times the
+retention limit through a small pipe. Workspace Clippy passed. Live SSH hosts
+were not contacted; endpoint identity pinning and capability exchange remain
+in the existing connection path.
+
+### Multiplayer lifecycle and memory
+
+- [ ] Keep room creation/attachment/subscription atomic with idle eviction;
+  evict after the last attachment too, regardless of drop order. Expiration
+  must recheck a lease under its entry lock before removing refreshed presence.
+- [ ] Bound replica chunk counts, bytes, and concurrent transfers; count received
+  chunks instead of scanning all slots each arrival. Reject inconsistent or
+  incomplete transfers, and clear abandoned transfers on resync/reconnect.
+- [ ] Retain pending update IDs only. Reconnect already reconstructs missing
+  updates from the CRDT version vector, so retaining payload copies is waste.

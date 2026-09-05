@@ -1,7 +1,8 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
+
+mod ssh_output;
 
 use keyring::{Entry, Error as KeyringError};
 use sift_client_sdk::SessionTokenProvider;
@@ -18,7 +19,6 @@ use crate::config::{validate_base_url, validate_token};
 
 const PROFILE_VERSION: u32 = 1;
 const KEYCHAIN_SERVICE: &str = "sift-desktop";
-const MAX_SSH_HELPER_DIAGNOSTICS: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct InstanceStore {
@@ -1582,19 +1582,31 @@ async fn connect_ssh(
         .stdout
         .take()
         .ok_or_else(|| "SSH helper stdout was unavailable".to_string())?;
-    let mut lines = tokio::io::BufReader::new(stdout).lines();
-    let first = match tokio::time::timeout(std::time::Duration::from_secs(120), lines.next_line())
-        .await
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "SSH helper stderr was unavailable".to_string())?;
+    let mut diagnostics = ssh_output::Diagnostics::drain(stderr);
+    let mut lines = tokio::io::BufReader::new(stdout);
+    let ready = match tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        ssh_output::read_ready(&mut lines),
+    )
+    .await
     {
-        Ok(Ok(Some(line))) => line,
+        Ok(Ok(Some(ready))) => ready,
         Ok(Ok(None)) => {
-            return Err(
-                ssh_helper_failure(&mut child, "SSH helper exited before remote readiness").await,
+            return Err(ssh_helper_failure(
+                &mut child,
+                &mut diagnostics,
+                "SSH helper exited before remote readiness",
             )
+            .await)
         }
         Ok(Err(error)) => {
             return Err(ssh_helper_failure(
                 &mut child,
+                &mut diagnostics,
                 &format!("reading SSH helper readiness failed: {error}"),
             )
             .await)
@@ -1602,14 +1614,12 @@ async fn connect_ssh(
         Err(_) => {
             return Err(ssh_helper_failure(
                 &mut child,
+                &mut diagnostics,
                 "SSH helper timed out before remote readiness",
             )
             .await)
         }
     };
-    let ready: sift_protocol::RemoteReady = serde_json::from_str(&first).map_err(|error| {
-        format!("decoding SSH helper readiness failed: {error}; output: {first}")
-    })?;
 
     let expected_instance_id = requested_id.as_deref().and_then(|id| {
         profiles
@@ -1658,16 +1668,8 @@ async fn connect_ssh(
     let renewal_targets = targets.clone();
     let renewal_name = name.clone();
     let task = tokio::spawn(async move {
-        let stderr_task = child.stderr.take().map(|stderr| {
-            tokio::spawn(async move {
-                let mut stderr = tokio::io::BufReader::new(stderr);
-                let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-            })
-        });
-        while let Ok(Some(line)) = lines.next_line().await {
-            let Ok(ready) = serde_json::from_str::<sift_protocol::RemoteReady>(&line) else {
-                continue;
-            };
+        let _diagnostics = diagnostics;
+        while let Ok(Some(ready)) = ssh_output::read_ready(&mut lines).await {
             if verify_instance_identity(Some(&pinned_instance_id), &ready.instance_id).is_err() {
                 break;
             }
@@ -1683,33 +1685,17 @@ async fn connect_ssh(
             let _ = renewal_targets.send(DesktopServer::remote(profile, Some(ready.access_token)));
         }
         let _ = child.kill().await;
-        if let Some(task) = stderr_task {
-            task.abort();
-        }
     });
     Ok((ManagerOutcome::Connected(name), task))
 }
 
-async fn ssh_helper_failure(child: &mut tokio::process::Child, summary: &str) -> String {
+async fn ssh_helper_failure(
+    child: &mut tokio::process::Child,
+    diagnostics: &mut ssh_output::Diagnostics,
+    summary: &str,
+) -> String {
     let _ = child.kill().await;
-    let mut detail = Vec::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        let _ = (&mut stderr)
-            .take((MAX_SSH_HELPER_DIAGNOSTICS + 1) as u64)
-            .read_to_end(&mut detail)
-            .await;
-    }
-    let truncated = detail.len() > MAX_SSH_HELPER_DIAGNOSTICS;
-    detail.truncate(MAX_SSH_HELPER_DIAGNOSTICS);
-    let detail = String::from_utf8_lossy(&detail);
-    let detail = detail.trim();
-    if detail.is_empty() {
-        summary.to_owned()
-    } else if truncated {
-        format!("{summary}: {detail}… [diagnostics truncated]")
-    } else {
-        format!("{summary}: {detail}")
-    }
+    diagnostics.failure(summary).await
 }
 
 async fn test_client(

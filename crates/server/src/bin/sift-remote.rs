@@ -682,7 +682,8 @@ impl SshSession {
         if !self.multiplex.load(Ordering::Acquire) {
             return;
         }
-        let _ = Command::new("ssh")
+        let mut command = Command::new("ssh");
+        command
             .arg("-S")
             .arg(self.control_socket.as_ref())
             .arg("-O")
@@ -690,8 +691,8 @@ impl SshSession {
             .arg(self.destination.as_ref())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .await;
+            .kill_on_drop(true);
+        let _ = tokio::time::timeout(SSH_COMMAND_TIMEOUT, command.status()).await;
     }
 
     async fn agent_json<T: serde::de::DeserializeOwned>(
