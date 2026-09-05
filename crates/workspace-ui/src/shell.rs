@@ -644,22 +644,32 @@ fn query_performance_summary(entries: &[sift_api_types::QueryHistory]) -> QueryP
         .iter()
         .filter_map(|entry| entry.duration_ms)
         .collect::<Vec<_>>();
-    durations.sort_unstable();
     let timed_runs = durations.len();
     let average_ms = if timed_runs == 0 {
         0
     } else {
-        durations.iter().sum::<i64>() / timed_runs as i64
+        (durations
+            .iter()
+            .map(|duration| i128::from(*duration))
+            .sum::<i128>()
+            / timed_runs as i128) as i64
     };
-    let p95_ms = timed_runs
-        .checked_sub(1)
-        .map(|last| durations[last * 95 / 100])
-        .unwrap_or(0);
+    // Nearest-rank percentile: ceil(0.95 * n), indexed from one. Selection
+    // avoids sorting the whole history just to display one order statistic.
+    let p95_ms = if timed_runs == 0 {
+        0
+    } else {
+        let index = timed_runs - timed_runs / 20 - 1;
+        *durations.select_nth_unstable(index).1
+    };
     QueryPerformanceSummary {
         timed_runs,
         average_ms,
         p95_ms,
-        total_rows: entries.iter().filter_map(|entry| entry.row_count).sum(),
+        total_rows: entries
+            .iter()
+            .filter_map(|entry| entry.row_count)
+            .fold(0i64, i64::saturating_add),
         failures: entries
             .iter()
             .filter(|entry| matches!(entry.status, sift_api_types::QueryStatus::Error))
@@ -48841,11 +48851,17 @@ mod tests {
             QueryPerformanceSummary {
                 timed_runs: 3,
                 average_ms: 43,
-                p95_ms: 20,
+                p95_ms: 100,
                 total_rows: 5,
                 failures: 1,
             }
         );
+        let large = vec![entry(4, i64::MAX, i64::MAX, sift_api_types::QueryStatus::Ok); 20];
+        let summary = query_performance_summary(&large);
+        assert_eq!(summary.average_ms, i64::MAX);
+        assert_eq!(summary.p95_ms, i64::MAX);
+        assert_eq!(summary.total_rows, i64::MAX);
+        assert_eq!(query_performance_summary(&[]).p95_ms, 0);
     }
 
     fn ranked_candidate(
