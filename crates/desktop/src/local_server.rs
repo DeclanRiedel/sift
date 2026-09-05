@@ -38,6 +38,7 @@ pub struct LocalServerManager {
     runtime_state_dir: PathBuf,
     base_url: String,
     instance_root: Option<PathBuf>,
+    configured_bind: Option<std::net::SocketAddr>,
 }
 
 impl LocalServerManager {
@@ -64,6 +65,7 @@ impl LocalServerManager {
             runtime_state_dir,
             base_url,
             instance_root: None,
+            configured_bind: None,
         }
     }
 
@@ -84,6 +86,14 @@ impl LocalServerManager {
             launcher: server,
             runtime_state_dir: instance.default_state_dir(),
             base_url: "auto-loopback".into(),
+            configured_bind: Some(
+                instance
+                    .manifest
+                    .server
+                    .bind
+                    .parse()
+                    .map_err(|_| "invalid configured bind address")?,
+            ),
             instance_root: Some(instance.root),
         })
     }
@@ -195,12 +205,11 @@ impl LocalServerManager {
             Ok(descriptor) => descriptor,
             Err(_) => return Ok(None),
         };
-        if !descriptor.endpoint.ip().is_loopback() || descriptor.endpoint.port() == 0 {
-            return Err(
-                "local Sift descriptor must name a loopback endpoint with a nonzero port".into(),
-            );
-        }
-        let candidate = Client::new(format!("http://{}", descriptor.endpoint));
+        let endpoint = local_connect_endpoint(
+            self.configured_bind.expect("configured manager has a bind"),
+            descriptor.endpoint,
+        )?;
+        let candidate = Client::new(format!("http://{endpoint}"));
         match tokio::time::timeout(Duration::from_secs(1), candidate.connect()).await {
             Ok(Ok(handshake))
                 if handshake.instance_id == descriptor.instance_id
@@ -216,6 +225,29 @@ impl LocalServerManager {
     fn lease_count(&self) -> usize {
         self.state.lock().unwrap().leases
     }
+}
+
+fn local_connect_endpoint(
+    configured: std::net::SocketAddr,
+    advertised: std::net::SocketAddr,
+) -> Result<std::net::SocketAddr, String> {
+    if configured.ip() != advertised.ip()
+        || advertised.port() == 0
+        || (configured.port() != 0 && configured.port() != advertised.port())
+    {
+        return Err("local Sift descriptor does not match the configured bind address".into());
+    }
+    // Network-hosted instances may bind every interface. A local supervisor
+    // connects through loopback instead of using a wildcard as a destination.
+    let mut endpoint = advertised;
+    if endpoint.ip().is_unspecified() {
+        endpoint.set_ip(if endpoint.is_ipv4() {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else {
+            std::net::Ipv6Addr::LOCALHOST.into()
+        });
+    }
+    Ok(endpoint)
 }
 
 pub struct LocalServerLease {
@@ -237,6 +269,30 @@ impl Drop for LocalServerLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_network_binds_use_validated_descriptor_endpoints() {
+        for (bind, advertised, expected) in [
+            ("0.0.0.0:0", "0.0.0.0:7474", "127.0.0.1:7474"),
+            ("[::]:7474", "[::]:7474", "[::1]:7474"),
+            ("192.0.2.1:7474", "192.0.2.1:7474", "192.0.2.1:7474"),
+        ] {
+            assert_eq!(
+                local_connect_endpoint(bind.parse().unwrap(), advertised.parse().unwrap()).unwrap(),
+                expected.parse().unwrap()
+            );
+        }
+        assert!(local_connect_endpoint(
+            "127.0.0.1:7474".parse().unwrap(),
+            "192.0.2.1:7474".parse().unwrap()
+        )
+        .is_err());
+        assert!(local_connect_endpoint(
+            "127.0.0.1:7474".parse().unwrap(),
+            "127.0.0.1:1234".parse().unwrap()
+        )
+        .is_err());
+    }
 
     #[tokio::test]
     async fn a_stalled_http_listener_cannot_block_local_activation() {

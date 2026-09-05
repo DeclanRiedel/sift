@@ -198,12 +198,16 @@ and repeated i64-maximum durations/row counts. Workspace Clippy passed.
   stalls startup indefinitely because the SDK has no HTTP response deadline.
 - [x] Bound individual probes and avoid reparsing/rehashing the same instance
   manifest and lock on every 100-ms readiness poll. Use the already validated
-  manager's state directory, and accept only a local descriptor endpoint.
+  manager's state directory, and validate its advertised endpoint against the
+  configured bind. Wildcard network binds connect through local loopback;
+  explicit interface binds remain supported.
 
 Evidence: the full workspace suite passed, including desktop lifecycle tests
 and a stalled local TCP listener that never sends HTTP headers. Individual
 probes now time out after one second. The supervisor also kills its own child
 on final drop even if activation failed before acquiring a window lease.
+Three local-supervisor tests additionally cover IPv4/IPv6 wildcard binds,
+explicit interface binds, and rejecting a mismatched descriptor address/port.
 
 ### Document actor retention
 
@@ -229,6 +233,43 @@ Evidence: three shared-result tests and workspace Clippy passed. Eight threads
 publish 256 results into one room and retain exactly 32. Retired spill files
 are dropped after releasing the publication lock, as well as keeping initial
 serialization/spill outside it.
+
+## Coverage and remaining verification limits
+
+- Configuration ownership was traced from manifest/lock validation through
+  applied-generation checks and runtime conversion. Startup rejects unapplied
+  source drift; only opaque credential handles enter metadata. Runtime safety
+  limits and configuration help now agree at the boundaries changed here.
+- Local, network, and SSH transport were checked separately from personal/team
+  deployment. Authentication middleware remains fail-closed; session/cursor
+  ownership and managed connection policy remain server-owned. ADR-019/020
+  now describe tenant revocation and the implemented SSH policy accurately.
+- SDK reconnect still reattaches and reconstructs missing CRDT updates from
+  version vectors. Results remain immutable independent reader views, with
+  bounded retention and encrypted spill, not CRDT state.
+- Existing editor tests exercise virtualized large documents and cached line
+  layouts; new tests cover stale work, caret movement, coalescing, and popup
+  bounds. No new speedup percentage is claimed: improvements remove repeated
+  allocations/work or bound resource retention, rather than benchmark a workload.
+- Native pixel screenshots remain unverified because X display authentication
+  is unavailable. Layout tests are rendered GPUI geometry, not screenshots.
+  They sample content/footer states; they do not prove every possible dynamic
+  text payload fits every display/theme.
+- Live external PostgreSQL, SQL Server, SSH, OAuth, and repository-provider
+  infrastructure was not contacted. Local HTTP/WebSocket and in-memory relay
+  tests cover the changed boundaries; feature-gated live suites remain separate.
+- Future unchecked product inventory items (for example backup/restore,
+  resumable transfer UI, and metrics export) were not silently treated as
+  implemented. This audit's concrete findings are the checklist above.
+
+## Validation environment
+
+Desktop test linking needs `libxkbcommon-x11.so`, but this machine only has its
+versioned runtime library. Tests used an ephemeral linker alias via
+`LIBRARY_PATH=/tmp/sift-refactor-HGLfxo`; no repository or system linker settings
+were changed. Native display capture remained unavailable. Build artifacts have
+left roughly 4 GiB free on the filesystem; no user files were deleted to make
+space. Temporary JSON tracking stays outside Git under the same `/tmp` directory.
 
 ### Repository hosting I/O
 
