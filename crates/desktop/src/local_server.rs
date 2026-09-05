@@ -11,6 +11,23 @@ struct LocalServerState {
     child: Option<Child>,
 }
 
+impl LocalServerState {
+    fn stop_owned_child(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for LocalServerState {
+    fn drop(&mut self) {
+        // A configured instance can fail or be cancelled before its first
+        // window lease is acquired. Dropping the supervisor still owns cleanup.
+        self.stop_owned_child();
+    }
+}
+
 /// One process-wide supervisor shared by every desktop window. The first
 /// lease may start the bundled launcher; the final lease stops only a process
 /// that this desktop instance owns.
@@ -86,13 +103,25 @@ impl LocalServerManager {
     }
 
     pub async fn ensure_ready(&self) -> Result<Client, String> {
+        tokio::time::timeout(Duration::from_secs(10), self.ensure_ready_inner())
+            .await
+            .map_err(|_| "local Sift server missed the 10-second readiness deadline".to_string())?
+    }
+
+    async fn ensure_ready_inner(&self) -> Result<Client, String> {
         if let Some(client) = self.discover_configured_client().await? {
             return Ok(client);
         }
-        if self.instance_root.is_none() {
-            let client = Client::new(&self.base_url);
-            if client.connect().await.is_ok() {
-                return Ok(client);
+        let local_client = self
+            .instance_root
+            .is_none()
+            .then(|| Client::new(&self.base_url));
+        if let Some(client) = &local_client {
+            if tokio::time::timeout(Duration::from_secs(1), client.connect())
+                .await
+                .is_ok_and(|result| result.is_ok())
+            {
+                return Ok(client.clone());
             }
         }
         {
@@ -144,10 +173,12 @@ impl LocalServerManager {
             if let Some(candidate) = self.discover_configured_client().await? {
                 return Ok(candidate);
             }
-            if self.instance_root.is_none() {
-                let candidate = Client::new(&self.base_url);
-                if candidate.connect().await.is_ok() {
-                    return Ok(candidate);
+            if let Some(candidate) = &local_client {
+                if tokio::time::timeout(Duration::from_secs(1), candidate.connect())
+                    .await
+                    .is_ok_and(|result| result.is_ok())
+                {
+                    return Ok(candidate.clone());
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -156,21 +187,22 @@ impl LocalServerManager {
     }
 
     async fn discover_configured_client(&self) -> Result<Option<Client>, String> {
-        let Some(root) = &self.instance_root else {
+        let Some(_) = &self.instance_root else {
             return Ok(None);
         };
-        let instance = match sift_server::instance_runtime::InstanceRoot::open(root) {
-            Ok(instance) => instance,
-            Err(error) => return Err(format!("loading instance root failed: {error:#}")),
+        let descriptor = match sift_server::runtime::read_daemon_descriptor(&self.runtime_state_dir)
+        {
+            Ok(descriptor) => descriptor,
+            Err(_) => return Ok(None),
         };
-        let descriptor =
-            match sift_server::runtime::read_daemon_descriptor(&instance.default_state_dir()) {
-                Ok(descriptor) => descriptor,
-                Err(_) => return Ok(None),
-            };
+        if !descriptor.endpoint.ip().is_loopback() || descriptor.endpoint.port() == 0 {
+            return Err(
+                "local Sift descriptor must name a loopback endpoint with a nonzero port".into(),
+            );
+        }
         let candidate = Client::new(format!("http://{}", descriptor.endpoint));
-        match candidate.connect().await {
-            Ok(handshake)
+        match tokio::time::timeout(Duration::from_secs(1), candidate.connect()).await {
+            Ok(Ok(handshake))
                 if handshake.instance_id == descriptor.instance_id
                     && handshake.daemon_generation == descriptor.daemon_generation =>
             {
@@ -197,11 +229,7 @@ impl Drop for LocalServerLease {
         };
         state.leases = state.leases.saturating_sub(1);
         if state.leases == 0 {
-            if let Some(child) = state.child.as_mut() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            state.child = None;
+            state.stop_owned_child();
         }
     }
 }
@@ -209,6 +237,27 @@ impl Drop for LocalServerLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_stalled_http_listener_cannot_block_local_activation() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let manager = LocalServerManager::new(
+            "missing-launcher".into(),
+            "unused-state".into(),
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let stalled = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let result = tokio::time::timeout(Duration::from_secs(3), manager.ensure_ready()).await;
+        stalled.abort();
+        let error = result
+            .expect("probe must have its own response deadline")
+            .err()
+            .unwrap();
+        assert!(error.contains("missing"));
+    }
 
     #[test]
     fn multiple_window_leases_share_one_lifecycle() {

@@ -192,12 +192,30 @@ and repeated i64-maximum durations/row counts. Workspace Clippy passed.
 
 ### Local desktop activation
 
-- [ ] Enforce the advertised 10-second readiness deadline across handshake I/O,
+- [x] Enforce the advertised 10-second readiness deadline across handshake I/O,
   not merely 100 sleeps. A listener that accepts TCP without replying currently
   stalls startup indefinitely because the SDK has no HTTP response deadline.
-- [ ] Bound individual probes and avoid reparsing/rehashing the same instance
+- [x] Bound individual probes and avoid reparsing/rehashing the same instance
   manifest and lock on every 100-ms readiness poll. Use the already validated
   manager's state directory, and accept only a local descriptor endpoint.
+
+Evidence: the full workspace suite passed, including desktop lifecycle tests
+and a stalled local TCP listener that never sends HTTP headers. Individual
+probes now time out after one second. The supervisor also kills its own child
+on final drop even if activation failed before acquiring a window lease.
+
+### Document actor retention
+
+- [ ] Bound the idle actor cache and remove empty writer-lease sets. Every
+  visited document currently retains its loaded CRDT until explicit deletion
+  or server restart. Evict only map-owned actors, preserving active shared
+  identity and durable reloads; serialize cache-miss loading with insertion.
+
+### Shared-result publication
+
+- [ ] Make per-room cap enforcement and publication atomic. Concurrent finished
+  queries can all observe the same pre-insertion count and exceed the 32-result
+  cap. Keep expensive serialization/encrypted spill outside the publication lock.
 
 ### Repository hosting I/O
 
