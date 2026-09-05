@@ -7,7 +7,9 @@
 //! state to disk; a future durable client must store a Loro snapshot together
 //! with its peer id before reusing that peer id.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
+
+mod transfers;
 
 use sift_doc::{DocError, TextReplica};
 use sift_protocol::{CrdtUpdate, DocumentVersion, ReplicaId, RoomClientMessage, RoomServerMessage};
@@ -108,10 +110,10 @@ pub struct RoomReplica {
     document_id: i64,
     replica_id: u64,
     replica: TextReplica,
-    /// Local updates awaiting a durable ACK: update_id -> bytes.
-    pending: HashMap<String, Vec<u8>>,
-    /// In-flight chunk transfers: transfer_id -> ordered chunk slots.
-    transfers: HashMap<String, Vec<Option<Vec<u8>>>>,
+    /// IDs awaiting a durable ACK. Catch-up bytes come from the CRDT frontier;
+    /// retaining another copy of every outbound update is unnecessary.
+    pending: HashSet<String>,
+    transfers: transfers::Transfers,
     seq: u64,
 }
 
@@ -130,8 +132,8 @@ impl RoomReplica {
             document_id,
             replica_id,
             replica,
-            pending: HashMap::new(),
-            transfers: HashMap::new(),
+            pending: HashSet::new(),
+            transfers: transfers::Transfers::default(),
             seq: 0,
         })
     }
@@ -169,6 +171,7 @@ impl RoomReplica {
 
     /// A `DocumentSync` carrying this replica's current version.
     pub fn sync_message(&mut self) -> (String, RoomClientMessage) {
+        self.transfers.clear();
         let request_id = self.next_id("sync");
         (
             request_id.clone(),
@@ -210,7 +213,7 @@ impl RoomReplica {
         let update = self.replica.export_updates_since(since)?;
         let update_id = self.next_id(tag);
         let request_id = self.next_id("req");
-        self.pending.insert(update_id.clone(), update.clone());
+        self.pending.insert(update_id.clone());
         Ok(RoomClientMessage::DocumentUpdate {
             request_id,
             update_id,
@@ -239,7 +242,7 @@ impl RoomReplica {
         };
         let update_id = self.next_id("catchup");
         let request_id = self.next_id("req");
-        self.pending.insert(update_id.clone(), update.clone());
+        self.pending.insert(update_id.clone());
         Ok(Some(RoomClientMessage::DocumentUpdate {
             request_id,
             update_id,
@@ -252,24 +255,10 @@ impl RoomReplica {
     /// Fold one server message into replica state.
     pub fn ingest(&mut self, message: &RoomServerMessage) -> Result<Ingest, DocError> {
         match message {
-            RoomServerMessage::DocumentChunk {
-                document_id,
-                transfer_id,
-                index,
-                count,
-                payload,
-                ..
-            } if *document_id == self.document_id => {
-                let slots = self
-                    .transfers
-                    .entry(transfer_id.clone())
-                    .or_insert_with(|| vec![None; *count as usize]);
-                if let Some(slot) = slots.get_mut(*index as usize) {
-                    *slot = Some(payload.as_bytes().to_vec());
-                }
-                if slots.iter().all(Option::is_some) {
-                    let bytes: Vec<u8> = slots.iter().flatten().flatten().copied().collect();
-                    self.transfers.remove(transfer_id);
+            RoomServerMessage::DocumentChunk { document_id, .. }
+                if *document_id == self.document_id =>
+            {
+                if let Some(bytes) = self.transfers.ingest(message)? {
                     if !bytes.is_empty() {
                         self.replica.import(&bytes)?;
                     }
@@ -281,6 +270,13 @@ impl RoomReplica {
                 server_version,
                 ..
             } if *document_id == self.document_id => {
+                if !self.transfers.is_empty() {
+                    self.transfers.clear();
+                    return Err(DocError::Decode {
+                        what: "document transfer",
+                        detail: "sync completed with missing chunks".into(),
+                    });
+                }
                 Ok(Ingest::Synced(server_version.as_bytes().to_vec()))
             }
             RoomServerMessage::DocumentUpdateAck {
@@ -302,16 +298,22 @@ impl RoomReplica {
                 }
                 Ok(Ingest::Progress)
             }
-            RoomServerMessage::ResyncRequired { .. } => Ok(Ingest::Resync),
+            RoomServerMessage::ResyncRequired { .. } => {
+                self.transfers.clear();
+                Ok(Ingest::Resync)
+            }
             RoomServerMessage::DocumentError {
                 document_id,
                 code,
                 message,
                 ..
-            } if *document_id == self.document_id => Ok(Ingest::Error {
-                code: *code,
-                message: message.clone(),
-            }),
+            } if *document_id == self.document_id => {
+                self.transfers.clear();
+                Ok(Ingest::Error {
+                    code: *code,
+                    message: message.clone(),
+                })
+            }
             _ => Ok(Ingest::Ignored),
         }
     }
@@ -330,7 +332,10 @@ mod tests {
         let mid = snapshot.len() / 2;
 
         let mut replica = RoomReplica::new(1, 0xB, None).unwrap();
-        for (index, part) in [&snapshot[..mid], &snapshot[mid..]].iter().enumerate() {
+        // Out-of-order delivery and an identical duplicate still import once.
+        let parts = [&snapshot[..mid], &snapshot[mid..]];
+        for index in [1, 1, 0] {
+            let part = parts[index];
             let msg = RoomServerMessage::DocumentChunk {
                 request_id: "r".into(),
                 document_id: 1,
@@ -345,6 +350,43 @@ mod tests {
             replica.ingest(&msg).unwrap();
         }
         assert_eq!(replica.text(), "select 1");
+    }
+
+    #[test]
+    fn resync_clears_abandoned_chunks_and_incomplete_sync_is_rejected() {
+        let mut replica = RoomReplica::new(1, 0xB, None).unwrap();
+        let chunk = RoomServerMessage::DocumentChunk {
+            request_id: "r".into(),
+            document_id: 1,
+            transfer_id: "t".into(),
+            index: 0,
+            count: 2,
+            payload_kind: sift_protocol::DocumentTransferKind::Snapshot,
+            payload: CrdtUpdate::new(vec![1]),
+            snapshot_seq: 0,
+            server_version: DocumentVersion::new(Vec::new()),
+        };
+        replica.ingest(&chunk).unwrap();
+        assert!(!replica.transfers.is_empty());
+        replica.sync_message();
+        assert!(replica.transfers.is_empty());
+        replica.ingest(&chunk).unwrap();
+        assert!(replica
+            .ingest(&RoomServerMessage::DocumentSynced {
+                request_id: "r".into(),
+                document_id: 1,
+                server_version: DocumentVersion::new(Vec::new()),
+            })
+            .is_err());
+        assert!(replica.transfers.is_empty());
+        replica.ingest(&chunk).unwrap();
+        replica
+            .ingest(&RoomServerMessage::ResyncRequired {
+                runtime_epoch: "new".into(),
+                event_seq: 0,
+            })
+            .unwrap();
+        assert!(replica.transfers.is_empty());
     }
 
     #[test]

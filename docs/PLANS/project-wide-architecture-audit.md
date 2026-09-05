@@ -77,11 +77,32 @@ in the existing connection path.
 
 ### Multiplayer lifecycle and memory
 
-- [ ] Keep room creation/attachment/subscription atomic with idle eviction;
+- [x] Keep room creation/attachment/subscription atomic with idle eviction;
   evict after the last attachment too, regardless of drop order. Expiration
   must recheck a lease under its entry lock before removing refreshed presence.
-- [ ] Bound replica chunk counts, bytes, and concurrent transfers; count received
+- [x] Bound replica chunk counts, bytes, and concurrent transfers; count received
   chunks instead of scanning all slots each arrival. Reject inconsistent or
   incomplete transfers, and clear abandoned transfers on resync/reconnect.
-- [ ] Retain pending update IDs only. Reconnect already reconstructs missing
+- [x] Retain pending update IDs only. Reconnect already reconstructs missing
   updates from the CRDT version vector, so retaining payload copies is waste.
+
+Evidence: nine SDK room tests and fourteen server room/authorization tests
+passed, including concurrent subscription churn, reverse drop order, malicious
+chunk counts, duplicate and out-of-order chunks, incomplete sync, and resync
+cleanup. Workspace Clippy passed. Chunk limits are 4096 slots, 1 MiB per chunk,
+four incomplete transfers, and 256 MiB retained payload per replica, matching
+the server's default maximum retained CRDT history.
+
+### Modal layout
+
+- [ ] Centralize preferred content widths for every modal variant and make
+  content roots responsive instead of competing with the surrounding card.
+- [ ] Clamp cards to the available viewport, account for app-bar placement and
+  padding, and provide overflow scrolling instead of clipping inaccessible
+  controls. Preserve the dedicated expanded-result viewport.
+- [ ] Exercise modal layout at small and large window sizes, including wide
+  repository, room, snippet, vault, and ledger surfaces and long form content.
+
+Native screenshot capture is currently unavailable: this process cannot
+authenticate to the running X display. Use GPUI's rendered layout tests and
+record that limit rather than claiming pixel inspection.

@@ -27,6 +27,16 @@ struct RoomRuntimeInner {
     scheduler_started: AtomicBool,
 }
 
+impl RoomRuntimeInner {
+    fn evict_if_idle(&self, room_id: i64, room: &Arc<RoomRuntimeRoom>) {
+        self.rooms.remove_if(&room_id, |_, candidate| {
+            Arc::ptr_eq(candidate, room)
+                && candidate.subscribers.load(Ordering::Acquire) == 0
+                && candidate.presence.is_empty()
+        });
+    }
+}
+
 struct RoomRuntimeRoom {
     presence: DashMap<i64, PresenceEntry>,
     /// Ephemeral lane: presence, attach refresh, query-result references,
@@ -184,25 +194,27 @@ impl RoomRuntime {
         principal_id: i64,
         client_id: String,
     ) -> (RoomAttachment, Vec<RoomPresence>) {
-        let room = self.room(room_id);
         let attachment_id = self
             .inner
             .next_attachment_id
             .fetch_add(1, Ordering::Relaxed)
             + 1;
-        room.presence.insert(
-            attachment_id,
-            PresenceEntry {
-                presence: RoomPresence {
-                    attachment_id,
-                    principal_id,
-                    client_id,
-                    active_document_id: None,
-                    selection: None,
+        let room = self.with_room(room_id, |room| {
+            room.presence.insert(
+                attachment_id,
+                PresenceEntry {
+                    presence: RoomPresence {
+                        attachment_id,
+                        principal_id,
+                        client_id,
+                        active_document_id: None,
+                        selection: None,
+                    },
+                    last_seen: Instant::now(),
                 },
-                last_seen: Instant::now(),
-            },
-        );
+            );
+            room.clone()
+        });
         let presence = Self::presence_for(&room);
         let _ = room.presence_events.send(RoomServerMessage::Presence {
             presence: presence.clone(),
@@ -227,19 +239,21 @@ impl RoomRuntime {
         let _ = room.presence_events.send(RoomServerMessage::Presence {
             presence: presence.clone(),
         });
+        self.inner.evict_if_idle(room_id, &room);
         presence
     }
 
     pub fn subscribe(&self, room_id: i64) -> RoomSubscription {
-        let room = self.room(room_id);
-        room.subscribers.fetch_add(1, Ordering::AcqRel);
-        RoomSubscription {
-            room_id,
-            presence_rx: room.presence_events.subscribe(),
-            doc_rx: room.doc_events.subscribe(),
-            room,
-            runtime: Arc::downgrade(&self.inner),
-        }
+        self.with_room(room_id, |room| {
+            room.subscribers.fetch_add(1, Ordering::AcqRel);
+            RoomSubscription {
+                room_id,
+                presence_rx: room.presence_events.subscribe(),
+                doc_rx: room.doc_events.subscribe(),
+                room: room.clone(),
+                runtime: Arc::downgrade(&self.inner),
+            }
+        })
     }
 
     /// Publish on the ephemeral presence lane (presence, query-result
@@ -336,39 +350,46 @@ impl RoomRuntime {
             return Vec::new();
         };
         let now = Instant::now();
-        let expired: Vec<_> = room
+        let candidates: Vec<_> = room
             .presence
             .iter()
             .filter(|entry| now.duration_since(entry.last_seen) >= PRESENCE_LEASE)
             .map(|entry| *entry.key())
             .collect();
-        for attachment_id in &expired {
-            room.presence.remove(attachment_id);
-        }
+        let expired = candidates
+            .into_iter()
+            .filter(|attachment_id| {
+                room.presence
+                    .remove_if(attachment_id, |_, entry| {
+                        now.saturating_duration_since(entry.last_seen) >= PRESENCE_LEASE
+                    })
+                    .is_some()
+            })
+            .collect::<Vec<_>>();
         if !expired.is_empty() {
             let presence = Self::presence_for(&room);
             let _ = room
                 .presence_events
                 .send(RoomServerMessage::Presence { presence });
         }
+        self.inner.evict_if_idle(room_id, &room);
         expired
     }
 
-    fn room(&self, room_id: i64) -> Arc<RoomRuntimeRoom> {
-        self.inner
-            .rooms
-            .entry(room_id)
-            .or_insert_with(|| {
-                let (presence_events, _) = broadcast::channel(PRESENCE_CHANNEL_CAPACITY);
-                let (doc_events, _) = broadcast::channel(DOC_CHANNEL_CAPACITY);
-                Arc::new(RoomRuntimeRoom {
-                    presence: DashMap::new(),
-                    presence_events,
-                    doc_events,
-                    subscribers: AtomicUsize::new(0),
-                })
+    fn with_room<T>(&self, room_id: i64, activate: impl FnOnce(&Arc<RoomRuntimeRoom>) -> T) -> T {
+        // Activation and eviction use the same map lock. Returning an idle Arc
+        // first would allow eviction before the caller adds its subscription.
+        let room = self.inner.rooms.entry(room_id).or_insert_with(|| {
+            let (presence_events, _) = broadcast::channel(PRESENCE_CHANNEL_CAPACITY);
+            let (doc_events, _) = broadcast::channel(DOC_CHANNEL_CAPACITY);
+            Arc::new(RoomRuntimeRoom {
+                presence: DashMap::new(),
+                presence_events,
+                doc_events,
+                subscribers: AtomicUsize::new(0),
             })
-            .clone()
+        });
+        activate(&room)
     }
 
     fn presence_for(room: &RoomRuntimeRoom) -> Vec<RoomPresence> {
@@ -431,11 +452,7 @@ impl Drop for RoomSubscription {
         let Some(runtime) = self.runtime.upgrade() else {
             return;
         };
-        runtime.rooms.remove_if(&self.room_id, |_, candidate| {
-            Arc::ptr_eq(candidate, &self.room)
-                && candidate.subscribers.load(Ordering::Acquire) == 0
-                && candidate.presence.is_empty()
-        });
+        runtime.evict_if_idle(self.room_id, &self.room);
     }
 }
 
@@ -468,6 +485,39 @@ mod tests {
         drop(first);
         assert_eq!(runtime.room_count(), 1);
         drop(second);
+        assert_eq!(runtime.room_count(), 0);
+    }
+
+    #[test]
+    fn final_attachment_drop_evicts_after_subscribers_leave() {
+        let runtime = RoomRuntime::default();
+        let subscription = runtime.subscribe(10);
+        let (attachment, _) = runtime.attach(10, 1, "client".into());
+        drop(subscription);
+        assert!(runtime.is_active(10));
+        drop(attachment);
+        assert!(!runtime.is_active(10));
+
+        let (attachment, _) = runtime.attach(11, 1, "client".into());
+        drop(attachment);
+        assert!(!runtime.is_active(11));
+    }
+
+    #[test]
+    fn concurrent_subscriptions_remain_registered_until_they_leave() {
+        let runtime = RoomRuntime::default();
+        std::thread::scope(|threads| {
+            for _ in 0..4 {
+                let runtime = &runtime;
+                threads.spawn(move || {
+                    for _ in 0..100 {
+                        let subscription = runtime.subscribe(10);
+                        let room = runtime.inner.rooms.get(&10).unwrap();
+                        assert!(Arc::ptr_eq(&room, &subscription.room));
+                    }
+                });
+            }
+        });
         assert_eq!(runtime.room_count(), 0);
     }
 
