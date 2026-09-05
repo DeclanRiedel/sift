@@ -344,6 +344,45 @@ pub struct LimitsConfig {
     pub plan_capture_max_age_days: i64,
 }
 
+impl LimitsConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        // Keep portable and development startup on one validation boundary.
+        // Exhaustive destructuring makes a new runtime field require an
+        // explicit decision here instead of silently bypassing validation.
+        let Self {
+            max_http_result_rows,
+            max_http_result_bytes,
+            max_cursors_per_session,
+            cursor_prefetch_pages,
+            cursor_spill_dir,
+            cursor_spill_ttl_secs,
+            schema_cache_ttl_secs,
+            schema_mssql_poll_secs,
+            plan_capture_max_bytes,
+            plan_capture_max_per_tenant,
+            plan_capture_max_per_source,
+            plan_capture_max_age_days,
+        } = self;
+        sift_instance_config::LimitsConfig {
+            max_http_result_rows: *max_http_result_rows as u64,
+            max_http_result_bytes: *max_http_result_bytes as u64,
+            max_cursors_per_session: *max_cursors_per_session as u64,
+            cursor_prefetch_pages: *cursor_prefetch_pages as u64,
+            cursor_spill_dir: cursor_spill_dir.clone(),
+            cursor_spill_ttl_secs: *cursor_spill_ttl_secs,
+            schema_cache_ttl_secs: *schema_cache_ttl_secs,
+            schema_mssql_poll_secs: *schema_mssql_poll_secs,
+            plan_capture_max_bytes: *plan_capture_max_bytes as u64,
+            plan_capture_max_per_tenant: *plan_capture_max_per_tenant,
+            plan_capture_max_per_source: *plan_capture_max_per_source,
+            plan_capture_max_age_days: *plan_capture_max_age_days,
+            ..Default::default()
+        }
+        .validate()?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RateLimitsConfig {
@@ -416,6 +455,13 @@ impl Config {
             .bind
             .parse()
             .with_context(|| format!("invalid bind address: {}", self.bind))?;
+
+        self.limits.validate()?;
+        if !(1..=300).contains(&self.timeouts.request_secs)
+            || self.timeouts.shutdown_drain_secs > 3_600
+        {
+            bail!("timeouts.request_secs must be between 1 and 300 and shutdown_drain_secs must not exceed 3600");
+        }
 
         if self.transport == Transport::Loopback && !bind.ip().is_loopback() {
             bail!(
@@ -798,7 +844,7 @@ pub fn load() -> anyhow::Result<Config> {
         .merge(figment::providers::Serialized::defaults(Config::default()))
         .merge(Toml::file("sift.toml"))
         .merge(Env::prefixed("SIFT_").split("__"));
-    Ok(fig.extract()?)
+    extract_runtime_config(fig)
 }
 
 /// Load one explicit config file over defaults. Remote bootstrap uses this so
@@ -808,6 +854,13 @@ pub fn load_path(path: impl AsRef<std::path::Path>) -> anyhow::Result<Config> {
     let fig = figment::Figment::new()
         .merge(figment::providers::Serialized::defaults(Config::default()))
         .merge(Toml::file(path.as_ref()));
+    extract_runtime_config(fig)
+}
+
+fn extract_runtime_config(fig: figment::Figment) -> anyhow::Result<Config> {
+    if fig.extract_inner::<String>("kind").ok().as_deref() == Some("sift-instance") {
+        anyhow::bail!("sift.toml is an instance manifest; apply it with `sift instance apply <root>` and start with `sift-server --instance-root <root>`");
+    }
     Ok(fig.extract()?)
 }
 
@@ -822,6 +875,17 @@ mod tests {
         assert_eq!(config.transport, Transport::Loopback);
         assert_eq!(config.mode, RuntimeMode::InProcess);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn development_loader_rejects_instance_manifest_instead_of_using_defaults() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/reproducible-instance/sift.toml");
+        let error = load_path(path).unwrap_err().to_string();
+        assert!(error.contains("--instance-root"));
+        let template =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sift.example.toml");
+        load_path(template).unwrap().validate().unwrap();
     }
 
     #[test]
@@ -986,5 +1050,37 @@ mod tests {
             cost: 2.0,
         });
         assert!(config.validate().unwrap_err().to_string().contains("query"));
+    }
+
+    #[test]
+    fn runtime_rejects_invalid_cursor_intervals_and_capture_limits() {
+        for limits in [
+            LimitsConfig {
+                schema_mssql_poll_secs: 0,
+                ..Default::default()
+            },
+            LimitsConfig {
+                cursor_prefetch_pages: 0,
+                ..Default::default()
+            },
+            LimitsConfig {
+                max_cursors_per_session: 0,
+                ..Default::default()
+            },
+            LimitsConfig {
+                plan_capture_max_age_days: 31,
+                ..Default::default()
+            },
+        ] {
+            let config = Config {
+                limits,
+                ..Default::default()
+            };
+            assert!(config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("limits"));
+        }
     }
 }

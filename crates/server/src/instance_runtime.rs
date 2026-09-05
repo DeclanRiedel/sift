@@ -272,13 +272,21 @@ impl InstanceRoot {
             tenant_resource_limits(&self.manifest.server.tenant_limits.defaults);
         config.tenant_limits.ceilings =
             tenant_resource_limits(&self.manifest.server.tenant_limits.ceilings);
-        // Format-v1 compatibility fields remain the final authority for these
-        // two ceilings until a future format removes the duplication.
-        config.tenant_limits.ceilings.connections =
-            Some(u64::from(self.manifest.server.limits.max_connections));
-        config.tenant_limits.ceilings.concurrent_queries = Some(u64::from(
-            self.manifest.server.limits.max_concurrent_queries,
-        ));
+        // Both manifest sections declare ceilings. Neither may relax a stricter
+        // operator policy from the other section.
+        for (ceiling, limit) in [
+            (
+                &mut config.tenant_limits.ceilings.connections,
+                self.manifest.server.limits.max_connections,
+            ),
+            (
+                &mut config.tenant_limits.ceilings.concurrent_queries,
+                self.manifest.server.limits.max_concurrent_queries,
+            ),
+        ] {
+            let limit = u64::from(limit);
+            *ceiling = Some(ceiling.map_or(limit, |ceiling| ceiling.min(limit)));
+        }
         config
             .validate()
             .context("validating realized server settings")?;
@@ -1098,5 +1106,37 @@ mod tests {
         );
         assert!(config.vcs.enabled);
         assert!(!config.vcs.network_enabled);
+    }
+
+    #[test]
+    fn runtime_uses_the_stricter_declared_resource_ceiling() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("root");
+        let state = directory.path().join("state");
+        copy_demo(&root);
+        let mut instance = InstanceRoot::open(&root).unwrap();
+        for (requested, expected_connections, expected_queries) in [
+            (Some(2), 2, 2),
+            (Some(100), 64, 16),
+            (None, 64, 16),
+            (Some(0), 0, 0),
+        ] {
+            instance.manifest.server.tenant_limits.ceilings.connections = requested;
+            instance
+                .manifest
+                .server
+                .tenant_limits
+                .ceilings
+                .concurrent_queries = requested;
+            let config = instance.runtime_config(&state).unwrap();
+            assert_eq!(
+                config.tenant_limits.ceilings.connections,
+                Some(expected_connections)
+            );
+            assert_eq!(
+                config.tenant_limits.ceilings.concurrent_queries,
+                Some(expected_queries)
+            );
+        }
     }
 }

@@ -42,3 +42,29 @@ without evidence.
 
 Investigation in progress. The sections below will collect reviewed findings,
 fixes, evidence, and deliberately unresolved external dependencies.
+
+### Configuration boundary
+
+- [x] Require loopback binds for SSH manifests, matching runtime topology.
+- [x] Intersect the two declared connection/query ceilings instead of letting
+  format-v1 fields overwrite a stricter tenant policy. Document this in editor
+  help and the operator guide; both fields remain usable without hidden priority.
+- [x] Reject portable instance manifests in the development-config loader with
+  an actionable `--instance-root` error, and clearly label the development template.
+- [x] Share result/cursor/interval limit validation across manifest and runtime
+  paths so non-instance startup cannot accept panic-inducing zero intervals.
+
+Evidence: 19 instance-config tests and 226 server unit tests passed. Workspace
+Clippy with warnings denied passed for the configuration milestone. Development
+and manifest startup now use the same limits validator; timeout bounds also
+agree. The example, operator guide, and configuration Wiki explain ownership
+and intersecting ceilings.
+
+### SSH helper lifecycle
+
+- [ ] Drain helper stderr from spawn, retaining only bounded diagnostics, so
+  bootstrap cannot block on a full pipe before it emits readiness.
+- [ ] Bound readiness lines on initial connect and renewal, reject non-loopback
+  forwarding URLs before sending credentials, and never echo token-bearing JSON
+  in a parse error. Own the drain task through cancellation and early returns.
+- [ ] Bound control-master shutdown as well as startup and ordinary commands.

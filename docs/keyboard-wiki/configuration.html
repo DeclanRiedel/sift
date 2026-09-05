@@ -80,8 +80,8 @@
         <table class="compact"><thead><tr><th><code>[server.limits]</code></th><th>Meaning</th></tr></thead><tbody>
           <tr><td><code>max_http_result_rows</code></td><td>Rows allowed in a synchronous response.</td></tr>
           <tr><td><code>max_http_result_bytes</code></td><td>Approximate response-byte ceiling.</td></tr>
-          <tr><td><code>max_connections</code></td><td>Compatibility ceiling for open tenant connections.</td></tr>
-          <tr><td><code>max_concurrent_queries</code></td><td>Compatibility ceiling for concurrent tenant queries.</td></tr>
+          <tr><td><code>max_connections</code></td><td>Open tenant connection cap; the smaller of this and tenant_limits.ceilings.connections applies.</td></tr>
+          <tr><td><code>max_concurrent_queries</code></td><td>Concurrent tenant query cap; the smaller of this and tenant_limits.ceilings.concurrent_queries applies.</td></tr>
           <tr><td><code>max_cursors_per_session</code></td><td>Open cursors retained per query session.</td></tr>
           <tr><td><code>cursor_prefetch_pages</code></td><td>Pages buffered ahead before backpressure.</td></tr>
           <tr><td><code>cursor_spill_dir</code></td><td>Optional bounded cursor spill directory.</td></tr>

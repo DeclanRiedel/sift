@@ -186,13 +186,13 @@ const FIELDS: &[Field] = &[
         "server.limits",
         "max_connections",
         "integer",
-        "Legacy per-tenant open-connection ceiling."
+        "Per-tenant open-connection cap, intersected with tenant_limits.ceilings.connections."
     ),
     field!(
         "server.limits",
         "max_concurrent_queries",
         "integer",
-        "Legacy per-tenant concurrent-query ceiling."
+        "Per-tenant concurrent-query cap, intersected with tenant_limits.ceilings.concurrent_queries."
     ),
     field!(
         "server.limits",

@@ -114,8 +114,6 @@ Keep `network_enabled = false` for an offline instance. An instance admin can
 inspect the realized executable, version, helper state, health, and these
 effective limits through `/v1/admin/instance/vcs-diagnostics`.
 
-## Vault policy
-
 ## SQL formatting
 
 Formatting is server policy so local and remote clients produce identical SQL.
@@ -132,6 +130,8 @@ The semantic formatter preserves quoted identifiers, string bodies, comments,
 and recovered statements while applying these rules. Enable
 `insert_trailing_semicolon` when the instance requires explicit statement
 terminators.
+
+## Vault policy
 
 Collaborative vault admission, retention, and cleanup use typed server
 configuration. These defaults are set in an instance manifest under
@@ -156,6 +156,15 @@ Unreferenced secret handles enter the durable cleanup queue and are retried
 with bounded exponential backoff; stored cleanup failures are sanitized and
 never include secret bytes. All limits and intervals must be positive, and the
 maximum retry delay cannot be below the initial delay.
+
+## Resource ceilings
+
+`server.tenant_limits.defaults` sets normal per-tenant admission, and
+`server.tenant_limits.ceilings` bounds overrides. The connection and concurrent
+query caps in `server.limits` also apply: the effective ceiling is the smaller
+declared value. Tightening either section cannot silently relax the other.
+The `trusted_local_unlimited` exemption applies only to verified trusted-local
+requests; SSH and network clients remain subject to admission.
 
 ## Configuration ownership
 

@@ -1,8 +1,13 @@
-# sift config template
+# Development-only process configuration (not an instance manifest)
 #
-# Copy to `sift.toml` for local development if you prefer file-based config.
+# For ordinary local, SSH, or hosted instances, use `sift instance new` and
+# docs/INSTANCE-CONFIG.md. Their sift.toml starts with kind = "sift-instance"
+# and has a [server] section; start them with --instance-root.
+#
+# Copy this to `sift.toml` only for a non-instance development server.
 # Do not commit `sift.toml` with real machine paths, tokens, or private DB
-# details. Environment variables with the `SIFT_` prefix override this file.
+# details. SIFT_ environment variables override this development file only;
+# they do not override a locked instance manifest.
 
 deployment = "personal"
 transport = "loopback"

@@ -516,6 +516,34 @@ impl Default for LimitsConfig {
     }
 }
 
+impl LimitsConfig {
+    /// Shared by portable manifests and destination runtime startup.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_http_result_rows == 0
+            || self.max_http_result_rows > 1_000_000
+            || self.max_http_result_bytes == 0
+            || self.max_http_result_bytes > 1024 * 1024 * 1024
+            || self.max_connections == 0
+            || self.max_connections > 10_000
+            || self.max_concurrent_queries == 0
+            || self.max_concurrent_queries > self.max_connections
+            || self.max_cursors_per_session == 0
+            || self.cursor_prefetch_pages == 0
+            || self.cursor_spill_ttl_secs == 0
+            || self.schema_cache_ttl_secs == 0
+            || self.schema_mssql_poll_secs == 0
+            || self.plan_capture_max_bytes == 0
+            || self.plan_capture_max_bytes > 8 * 1024 * 1024
+            || !(1..=5_000).contains(&self.plan_capture_max_per_tenant)
+            || !(1..=50).contains(&self.plan_capture_max_per_source)
+            || !(1..=30).contains(&self.plan_capture_max_age_days)
+        {
+            return validation("server.limits", "contains an unsafe or invalid limit");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AutomationConfig {
@@ -1195,7 +1223,7 @@ impl ServerConfig {
                     message: "must be a socket address or a supported symbolic binding".into(),
                 })?;
         }
-        if self.transport == Transport::Loopback
+        if matches!(self.transport, Transport::Loopback | Transport::SshProxy)
             && !symbolic
             && !bind
                 .parse::<std::net::SocketAddr>()
@@ -1205,7 +1233,7 @@ impl ServerConfig {
         {
             return validation(
                 "server.bind",
-                "loopback transport requires a loopback address",
+                "loopback and ssh-proxy transports require a loopback address",
             );
         }
         if self.transport == Transport::SshProxy && self.mode != RuntimeMode::Daemon {
@@ -1244,27 +1272,7 @@ impl ServerConfig {
                 "must not exceed 3600",
             );
         }
-        if self.limits.max_http_result_rows == 0
-            || self.limits.max_http_result_rows > 1_000_000
-            || self.limits.max_http_result_bytes == 0
-            || self.limits.max_http_result_bytes > 1024 * 1024 * 1024
-            || self.limits.max_connections == 0
-            || self.limits.max_connections > 10_000
-            || self.limits.max_concurrent_queries == 0
-            || self.limits.max_concurrent_queries > self.limits.max_connections
-            || self.limits.max_cursors_per_session == 0
-            || self.limits.cursor_prefetch_pages == 0
-            || self.limits.cursor_spill_ttl_secs == 0
-            || self.limits.schema_cache_ttl_secs == 0
-            || self.limits.schema_mssql_poll_secs == 0
-            || self.limits.plan_capture_max_bytes == 0
-            || self.limits.plan_capture_max_bytes > 8 * 1024 * 1024
-            || !(1..=5_000).contains(&self.limits.plan_capture_max_per_tenant)
-            || !(1..=50).contains(&self.limits.plan_capture_max_per_source)
-            || !(1..=30).contains(&self.limits.plan_capture_max_age_days)
-        {
-            return validation("server.limits", "contains an unsafe or invalid limit");
-        }
+        self.limits.validate()?;
         if self.updater.enabled {
             if self.updater.channel.is_empty()
                 || !self
@@ -2076,6 +2084,22 @@ prevent_destroy = true
             manifest,
             Manifest::parse(&manifest.to_toml_pretty().unwrap()).unwrap()
         );
+    }
+
+    #[test]
+    fn ssh_transport_rejects_non_loopback_binds_before_apply() {
+        let mut manifest = Manifest::parse(VALID).unwrap();
+        manifest.server.transport = Transport::SshProxy;
+        for bind in ["0.0.0.0:7474", "[::]:7474", "192.0.2.1:7474"] {
+            manifest.server.bind = bind.into();
+            assert!(
+                matches!(manifest.validate(), Err(ConfigError::Validation { path, .. }) if path == "server.bind")
+            );
+        }
+        for bind in ["127.0.0.1:7474", "[::1]:7474", "auto-loopback"] {
+            manifest.server.bind = bind.into();
+            manifest.validate().unwrap();
+        }
     }
 
     #[test]
