@@ -110,7 +110,7 @@ the server's default maximum retained CRDT history.
 - [x] Clamp cards to the available viewport, account for app-bar placement and
   padding, and provide overflow scrolling instead of clipping inaccessible
   controls. Preserve the dedicated expanded-result viewport.
-- [ ] Exercise modal layout at small and large window sizes, including wide
+- [x] Exercise modal layout at small and large window sizes, including wide
   repository, room, snippet, vault, and ledger surfaces and long form content.
 
 Native screenshot capture is currently unavailable: this process cannot
@@ -121,7 +121,12 @@ Evidence: 406 UI tests and workspace Clippy passed. New rendered-layout tests
 cover 64 modal variants at 1280×900, 800×600, and 480×400, plus footer/content
 bounds on five wide surfaces. Repository commit details needed an explicit
 flex height and wrapping actions to keep their footer inside the card. Long
-populated content and editor overlays remain follow-up checks.
+populated content and editor overlays were exercised in the follow-up below.
+
+Long-content follow-up: a rendered test supplies 8 KiB of snippet validation
+errors in an 800×600 window, scrolls the modal, and verifies the footer remains
+reachable. The error region is separately scrollable and capped at 120 px,
+preventing overlap with its footer. Targeted test and workspace Clippy passed.
 
 ### SQL editor scheduling and response ownership
 

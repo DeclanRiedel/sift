@@ -42175,7 +42175,9 @@ impl WorkspaceShell {
                                                 .child("Tabstops: $1, ${1:default}, and final $0"),
                                         )
                                         .children(self.snippet_error.as_ref().map(|error| {
-                                            div().text_sm().text_color(colors.danger).child(error.clone())
+                                            div().id("snippet-error").debug_selector(|| "snippet-error".into())
+                                                .max_h(px(120.)).flex_none().overflow_y_scroll()
+                                                .text_sm().text_color(colors.danger).child(error.clone())
                                         })),
                                 ),
                         )
@@ -51537,6 +51539,42 @@ mod tests {
                 "{modal:?}: clipped footer control {button:?} in {card:?}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn long_modal_errors_do_not_hide_footer_actions(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.simulate_resize(gpui::size(px(800.), px(600.)));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.modal = Some(Modal::Snippets);
+            shell.snippet_error = Some("A detailed validation error with context. ".repeat(200));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let card = cx.debug_bounds("modal-card").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: card.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10000.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let button = cx.debug_bounds("save-snippet").unwrap();
+        let error = cx.debug_bounds("snippet-error").unwrap();
+        assert!(error.size.height <= px(120.));
+        assert!(
+            error.bottom() <= button.top(),
+            "error {error:?} overlaps footer {button:?}"
+        );
+        assert!(
+            button.bottom() <= card.bottom() && button.top() >= card.top(),
+            "footer {button:?} outside card {card:?}"
+        );
+        assert!(
+            button.left() >= card.left() && button.right() <= card.right(),
+            "footer {button:?} outside card {card:?}"
+        );
     }
 
     #[gpui::test]
