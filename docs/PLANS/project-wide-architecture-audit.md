@@ -155,9 +155,21 @@ against a local HTTP/WebSocket server; workspace Clippy passed. The new check
 joins current room, tenant, and principal state instead of trusting a cached
 tenant list. No external server was contacted.
 
-- [ ] Follow-up: retain lease checks during active result/notification streams.
+- [x] Follow-up: retain lease checks during active result/notification streams.
   The outer socket loop currently stops polling its lease while streaming or
   awaiting an ACK. Cancel and release active cursors on every streaming error.
+
+Evidence: all four live local WebSocket lease tests passed, including logout
+while an active cursor waits for an ACK. The socket closes and its cursor is
+removed. Result and notification streams also observe graceful drain; JSON
+sends have a 30-second write deadline. Workspace Clippy passed.
+
+### Shared keyed mutation gates
+
+- [ ] Replace permanent per-workspace mutex entries with lifetime-owned gates.
+  Reuse the schema-fetch gate's tested atomic last-owner cleanup in a small
+  server-internal utility rather than duplicating the race-sensitive logic.
+  Keep gates discoverable while any owner or waiter exists; remove idle entries.
 
 ### Repository hosting I/O
 

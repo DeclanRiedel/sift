@@ -19340,6 +19340,29 @@ async fn reauthenticate_ws(
     })
 }
 
+/// A stream may be blocked on driver output, socket backpressure, or a missing
+/// ACK. Keep revocation and shutdown observable throughout all those waits.
+async fn with_ws_lease<T>(
+    state: &AppState,
+    auth: Option<&AuthContext>,
+    work: impl std::future::Future<Output = ApiResult<T>>,
+) -> ApiResult<T> {
+    tokio::pin!(work);
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = state.shutdown.wait_for_drain_start() => return Err(ApiError::ServiceDraining),
+            _ = tick.tick(), if auth.is_some() => {
+                if !ws_lease_is_valid(state, auth.expect("guarded"), None).await? {
+                    return Err(ApiError::Unauthorized);
+                }
+            }
+            result = &mut work => return result,
+        }
+    }
+}
+
 async fn handle_ws(
     state: AppState,
     mut auth: Option<AuthContext>,
@@ -19563,34 +19586,48 @@ async fn handle_ws(
                                 continue;
                             }
                         };
-                        send_json(
-                            &mut sender,
-                            &WsServerMessage::Started {
-                                request_id: request_id.clone(),
-                                cursor_id: stream.cursor_id,
-                            },
-                        )
-                        .await?;
                         let cursor_id = stream.cursor_id;
-                        let native_progress = stream.native_progress;
-                        let terminal = stream_pages_with_ack(
-                            &mut sender,
-                            &mut receiver,
-                            stream.rows,
-                            native_progress,
-                            WsPageContext {
-                                sessions: &state.sessions,
-                                session_id,
-                                connection,
-                                cursor_id,
-                                execution_events: event_version.is_some(),
-                                tx_id: tx.as_ref().map(|tx| tx.tx_id),
-                                rate_limiter: &state.auth.rate_limiter,
-                                auth: auth.as_ref(),
-                                shutdown: &state.shutdown,
-                            },
-                        )
-                        .await?;
+                        let terminal = with_ws_lease(&state, auth.as_ref(), async {
+                            send_json(
+                                &mut sender,
+                                &WsServerMessage::Started {
+                                    request_id: request_id.clone(),
+                                    cursor_id: stream.cursor_id,
+                                },
+                            )
+                            .await?;
+                            let native_progress = stream.native_progress;
+                            stream_pages_with_ack(
+                                &mut sender,
+                                &mut receiver,
+                                stream.rows,
+                                native_progress,
+                                WsPageContext {
+                                    sessions: &state.sessions,
+                                    session_id,
+                                    connection,
+                                    cursor_id,
+                                    execution_events: event_version.is_some(),
+                                    tx_id: tx.as_ref().map(|tx| tx.tx_id),
+                                    rate_limiter: &state.auth.rate_limiter,
+                                    auth: auth.as_ref(),
+                                    shutdown: &state.shutdown,
+                                },
+                            )
+                            .await
+                        })
+                        .await;
+                        let terminal = match terminal {
+                            Ok(terminal) => terminal,
+                            Err(error) => {
+                                let _ = state
+                                    .sessions
+                                    .cancel(session_id, connection, cursor_id)
+                                    .await;
+                                state.sessions.cursor_remove(cursor_id);
+                                return Err(error);
+                            }
+                        };
                         if let (Some(scope), Some(context)) =
                             (ledger_scope.as_ref(), variable_context)
                         {
@@ -19728,7 +19765,12 @@ async fn handle_ws(
                         state
                             .sessions
                             .push_operation(operation, OperationStatus::Succeeded);
-                        stream_notifications(&mut sender, request_id, stream.notifications).await?;
+                        with_ws_lease(
+                            &state,
+                            auth.as_ref(),
+                            stream_notifications(&mut sender, request_id, stream.notifications),
+                        )
+                        .await?;
                     }
                     WsClientMessage::Cancel {
                         connection,
@@ -20155,10 +20197,13 @@ async fn send_json<T: serde::Serialize>(
     value: &T,
 ) -> ApiResult<()> {
     let bytes = serde_json::to_vec(value).map_err(|e| ApiError::Internal(e.to_string()))?;
-    sender
-        .send(Message::Binary(bytes))
-        .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        sender.send(Message::Binary(bytes)),
+    )
+    .await
+    .map_err(|_| ApiError::BadRequest("websocket send timed out".into()))?
+    .map_err(|e| ApiError::BadRequest(e.to_string()))
 }
 
 #[cfg(test)]

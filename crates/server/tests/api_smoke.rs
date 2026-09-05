@@ -1583,6 +1583,15 @@ async fn password_login_refresh_whoami_and_logout_are_end_to_end() {
 
 #[tokio::test]
 async fn websocket_lease_reauthenticates_after_rotation_and_closes_on_revocation() {
+    websocket_lease_revocation(false).await;
+}
+
+#[tokio::test]
+async fn websocket_lease_revocation_cancels_a_stream_waiting_for_ack() {
+    websocket_lease_revocation(true).await;
+}
+
+async fn websocket_lease_revocation(streaming: bool) {
     let mut state = test_state_with_metadata(false);
     let password = "renewable websocket password";
     let verifier = sift_server::identity::hash_password(password.as_bytes().to_vec())
@@ -1615,6 +1624,7 @@ async fn websocket_lease_reauthenticates_after_rotation_and_closes_on_revocation
         .await
         .unwrap();
     state.auth.loopback_bypass = false;
+    let sessions = state.sessions.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -1648,16 +1658,59 @@ async fn websocket_lease_reauthenticates_after_rotation_and_closes_on_revocation
         .unwrap();
     assert!(renewed_expiry > chrono::Utc::now());
 
+    let cursor = if streaming {
+        let connection = client
+            .open_connection(
+                session.id,
+                sift_protocol::OpenConnectionRequest {
+                    provider_id: Engine::Postgres.provider_id(),
+                    spec: pg_spec(),
+                },
+            )
+            .await
+            .unwrap();
+        socket
+            .send(sift_protocol::WsClientMessage::Execute {
+                request_id: "revocation-test".into(),
+                connection: connection.id,
+                sql: "SELECT 1".into(),
+                event_version: None,
+                params: Vec::new(),
+                tx: None,
+                transform: None,
+                source: None,
+                variable_context: None,
+            })
+            .await
+            .unwrap();
+        let sift_protocol::WsServerMessage::Started { cursor_id, .. } =
+            socket.next().await.unwrap()
+        else {
+            panic!("stream started")
+        };
+        assert!(matches!(
+            socket.next().await.unwrap(),
+            sift_protocol::WsServerMessage::Page { .. }
+        ));
+        // Intentionally withhold the ACK: the outer socket loop is suspended.
+        Some(cursor_id)
+    } else {
+        None
+    };
+
     client.logout_all().await.unwrap();
     let revoked = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
         .await
-        .expect("lease revocation is delivered")
-        .unwrap();
-    assert!(matches!(
-        revoked,
-        sift_protocol::WsServerMessage::Error { message, .. }
-            if message.contains("revoked")
-    ));
+        .expect("lease revocation is delivered");
+    if let Some(cursor) = cursor {
+        assert!(revoked.is_err(), "revoked active socket must close");
+        assert!(!sessions.cursor_registry().is_open(cursor));
+    } else {
+        assert!(matches!(revoked.unwrap(),
+            sift_protocol::WsServerMessage::Error { message, .. }
+                if message.contains("revoked")
+        ));
+    }
     server.abort();
 }
 
