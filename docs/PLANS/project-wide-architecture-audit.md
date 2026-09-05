@@ -25,7 +25,7 @@ milestones. Runtime-only tracking lives in temporary JSON outside the repository
   task/resource lifetime, repeated computation, and architectural duplication.
 - [x] Update architecture decisions when a stable boundary changes and reconcile
   product/docs checklists with actual behavior.
-- [ ] Complete final workspace formatting, Clippy, tests, diff review, and
+- [x] Complete final workspace formatting, Clippy, tests, diff review, and
   milestone commits; record any unverified external/live behavior explicitly.
 
 ## Working rules
@@ -263,6 +263,18 @@ serialization/spill outside it.
   implemented. This audit's concrete findings are the checklist above.
 
 ## Validation environment
+
+Final checks passed after all code changes:
+
+- `cargo fmt --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `LIBRARY_PATH=/tmp/sift-refactor-HGLfxo cargo test --workspace --quiet`
+- `git diff --check`
+
+The workspace run included 409 workspace-UI tests and 32 desktop tests, plus
+server, metadata, SDK, driver, shared-crate, integration, and doc-test targets.
+Existing ignored/feature-gated live tests were not enabled. Milestone changes
+were reviewed and committed locally; nothing was pushed or deployed.
 
 Desktop test linking needs `libxkbcommon-x11.so`, but this machine only has its
 versioned runtime library. Tests used an ephemeral linker alias via

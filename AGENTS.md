@@ -13,7 +13,7 @@ what sift is and the five product goals; this file is the operational subset.
 - `crates/doc` — Loro query-text CRDT abstraction; CRDT state stays out of
   results, schema, and sessions.
 - `crates/client-sdk` — thin reference HTTP + WebSocket consumer.
-- `crates/core` — reserved for shared server-internal types (currently empty).
+- `crates/core` — shared server-internal catalog, comparison, and schema-diff logic.
 - `docs/DECISIONS.md` — load-bearing ADRs.
 - `docs/PLANS/ide-parity-and-provider-extensibility.md` — canonical product
   feature inventory; unchecked and partial items are current work candidates.

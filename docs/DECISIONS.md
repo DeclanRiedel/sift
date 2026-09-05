@@ -881,8 +881,12 @@ refresh tokens. Durable state retains only token lookup/digest material,
 lineage, expiry, and revocation. Refresh replay revokes the family. Native
 clients use bearer tokens; same-origin web clients use secure HttpOnly cookies
 with CSRF protection. WebSockets authenticate into renewable leases that can
-be invalidated when the principal, auth session, or room membership is
-revoked. API tokens remain separate automation credentials; existing Ed25519
+be invalidated when the principal, auth session, or room membership is revoked.
+Room sockets also revalidate membership in their containing tenant.
+Periodic checks use current metadata, run off async
+workers, and remain active while result streams wait on driver output or ACKs.
+Stream errors and graceful drain cancel and release their active cursor.
+API tokens remain separate automation credentials; existing Ed25519
 key/challenge schema is adopted for challenge login and future SSH bootstrap.
 
 Phase E also establishes the minimum authorization floor: one middleware
@@ -927,15 +931,16 @@ boundary is:
 | personal | network | required | profile only |
 | team | loopback | required | profile only |
 | team | network | required | profile only |
+| personal | ssh-proxy | required | profile only |
+| team | ssh-proxy | required | profile only |
 
 The personal-loopback bypass resolves to the bootstrapped local principal and
 personal tenant internally; it is not an unaffiliated or unowned runtime path.
 General abuse rate limits and tenant quotas are unlimited by default in this
 trusted-local mode, while hard safety bounds such as per-result size, cursor
 backpressure, driver timeouts, and cancellation remain active. Explicit policy
-on a saved local profile is still honored. Future SSH-proxy transport must
-establish an authenticated, instance-bound principal context and never widens
-loopback trust.
+on a saved local profile is still honored. SSH-proxy transport establishes an
+authenticated, instance-bound principal context and never widens loopback trust.
 
 For managed connections, permission is the intersection of the authenticated
 principal's tenant role, optional room role, and connection-profile policy.
