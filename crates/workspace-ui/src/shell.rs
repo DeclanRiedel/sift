@@ -9656,13 +9656,12 @@ pub struct WorkspaceShell {
     /// acknowledgement holds the whole server stream, which is the backpressure
     /// that keeps a huge result from being pulled through and thrown away.
     held_result_pages: HashMap<u64, HeldResultPage>,
-    /// Debounce generation per item for `Analyze` requests. Only the newest
-    /// generation is allowed to dispatch, so a burst of keystrokes costs one
-    /// server round trip instead of one per character.
-    semantic_analyze_generation: HashMap<u64, u64>,
+    /// One owned debounce task per item. Replacing it cancels the old timer,
+    /// so a keystroke burst retains one task and dispatches one analysis.
+    semantic_analyze_tasks: HashMap<u64, Task<()>>,
     /// Independent cancellation window for automatic completion. Diagnostics
     /// must never delay the popup and completion must never accelerate errors.
-    semantic_completion_generation: HashMap<u64, u64>,
+    semantic_completion_tasks: HashMap<u64, Task<()>>,
     /// Stable catalog identity per live query tab. Scratch tabs bind when
     /// created on a connection (or on their first semantic request); sourced
     /// database tabs retain their own profile instead of following global UI
@@ -10894,8 +10893,8 @@ impl WorkspaceShell {
             next_savepoint: 1,
             pending_connection_change: None,
             held_result_pages: HashMap::new(),
-            semantic_analyze_generation: HashMap::new(),
-            semantic_completion_generation: HashMap::new(),
+            semantic_analyze_tasks: HashMap::new(),
+            semantic_completion_tasks: HashMap::new(),
             query_semantic_targets: HashMap::new(),
             query_outline_item_id: None,
             query_outline_revision: None,
@@ -15966,20 +15965,11 @@ impl WorkspaceShell {
             return;
         }
         if let SemanticRequestKind::AutoComplete { cursor } = request {
-            let generation = self
-                .semantic_completion_generation
-                .entry(item_id)
-                .and_modify(|generation| *generation = generation.wrapping_add(1))
-                .or_insert(1);
-            let generation = *generation;
-            cx.spawn(async move |shell, cx| {
+            let task = cx.spawn(async move |shell, cx| {
                 cx.background_executor()
                     .timer(SEMANTIC_COMPLETION_DEBOUNCE)
                     .await;
                 let _ = shell.update(cx, |shell, cx| {
-                    if shell.semantic_completion_generation.get(&item_id) != Some(&generation) {
-                        return;
-                    }
                     shell.dispatch_semantic_request(
                         item_id,
                         revision,
@@ -15987,31 +15977,22 @@ impl WorkspaceShell {
                         cx,
                     );
                 });
-            })
-            .detach();
+            });
+            self.semantic_completion_tasks.insert(item_id, task);
             return;
         }
         if matches!(request, SemanticRequestKind::Complete { .. }) {
-            self.semantic_completion_generation.remove(&item_id);
+            self.semantic_completion_tasks.remove(&item_id);
         }
         if !request.is_debounced() {
             self.dispatch_semantic_request(item_id, revision, request, cx);
             return;
         }
-        let generation = self
-            .semantic_analyze_generation
-            .entry(item_id)
-            .and_modify(|generation| *generation = generation.wrapping_add(1))
-            .or_insert(1);
-        let generation = *generation;
-        cx.spawn(async move |shell, cx| {
+        let task = cx.spawn(async move |shell, cx| {
             cx.background_executor()
                 .timer(SEMANTIC_ANALYZE_DEBOUNCE)
                 .await;
             let _ = shell.update(cx, |shell, cx| {
-                if shell.semantic_analyze_generation.get(&item_id) != Some(&generation) {
-                    return;
-                }
                 shell.dispatch_semantic_request(
                     item_id,
                     revision,
@@ -16027,8 +16008,8 @@ impl WorkspaceShell {
                     shell.request_query_outline(cx);
                 }
             });
-        })
-        .detach();
+        });
+        self.semantic_analyze_tasks.insert(item_id, task);
     }
 
     /// Send a semantic request with the exact text of the revision it names.
@@ -16047,16 +16028,18 @@ impl WorkspaceShell {
         let Some(editor) = self.editor_for_item(item_id, cx) else {
             return;
         };
-        let (current_revision, text) = {
+        let text = {
             let editor = editor.read(cx);
-            if !editor.semantic_enabled() {
+            if !editor.semantic_enabled() || editor.text_revision() != revision {
                 return;
             }
-            (editor.text_revision(), editor.document().text().to_owned())
+            if let SemanticRequestKind::Complete { cursor } = &request {
+                if *cursor as usize != editor.document().cursor() {
+                    return;
+                }
+            }
+            editor.document().text().to_owned()
         };
-        if current_revision != revision {
-            return;
-        }
         let _ = sender.send(ExecutorCommand::Semantic {
             item_id,
             text_revision: revision,
@@ -16190,11 +16173,18 @@ impl WorkspaceShell {
         let Some(editor) = self.editor_for_item(item_id, cx) else {
             return;
         };
+        if editor.read(cx).text_revision() != text_revision {
+            return;
+        }
         if let SemanticOutcome::Completions {
+            cursor,
             replaced,
             candidates,
         } = &mut outcome
         {
+            if *cursor as usize != editor.read(cx).document().cursor() {
+                return;
+            }
             let document = editor.read(cx).document().text();
             let range = replaced.start as usize..replaced.end as usize;
             if range.end <= document.len()
@@ -28685,8 +28675,8 @@ impl WorkspaceShell {
             self.theme_items.remove(&item_id);
         }
         if let (Some(sender), Some(item_id)) = (&self.executor_sender, removed_item_id) {
-            self.semantic_analyze_generation.remove(&item_id);
-            self.semantic_completion_generation.remove(&item_id);
+            self.semantic_analyze_tasks.remove(&item_id);
+            self.semantic_completion_tasks.remove(&item_id);
             self.query_semantic_targets.remove(&item_id);
             let _ = sender.send(ExecutorCommand::CloseSemanticDocument { item_id });
         }

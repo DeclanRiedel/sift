@@ -1486,6 +1486,9 @@ impl QueryEditor {
         cx: &mut Context<Self>,
     ) -> bool {
         let current = self.revision;
+        if revision != current {
+            return false;
+        }
         let applied = match outcome {
             SemanticOutcome::Diagnostics {
                 diagnostics,
@@ -1498,15 +1501,19 @@ impl QueryEditor {
                 incomplete,
             ),
             SemanticOutcome::Completions {
+                cursor,
                 replaced,
                 candidates,
-            } => self.semantic.set_completions(
-                self.document.text(),
-                revision,
-                current,
-                replaced,
-                candidates,
-            ),
+            } => {
+                cursor as usize == self.document.cursor()
+                    && self.semantic.set_completions(
+                        self.document.text(),
+                        (revision, cursor),
+                        current,
+                        replaced,
+                        candidates,
+                    )
+            }
             SemanticOutcome::Hover(hover) => self.semantic.set_hover(revision, current, hover),
             SemanticOutcome::StarExpansion(preview) => {
                 self.semantic.set_star_expansion(revision, current, preview)
@@ -1598,8 +1605,8 @@ impl QueryEditor {
         if !self.semantic_enabled() {
             return;
         }
-        self.semantic.expect_completion(self.revision);
         let cursor = self.document.cursor() as u32;
+        self.semantic.expect_completion(self.revision, cursor);
         self.request_semantic(SemanticRequestKind::Complete { cursor }, cx);
         cx.notify();
     }
@@ -2073,8 +2080,8 @@ impl QueryEditor {
             } else if self.language == EditorLanguage::Json {
                 self.open_json_completion(cx);
             } else {
-                self.semantic.expect_completion(self.revision);
                 let cursor = self.document.cursor() as u32;
+                self.semantic.expect_completion(self.revision, cursor);
                 self.request_semantic(SemanticRequestKind::AutoComplete { cursor }, cx);
             }
         }
@@ -2155,10 +2162,11 @@ impl QueryEditor {
                 },
             )
             .collect();
-        self.semantic.expect_completion(self.revision);
+        let cursor = self.document.cursor() as u32;
+        self.semantic.expect_completion(self.revision, cursor);
         self.semantic.set_completions(
             self.document.text(),
-            self.revision,
+            (self.revision, cursor),
             self.revision,
             sift_protocol::TextRange {
                 start: replaced.start as u32,
@@ -2175,10 +2183,11 @@ impl QueryEditor {
         };
         let cursor = self.document.cursor();
         let (replaced, candidates) = json_schema_completions(self.document.text(), cursor, schema);
-        self.semantic.expect_completion(self.revision);
+        self.semantic
+            .expect_completion(self.revision, cursor as u32);
         self.semantic.set_completions(
             self.document.text(),
-            self.revision,
+            (self.revision, cursor as u32),
             self.revision,
             sift_protocol::TextRange {
                 start: replaced.start as u32,
@@ -2190,6 +2199,7 @@ impl QueryEditor {
     }
 
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        self.semantic.cancel_completion();
         let cursor_line = self.document.line_of_offset(self.document.cursor());
         self.folded_lines
             .retain(|range| cursor_line <= range.start || cursor_line >= range.end);
@@ -5069,6 +5079,7 @@ mod tests {
             assert!(editor.apply_semantic_outcome(
                 revision,
                 SemanticOutcome::Completions {
+                    cursor: 16,
                     replaced: sift_protocol::TextRange { start: 14, end: 16 },
                     candidates: vec![candidate("users")],
                 },
@@ -5092,6 +5103,37 @@ mod tests {
     }
 
     #[gpui::test]
+    fn caret_motion_cancels_completion_and_stale_failures_are_ignored(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("select name", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.document.set_selection(11..11, false);
+            editor.complete(&Complete, window, cx);
+            let revision = editor.revision;
+            editor.document.set_selection(7..7, false);
+            editor.selection_changed(cx);
+            // Even moving back must not reopen the cancelled request.
+            editor.document.set_selection(11..11, false);
+            editor.selection_changed(cx);
+            assert!(!editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Completions {
+                    cursor: 11,
+                    replaced: sift_protocol::TextRange { start: 7, end: 11 },
+                    candidates: vec![candidate("names")],
+                },
+                cx
+            ));
+            assert!(editor.semantic.completion().is_none());
+            editor.revision += 1;
+            assert!(!editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Failed("old failure".into()),
+                cx
+            ));
+        });
+    }
+
+    #[gpui::test]
     fn completion_row_text_and_kind_share_one_vertical_track(cx: &mut TestAppContext) {
         let (mut cx, editor, spy) = editor_with_spy("select * from us", cx);
         editor.update_in(&mut cx, |editor, window, cx| {
@@ -5108,6 +5150,7 @@ mod tests {
             assert!(editor.apply_semantic_outcome(
                 revision,
                 SemanticOutcome::Completions {
+                    cursor: 16,
                     replaced: sift_protocol::TextRange { start: 14, end: 16 },
                     candidates: vec![users],
                 },
@@ -5196,6 +5239,7 @@ mod tests {
             assert!(editor.apply_semantic_outcome(
                 revision,
                 SemanticOutcome::Completions {
+                    cursor: 3,
                     replaced: sift_protocol::TextRange { start: 0, end: 3 },
                     candidates: vec![sift_protocol::completion::CompletionCandidate {
                         label: "sel".into(),

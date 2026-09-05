@@ -125,9 +125,25 @@ populated content and editor overlays remain follow-up checks.
 
 ### SQL editor scheduling and response ownership
 
-- [ ] Correlate completions with their requested caret as well as text revision;
+- [x] Correlate completions with their requested caret as well as text revision;
   moving without editing must cancel stale menus and pending responses.
-- [ ] Reject stale failures just like stale successful answers.
-- [ ] Own one debounce task per document/request class instead of detached
+- [x] Reject stale failures just like stale successful answers.
+- [x] Own one debounce task per document/request class instead of detached
   timers; cancel superseded work and avoid cloning text for stale dispatches.
 - [ ] Review service queue coalescing and popup placement near viewport edges.
+
+Evidence: UI suite passed (406 tests before the added caret-motion regression,
+which also passed separately); desktop completion-burst regression and workspace
+Clippy passed. Service batching keeps the latest completion position per tab,
+preserving serial server-document updates. Old responses cannot consume a newer
+caret request; moving away and back still cancels an outstanding menu.
+
+### Repository hosting I/O
+
+- [ ] Reuse one credential-free HTTP client per router lifetime; keep explicit
+  timeouts and redirect denial. Currently each hosting handler rebuilds a pool.
+- [ ] Fetch independent PR/check summaries concurrently, respecting the existing
+  repository network policy and keeping credentials request-scoped.
+- [ ] Bound provider response bodies before JSON decoding; upstream responses
+  currently have no byte ceiling. Wipe temporary credential buffers on early
+  errors and request cancellation as well as successful completion.

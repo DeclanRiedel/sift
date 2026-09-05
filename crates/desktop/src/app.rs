@@ -6680,7 +6680,7 @@ async fn run_semantic_service(
 }
 
 /// Reduce one drained batch to the work still worth doing: newest revision per
-/// item, and at most one `Analyze` for it. A superseded interactive request is
+/// item, and at most one analysis, hover, and completion for it. A superseded interactive request is
 /// reported back rather than dropped silently, so the editor never waits on an
 /// answer that will never arrive.
 fn admissible_jobs(
@@ -6704,6 +6704,7 @@ fn admissible_jobs(
     // whose answer matches what the user is now looking at.
     let mut analyzed: HashSet<u64> = HashSet::new();
     let mut hovered: HashSet<u64> = HashSet::new();
+    let mut completed: HashSet<u64> = HashSet::new();
     let mut kept = Vec::with_capacity(jobs.len());
     for job in jobs.drain(..).rev() {
         let current = newest.get(&job.item_id).copied() == Some(job.text_revision);
@@ -6711,11 +6712,16 @@ fn admissible_jobs(
             job.request == SemanticRequestKind::Analyze && !analyzed.insert(job.item_id);
         let duplicate_hover = matches!(job.request, SemanticRequestKind::Hover { .. })
             && !hovered.insert(job.item_id);
-        if current && !duplicate_analyze && !duplicate_hover {
+        let duplicate_completion = matches!(
+            job.request,
+            SemanticRequestKind::Complete { .. } | SemanticRequestKind::AutoComplete { .. }
+        ) && !completed.insert(job.item_id);
+        if current && !duplicate_analyze && !duplicate_hover && !duplicate_completion {
             kept.push(job);
             continue;
         }
-        if job.request != SemanticRequestKind::Analyze && !duplicate_hover {
+        if job.request != SemanticRequestKind::Analyze && !duplicate_hover && !duplicate_completion
+        {
             let outcome = if matches!(job.request, SemanticRequestKind::Outline { .. }) {
                 SemanticOutcome::OutlineFailed("Buffer changed before the request ran.".into())
             } else {
@@ -6918,6 +6924,7 @@ async fn semantic_outcome(
                 .await
             {
                 Ok(response) => SemanticOutcome::Completions {
+                    cursor,
                     replaced: sift_protocol::TextRange {
                         start: response.replaced_range.start,
                         end: response.replaced_range.end,
@@ -8030,6 +8037,25 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn caret_completion_bursts_keep_only_the_latest_position() {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let kept = admissible_jobs(
+            vec![
+                job(1, 1, SemanticRequestKind::Complete { cursor: 3 }),
+                job(1, 1, SemanticRequestKind::Analyze),
+                job(1, 1, SemanticRequestKind::Complete { cursor: 7 }),
+                job(2, 1, SemanticRequestKind::Complete { cursor: 9 }),
+            ],
+            &HashSet::new(),
+            &events,
+        );
+        assert_eq!(kept.len(), 3);
+        assert_eq!(kept[1].request, SemanticRequestKind::Complete { cursor: 7 });
+        assert_eq!(kept[2].item_id, 2);
+        assert!(received.try_recv().is_err());
     }
 
     #[test]

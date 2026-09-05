@@ -5,10 +5,9 @@
 //! document. This module holds the editor-local projection of those answers
 //! plus the offset arithmetic needed to map wire ranges onto client bytes.
 //!
-//! Staleness is decided by one number: the editor's text revision. A request
-//! carries the revision it was issued against and any answer whose revision no
-//! longer matches the buffer is dropped instead of being applied late. That is
-//! the whole of "semantic revision cancellation" on the client side.
+//! Answers must match the editor's text revision. Position-sensitive requests
+//! also track their requested caret, so moving without editing cannot apply a
+//! completion meant for a different location.
 
 use std::ops::Range;
 
@@ -89,6 +88,7 @@ pub enum SemanticOutcome {
         incomplete: bool,
     },
     Completions {
+        cursor: u32,
         replaced: TextRange,
         candidates: Vec<CompletionCandidate>,
     },
@@ -184,7 +184,7 @@ pub struct SemanticState {
     completion: Option<CompletionMenu>,
     /// Revision a completion request is outstanding for, used to keep the
     /// menu from flickering open on a stale answer.
-    pending_completion: Option<u64>,
+    pending_completion: Option<(u64, u32)>,
     hover: Option<sift_protocol::SemanticHoverResponse>,
     pending_hover: Option<(u64, u32)>,
     star_expansion: Option<sift_protocol::StarExpansionPreview>,
@@ -285,8 +285,8 @@ impl SemanticState {
         had_menu
     }
 
-    pub fn expect_completion(&mut self, revision: u64) {
-        self.pending_completion = Some(revision);
+    pub fn expect_completion(&mut self, revision: u64, cursor: u32) {
+        self.pending_completion = Some((revision, cursor));
         self.completion = None;
     }
 
@@ -370,12 +370,12 @@ impl SemanticState {
     pub fn set_completions(
         &mut self,
         text: &str,
-        revision: u64,
+        request: (u64, u32),
         current_revision: u64,
         replaced: TextRange,
         candidates: Vec<CompletionCandidate>,
     ) -> bool {
-        if revision != current_revision || self.pending_completion != Some(revision) {
+        if request.0 != current_revision || self.pending_completion != Some(request) {
             return false;
         }
         self.pending_completion = None;
@@ -667,15 +667,23 @@ mod tests {
         // No request outstanding: an unsolicited answer never opens a menu.
         assert!(!state.set_completions(
             "sel",
-            3,
+            (3, 3),
             3,
             TextRange { start: 0, end: 3 },
             vec![candidate.clone()],
         ));
-        state.expect_completion(3);
+        state.expect_completion(3, 3);
+        // A reply for another caret must not consume the current request.
+        assert!(!state.set_completions(
+            "sel",
+            (3, 1),
+            3,
+            TextRange { start: 0, end: 1 },
+            vec![candidate.clone()],
+        ));
         assert!(state.set_completions(
             "sel",
-            3,
+            (3, 3),
             3,
             TextRange { start: 0, end: 3 },
             vec![candidate],
