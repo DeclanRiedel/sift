@@ -206,10 +206,17 @@ on final drop even if activation failed before acquiring a window lease.
 
 ### Document actor retention
 
-- [ ] Bound the idle actor cache and remove empty writer-lease sets. Every
+- [x] Bound the idle actor cache and remove empty writer-lease sets. Every
   visited document currently retains its loaded CRDT until explicit deletion
   or server restart. Evict only map-owned actors, preserving active shared
   identity and durable reloads; serialize cache-miss loading with insertion.
+
+Evidence: a regression loads 66 documents, retains a live owner, verifies idle
+eviction/durable reconstruction, and checks writer-lease cleanup. The cache
+targets 64 actors on misses; active owners may exceed that target and are never
+evicted by trimming. This is a cache policy, not a global CRDT-memory quota.
+The stale comment claiming manifest-configurable collaboration limits was also
+corrected. Targeted test and workspace Clippy passed.
 
 ### Shared-result publication
 

@@ -17,8 +17,18 @@ use crate::document_actor::{ApplyError, CollaborationLimits, DocumentActor};
 /// Shared handle to one document's serialized actor.
 pub type SharedActor = Arc<Mutex<DocumentActor>>;
 
+// Idle cache target, not an active-document quota. Borrowed actors cannot be
+// evicted without splitting shared identity; a later miss trims them once idle.
+const MAX_CACHED_ACTORS: usize = 64;
+
+struct CachedActor {
+    actor: SharedActor,
+    last_used: AtomicU64,
+}
+
 pub struct DocumentRegistry {
-    actors: DashMap<i64, SharedActor>,
+    actors: DashMap<i64, CachedActor>,
+    cache_clock: AtomicU64,
     /// document_id -> set of replica ids with a live writer.
     leases: DashMap<i64, HashSet<String>>,
     limits: CollaborationLimits,
@@ -37,6 +47,7 @@ impl DocumentRegistry {
     pub fn new(limits: CollaborationLimits) -> Self {
         Self {
             actors: DashMap::new(),
+            cache_clock: AtomicU64::new(0),
             leases: DashMap::new(),
             limits,
             runtime_epoch: uuid::Uuid::new_v4().to_string(),
@@ -71,15 +82,47 @@ impl DocumentRegistry {
         metadata: &MetadataStore,
         document: DocumentId,
     ) -> Result<SharedActor, ApplyError> {
-        if let Some(actor) = self.actors.get(&document.0) {
-            return Ok(actor.clone());
+        let used = self.cache_clock.fetch_add(1, Ordering::Relaxed);
+        if let Some(cached) = self.actors.get(&document.0) {
+            cached.last_used.store(used, Ordering::Relaxed);
+            return Ok(cached.actor.clone());
         }
-        let actor = Arc::new(Mutex::new(DocumentActor::load(
-            metadata,
-            document,
-            self.limits,
-        )?));
-        Ok(self.actors.entry(document.0).or_insert(actor).clone())
+        self.trim_idle_cache();
+        // Loading outside the entry lock could insert an old replica after a
+        // concurrent load, durable update, and idle eviction of that document.
+        let cached = match self.actors.entry(document.0) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.into_ref(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => entry.insert(CachedActor {
+                actor: Arc::new(Mutex::new(DocumentActor::load(
+                    metadata,
+                    document,
+                    self.limits,
+                )?)),
+                last_used: AtomicU64::new(used),
+            }),
+        };
+        cached.last_used.store(used, Ordering::Relaxed);
+        Ok(cached.actor.clone())
+    }
+
+    fn trim_idle_cache(&self) {
+        let remove = self.actors.len().saturating_sub(MAX_CACHED_ACTORS - 1);
+        if remove == 0 {
+            return;
+        }
+        let mut candidates: Vec<_> = self
+            .actors
+            .iter()
+            .filter(|entry| Arc::strong_count(&entry.actor) == 1)
+            .map(|entry| (*entry.key(), entry.last_used.load(Ordering::Relaxed)))
+            .collect();
+        candidates.sort_unstable_by_key(|(_, used)| *used);
+        for (document, used) in candidates.into_iter().take(remove) {
+            self.actors.remove_if(&document, |_, cached| {
+                Arc::strong_count(&cached.actor) == 1
+                    && cached.last_used.load(Ordering::Relaxed) == used
+            });
+        }
     }
 
     /// Drop a cached actor (idle eviction / shutdown). Its state is durable.
@@ -98,9 +141,10 @@ impl DocumentRegistry {
 
     /// Release a previously held lease.
     pub fn release_lease(&self, document: i64, replica: &str) {
-        if let Some(mut set) = self.leases.get_mut(&document) {
+        self.leases.remove_if_mut(&document, |_, set| {
             set.remove(replica);
-        }
+            set.is_empty()
+        });
     }
 }
 
@@ -143,5 +187,63 @@ impl Drop for LeaseGuard {
         for (document, replica) in self.held.drain() {
             self.runtime.documents().release_lease(document, &replica);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sift_metadata::{MemorySecretStore, NewDocument, NewRoom, PrincipalId, RoomKind, TenantId};
+
+    #[test]
+    fn idle_actors_reload_without_splitting_live_owners_and_empty_leases_leave() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("test").unwrap();
+        let room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "cache".into(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let replica = sift_doc::TextReplica::new(sift_doc::random_peer_id()).unwrap();
+        replica.insert(0, "select 1").unwrap();
+        let registry = DocumentRegistry::default();
+        let mut documents = Vec::new();
+        for _ in 0..MAX_CACHED_ACTORS + 2 {
+            let document = store
+                .create_document(
+                    room.id,
+                    NewDocument {
+                        kind: "sql".into(),
+                        title: "query.sql".into(),
+                        crdt_state: replica.export_snapshot().unwrap(),
+                        snapshot_version: replica.version_vector(),
+                        position: 0,
+                        connection_profile_id: None,
+                    },
+                )
+                .unwrap();
+            documents.push(document.id);
+        }
+        let pinned = registry.get_or_load(&store, documents[0]).unwrap();
+        for &document in &documents[1..] {
+            registry.get_or_load(&store, document).unwrap();
+        }
+        assert_eq!(registry.actors.len(), MAX_CACHED_ACTORS);
+        assert!(Arc::ptr_eq(
+            &pinned,
+            &registry.get_or_load(&store, documents[0]).unwrap()
+        ));
+        assert!(!registry.actors.contains_key(&documents[1].0));
+        let reloaded = registry.get_or_load(&store, documents[1]).unwrap();
+        assert_eq!(reloaded.lock().unwrap().text(), "select 1");
+        assert!(registry.try_acquire_lease(documents[0].0, "peer"));
+        assert!(!registry.try_acquire_lease(documents[0].0, "peer"));
+        registry.release_lease(documents[0].0, "peer");
+        assert!(registry.leases.is_empty());
     }
 }

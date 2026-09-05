@@ -15,8 +15,8 @@
 use sift_doc::{DocError, ImportOutcome, TextReplica};
 use sift_metadata::{DocumentId, MetadataError, MetadataStore, NewDocumentUpdate, PrincipalId};
 
-/// Tunables mirrored by the server's `CollaborationConfig`. Defaults match the
-/// plan; the runtime overrides them from configuration.
+/// Server-internal collaboration safety limits. The registry uses these
+/// defaults; they are not currently exposed in the instance manifest.
 #[derive(Debug, Clone, Copy)]
 pub struct CollaborationLimits {
     pub max_document_text_bytes: usize,
