@@ -12,12 +12,13 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 
 const MAX_AGENT_OUTPUT: usize = 64 * 1024;
+const MAX_FORWARD_CHANNELS: usize = 128;
 const SSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const DAEMON_LAUNCH_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -158,22 +159,28 @@ async fn run(mut options: Options, session: SshSession) -> anyhow::Result<()> {
     let local_addr = listener.local_addr()?;
     let forward_session = session.clone();
     let forward_endpoint = Arc::clone(&endpoint);
-    let (forward_error_tx, mut forward_error_rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
+    let (forward_error_tx, mut forward_error_rx) = mpsc::channel(1);
+    let _forwarding = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut channels = tokio::task::JoinSet::new();
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let session = forward_session.clone();
-            let endpoint = Arc::clone(&forward_endpoint);
-            let forward_error_tx = forward_error_tx.clone();
-            tokio::spawn(async move {
-                if let Err(error) = forward_connection(session, endpoint, stream).await {
-                    let _ = forward_error_tx.send(error);
+            tokio::select! {
+                _ = channels.join_next(), if !channels.is_empty() => {}
+                accepted = listener.accept(), if channels.len() < MAX_FORWARD_CHANNELS => {
+                    let Ok((stream, _)) = accepted else { break };
+                    let session = forward_session.clone();
+                    let endpoint = Arc::clone(&forward_endpoint);
+                    let forward_error_tx = forward_error_tx.clone();
+                    channels.spawn(async move {
+                        if let Err(error) = forward_connection(session, endpoint, stream).await {
+                            // Bootstrap needs one diagnostic. A long session must
+                            // not accumulate errors while nobody drains this lane.
+                            let _ = forward_error_tx.try_send(error);
+                        }
+                    });
                 }
-            });
+            }
         }
-    });
+    }));
 
     let base = format!("http://{local_addr}");
     let bootstrap = async {
@@ -547,12 +554,10 @@ async fn forward_connection(
         .kill_on_drop(true)
         .spawn()
         .context("starting SSH direct-stream channel")?;
-    let (mut socket_read, mut socket_write) = stream.into_split();
-    let mut child_stdin = child.stdin.take().context("SSH channel omitted stdin")?;
-    let mut child_stdout = child.stdout.take().context("SSH channel omitted stdout")?;
+    let child_stdin = child.stdin.take().context("SSH channel omitted stdin")?;
+    let child_stdout = child.stdout.take().context("SSH channel omitted stdout")?;
     let child_stderr = child.stderr.take().context("SSH channel omitted stderr")?;
-    let upload = tokio::io::copy(&mut socket_read, &mut child_stdin);
-    let download = tokio::io::copy(&mut child_stdout, &mut socket_write);
+    let relay = relay_channel(stream, child_stdout, child_stdin);
     let stderr_read = async {
         let mut bytes = Vec::with_capacity(4096);
         child_stderr
@@ -561,16 +566,15 @@ async fn forward_connection(
             .await?;
         std::io::Result::Ok(bytes)
     };
-    let transfer = async {
-        tokio::try_join!(upload, download, stderr_read).context("copying SSH direct-stream channel")
-    };
+    let transfer =
+        async { tokio::try_join!(relay, stderr_read).context("copying SSH direct-stream channel") };
     let wait = async {
         child
             .wait()
             .await
             .context("waiting for SSH direct-stream channel")
     };
-    let ((_, _, stderr), status) = tokio::try_join!(transfer, wait)?;
+    let ((_, stderr), status) = tokio::try_join!(transfer, wait)?;
     if stderr.len() > MAX_AGENT_OUTPUT {
         bail!("SSH direct-stream diagnostics exceeded 64 KiB");
     }
@@ -580,6 +584,24 @@ async fn forward_connection(
             String::from_utf8_lossy(&stderr).trim()
         );
     }
+    Ok(())
+}
+
+async fn relay_channel(
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+    mut remote_read: impl AsyncRead + Unpin,
+    mut remote_write: impl AsyncWrite + Unpin,
+) -> std::io::Result<()> {
+    let (mut socket_read, mut socket_write) = tokio::io::split(stream);
+    let upload = async {
+        tokio::io::copy(&mut socket_read, &mut remote_write).await?;
+        remote_write.shutdown().await
+    };
+    let download = async {
+        tokio::io::copy(&mut remote_read, &mut socket_write).await?;
+        socket_write.shutdown().await
+    };
+    tokio::try_join!(upload, download)?;
     Ok(())
 }
 
@@ -947,6 +969,34 @@ fn make_private_dir(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn relay_propagates_half_close_without_losing_the_response() {
+        let (mut client, proxy) = tokio::io::duplex(64);
+        let (remote, mut server) = tokio::io::duplex(64);
+        let (remote_read, remote_write) = tokio::io::split(remote);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let relay = relay_channel(proxy, remote_read, remote_write);
+            let request = async {
+                client.write_all(b"request").await.unwrap();
+                client.shutdown().await.unwrap();
+                let mut response = Vec::new();
+                client.read_to_end(&mut response).await.unwrap();
+                assert_eq!(response, b"response");
+            };
+            let response = async {
+                let mut request = Vec::new();
+                server.read_to_end(&mut request).await.unwrap();
+                assert_eq!(request, b"request");
+                server.write_all(b"response").await.unwrap();
+                server.shutdown().await.unwrap();
+            };
+            let (result, _, _) = tokio::join!(relay, request, response);
+            result.unwrap();
+        })
+        .await
+        .unwrap();
+    }
 
     #[test]
     fn remote_paths_reject_shell_and_parent_traversal() {

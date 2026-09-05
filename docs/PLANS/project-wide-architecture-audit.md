@@ -75,6 +75,16 @@ retention limit through a small pipe. Workspace Clippy passed. Live SSH hosts
 were not contacted; endpoint identity pinning and capability exchange remain
 in the existing connection path.
 
+- [x] Follow-up: own the listener and its forwarding children, cap simultaneous
+  SSH channels and queued errors, and propagate TCP half-close in both relay
+  directions. A local EOF currently does not close SSH stdin, which can leave
+  both sides waiting for completion.
+
+Evidence: all five `sift-remote` tests passed, including bidirectional EOF
+propagation with in-memory streams. Forwarding is capped at 128 channels and
+one queued error; aborting its owner also drops all child relays. Workspace
+Clippy passed.
+
 ### Multiplayer lifecycle and memory
 
 - [x] Keep room creation/attachment/subscription atomic with idle eviction;
