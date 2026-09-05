@@ -67,7 +67,7 @@ struct Inner {
     /// fallback after a provider build fails.
     stale_entries: DashMap<CacheKey, CachedSchema>,
     entries_by_spec: DashMap<String, Vec<CacheKey>>,
-    in_flight: DashMap<CacheKey, Arc<tokio::sync::Mutex<()>>>,
+    in_flight: crate::keyed_lock::KeyedLocks<CacheKey>,
     /// `spec_hash → invalidator task`. Tasks are spawned lazily on
     /// first `insert` for a spec; kept alive for the process lifetime.
     invalidators: DashMap<String, InvalidatorHandle>,
@@ -109,30 +109,12 @@ impl CachedSchema {
 }
 
 pub struct SchemaFetchGate {
-    key: CacheKey,
-    gate: Option<Arc<tokio::sync::Mutex<()>>>,
-    cache: Arc<Inner>,
+    gate: crate::keyed_lock::KeyedGate<CacheKey>,
 }
 
 impl SchemaFetchGate {
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.gate.as_ref().unwrap().lock().await
-    }
-}
-
-impl Drop for SchemaFetchGate {
-    fn drop(&mut self) {
-        // Keep the shared gate discoverable until the final caller leaves,
-        // including callers waiting for a failed or cancelled fetch. The map
-        // lock makes checking ownership and removal atomic with acquisition.
-        let mut gate = self.gate.take();
-        self.cache.in_flight.remove_if(&self.key, |_, current| {
-            let same_gate = Arc::ptr_eq(current, gate.as_ref().unwrap());
-            // Release this caller under the map lock as well. Otherwise two
-            // concurrent drops could both see another owner and leave an entry.
-            drop(gate.take());
-            same_gate && Arc::strong_count(current) == 1
-        });
+        self.gate.lock().await
     }
 }
 
@@ -262,16 +244,8 @@ impl SchemaCache {
         scope: &SchemaScope,
     ) -> Result<SchemaFetchGate, serde_json::Error> {
         let key = self.key_for(spec, scope)?;
-        let gate = self
-            .inner
-            .in_flight
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
         Ok(SchemaFetchGate {
-            key,
-            gate: Some(gate),
-            cache: self.inner.clone(),
+            gate: self.inner.in_flight.gate(key),
         })
     }
 
@@ -693,13 +667,13 @@ mod tests {
         let first = cache.fetch_gate(&spec(), &scope()).unwrap();
         let waiting = cache.fetch_gate(&spec(), &scope()).unwrap();
         let guard = first.lock().await;
-        assert!(waiting.gate.as_ref().unwrap().try_lock().is_err());
+        assert!(waiting.gate.try_lock().is_err());
         drop(guard);
         drop(first);
 
         let guard = waiting.lock().await;
         let newcomer = cache.fetch_gate(&spec(), &scope()).unwrap();
-        assert!(newcomer.gate.as_ref().unwrap().try_lock().is_err());
+        assert!(newcomer.gate.try_lock().is_err());
         drop(guard);
         drop(waiting);
         assert_eq!(cache.inner.in_flight.len(), 1);

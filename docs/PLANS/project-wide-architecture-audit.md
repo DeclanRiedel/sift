@@ -171,10 +171,33 @@ sends have a 30-second write deadline. Workspace Clippy passed.
 
 ### Shared keyed mutation gates
 
-- [ ] Replace permanent per-workspace mutex entries with lifetime-owned gates.
+- [x] Replace permanent per-workspace mutex entries with lifetime-owned gates.
   Reuse the schema-fetch gate's tested atomic last-owner cleanup in a small
   server-internal utility rather than duplicating the race-sensitive logic.
   Keep gates discoverable while any owner or waiter exists; remove idle entries.
+
+Evidence: three schema-gate tests and the workspace-gate test passed, including
+owned guards used across repository mutations. Workspace Clippy passed. The
+owned guard unlocks before releasing its map ownership, retaining atomic cleanup.
+
+### Query-performance summary
+
+- [x] Define p95 as nearest-rank and select its order statistic without sorting
+  every duration. The current floor-index calculation reports 20 ms for runs
+  of 10, 20, and 100 ms, hiding the tail in a small history window.
+- [x] Accumulate averages without i64 overflow and saturate total-row counters.
+
+Evidence: the history-summary test passed with small samples, an empty history,
+and repeated i64-maximum durations/row counts. Workspace Clippy passed.
+
+### Local desktop activation
+
+- [ ] Enforce the advertised 10-second readiness deadline across handshake I/O,
+  not merely 100 sleeps. A listener that accepts TCP without replying currently
+  stalls startup indefinitely because the SDK has no HTTP response deadline.
+- [ ] Bound individual probes and avoid reparsing/rehashing the same instance
+  manifest and lock on every 100-ms readiness poll. Use the already validated
+  manager's state directory, and accept only a local descriptor endpoint.
 
 ### Repository hosting I/O
 

@@ -7153,7 +7153,7 @@ struct RepositoryMutationLease {
     binding_id: RepositoryBindingId,
     actor: PrincipalId,
     action: VcsAction,
-    _guard: tokio::sync::OwnedMutexGuard<()>,
+    _guard: crate::keyed_lock::OwnedKeyedGuard<i64>,
     completed: bool,
 }
 

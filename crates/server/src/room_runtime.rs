@@ -19,7 +19,7 @@ struct RoomRuntimeInner {
     next_attachment_id: AtomicI64,
     documents: DocumentRegistry,
     results: crate::room_results::RoomResultRegistry,
-    workspace_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
+    workspace_locks: crate::keyed_lock::KeyedLocks<i64>,
     workspace_adapter: RwLock<Option<Arc<crate::workspace_adapter::RootedFilesystemAdapter>>>,
     git_adapter: RwLock<Option<Arc<crate::git_adapter::GitAdapter>>>,
     vcs_pending: DashMap<(i64, String), sift_protocol::VcsPendingOperation>,
@@ -280,12 +280,8 @@ impl RoomRuntime {
 
     /// Serialize cross-resource workspace mutations, especially checkpoint
     /// restore where Loro document updates and tree metadata must agree.
-    pub fn workspace_lock(&self, workspace_id: i64) -> Arc<tokio::sync::Mutex<()>> {
-        self.inner
-            .workspace_locks
-            .entry(workspace_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+    pub fn workspace_lock(&self, workspace_id: i64) -> crate::keyed_lock::KeyedGate<i64> {
+        self.inner.workspace_locks.gate(workspace_id)
     }
 
     pub fn results(&self) -> &crate::room_results::RoomResultRegistry {
@@ -598,6 +594,14 @@ mod tests {
         assert!(other_workspace.try_lock().is_ok());
         drop(guard);
         assert!(same_workspace.try_lock().is_ok());
+        drop(first);
+        drop(same_workspace);
+        drop(other_workspace);
+        assert!(runtime.inner.workspace_locks.is_empty());
+        let owned = runtime.workspace_lock(7).lock_owned().await;
+        assert!(runtime.workspace_lock(7).try_lock().is_err());
+        drop(owned);
+        assert!(runtime.inner.workspace_locks.is_empty());
     }
 
     #[test]
