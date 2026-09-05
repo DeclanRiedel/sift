@@ -130,13 +130,25 @@ populated content and editor overlays remain follow-up checks.
 - [x] Reject stale failures just like stale successful answers.
 - [x] Own one debounce task per document/request class instead of detached
   timers; cancel superseded work and avoid cloning text for stale dispatches.
-- [ ] Review service queue coalescing and popup placement near viewport edges.
+- [x] Review service queue coalescing and popup placement near viewport edges.
 
 Evidence: UI suite passed (406 tests before the added caret-motion regression,
 which also passed separately); desktop completion-burst regression and workspace
 Clippy passed. Service batching keeps the latest completion position per tab,
 preserving serial server-document updates. Old responses cannot consume a newer
 caret request; moving away and back still cancels an outstanding menu.
+
+Popup follow-up: completion, SQL/configuration hover, and star-expansion cards
+share viewport-aware placement. Completion rows adapt to available height and
+keep the selected row visible. All 408 UI tests and workspace Clippy passed,
+including a scrolled 320×180 editor with its caret at the bottom-right edge.
+
+### Live room authorization
+
+- [ ] Revalidate tenant membership as well as room membership on a live socket.
+  Removing tenant membership leaves the explicit room-member row intact, so
+  the old lease check can continue streaming room events to a removed member.
+- [ ] Move periodic SQLite authorization checks off Tokio worker threads.
 
 ### Repository hosting I/O
 

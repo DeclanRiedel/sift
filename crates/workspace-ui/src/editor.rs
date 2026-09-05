@@ -2720,17 +2720,61 @@ impl QueryEditor {
         ))
     }
 
+    /// Position in scroll-content coordinates, not window coordinates. Prefer
+    /// below the anchor, flip above when necessary, and constrain both axes to
+    /// the visible editor. Long cards scroll within the returned height.
+    fn popup_bounds(
+        &self,
+        anchor: (Pixels, Pixels),
+        width: Pixels,
+        height: Pixels,
+    ) -> Bounds<Pixels> {
+        let viewport = self.scroll_handle.bounds().size;
+        let offset = self.scroll_handle.offset();
+        let min_x = -offset.x;
+        let min_y = -offset.y;
+        let width = width.min(viewport.width).max(px(0.));
+        let below = (min_y + viewport.height - anchor.1).max(px(0.));
+        let above = (anchor.1 - self.line_height - min_y).max(px(0.));
+        let use_above = below < height && above > below;
+        let height = height
+            .min(if use_above { above } else { below })
+            .min(viewport.height)
+            .max(px(0.));
+        let top = if use_above {
+            anchor.1 - self.line_height - height
+        } else {
+            anchor.1
+        };
+        Bounds::new(
+            point(
+                anchor.0.clamp(min_x, min_x + viewport.width - width),
+                top.clamp(min_y, min_y + viewport.height - height),
+            ),
+            size(width, height),
+        )
+    }
+
     fn render_completion_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let menu = self.semantic.completion()?;
-        let (left, top) = self.caret_content_origin()?;
+        let anchor = self.caret_content_origin()?;
+        let bounds = self.popup_bounds(
+            anchor,
+            COMPLETION_MENU_WIDTH,
+            COMPLETION_ROW_HEIGHT * menu.candidates.len().min(COMPLETION_VISIBLE_ROWS) as f32
+                + px(2.),
+        );
+        let visible_rows = ((f32::from(bounds.size.height - px(2.))
+            / f32::from(COMPLETION_ROW_HEIGHT)) as usize)
+            .max(1);
         let colors = cx.theme().colors;
         let selected = menu.selected;
         let rows = menu
             .candidates
             .iter()
             .enumerate()
-            .skip(selected.saturating_sub(COMPLETION_VISIBLE_ROWS - 1))
-            .take(COMPLETION_VISIBLE_ROWS)
+            .skip(selected.saturating_sub(visible_rows - 1))
+            .take(visible_rows)
             .map(|(index, candidate)| {
                 let active = index == selected;
                 div()
@@ -2785,10 +2829,12 @@ impl QueryEditor {
             .collect::<Vec<_>>();
         Some(
             div()
+                .debug_selector(|| "editor-completion-popup".into())
                 .absolute()
-                .left(left)
-                .top(top)
-                .w(COMPLETION_MENU_WIDTH)
+                .left(bounds.left())
+                .top(bounds.top())
+                .w(bounds.size.width)
+                .max_h(bounds.size.height)
                 .border_1()
                 .border_color(colors.border)
                 .bg(colors.elevated_surface)
@@ -2803,7 +2849,7 @@ impl QueryEditor {
 
     fn render_hover_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let hover = self.semantic.hover()?;
-        let (left, top) = self.hover_anchor?;
+        let bounds = self.popup_bounds(self.hover_anchor?, px(380.), px(240.));
         let colors = cx.theme().colors;
         let type_text = hover.type_ref.as_ref().map(hover_type_display);
         let nullable = hover.nullability.map(|nullable| match nullable {
@@ -2813,10 +2859,14 @@ impl QueryEditor {
         });
         Some(
             div()
+                .id("editor-hover-popup")
+                .debug_selector(|| "editor-hover-popup".into())
                 .absolute()
-                .left(left)
-                .top(top)
-                .w(px(380.))
+                .left(bounds.left())
+                .top(bounds.top())
+                .w(bounds.size.width)
+                .max_h(bounds.size.height)
+                .overflow_y_scroll()
                 .p_3()
                 .border_1()
                 .border_color(colors.border)
@@ -2870,16 +2920,19 @@ impl QueryEditor {
 
     fn render_manifest_hover_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let hover = self.manifest_hover.as_ref()?;
-        let (left, top) = self.hover_anchor?;
+        let bounds = self.popup_bounds(self.hover_anchor?, px(380.), px(240.));
         let colors = cx.theme().colors;
         let choices =
             (!hover.choices.is_empty()).then(|| format!("Choices: {}", hover.choices.join(", ")));
         Some(
             div()
+                .id("manifest-hover-popup")
                 .absolute()
-                .left(left)
-                .top(top)
-                .w(px(380.))
+                .left(bounds.left())
+                .top(bounds.top())
+                .w(bounds.size.width)
+                .max_h(bounds.size.height)
+                .overflow_y_scroll()
                 .p_3()
                 .border_1()
                 .border_color(colors.border)
@@ -2990,7 +3043,7 @@ impl QueryEditor {
 
     fn render_star_expansion_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let preview = self.semantic.star_expansion()?;
-        let (left, top) = self.caret_content_origin()?;
+        let bounds = self.popup_bounds(self.caret_content_origin()?, px(440.), px(240.));
         let colors = cx.theme().colors;
         let replacement = if preview.replacement.chars().count() > 240 {
             format!(
@@ -3002,10 +3055,13 @@ impl QueryEditor {
         };
         Some(
             div()
+                .id("star-expansion-popup")
                 .absolute()
-                .left(left)
-                .top(top)
-                .w(px(440.))
+                .left(bounds.left())
+                .top(bounds.top())
+                .w(bounds.size.width)
+                .max_h(bounds.size.height)
+                .overflow_y_scroll()
                 .p_3()
                 .border_1()
                 .border_color(colors.accent)
@@ -5169,6 +5225,51 @@ mod tests {
             assert_eq!(child.top(), row.top(), "{selector} top");
             assert_eq!(child.bottom(), row.bottom(), "{selector} bottom");
         }
+    }
+
+    #[gpui::test]
+    fn completion_popup_fits_a_small_scrolled_editor_at_the_bottom_right(cx: &mut TestAppContext) {
+        let text = "select a_long_identifier_from_a_table;\n".repeat(100);
+        let (mut cx, editor, _) = editor_with_spy(&text, cx);
+        cx.simulate_resize(size(px(320.), px(180.)));
+        editor.update(&mut cx, |editor, cx| {
+            let cursor = editor.document.text().len() - 2;
+            editor.document.set_selection(cursor..cursor, false);
+            editor.selection_changed(cx);
+        });
+        cx.run_until_parked();
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.complete(&Complete, window, cx);
+            let cursor = editor.document.cursor() as u32;
+            assert!(editor.apply_semantic_outcome(
+                editor.revision,
+                SemanticOutcome::Completions {
+                    cursor,
+                    replaced: sift_protocol::TextRange {
+                        start: cursor,
+                        end: cursor
+                    },
+                    candidates: (0..20).map(|_| candidate("a_table")).collect(),
+                },
+                cx
+            ));
+            for _ in 0..19 {
+                editor.semantic.move_completion_selection(1);
+            }
+        });
+        cx.run_until_parked();
+        let viewport = cx.debug_bounds("editor-scroll").unwrap();
+        let popup = cx.debug_bounds("editor-completion-popup").unwrap();
+        assert!(
+            popup.left() >= viewport.left() && popup.right() <= viewport.right() + px(1.),
+            "{popup:?} in {viewport:?}"
+        );
+        assert!(
+            popup.top() >= viewport.top() && popup.bottom() <= viewport.bottom() + px(1.),
+            "{popup:?} in {viewport:?}"
+        );
+        let selected = cx.debug_bounds("completion-row-19").unwrap();
+        assert!(selected.top() >= popup.top() && selected.bottom() <= popup.bottom());
     }
 
     #[gpui::test]
