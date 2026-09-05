@@ -110,12 +110,29 @@ impl CachedSchema {
 
 pub struct SchemaFetchGate {
     key: CacheKey,
-    gate: Arc<tokio::sync::Mutex<()>>,
+    gate: Option<Arc<tokio::sync::Mutex<()>>>,
+    cache: Arc<Inner>,
 }
 
 impl SchemaFetchGate {
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.gate.lock().await
+        self.gate.as_ref().unwrap().lock().await
+    }
+}
+
+impl Drop for SchemaFetchGate {
+    fn drop(&mut self) {
+        // Keep the shared gate discoverable until the final caller leaves,
+        // including callers waiting for a failed or cancelled fetch. The map
+        // lock makes checking ownership and removal atomic with acquisition.
+        let mut gate = self.gate.take();
+        self.cache.in_flight.remove_if(&self.key, |_, current| {
+            let same_gate = Arc::ptr_eq(current, gate.as_ref().unwrap());
+            // Release this caller under the map lock as well. Otherwise two
+            // concurrent drops could both see another owner and leave an entry.
+            drop(gate.take());
+            same_gate && Arc::strong_count(current) == 1
+        });
     }
 }
 
@@ -251,18 +268,11 @@ impl SchemaCache {
             .entry(key.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
-        Ok(SchemaFetchGate { key, gate })
-    }
-
-    pub fn clear_fetch_gate(&self, gate: &SchemaFetchGate) {
-        let should_remove = self
-            .inner
-            .in_flight
-            .get(&gate.key)
-            .is_some_and(|current| Arc::ptr_eq(&current, &gate.gate));
-        if should_remove {
-            self.inner.in_flight.remove(&gate.key);
-        }
+        Ok(SchemaFetchGate {
+            key,
+            gate: Some(gate),
+            cache: self.inner.clone(),
+        })
     }
 
     /// Invalidate every cached entry for a spec. Called by the
@@ -675,6 +685,61 @@ mod tests {
         let cache = SchemaCache::new(SchemaCacheConfig::default());
         assert!(cache.get(&spec(), &scope()).is_none());
         assert_eq!(cache.cache_misses(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_gate_stays_shared_until_last_caller_leaves() {
+        let cache = SchemaCache::default();
+        let first = cache.fetch_gate(&spec(), &scope()).unwrap();
+        let waiting = cache.fetch_gate(&spec(), &scope()).unwrap();
+        let guard = first.lock().await;
+        assert!(waiting.gate.as_ref().unwrap().try_lock().is_err());
+        drop(guard);
+        drop(first);
+
+        let guard = waiting.lock().await;
+        let newcomer = cache.fetch_gate(&spec(), &scope()).unwrap();
+        assert!(newcomer.gate.as_ref().unwrap().try_lock().is_err());
+        drop(guard);
+        drop(waiting);
+        assert_eq!(cache.inner.in_flight.len(), 1);
+        drop(newcomer);
+        assert!(cache.inner.in_flight.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_fetch_releases_gate() {
+        let cache = SchemaCache::default();
+        let gate = cache.fetch_gate(&spec(), &scope()).unwrap();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = gate.lock().await;
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(cache.inner.in_flight.is_empty());
+    }
+
+    #[test]
+    fn concurrent_gate_drops_leave_no_idle_entry() {
+        let cache = SchemaCache::default();
+        let barrier = std::sync::Barrier::new(8);
+        let gates: Vec<_> = (0..8)
+            .map(|_| cache.fetch_gate(&spec(), &scope()).unwrap())
+            .collect();
+        std::thread::scope(|threads| {
+            for gate in gates {
+                let barrier = &barrier;
+                threads.spawn(move || {
+                    barrier.wait();
+                    drop(gate);
+                });
+            }
+        });
+        assert!(cache.inner.in_flight.is_empty());
     }
 
     #[test]

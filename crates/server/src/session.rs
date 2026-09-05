@@ -2782,14 +2782,8 @@ impl SessionStore {
                     .schema_cache
                     .insert(spec, &scope, snapshot.clone(), legacy.clone())
             {
-                if let Some(gate) = &fetch_gate {
-                    self.inner.schema_cache.clear_fetch_gate(gate);
-                }
                 return Ok(cached);
             }
-        }
-        if let Some(gate) = &fetch_gate {
-            self.inner.schema_cache.clear_fetch_gate(gate);
         }
         match (result, stale) {
             (Ok(snapshot), _) => Ok(CachedSchema::new_uncached(snapshot)),

@@ -145,14 +145,13 @@ impl RateLimiter {
                 .buckets
                 .retain(|_, bucket| now.saturating_duration_since(bucket.last_used) < idle_ttl);
         }
-        let mut keys = vec![BucketKey::Principal(principal_id, class)];
-        if let Some(tenant_id) = tenant_id {
-            keys.push(BucketKey::Tenant(tenant_id, class));
-        }
-        let candidates: Vec<_> = keys
-            .iter()
-            .map(|key| {
-                let current = inner.buckets.get(key).copied().unwrap_or(Bucket {
+        let keys = [
+            Some(BucketKey::Principal(principal_id, class)),
+            tenant_id.map(|id| BucketKey::Tenant(id, class)),
+        ];
+        let candidates = keys.map(|key| {
+            key.map(|key| {
+                let current = inner.buckets.get(&key).copied().unwrap_or(Bucket {
                     tokens: config.burst,
                     updated_at: now,
                     last_used: now,
@@ -162,11 +161,12 @@ impl RateLimiter {
                     .as_secs_f64();
                 let tokens =
                     (current.tokens + elapsed * config.refill_per_second).min(config.burst);
-                (*key, tokens)
+                (key, tokens)
             })
-            .collect();
+        });
         let retry_after = candidates
             .iter()
+            .flatten()
             .filter(|(_, tokens)| *tokens < cost)
             .map(|(_, tokens)| {
                 ((cost - *tokens) / config.refill_per_second)
@@ -177,7 +177,7 @@ impl RateLimiter {
         if let Some(retry_after) = retry_after {
             return Err(retry_after);
         }
-        for (key, tokens) in candidates {
+        for (key, tokens) in candidates.into_iter().flatten() {
             inner.buckets.insert(
                 key,
                 Bucket {
