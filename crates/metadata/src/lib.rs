@@ -3991,6 +3991,25 @@ impl MetadataStore {
         self.room_member_optional_locked(&conn, room, principal)
     }
 
+    /// Live socket leases must use current tenant membership, not the tenant
+    /// list captured when the socket opened. Room membership may intentionally
+    /// outlive removal from the tenant, but cannot grant access by itself.
+    pub fn room_access_is_active(&self, room: RoomId, principal: PrincipalId) -> Result<bool> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM room_member rm
+                JOIN room r ON r.id = rm.room_id
+                JOIN membership m ON m.tenant_id = r.tenant_id AND m.principal_id = rm.principal_id
+                JOIN principal p ON p.id = rm.principal_id
+                WHERE rm.room_id = ?1 AND rm.principal_id = ?2 AND p.disabled_at IS NULL
+            )",
+            params![room.0, principal.0],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     pub fn remove_room_member_authorized(
         &self,
         room: RoomId,

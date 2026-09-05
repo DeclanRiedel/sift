@@ -1663,6 +1663,15 @@ async fn websocket_lease_reauthenticates_after_rotation_and_closes_on_revocation
 
 #[tokio::test]
 async fn room_websocket_lease_closes_when_membership_is_removed() {
+    room_websocket_membership_revocation(false).await;
+}
+
+#[tokio::test]
+async fn room_websocket_lease_closes_when_tenant_membership_is_removed() {
+    room_websocket_membership_revocation(true).await;
+}
+
+async fn room_websocket_membership_revocation(remove_tenant: bool) {
     let mut state = test_state_with_metadata(false);
     let metadata = state.metadata.as_ref().unwrap().clone();
     let member = metadata
@@ -1760,14 +1769,31 @@ async fn room_websocket_lease_closes_when_membership_is_removed() {
         RoomServerMessage::Attached { .. }
     ));
 
-    metadata
-        .remove_room_member_authorized(
-            room.id,
-            PrincipalId(1),
-            member.id,
-            metadata_audit(PrincipalId(1), "remove_member", "room", Some(room.id.0)),
-        )
-        .unwrap();
+    if remove_tenant {
+        metadata
+            .remove_tenant_membership(
+                TenantId(1),
+                PrincipalId(1),
+                member.id,
+                metadata_audit(PrincipalId(1), "remove_member", "tenant", Some(1)),
+            )
+            .unwrap();
+        // The explicit room membership still exists; it is insufficient to
+        // keep streaming once the containing tenant has revoked access.
+        assert!(metadata
+            .get_room_member(room.id, member.id)
+            .unwrap()
+            .is_some());
+    } else {
+        metadata
+            .remove_room_member_authorized(
+                room.id,
+                PrincipalId(1),
+                member.id,
+                metadata_audit(PrincipalId(1), "remove_member", "room", Some(room.id.0)),
+            )
+            .unwrap();
+    }
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             if let RoomServerMessage::Error { message } = socket.next().await.unwrap() {

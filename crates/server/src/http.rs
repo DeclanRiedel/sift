@@ -18920,7 +18920,7 @@ async fn handle_room_ws(
                     }).await?;
                     break;
                 }
-                if !ws_lease_is_valid(&state, &auth, Some(room))? {
+                if !ws_lease_is_valid(&state, &auth, Some(room)).await? {
                     send_json(&mut sender, &RoomServerMessage::Error {
                         message: "authentication lease or room membership was revoked".into(),
                     }).await?;
@@ -19282,7 +19282,7 @@ impl Drop for AuditedRoomAttachment {
     }
 }
 
-fn ws_lease_is_valid(
+async fn ws_lease_is_valid(
     state: &AppState,
     auth: &AuthContext,
     room: Option<RoomId>,
@@ -19296,15 +19296,21 @@ fn ws_lease_is_valid(
     let Some(metadata) = state.metadata.as_ref() else {
         return Ok(true);
     };
-    if let Some(session_id) = auth.auth_session_id.as_deref() {
-        if !metadata.auth_session_is_active(session_id)? {
-            return Ok(false);
+    let metadata = metadata.clone();
+    let session_id = auth.auth_session_id.clone();
+    let principal = auth.principal_id;
+    metadata_blocking(move || {
+        if let Some(session_id) = session_id {
+            if !metadata.auth_session_is_active(&session_id)? {
+                return Ok(false);
+            }
         }
-    }
-    if let Some(room) = room {
-        return Ok(metadata.get_room_member(room, auth.principal_id)?.is_some());
-    }
-    Ok(true)
+        if let Some(room) = room {
+            return Ok(metadata.room_access_is_active(room, principal)?);
+        }
+        Ok(true)
+    })
+    .await
 }
 
 async fn reauthenticate_ws(
@@ -19349,7 +19355,7 @@ async fn handle_ws(
                 None => break,
             },
             _ = lease_tick.tick(), if auth.is_some() => {
-                if !ws_lease_is_valid(&state, auth.as_ref().expect("guarded"), None)? {
+                if !ws_lease_is_valid(&state, auth.as_ref().expect("guarded"), None).await? {
                     send_json(&mut sender, &WsServerMessage::Error {
                         request_id: None,
                         code: None,

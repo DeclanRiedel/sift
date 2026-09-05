@@ -145,10 +145,19 @@ including a scrolled 320×180 editor with its caret at the bottom-right edge.
 
 ### Live room authorization
 
-- [ ] Revalidate tenant membership as well as room membership on a live socket.
+- [x] Revalidate tenant membership as well as room membership on a live socket.
   Removing tenant membership leaves the explicit room-member row intact, so
   the old lease check can continue streaming room events to a removed member.
-- [ ] Move periodic SQLite authorization checks off Tokio worker threads.
+- [x] Move periodic SQLite authorization checks off Tokio worker threads.
+
+Evidence: existing room-revocation test and a tenant-revocation variant passed
+against a local HTTP/WebSocket server; workspace Clippy passed. The new check
+joins current room, tenant, and principal state instead of trusting a cached
+tenant list. No external server was contacted.
+
+- [ ] Follow-up: retain lease checks during active result/notification streams.
+  The outer socket loop currently stops polling its lease while streaming or
+  awaiting an ACK. Cancel and release active cursors on every streaming error.
 
 ### Repository hosting I/O
 
