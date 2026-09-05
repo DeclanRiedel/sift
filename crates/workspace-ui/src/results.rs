@@ -28,6 +28,9 @@ use sift_ui::{
 
 use crate::presentation::ResultReference;
 
+mod filter;
+use filter::PreparedFilters;
+
 const MIN_COLUMN_WIDTH: f32 = 144.0;
 const DEFAULT_COLUMN_WIDTH: f32 = 184.0;
 const MAX_COLUMN_WIDTH: f32 = 960.0;
@@ -2762,47 +2765,6 @@ impl ResultsView {
         }
     }
 
-    fn cell_matches_filter(
-        cell: Option<&CachedCellRender>,
-        operator: ResultFilterOperator,
-        value: &str,
-    ) -> bool {
-        let Some(cell) = cell else {
-            return operator == ResultFilterOperator::IsNull;
-        };
-        if operator == ResultFilterOperator::IsNull {
-            return cell.class == CellClass::Null;
-        }
-        if operator == ResultFilterOperator::IsNotNull {
-            return cell.class != CellClass::Null;
-        }
-        if cell.class == CellClass::Null {
-            return false;
-        }
-        let value = value.trim().to_lowercase();
-        let ordering = if cell.class == CellClass::Number {
-            match (cell.text.parse::<f64>(), value.parse::<f64>()) {
-                (Ok(left), Ok(right)) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
-                _ => cell.filter_text.cmp(&value),
-            }
-        } else {
-            cell.filter_text.cmp(&value)
-        };
-        match operator {
-            ResultFilterOperator::Contains => cell.filter_text.contains(&value),
-            ResultFilterOperator::NotContains => !cell.filter_text.contains(&value),
-            ResultFilterOperator::Equals => ordering == Ordering::Equal,
-            ResultFilterOperator::NotEquals => ordering != Ordering::Equal,
-            ResultFilterOperator::GreaterThan => ordering == Ordering::Greater,
-            ResultFilterOperator::GreaterThanOrEqual => ordering != Ordering::Less,
-            ResultFilterOperator::LessThan => ordering == Ordering::Less,
-            ResultFilterOperator::LessThanOrEqual => ordering != Ordering::Greater,
-            ResultFilterOperator::StartsWith => cell.filter_text.starts_with(&value),
-            ResultFilterOperator::EndsWith => cell.filter_text.ends_with(&value),
-            ResultFilterOperator::IsNull | ResultFilterOperator::IsNotNull => unreachable!(),
-        }
-    }
-
     fn filter_is_active(&self, column: usize) -> bool {
         let operator = self
             .column_filter_operators
@@ -2818,74 +2780,12 @@ impl ResultsView {
 
     fn rebuild_display_rows(&mut self, cx: &mut Context<Self>) {
         let filter = self.grid_filter_input.read(cx).text().trim().to_lowercase();
-        let column_filters = self
-            .column_filters
-            .iter()
-            .enumerate()
-            .filter_map(|(column, filter)| {
-                let operator = self
-                    .column_filter_operators
-                    .get(column)
-                    .copied()
-                    .unwrap_or_default();
-                let group = self.column_filter_groups.get(column).copied().unwrap_or(0);
-                (self.filter_is_active(column)).then_some((
-                    group,
-                    column,
-                    operator,
-                    filter.as_str(),
-                ))
-            })
-            .collect::<Vec<_>>();
+        let column_filters = PreparedFilters::new(self);
         let mut rows = (0..self.rendered_rows.len())
             .filter(|row| {
                 let cells = &self.rendered_rows[*row];
                 (filter.is_empty() || cells.iter().any(|cell| cell.filter_text.contains(&filter)))
-                    && {
-                        let group_results = self
-                            .filter_group_logics
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(group, logic)| {
-                                let filters = column_filters
-                                    .iter()
-                                    .filter(|(assigned, ..)| *assigned == group)
-                                    .collect::<Vec<_>>();
-                                if filters.is_empty() {
-                                    return None;
-                                }
-                                Some(match logic {
-                                    ResultFilterLogic::All => {
-                                        filters.iter().all(|(_, column, operator, value)| {
-                                            Self::cell_matches_filter(
-                                                cells.get(*column),
-                                                *operator,
-                                                value,
-                                            )
-                                        })
-                                    }
-                                    ResultFilterLogic::Any => {
-                                        filters.iter().any(|(_, column, operator, value)| {
-                                            Self::cell_matches_filter(
-                                                cells.get(*column),
-                                                *operator,
-                                                value,
-                                            )
-                                        })
-                                    }
-                                })
-                            })
-                            .collect::<Vec<_>>();
-                        group_results.is_empty()
-                            || match self.filter_logic {
-                                ResultFilterLogic::All => {
-                                    group_results.into_iter().all(|value| value)
-                                }
-                                ResultFilterLogic::Any => {
-                                    group_results.into_iter().any(|value| value)
-                                }
-                            }
-                    }
+                    && column_filters.matches(cells)
             })
             .collect::<Vec<_>>();
         if !self.sorts.is_empty() {
@@ -6887,9 +6787,9 @@ mod tests {
                 cx,
             );
             view.column_filter_operators[1] = ResultFilterOperator::GreaterThan;
-            view.set_column_filter(1, "10", cx);
+            view.set_column_filter(1, " 10 ", cx);
             view.column_filter_operators[2] = ResultFilterOperator::Equals;
-            view.set_column_filter(2, "b", cx);
+            view.set_column_filter(2, " B ", cx);
             assert_eq!(&*view.display_rows, &[2]);
 
             view.filter_group_logics[0] = ResultFilterLogic::Any;
@@ -6905,6 +6805,15 @@ mod tests {
             view.rebuild_display_rows(cx);
             view.set_sort(2, Some(SortDirection::Ascending), cx);
             view.set_sort(1, Some(SortDirection::Descending), cx);
+            assert_eq!(&*view.display_rows, &[0, 2, 1]);
+
+            // Empty groups must not make an outer OR match every row.
+            view.filter_group_logics.push(ResultFilterLogic::All);
+            view.set_column_filter(1, "100", cx);
+            assert_eq!(&*view.display_rows, &[2, 1]);
+            view.set_column_filter(2, "", cx);
+            assert!(view.display_rows.is_empty());
+            view.set_column_filter(1, "", cx);
             assert_eq!(&*view.display_rows, &[0, 2, 1]);
         });
     }

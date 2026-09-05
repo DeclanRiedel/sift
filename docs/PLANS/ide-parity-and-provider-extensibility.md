@@ -146,7 +146,7 @@ delete, import, and export workflows.
 - [x] Parameterized DML generation
 - [x] Table and query-result comparison
 - [x] Result search UI
-- [ ] Copy as CSV, JSON, SQL, or Markdown
+- [x] Copy as CSV, JSON, SQL, or Markdown
 - [x] JSON and text large viewers
 - [ ] Image and blob viewers
 - [ ] Foreign-key picker

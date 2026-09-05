@@ -14,16 +14,18 @@ product behavior. No API migration or compatibility work is required.
   Remove manual cleanup, which can let a new caller bypass existing waiters.
 - [x] Backend: use fixed-size principal/tenant admission candidates, preserving
   atomic charging and retry timing without per-request temporary heap vectors.
-- [ ] Frontend: prepare active filter groups and normalized operands once per
+- [x] Frontend: prepare active filter groups and normalized operands once per
   result-grid refresh. Row evaluation must allocate no temporary groups or
   normalized filter strings, and must short-circuit both group and outer logic.
   Preserve NULL handling, numeric comparisons, empty-group behavior, source row
   identity, stable multi-sort, and Vim controls.
-- [ ] Add focused regressions for gate lifetime and grouped grid filtering;
+- [x] Add focused regressions for gate lifetime and grouped grid filtering;
   reuse existing rate-limiter tests for admission semantics.
-- [ ] Run `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
+- [x] Reconcile the result-copy feature inventory with existing desktop command
+  routes and format coverage: CSV, JSON, SQL, and Markdown are implemented.
+- [x] Run `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace`. Record exact outcomes and any environment limits.
-- [ ] Review the final diff and commit completed milestones.
+- [x] Review the final diff and commit completed milestones.
 
 ## Evidence and limits
 
@@ -40,3 +42,21 @@ Backend validation: focused schema-cache and rate-admission tests passed.
 Workspace Clippy passed with warnings denied. Gate cleanup holds the map lock
 while releasing the caller's reference, so concurrent final drops cannot leave
 an idle entry behind; the workspace run includes that regression as well.
+
+Frontend implementation extracts prepared predicates into `results/filter.rs`.
+For R rows, G groups, and F active filters, group membership preparation moves
+from repeated per-row scans (O(R * G * F)) to one pass (O(G + F)); row matching
+visits only relevant predicates and short-circuits. Operand strings and numeric
+filter values are prepared once. Result indices and sorting remain unchanged.
+
+Final validation (2026-09-05): `cargo fmt` and workspace Clippy with warnings
+denied passed. The initial workspace test build could not link the desktop
+because this host lacks the development `libxkbcommon-x11.so` alias. Its runtime
+`libxkbcommon-x11.so.0` is installed; providing an alias in the temporary tracking
+directory and running `LIBRARY_PATH=<temporary-directory> cargo test --workspace`
+passed (exit 0), including all 404 workspace-UI tests. No repository build
+configuration or system libraries were changed. Existing ignored tests remain
+ignored; this run does not claim live database integration or measured latency.
+
+Milestones: plan `050f4ed`, backend `333850f`, followed by the frontend/filter
+and validation commit containing this completed checklist.
