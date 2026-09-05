@@ -105,9 +105,9 @@ the server's default maximum retained CRDT history.
 
 ### Modal layout
 
-- [ ] Centralize preferred content widths for every modal variant and make
+- [x] Centralize preferred content widths for every modal variant and make
   content roots responsive instead of competing with the surrounding card.
-- [ ] Clamp cards to the available viewport, account for app-bar placement and
+- [x] Clamp cards to the available viewport, account for app-bar placement and
   padding, and provide overflow scrolling instead of clipping inaccessible
   controls. Preserve the dedicated expanded-result viewport.
 - [ ] Exercise modal layout at small and large window sizes, including wide
@@ -116,3 +116,18 @@ the server's default maximum retained CRDT history.
 Native screenshot capture is currently unavailable: this process cannot
 authenticate to the running X display. Use GPUI's rendered layout tests and
 record that limit rather than claiming pixel inspection.
+
+Evidence: 406 UI tests and workspace Clippy passed. New rendered-layout tests
+cover 64 modal variants at 1280×900, 800×600, and 480×400, plus footer/content
+bounds on five wide surfaces. Repository commit details needed an explicit
+flex height and wrapping actions to keep their footer inside the card. Long
+populated content and editor overlays remain follow-up checks.
+
+### SQL editor scheduling and response ownership
+
+- [ ] Correlate completions with their requested caret as well as text revision;
+  moving without editing must cancel stale menus and pending responses.
+- [ ] Reject stale failures just like stale successful answers.
+- [ ] Own one debounce task per document/request class instead of detached
+  timers; cancel superseded work and avoid cloning text for stale dispatches.
+- [ ] Review service queue coalescing and popup placement near viewport edges.

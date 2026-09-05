@@ -54,6 +54,7 @@ mod database_monitor;
 mod dock_layout;
 mod docks;
 mod items;
+mod modal_layout;
 mod pane_layout;
 mod status_bar;
 
@@ -39909,19 +39910,11 @@ impl WorkspaceShell {
             })
     }
 
-    fn render_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn render_modal(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let colors = cx.theme().colors;
         self.modal.as_ref().map(|modal| {
             let server_picker = matches!(modal, Modal::ServerPicker);
             let account = matches!(modal, Modal::Account);
-            let settings = matches!(modal, Modal::Settings);
-            let api_tokens = matches!(modal, Modal::ApiTokens);
-            let connection_policy = matches!(modal, Modal::ConnectionPolicy);
-            let tenant_usage = matches!(modal, Modal::TenantUsage);
-            let vcs_diagnostics = matches!(modal, Modal::VcsDiagnostics);
-            let administration = matches!(modal, Modal::Administration);
-            let themes = matches!(modal, Modal::Themes);
-            let keymaps = matches!(modal, Modal::Keymaps);
             let app_bar_modal = matches!(
                 modal,
                 Modal::ServerPicker
@@ -39931,60 +39924,15 @@ impl WorkspaceShell {
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
-            let data_search = matches!(modal, Modal::DataSearch);
             let data_results = matches!(modal, Modal::DataResults(_));
-            let query_parameters = matches!(modal, Modal::QueryParameters);
-            let result_cell_edit = matches!(modal, Modal::EditResultCell);
-            let plan_captures = matches!(modal, Modal::PlanCaptures);
-            let catalog_diagram = matches!(modal, Modal::CatalogDiagram);
-            let catalog_snapshots = matches!(modal, Modal::CatalogSnapshots);
-            let ddl_sources = matches!(modal, Modal::DdlSources);
-            let room_administration = matches!(modal, Modal::RoomAdministration);
-            let csv_import = matches!(modal, Modal::CsvImport);
-            let transfer_recipes = matches!(modal, Modal::TransferRecipes);
-            let instance_setup = matches!(modal, Modal::InstanceSetup);
-            let repository_conflict = matches!(modal, Modal::RepositoryConflict);
-            let workspace_reconcile = matches!(modal, Modal::WorkspaceReconcile);
-            let change_ledger = matches!(modal, Modal::ChangeLedger);
-            let repository_hosting = matches!(modal, Modal::RepositoryHosting);
-            let card_width = if data_results {
-                0.0
-            } else if settings
-                || api_tokens
-                || connection_policy
-                || tenant_usage
-                || vcs_diagnostics
-                || administration
-                || ddl_sources
-                || room_administration
-                || themes
-                || keymaps
-                || command_palette
-                || query_parameters
-                || result_cell_edit
-                || plan_captures
-                || catalog_snapshots
-                || change_ledger
-                || repository_hosting
-            {
-                720.0
-            } else if catalog_diagram || workspace_reconcile {
-                1040.0
-            } else if data_search || csv_import || transfer_recipes || repository_conflict {
-                900.0
-            } else if server_picker || account {
-                360.0
-            } else if instance_setup {
-                720.0
-            } else if database_connection {
-                match self.database_wizard_step {
-                    DatabaseWizardStep::Provider => 760.0,
-                    DatabaseWizardStep::Details => 900.0,
-                    DatabaseWizardStep::Review => 720.0,
-                }
-            } else {
-                520.0
-            };
+            let padded = !database_connection && !command_palette && !data_results && !account && !server_picker;
+            let card_width = modal_layout::content_width(modal, self.database_wizard_step)
+                + if padded { 24.0 } else { 0.0 };
+            let toolbar_height = cx.theme().metrics.toolbar_height;
+            let viewport = window.viewport_size();
+            let layer_height = viewport.height - if app_bar_modal { toolbar_height } else { px(0.) };
+            let popover = server_picker || account || command_palette;
+            let max_card_height = (layer_height - px(if popover { 12.0 } else { 32.0 })).max(px(1.));
             let content = match modal {
                 Modal::CommandPalette => {
                     let input = self.query_input.read(cx).text();
@@ -42112,7 +42060,7 @@ impl WorkspaceShell {
                         .get(selected)
                         .is_some_and(|snippet| snippet.id.is_none());
                     div()
-                        .w(px(820.))
+                        .w_full()
                         .h(px(620.))
                         .flex()
                         .flex_col()
@@ -42259,6 +42207,7 @@ impl WorkspaceShell {
                                 )
                                 .child(
                                     Button::new("save-snippet", "Save")
+                                        .debug_selector("save-snippet")
                                         .tone(ButtonTone::Accent)
                                         .disabled(immutable || self.snippet_pending)
                                         .loading(self.snippet_pending)
@@ -44702,7 +44651,7 @@ impl WorkspaceShell {
                     );
                     div()
                         .debug_selector(|| "catalog-diagram-modal".into())
-                        .w(px(980.))
+                        .w_full()
                         .max_h(px(720.))
                         .flex()
                         .flex_col()
@@ -44780,7 +44729,7 @@ impl WorkspaceShell {
                     });
                     div()
                         .debug_selector(|| "catalog-snapshot-manager".into())
-                        .w(px(680.))
+                        .w_full()
                         .max_h(px(620.))
                         .flex()
                         .flex_col()
@@ -44926,7 +44875,7 @@ impl WorkspaceShell {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .w(px(720.))
+                        .w_full()
                         .max_h(px(640.))
                         .child(div().flex().items_center().justify_between().child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Schema baseline migration")).child(Button::new("manage-ddl-sources", "DDL sources…").tone(ButtonTone::Ghost).on_click(cx.listener(|shell, _, _, cx| shell.open_ddl_sources(cx)))))
                         .child(div().text_sm().text_color(colors.muted_text).child(format!("{change_count} change(s) · {statement_count} statement(s)")))
@@ -44948,7 +44897,7 @@ impl WorkspaceShell {
                 }
                 Modal::DdlSources => {
                     let rows = self.ddl_sources.clone();
-                    div().w(px(700.)).h(px(580.)).flex().flex_col().gap_3()
+                    div().w_full().h(px(580.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between().child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Workspace DDL sources")).child(Button::new("refresh-ddl-sources", "Refresh").tone(ButtonTone::Ghost).loading(self.ddl_sources_pending).on_click(cx.listener(|shell, _, _, cx| shell.open_ddl_sources(cx)))))
                         .child(div().text_xs().text_color(colors.muted_text).child("Offline schema models used by comparison and migration. Root IDs refer to folders or files in the active workspace."))
                         .child(div().flex().gap_2().children(self.ddl_source_inputs.iter().cloned()).child(Button::new("save-ddl-source", if self.selected_ddl_source.is_some() { "Save" } else { "Create" }).tone(ButtonTone::Accent).loading(self.ddl_sources_pending).on_click(cx.listener(|shell, _, _, cx| shell.save_ddl_source(cx)))))
@@ -44961,9 +44910,9 @@ impl WorkspaceShell {
                     let rooms = self.administered_rooms.clone();
                     let members = self.room_members.clone();
                     let results = self.room_admin_results.clone();
-                    div().w(px(760.)).h(px(620.)).flex().flex_col().gap_3()
+                    div().w_full().h(px(620.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between().child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Room administration")).child(Button::new("refresh-room-administration", "Refresh").tone(ButtonTone::Ghost).loading(self.room_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.open_room_administration(cx)))))
-                        .child(div().flex().gap_2().child(div().flex_1().child(self.room_admin_inputs[0].clone())).child(Button::new("create-shared-room", "Create shared room").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.create_admin_room(cx)))))
+                        .child(div().flex().gap_2().child(div().flex_1().child(self.room_admin_inputs[0].clone())).child(Button::new("create-shared-room", "Create shared room").debug_selector("create-shared-room").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.create_admin_room(cx)))))
                         .children(self.room_admin_error.clone().map(ErrorBanner::new))
                         .child(div().flex_1().min_h_0().flex().gap_3()
                             .child(div().id("admin-room-list").w(px(230.)).flex_none().overflow_y_scroll().children(rooms.into_iter().enumerate().map(|(index, room)| { let room_id = room.id.0; let selected = self.selected_admin_room == Some(room_id); div().id(("admin-room", index)).min_h(px(48.)).px_2().flex().flex_col().justify_center().rounded_sm().when(selected, |row| row.bg(colors.active_surface)).on_click(cx.listener(move |shell, _, _, cx| shell.select_admin_room(room_id, cx))).child(room.name).child(div().text_xs().text_color(colors.muted_text).child(format!("{:?} · {}", room.kind, room.bound_connection_profile_id.map_or_else(|| "unbound".into(), |id| format!("profile {}", id.0))))) })))
@@ -44988,7 +44937,7 @@ impl WorkspaceShell {
                         .unwrap_or("workspace root");
                     div()
                         .debug_selector(|| "workspace-create-node".into())
-                        .w(px(480.))
+                        .w_full()
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -45032,7 +44981,7 @@ impl WorkspaceShell {
                 }
                 Modal::WorkspaceMove => div()
                     .debug_selector(|| "workspace-move-node".into())
-                    .w(px(520.))
+                    .w_full()
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -45078,7 +45027,7 @@ impl WorkspaceShell {
                         .unwrap_or_else(|| "selected node".into());
                     div()
                         .debug_selector(|| "confirm-workspace-delete".into())
-                        .w(px(480.))
+                        .w_full()
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -45238,7 +45187,7 @@ impl WorkspaceShell {
                             .child(div().text_xs().text_color(colors.muted_text).child(if repository.private { "private" } else { "public" }))
                             .child(Button::new(("open-hosting-repository", index), "Open").tone(ButtonTone::Ghost).on_click(move |_, _, cx| cx.open_url(&url)))
                     });
-                    div().debug_selector(|| "repository-hosting".into()).w(px(720.)).max_h(px(680.)).flex().flex_col().gap_3()
+                    div().debug_selector(|| "repository-hosting".into()).w_full().max_h(px(680.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between()
                             .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child(summary.as_ref().map_or_else(|| "Repository hosting".into(), |summary| format!("{:?} · {}/{}", summary.identity.provider, summary.identity.owner, summary.identity.name))))
                             .child(Button::new("close-repository-hosting", "Close").tone(ButtonTone::Ghost).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx)))))
@@ -45345,7 +45294,7 @@ impl WorkspaceShell {
                     let create_name = self.query_input.read(cx).text().trim().to_owned();
                     let create_status = status.clone();
                     div().debug_selector(|| "repository-branches-modal".into())
-                        .w(px(640.)).max_h(px(620.)).flex().flex_col().gap_3()
+                        .w_full().max_h(px(620.)).flex().flex_col().gap_3()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Branches"))
                         .child(self.query_input.clone())
                         .child(div().id("repository-branch-list").flex_1().min_h(px(180.)).overflow_y_scroll().border_1().border_color(colors.subtle_border).children(rows))
@@ -45376,7 +45325,7 @@ impl WorkspaceShell {
                     let old = old.clone();
                     let new = self.workspace_path_input.read(cx).text().trim().to_owned();
                     let status = self.repository.status().cloned();
-                    div().w(px(480.)).flex().flex_col().gap_3()
+                    div().w_full().flex().flex_col().gap_3()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Rename {old}")))
                         .child(self.workspace_path_input.clone())
                         .child(div().flex().justify_end().gap_2()
@@ -45402,7 +45351,7 @@ impl WorkspaceShell {
                     let checkpoint_id = *checkpoint_id;
                     let name = self.workspace_path_input.read(cx).text().trim().to_owned();
                     let status = self.repository.status().cloned();
-                    div().w(px(500.)).flex().flex_col().gap_3()
+                    div().w_full().flex().flex_col().gap_3()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Create branch from checkpoint {}", checkpoint_id.0)))
                         .child(div().text_sm().text_color(colors.muted_text).child("Only checkpoints captured by a successful Sift commit have a Git object to branch from."))
                         .child(self.workspace_path_input.clone())
@@ -45432,7 +45381,7 @@ impl WorkspaceShell {
                     let status = self.repository.status().cloned();
                     let clear_status = status.clone();
                     let clear_branch = branch.clone();
-                    div().w(px(520.)).flex().flex_col().gap_3()
+                    div().w_full().flex().flex_col().gap_3()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Upstream for {branch}")))
                         .child(div().text_sm().text_color(colors.muted_text).child("Enter a remote branch such as origin/main, or clear the current upstream."))
                         .child(self.workspace_path_input.clone())
@@ -45470,7 +45419,7 @@ impl WorkspaceShell {
                     let name = name.clone();
                     let force = *force;
                     let status = self.repository.status().cloned();
-                    div().w(px(500.)).flex().flex_col().gap_3()
+                    div().w_full().flex().flex_col().gap_3()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Delete branch {name}?")))
                         .child(div().text_sm().text_color(if force { colors.warning } else { colors.muted_text }).child(
                             if force { "This permanently deletes an unmerged local branch. The repository reflog may be the only recovery path." }
@@ -45505,7 +45454,7 @@ impl WorkspaceShell {
                     let loading = self.repository.history_loading();
                     let selected_index = self.repository_modal_selected;
                     div().debug_selector(|| "repository-history-modal".into())
-                        .w(px(780.)).h(px(620.)).flex().flex_col().gap_3()
+                        .w_full().h(px(620.)).flex().flex_col().gap_3()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Repository history"))
                         .child(div().flex().gap_2().child(self.query_input.clone())
                             .child(Button::new("search-repository-history", "Search").tone(ButtonTone::Accent)
@@ -45564,7 +45513,7 @@ impl WorkspaceShell {
                         self.change_ledger_filter.affected_object.clone(),
                         self.change_ledger_filter.git_commit.as_deref().map(|oid| format!("commit {}", oid.chars().take(8).collect::<String>())),
                     ].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-                    div().debug_selector(|| "change-ledger-modal".into()).w(px(980.)).h(px(690.)).flex().flex_col().gap_3()
+                    div().debug_selector(|| "change-ledger-modal".into()).w_full().h(px(690.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between()
                             .child(div().flex().flex_col()
                                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Database change ledger"))
@@ -45619,7 +45568,7 @@ impl WorkspaceShell {
                             .child(div().flex().gap_2()
                                 .child(Button::new("export-change-ledger", "Export CSV…").tone(ButtonTone::Accent).loading(self.change_ledger_export_pending).disabled(self.change_ledger_filter.tenant_id.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.prompt_change_ledger_export(cx))))
                                 .child(Button::new("refresh-change-ledger", "Refresh").tone(ButtonTone::Ghost).disabled(self.change_ledger_loading).on_click(cx.listener(|shell, _, _, cx| shell.request_change_ledger(false, cx))))
-                                .child(Button::new("close-change-ledger", "Close").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))))
+                                .child(Button::new("close-change-ledger", "Close").debug_selector("close-change-ledger").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))))
                         .into_any_element()
                 }
                 Modal::RepositoryCommitDetail => {
@@ -45690,8 +45639,8 @@ impl WorkspaceShell {
                     let compare_status = status.clone();
                     div()
                         .debug_selector(|| "repository-commit-detail".into())
-                        .w(px(760.))
-                        .max_h(px(660.))
+                        .w_full()
+                        .h(px(660.))
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -45764,6 +45713,7 @@ impl WorkspaceShell {
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .justify_end()
                                 .gap_2()
                                 .child(
@@ -45853,6 +45803,7 @@ impl WorkspaceShell {
                                 }))
                                 .child(
                                     Button::new("close-repository-commit-detail", "Close")
+                                        .debug_selector("close-repository-commit-detail")
                                         .tone(ButtonTone::Neutral)
                                         .on_click(cx.listener(|shell, _, window, cx| {
                                             shell.dismiss_modal(&DismissModal, window, cx)
@@ -45927,7 +45878,7 @@ impl WorkspaceShell {
                     };
                     div()
                         .debug_selector(|| "repository-conflict-modal".into())
-                        .w(px(860.))
+                        .w_full()
                         .h(px(650.))
                         .flex()
                         .flex_col()
@@ -46158,7 +46109,7 @@ impl WorkspaceShell {
                             .child(div().truncate().child(file.path.0))
                             .child(div().text_xs().text_color(colors.muted_text).child(format!("+{} −{}", file.additions, file.deletions)))
                     });
-                    div().w(px(700.)).h(px(560.)).flex().flex_col().gap_3()
+                    div().w_full().h(px(560.)).flex().flex_col().gap_3()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Compare {} → {}", &base[..8.min(base.len())], &target[..8.min(target.len())])))
                         .child(div().id("repository-comparison-files").flex_1().min_h_0().overflow_y_scroll().border_1().border_color(colors.subtle_border).children(rows))
                         .child(div().flex().justify_end().child(Button::new("close-repository-comparison", "Close").tone(ButtonTone::Neutral)
@@ -46179,7 +46130,7 @@ impl WorkspaceShell {
                     ));
                     div()
                         .debug_selector(|| "repository-historical-file".into())
-                        .w(px(760.))
+                        .w_full()
                         .h(px(620.))
                         .flex()
                         .flex_col()
@@ -46244,7 +46195,7 @@ impl WorkspaceShell {
                 }
                 Modal::WorkspaceCheckpoint => div()
                     .debug_selector(|| "workspace-checkpoint".into())
-                    .w(px(480.))
+                    .w_full()
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -46359,7 +46310,7 @@ impl WorkspaceShell {
                     });
                     div()
                         .debug_selector(|| "workspace-history".into())
-                        .w(px(680.))
+                        .w_full()
                         .max_h(px(620.))
                         .flex()
                         .flex_col()
@@ -46394,7 +46345,7 @@ impl WorkspaceShell {
                     let checkpoint_id = *checkpoint_id;
                     div()
                         .debug_selector(|| "confirm-workspace-restore".into())
-                        .w(px(480.))
+                        .w_full()
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -46690,7 +46641,7 @@ impl WorkspaceShell {
                         .debug_selector(|| "vault-item-details".into())
                         .key_context("SiftVaultEditor")
                         .on_key_down(cx.listener(Self::handle_vault_editor_key))
-                        .w(px(680.))
+                        .w_full()
                         .h(px(600.))
                         .flex()
                         .flex_col()
@@ -46806,7 +46757,7 @@ impl WorkspaceShell {
                     .into_any_element(),
                 Modal::EditVault => div()
                     .debug_selector(|| "edit-vault".into())
-                    .w(px(480.))
+                    .w_full()
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -47086,7 +47037,7 @@ impl WorkspaceShell {
                     let confirm_path = path.clone();
                     div()
                         .debug_selector(|| "confirm-repository-discard".into())
-                        .w(px(500.))
+                        .w_full()
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -47130,7 +47081,7 @@ impl WorkspaceShell {
                     let hunk_id = hunk_id.clone();
                     div()
                         .debug_selector(|| "confirm-repository-hunk-revert".into())
-                        .w(px(500.))
+                        .w_full()
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -47181,7 +47132,7 @@ impl WorkspaceShell {
                         .unwrap_or_else(|| "current HEAD".into());
                     div()
                         .debug_selector(|| "confirm-repository-uncommit".into())
-                        .w(px(480.))
+                        .w_full()
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -47230,7 +47181,7 @@ impl WorkspaceShell {
                         && !self.repository.loading();
                     div()
                         .debug_selector(|| "repository-commit-editor".into())
-                        .w(px(620.))
+                        .w_full()
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -47301,6 +47252,7 @@ impl WorkspaceShell {
                                 )
                                 .child(
                                     Button::new("submit-expanded-repository-commit", "Commit")
+                                        .debug_selector("submit-expanded-repository-commit")
                                         .tone(ButtonTone::Accent)
                                         .disabled(!can_commit)
                                         .on_click(cx.listener(|shell, _, _, cx| {
@@ -47374,7 +47326,7 @@ impl WorkspaceShell {
                     );
                     div()
                         .debug_selector(|| "csv-import-preview".into())
-                        .w(px(860.))
+                        .w_full()
                         .max_h(px(700.))
                         .flex()
                         .flex_col()
@@ -47986,7 +47938,6 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
             };
-            let toolbar_height = cx.theme().metrics.toolbar_height;
             // Scrim-clicking dismisses transient surfaces. Long-form dialogs
             // with typed-but-unsaved input keep their explicit cancel control.
             let dismiss_on_scrim = matches!(
@@ -48053,11 +48004,11 @@ impl WorkspaceShell {
                 .flex()
                 .items_start()
                 .when(server_picker, |layer| {
-                    layer.justify_start().pt_1().pl(px(38.))
+                    layer.justify_start().pt_1().pl(px(38.)).pr_2()
                 })
-                .when(account, |layer| layer.justify_end().pt_1().pr_2())
-                .when(command_palette, |layer| layer.justify_center().pt_1())
-                .when(settings || keymaps || database_connection, |layer| {
+                .when(account, |layer| layer.justify_end().pt_1().px_2())
+                .when(command_palette, |layer| layer.justify_center().pt_1().px_2())
+                .when(!popover && !data_results, |layer| {
                     layer
                         .items_center()
                         .justify_center()
@@ -48068,25 +48019,6 @@ impl WorkspaceShell {
                 .when(data_results, |layer| {
                     layer.items_center().justify_center().bg(colors.scrim)
                 })
-                .when(
-                    !server_picker
-                        && !settings
-                        && !keymaps
-                        && !account
-                        && !command_palette
-                        && !database_connection
-                        && !data_results,
-                    |layer| {
-                        layer
-                            .justify_center()
-                            .pt(if app_bar_modal {
-                                px(100.) - toolbar_height
-                            } else {
-                                px(100.)
-                            })
-                            .bg(colors.scrim)
-                    },
-                )
                 .child(
                     div()
                         .id("modal-card")
@@ -48098,18 +48030,11 @@ impl WorkspaceShell {
                             card.w(gpui::relative(0.985))
                                 .h(gpui::relative(0.985))
                         })
-                        .when(!data_results, |card| card.max_h(gpui::relative(0.92)))
+                        .when(!data_results, |card| card.max_h(max_card_height).overflow_scroll())
                         .flex()
                         .flex_col()
-                        .when(
-                            !database_connection
-                                && !command_palette
-                                && !data_results
-                                && !account
-                                && !server_picker,
-                            |card| card.p_3(),
-                        )
-                        .overflow_hidden()
+                        .when(padded, |card| card.p_3())
+                        .when(data_results, |card| card.overflow_hidden())
                         .rounded(cx.theme().metrics.radius_large)
                         .border_1()
                         .border_color(colors.strong_border)
@@ -48804,7 +48729,7 @@ impl gpui::Render for WorkspaceShell {
             }))
             .children(self.render_key_language_hint(cx))
             .children(frame_metrics)
-            .children(self.render_modal(cx))
+            .children(self.render_modal(window, cx))
             .children(
                 edge_resize_enabled(window.is_maximized(), window.is_fullscreen())
                     .then(window_resize_handles)
@@ -51404,6 +51329,224 @@ mod tests {
         assert!(cx.debug_bounds("result-row-0").is_some());
         assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
         assert!(!cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
+    }
+
+    fn load_modal_layout_details(shell: &mut WorkspaceShell) {
+        shell.instance_plan = Some(InstancePlanPresentation {
+            root: "instance".into(),
+            manifest_id: "manifest".into(),
+            name: "Instance".into(),
+            deployment: "personal".into(),
+            bind: "auto-loopback".into(),
+            configuration_digest: "digest".into(),
+            lock_digest: "lock".into(),
+            lock: String::new(),
+            principals: 1,
+            tenants: 1,
+            memberships: 1,
+            connections: 1,
+            extensions: 0,
+            warnings: Vec::new(),
+            credentials: Vec::new(),
+            resource_changes: Vec::new(),
+            current_generation: Some(1),
+            generation_count: 1,
+            generations: Vec::new(),
+            drifted: false,
+            last_apply: None,
+            destroy_confirmation_required: false,
+        });
+        shell
+            .repository
+            .set_commit_detail(Ok(sift_protocol::VcsCommitDetail {
+                commit: sift_protocol::VcsCommitSummary {
+                    oid: "a".repeat(40),
+                    parents: Vec::new(),
+                    author_name: "Author".into(),
+                    author_email: "author@example.test".into(),
+                    authored_at: chrono::Utc::now(),
+                    refs: Vec::new(),
+                    subject: "Update query".into(),
+                },
+                message: "Update query".into(),
+                files: Vec::new(),
+                files_truncated: false,
+                checkpoint_id: None,
+                workspace_revision: None,
+            }));
+        shell
+            .repository
+            .set_historical_file(Ok(sift_protocol::VcsHistoricalFile {
+                commit: "a".repeat(40),
+                path: sift_protocol::WorkspacePath("query.sql".into()),
+                text: "select 1;".into(),
+                truncated: false,
+            }));
+        shell
+            .repository
+            .set_conflict(Ok(sift_protocol::VcsConflictFile {
+                path: sift_protocol::WorkspacePath("query.sql".into()),
+                kind: sift_protocol::VcsConflictKind::BothModified,
+                binary: false,
+                regions: Vec::new(),
+                truncated: false,
+            }));
+        shell.repository.set_comparison(Ok(sift_protocol::VcsDiff {
+            binding_id: sift_protocol::RepositoryBindingId(1),
+            side: sift_protocol::VcsDiffSide::HeadToWorktree,
+            base_revision: None,
+            target_revision: None,
+            files: Vec::new(),
+            truncated: false,
+        }));
+    }
+
+    #[gpui::test]
+    fn modal_cards_fit_small_and_large_viewports(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, _| load_modal_layout_details(shell));
+        let modals = [
+            Modal::CommandPalette,
+            Modal::DataSearch,
+            Modal::QueryParameters,
+            Modal::EditResultCell,
+            Modal::PlanCaptures,
+            Modal::ConfirmTransactionDisconnect,
+            Modal::ConfirmProductionExecution,
+            Modal::ConfirmOutcomeUnknownRerun(1, "Query".into()),
+            Modal::ServerPicker,
+            Modal::ServerConnection,
+            Modal::InstanceSetup,
+            Modal::Settings,
+            Modal::Snippets,
+            Modal::Themes,
+            Modal::Keymaps,
+            Modal::Account,
+            Modal::ApiTokens,
+            Modal::ConnectionPolicy,
+            Modal::TenantUsage,
+            Modal::VcsDiagnostics,
+            Modal::Administration,
+            Modal::ConnectionUrl,
+            Modal::DatabaseConnection,
+            Modal::ConfirmTerminateProcess(1),
+            Modal::SemanticRename,
+            Modal::CatalogDiagram,
+            Modal::CatalogMigration,
+            Modal::DdlSources,
+            Modal::RoomAdministration,
+            Modal::CatalogSnapshots,
+            Modal::CsvImport,
+            Modal::TransferRecipes,
+            Modal::RepositoryCommit,
+            Modal::ConfirmRepositoryUncommit,
+            Modal::ConfirmRepositoryDiscard(sift_protocol::WorkspacePath("query.sql".into())),
+            Modal::ConfirmRepositoryHunkRevert {
+                path: sift_protocol::WorkspacePath("query.sql".into()),
+                hunk_id: "hunk".into(),
+            },
+            Modal::RepositoryBranches,
+            Modal::RepositoryHistory,
+            Modal::RepositoryCommitDetail,
+            Modal::RepositoryHistoricalFile,
+            Modal::RepositoryComparison,
+            Modal::RepositoryRenameBranch("branch".into()),
+            Modal::RepositoryBranchFromCheckpoint(sift_protocol::WorkspaceCheckpointId(1)),
+            Modal::RepositorySetUpstream("branch".into()),
+            Modal::ConfirmRepositoryDeleteBranch {
+                name: "branch".into(),
+                force: false,
+            },
+            Modal::RepositoryConflict,
+            Modal::RepositorySetup,
+            Modal::RepositoryRemotes,
+            Modal::RepositoryHosting,
+            Modal::WorkspaceCreateFile,
+            Modal::WorkspaceCreateFolder,
+            Modal::WorkspaceMove,
+            Modal::ConfirmWorkspaceDelete,
+            Modal::WorkspaceCheckpoint,
+            Modal::WorkspaceHistory,
+            Modal::ChangeLedger,
+            Modal::ConfirmWorkspaceRestore(sift_protocol::WorkspaceCheckpointId(1)),
+            Modal::WorkspaceReconcile,
+            Modal::CreateVault,
+            Modal::EditVault,
+            Modal::CreateVaultItem,
+            Modal::VaultItemDetails,
+            Modal::ObjectPeek,
+            Modal::ConfirmDeleteDatabaseObject,
+        ];
+        for (width, height) in [(1280., 900.), (800., 600.), (480., 400.)] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            for modal in &modals {
+                workspace.update(&mut cx, |shell, cx| {
+                    shell.modal = Some(modal.clone());
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let layer = cx.debug_bounds("modal-layer").expect("modal layer");
+                let card = cx.debug_bounds("modal-card").expect("modal card");
+                assert!(
+                    card.size.width > px(0.) && card.size.height > px(0.),
+                    "{modal:?}: empty card"
+                );
+                assert!(
+                    card.left() >= layer.left() && card.right() <= layer.right() + px(1.),
+                    "{modal:?}: horizontal overflow at {width}x{height}: {card:?} in {layer:?}"
+                );
+                assert!(
+                    card.top() >= layer.top() && card.bottom() <= layer.bottom() + px(1.),
+                    "{modal:?}: vertical overflow at {width}x{height}: {card:?} in {layer:?}"
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn wide_modal_content_and_footer_controls_fit_the_card(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, _| load_modal_layout_details(shell));
+        cx.simulate_resize(gpui::size(px(1280.), px(900.)));
+        for (modal, control, minimum_width) in [
+            (Modal::Snippets, "save-snippet", 820.),
+            (Modal::ChangeLedger, "close-change-ledger", 980.),
+            (
+                Modal::RepositoryCommitDetail,
+                "close-repository-commit-detail",
+                760.,
+            ),
+            (Modal::RoomAdministration, "create-shared-room", 760.),
+            (
+                Modal::RepositoryCommit,
+                "submit-expanded-repository-commit",
+                620.,
+            ),
+        ] {
+            workspace.update(&mut cx, |shell, cx| {
+                shell.modal = Some(modal.clone());
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let card = cx.debug_bounds("modal-card").unwrap();
+            let button = cx.debug_bounds(control).expect(control);
+            assert!(
+                card.size.width >= px(minimum_width),
+                "{modal:?}: content squeezed"
+            );
+            assert!(
+                button.right() <= card.right() && button.left() >= card.left(),
+                "{modal:?}: clipped footer control {button:?} in {card:?}"
+            );
+            assert!(
+                button.bottom() <= card.bottom(),
+                "{modal:?}: clipped footer control {button:?} in {card:?}"
+            );
+        }
     }
 
     #[gpui::test]
