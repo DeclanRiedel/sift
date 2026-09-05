@@ -7,23 +7,23 @@ milestones. Runtime-only tracking lives in temporary JSON outside the repository
 
 ## Audit coverage
 
-- [ ] Configuration: compare portable `sift.toml`, editor/schema help, examples,
+- [x] Configuration: compare portable `sift.toml`, editor/schema help, examples,
   lock/apply, and effective runtime validation. Reject settings that validate
   but cannot start; document ownership and remove misleading examples.
-- [ ] Local and hosted instances: inspect authentication topology, lifecycle,
+- [x] Local and hosted instances: inspect authentication topology, lifecycle,
   admission limits, public endpoint handling, and shared server boundaries.
-- [ ] SSH networking: inspect bootstrap, process ownership, forwarding, endpoint
+- [x] SSH networking: inspect bootstrap, process ownership, forwarding, endpoint
   validation, deadlines, reconnect, and cancellation versus local transport.
-- [ ] Multiplayer: inspect room attachment/presence lifecycle, CRDT sync and
+- [x] Multiplayer: inspect room attachment/presence lifecycle, CRDT sync and
   reassembly limits, reconnect/replay, permissions, and shared results.
-- [ ] SQL editor: inspect revision ownership, stale work, completion/diagnostic
+- [x] SQL editor: inspect revision ownership, stale work, completion/diagnostic
   scheduling, cancellation, large-document work, and Vim interaction.
-- [ ] Visual layout: inventory modal sizes, scroll containment, content fit,
+- [x] Visual layout: inventory modal sizes, scroll containment, content fit,
   long/error content, and small windows; use GPUI layout assertions and actual
   rendered inspection where the available environment supports it.
-- [ ] Broader backend/frontend hot paths: inspect metadata, cursor/results,
+- [x] Broader backend/frontend hot paths: inspect metadata, cursor/results,
   task/resource lifetime, repeated computation, and architectural duplication.
-- [ ] Update architecture decisions when a stable boundary changes and reconcile
+- [x] Update architecture decisions when a stable boundary changes and reconcile
   product/docs checklists with actual behavior.
 - [ ] Complete final workspace formatting, Clippy, tests, diff review, and
   milestone commits; record any unverified external/live behavior explicitly.
@@ -40,8 +40,9 @@ without evidence.
 
 ## Findings and milestones
 
-Investigation in progress. The sections below will collect reviewed findings,
-fixes, evidence, and deliberately unresolved external dependencies.
+The sections below record reviewed findings, fixes, evidence, and deliberately
+unverified external behavior. An audit checks the implementation; it is not a
+claim that every future product-inventory feature is implemented.
 
 ### Configuration boundary
 
@@ -220,9 +221,14 @@ corrected. Targeted test and workspace Clippy passed.
 
 ### Shared-result publication
 
-- [ ] Make per-room cap enforcement and publication atomic. Concurrent finished
+- [x] Make per-room cap enforcement and publication atomic. Concurrent finished
   queries can all observe the same pre-insertion count and exceed the 32-result
   cap. Keep expensive serialization/encrypted spill outside the publication lock.
+
+Evidence: three shared-result tests and workspace Clippy passed. Eight threads
+publish 256 results into one room and retain exactly 32. Retired spill files
+are dropped after releasing the publication lock, as well as keeping initial
+serialization/spill outside it.
 
 ### Repository hosting I/O
 

@@ -28,6 +28,7 @@ pub struct RoomResultRegistry {
 
 struct Inner {
     entries: DashMap<RoomResultId, Arc<Entry>>,
+    publication: std::sync::Mutex<()>,
     spill_key: [u8; 32],
 }
 
@@ -63,6 +64,7 @@ impl Default for RoomResultRegistry {
         Self {
             inner: Arc::new(Inner {
                 entries: DashMap::new(),
+                publication: std::sync::Mutex::new(()),
                 spill_key,
             }),
         }
@@ -81,7 +83,6 @@ impl RoomResultRegistry {
             mut retention_guards,
         } = result;
         self.reap_expired();
-        self.enforce_room_cap(room_id);
         let schema_digests = pages
             .iter()
             .filter_map(|page| match page {
@@ -130,6 +131,10 @@ impl RoomResultRegistry {
             created_at: now,
             finished_at: Some(now),
         };
+        // Only publication is serialized; encoding and encrypted spill above
+        // remain concurrent. Cap checking must be atomic with insertion.
+        let _publication = self.inner.publication.lock().unwrap();
+        let evicted = self.enforce_room_cap(room_id);
         self.inner.entries.insert(
             reference.result_id,
             Arc::new(Entry {
@@ -139,6 +144,10 @@ impl RoomResultRegistry {
                 _retention_guards: retention_guards,
             }),
         );
+        drop(_publication);
+        // Dropping retained spill pages unlinks their files; do that outside
+        // the publication lock too.
+        drop(evicted);
         reference
     }
 
@@ -323,7 +332,7 @@ impl RoomResultRegistry {
             .retain(|_, entry| entry.last_accessed.lock().unwrap().elapsed() < DEFAULT_RESULT_TTL);
     }
 
-    fn enforce_room_cap(&self, room_id: i64) {
+    fn enforce_room_cap(&self, room_id: i64) -> Vec<Arc<Entry>> {
         let mut room_entries: Vec<_> = self
             .inner
             .entries
@@ -332,13 +341,20 @@ impl RoomResultRegistry {
             .map(|entry| (entry.reference.created_at, *entry.key()))
             .collect();
         if room_entries.len() < DEFAULT_MAX_RESULTS_PER_ROOM {
-            return;
+            return Vec::new();
         }
         room_entries.sort_by_key(|(created_at, _)| *created_at);
         let remove_count = room_entries.len() + 1 - DEFAULT_MAX_RESULTS_PER_ROOM;
-        for (_, result_id) in room_entries.into_iter().take(remove_count) {
-            self.inner.entries.remove(&result_id);
-        }
+        room_entries
+            .into_iter()
+            .take(remove_count)
+            .filter_map(|(_, result_id)| {
+                self.inner
+                    .entries
+                    .remove(&result_id)
+                    .map(|(_, entry)| entry)
+            })
+            .collect()
     }
 }
 
@@ -347,6 +363,31 @@ mod tests {
     use sift_protocol::{Row, Value};
 
     use super::*;
+
+    #[test]
+    fn concurrent_publication_respects_the_room_result_cap() {
+        let registry = RoomResultRegistry::default();
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|threads| {
+            for _ in 0..8 {
+                threads.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..DEFAULT_MAX_RESULTS_PER_ROOM {
+                        registry.insert(NewRoomResult {
+                            room_id: 7,
+                            actor_principal_id: 3,
+                            connection_profile_id: None,
+                            pages: Vec::new(),
+                            row_count: Some(0),
+                            error_message: None,
+                            retention_guards: Vec::new(),
+                        });
+                    }
+                });
+            }
+        });
+        assert_eq!(registry.list(7).len(), DEFAULT_MAX_RESULTS_PER_ROOM);
+    }
 
     #[test]
     fn readers_page_independently() {
