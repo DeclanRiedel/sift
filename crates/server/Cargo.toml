@@ -66,6 +66,7 @@ tempfile = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
 zip = { workspace = true }
+zeroize = "1"
 tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }

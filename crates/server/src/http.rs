@@ -1160,6 +1160,7 @@ pub fn app(state: AppState) -> Router {
     let router = router.finish_api_with(&mut api, |t| t.title("sift API").version(VERSION));
     let openapi_doc = Arc::new(finalize_openapi(api));
     router
+        .layer(Extension(crate::hosting::HostingHttp::default()))
         .layer(Extension(openapi_doc))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
         .layer(from_fn_with_state(state.clone(), auth_middleware))
@@ -10680,14 +10681,6 @@ async fn hosting_identity(
     crate::hosting::detect_repository(&selected.fetch_url).map_err(hosting_error)
 }
 
-fn hosting_client() -> ApiResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| ApiError::Internal("hosting client initialization failed".into()))
-}
-
 fn hosting_error(error: crate::hosting::HostingError) -> ApiError {
     use crate::hosting::HostingError;
     match error {
@@ -10700,14 +10693,15 @@ fn hosting_error(error: crate::hosting::HostingError) -> ApiError {
         HostingError::Rejected(404) => {
             ApiError::BadRequest("hosting repository not found or not visible".into())
         }
-        HostingError::Rejected(_) | HostingError::InvalidResponse => {
-            ApiError::BadRequest(error.to_string())
-        }
+        HostingError::Rejected(_)
+        | HostingError::InvalidResponse
+        | HostingError::ResponseTooLarge => ApiError::BadRequest(error.to_string()),
     }
 }
 
 async fn get_repository_hosting(
     State(state): State<AppState>,
+    Extension(hosting): Extension<crate::hosting::HostingHttp>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Query(query): Query<HostingQuery>,
@@ -10726,9 +10720,10 @@ async fn get_repository_hosting(
         VcsAction::HostingRead,
     )?;
     let identity = hosting_identity(&context, query.remote.as_deref()).await?;
-    let mut credential = metadata
+    let credential = metadata
         .repository_hosting_credential(binding_id, actor)
-        .await?;
+        .await?
+        .map(zeroize::Zeroizing::new);
     let credential_present = credential.is_some();
     let links = crate::hosting::browser_links(
         &identity,
@@ -10737,32 +10732,35 @@ async fn get_repository_hosting(
         query.path.as_deref(),
     );
     let provider = crate::hosting::provider(identity.provider);
-    let client = hosting_client()?;
-    let pull_requests = if context.record.binding.network_enabled {
-        match context.record.binding.branch.as_deref() {
-            Some(branch) => provider
-                .pull_requests(&client, credential.as_deref(), &identity, branch)
-                .await
-                .map_err(hosting_error)?,
-            None => Vec::new(),
-        }
-    } else {
-        Vec::new()
+    let client = hosting.client().map_err(hosting_error)?;
+    let credential_bytes = credential.as_ref().map(|secret| secret.as_slice());
+    let pull_requests = async {
+        Ok::<_, ApiError>(if context.record.binding.network_enabled {
+            match context.record.binding.branch.as_deref() {
+                Some(branch) => provider
+                    .pull_requests(client, credential_bytes, &identity, branch)
+                    .await
+                    .map_err(hosting_error)?,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        })
     };
-    let checks = if context.record.binding.network_enabled {
-        match context.record.binding.head.as_deref() {
-            Some(head) => provider
-                .checks(&client, credential.as_deref(), &identity, head)
-                .await
-                .map_err(hosting_error)?,
-            None => Vec::new(),
-        }
-    } else {
-        Vec::new()
+    let checks = async {
+        Ok::<_, ApiError>(if context.record.binding.network_enabled {
+            match context.record.binding.head.as_deref() {
+                Some(head) => provider
+                    .checks(client, credential_bytes, &identity, head)
+                    .await
+                    .map_err(hosting_error)?,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        })
     };
-    if let Some(secret) = credential.as_mut() {
-        secret.fill(0);
-    }
+    let (pull_requests, checks) = tokio::try_join!(pull_requests, checks)?;
     push_vcs_operation(
         &state,
         actor,
@@ -10781,6 +10779,7 @@ async fn get_repository_hosting(
 
 async fn list_hosting_repositories(
     State(state): State<AppState>,
+    Extension(hosting): Extension<crate::hosting::HostingHttp>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Query(query): Query<HostingQuery>,
@@ -10804,15 +10803,16 @@ async fn list_hosting_repositories(
         ));
     }
     let identity = hosting_identity(&context, query.remote.as_deref()).await?;
-    let mut credential = metadata
-        .repository_hosting_credential(binding_id, actor)
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("hosting credential is required".into()))?;
+    let credential = zeroize::Zeroizing::new(
+        metadata
+            .repository_hosting_credential(binding_id, actor)
+            .await?
+            .ok_or_else(|| ApiError::BadRequest("hosting credential is required".into()))?,
+    );
     let result = crate::hosting::provider(identity.provider)
-        .repositories(&hosting_client()?, &credential)
+        .repositories(hosting.client().map_err(hosting_error)?, &credential)
         .await
         .map_err(hosting_error);
-    credential.fill(0);
     let repositories = result?;
     push_vcs_operation(
         &state,
@@ -10914,6 +10914,7 @@ async fn delete_hosting_credential(
 
 async fn create_hosting_pull_request(
     State(state): State<AppState>,
+    Extension(hosting): Extension<crate::hosting::HostingHttp>,
     headers: HeaderMap,
     Path(id): Path<i64>,
     Json(request): Json<sift_protocol::CreateHostingPullRequestRequest>,
@@ -10963,13 +10964,15 @@ async fn create_hosting_pull_request(
     )
     .await;
     let identity = hosting_identity(&context, None).await?;
-    let mut credential = metadata
-        .repository_hosting_credential(binding_id, actor)
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("hosting credential is required".into()))?;
+    let credential = zeroize::Zeroizing::new(
+        metadata
+            .repository_hosting_credential(binding_id, actor)
+            .await?
+            .ok_or_else(|| ApiError::BadRequest("hosting credential is required".into()))?,
+    );
     let result = crate::hosting::provider(identity.provider)
         .create_pull_request(
-            &hosting_client()?,
+            hosting.client().map_err(hosting_error)?,
             &credential,
             &identity,
             crate::hosting::PullRequestDraft {
@@ -10981,7 +10984,6 @@ async fn create_hosting_pull_request(
         )
         .await
         .map_err(hosting_error);
-    credential.fill(0);
     let pull = result?;
     push_vcs_operation(
         &state,

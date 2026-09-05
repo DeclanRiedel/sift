@@ -140,10 +140,16 @@ caret request; moving away and back still cancels an outstanding menu.
 
 ### Repository hosting I/O
 
-- [ ] Reuse one credential-free HTTP client per router lifetime; keep explicit
+- [x] Reuse one credential-free HTTP client per router lifetime; keep explicit
   timeouts and redirect denial. Currently each hosting handler rebuilds a pool.
-- [ ] Fetch independent PR/check summaries concurrently, respecting the existing
+- [x] Fetch independent PR/check summaries concurrently, respecting the existing
   repository network policy and keeping credentials request-scoped.
-- [ ] Bound provider response bodies before JSON decoding; upstream responses
+- [x] Bound provider response bodies before JSON decoding; upstream responses
   currently have no byte ceiling. Wipe temporary credential buffers on early
   errors and request cancellation as well as successful completion.
+
+Evidence: three hosting tests and workspace Clippy passed. A local HTTP server
+checks known-length and chunked bodies over 8 MiB, sanitized decode errors,
+shared pool identity, and absent default credentials after an authenticated
+request. No external repository provider was contacted. `Zeroizing` now owns
+temporary hosting credential buffers, including early-return/cancellation paths.

@@ -6,11 +6,33 @@ use sift_protocol::{
     HostingPullRequest, HostingPullRequestState, HostingRepositoryCandidate,
     HostingRepositoryIdentity,
 };
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
 const API_LIMIT: usize = 100;
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
-#[derive(Debug, Error)]
+/// Router-owned transport pool. Credentials remain on individual requests;
+/// no default authorization, cookies, or cross-runtime global client.
+#[derive(Clone, Default)]
+pub(crate) struct HostingHttp(Arc<OnceLock<Result<Client, HostingError>>>);
+
+impl HostingHttp {
+    pub(crate) fn client(&self) -> Result<&Client, HostingError> {
+        self.0
+            .get_or_init(|| {
+                Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|_| HostingError::InvalidResponse)
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+}
+
+#[derive(Debug, Clone, Error)]
 pub enum HostingError {
     #[error("remote is not a supported GitHub, GitLab, or Bitbucket HTTPS repository")]
     UnsupportedRemote,
@@ -20,6 +42,8 @@ pub enum HostingError {
     Rejected(u16),
     #[error("hosting provider returned invalid response")]
     InvalidResponse,
+    #[error("hosting provider response exceeds the size limit")]
+    ResponseTooLarge,
     #[error("hosting operation is unavailable for this provider")]
     UnsupportedOperation,
 }
@@ -389,7 +413,7 @@ impl HostingProvider for LinkOnlyProvider {
 async fn github<T: for<'de> Deserialize<'de>>(
     request: reqwest::RequestBuilder,
 ) -> Result<T, HostingError> {
-    let response = request
+    let mut response = request
         .header("User-Agent", "sift-hosting-integration")
         .send()
         .await
@@ -397,10 +421,24 @@ async fn github<T: for<'de> Deserialize<'de>>(
     if !response.status().is_success() {
         return Err(HostingError::Rejected(response.status().as_u16()));
     }
-    response
-        .json()
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(HostingError::ResponseTooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| HostingError::InvalidResponse)
+        .map_err(|_| HostingError::InvalidResponse)?
+    {
+        if chunk.len() > MAX_RESPONSE_BYTES - body.len() {
+            return Err(HostingError::ResponseTooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|_| HostingError::InvalidResponse)
 }
 
 fn token_text(token: &[u8]) -> Result<&str, HostingError> {
@@ -470,6 +508,69 @@ fn safe_path(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn transport_reuses_pool_without_credentials_and_bounds_provider_bodies() {
+        use axum::{body::Body, http::HeaderMap, routing::get, Router};
+        let router = Router::new()
+            .route(
+                "/valid",
+                get(|headers: HeaderMap| async move {
+                    axum::Json(
+                        serde_json::json!({"authorized": headers.contains_key("authorization")}),
+                    )
+                }),
+            )
+            .route(
+                "/large",
+                get(|| async { vec![b' '; MAX_RESPONSE_BYTES + 1] }),
+            )
+            .route(
+                "/chunked",
+                get(|| async {
+                    let chunk = bytes::Bytes::from(vec![b' '; 64 * 1024]);
+                    Body::from_stream(futures::stream::iter(
+                        (0..129).map(move |_| Ok::<_, std::io::Error>(chunk.clone())),
+                    ))
+                }),
+            )
+            .route("/invalid", get(|| async { "private upstream error text" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        }));
+        let transport = HostingHttp::default();
+        let cloned = transport.clone();
+        assert!(std::ptr::eq(
+            transport.client().unwrap(),
+            cloned.client().unwrap()
+        ));
+        let client = transport.client().unwrap();
+        let authorized: serde_json::Value =
+            github(client.get(format!("{base}/valid")).bearer_auth("test-only"))
+                .await
+                .unwrap();
+        assert_eq!(authorized["authorized"], true);
+        let anonymous: serde_json::Value =
+            github(client.get(format!("{base}/valid"))).await.unwrap();
+        assert_eq!(anonymous["authorized"], false);
+        for path in ["large", "chunked"] {
+            let result = github::<serde_json::Value>(client.get(format!("{base}/{path}"))).await;
+            assert!(
+                matches!(result, Err(HostingError::ResponseTooLarge)),
+                "{path}: {result:?}"
+            );
+        }
+        let error = github::<serde_json::Value>(client.get(format!("{base}/invalid")))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "hosting provider returned invalid response"
+        );
+    }
+
     #[test]
     fn detects_supported_https_remotes_without_credentials() {
         let github = detect_repository("https://github.com/sift-org/sift.git").unwrap();

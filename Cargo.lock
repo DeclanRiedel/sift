@@ -7933,6 +7933,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "zeroize",
  "zip",
 ]
 
