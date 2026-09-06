@@ -176,6 +176,15 @@ pub enum PresenceEvent {
 }
 
 impl LifecycleProjection {
+    pub fn supports(&self, capability: &str) -> bool {
+        self.handshake.as_ref().is_some_and(|handshake| {
+            handshake
+                .capabilities
+                .iter()
+                .any(|value| value == capability)
+        })
+    }
+
     pub fn apply(&mut self, event: LifecycleEvent) {
         match event {
             LifecycleEvent::Selected(instance) => {

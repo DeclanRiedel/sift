@@ -94,6 +94,8 @@ use access::{
 #[derive(Clone)]
 pub struct InstanceConfigurationState {
     pub root: std::path::PathBuf,
+    workspace_projections: bool,
+    git: bool,
     write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -101,7 +103,64 @@ impl InstanceConfigurationState {
     pub fn new(root: std::path::PathBuf) -> Self {
         Self {
             root,
+            workspace_projections: false,
+            git: false,
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    pub fn with_features(mut self, workspace_projections: bool, git: bool) -> Self {
+        self.workspace_projections = workspace_projections;
+        self.git = workspace_projections && git;
+        self
+    }
+}
+
+fn handshake_capabilities(configuration: Option<&InstanceConfigurationState>) -> Vec<String> {
+    use sift_protocol::handshake::*;
+    let mut capabilities = vec!["protocol_handshake".into(), "execution.events@2".into()];
+    if let Some(configuration) = configuration {
+        capabilities.push(CAPABILITY_INSTANCE_CONFIGURATION.into());
+        if configuration.workspace_projections {
+            capabilities.push(CAPABILITY_WORKSPACE_PROJECTIONS.into());
+        }
+        if configuration.git {
+            capabilities.push(CAPABILITY_WORKSPACE_GIT.into());
+        }
+    }
+    capabilities
+}
+
+#[cfg(test)]
+mod handshake_feature_tests {
+    use super::*;
+    use sift_protocol::handshake::*;
+
+    #[test]
+    fn handshake_advertises_only_applied_enabled_features() {
+        let standalone = handshake_capabilities(None);
+        assert!(!standalone
+            .iter()
+            .any(|value| value == CAPABILITY_INSTANCE_CONFIGURATION));
+        for (workspace, git) in [(false, false), (false, true), (true, false), (true, true)] {
+            let configuration =
+                InstanceConfigurationState::new("instance".into()).with_features(workspace, git);
+            let capabilities = handshake_capabilities(Some(&configuration));
+            assert!(capabilities
+                .iter()
+                .any(|value| value == CAPABILITY_INSTANCE_CONFIGURATION));
+            assert_eq!(
+                capabilities
+                    .iter()
+                    .any(|value| value == CAPABILITY_WORKSPACE_PROJECTIONS),
+                workspace
+            );
+            assert_eq!(
+                capabilities
+                    .iter()
+                    .any(|value| value == CAPABILITY_WORKSPACE_GIT),
+                workspace && git
+            );
         }
     }
 }
@@ -2921,7 +2980,7 @@ async fn handshake(
             RuntimeMode::Daemon => HandshakeRuntimeMode::Daemon,
             RuntimeMode::Container => HandshakeRuntimeMode::Container,
         },
-        capabilities: vec!["protocol_handshake".into(), "execution.events@2".into()],
+        capabilities: handshake_capabilities(state.auth.instance_configuration.as_ref()),
     }))
 }
 

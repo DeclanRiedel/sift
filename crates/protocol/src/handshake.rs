@@ -1,6 +1,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Optional runtime features advertised before a database connection is opened.
+pub const CAPABILITY_INSTANCE_CONFIGURATION: &str = "instance.configuration@1";
+pub const CAPABILITY_WORKSPACE_PROJECTIONS: &str = "workspace.projections@1";
+pub const CAPABILITY_WORKSPACE_GIT: &str = "workspace.git@1";
+
 /// Inclusive application-protocol compatibility window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProtocolRange {

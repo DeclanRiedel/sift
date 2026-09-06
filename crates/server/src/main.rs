@@ -370,8 +370,10 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| format!("sift:instance:{}", runtime.instance_id)),
             instance_id: runtime.instance_id.clone(),
             daemon_generation: runtime.daemon_generation.clone(),
-            instance_configuration: configured_instance_root
-                .map(sift_server::http::InstanceConfigurationState::new),
+            instance_configuration: configured_instance_root.map(|root| {
+                sift_server::http::InstanceConfigurationState::new(root)
+                    .with_features(cfg.workspaces.enabled, cfg.vcs.enabled)
+            }),
             allow_legacy_unversioned: false,
             rate_limiter: sift_server::rate_limit::RateLimiter::from_config(&cfg.rate_limits),
             github: match (
