@@ -22,6 +22,7 @@ Built entirely to my taste but you may use it too.
 
 - [Instance configuration](docs/INSTANCE-CONFIG.md)
 - [Keyboard reference](docs/keyboard-wiki/index.html)
+- [Shared rooms](docs/keyboard-wiki/shared-rooms.html)
 - [Extensions](docs/EXTENSIONS.md)
 
 ## License

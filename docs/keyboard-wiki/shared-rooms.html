@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Set up shared Sift rooms, grant access, bind database connections, and understand collaborative editing and recovery." />
+    <title>Shared rooms · Sift</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="doc-tabs" aria-label="Sift documentation">
+          <a href="index.html">Keyboard</a>
+          <a href="configuration.html">Sift configuration</a>
+          <a href="hosting.html">Hosting</a>
+          <a class="active" aria-current="page" href="shared-rooms.html">Shared rooms</a>
+        </div>
+        <h1>Shared rooms</h1>
+        <p>One server, one room, several independent editors. Share SQL documents,
+          presence, and query results without sharing a desktop or a password.</p>
+        <p class="note">Everyone must connect to the same Sift instance and belong
+          to the room's tenant. Two desktops running separate local instances
+          do not become collaborators just because their room names match.</p>
+        <p>SSH logins on the same machine can also use different per-user Sift
+          state roots. Verify the instance identity, not only the SSH hostname.</p>
+      </header>
+
+      <nav aria-label="On this page">
+        <a href="#setup">Get started</a>
+        <a href="#permissions">Permissions</a>
+        <a href="#execution">Connections and results</a>
+        <a href="#sync">Editing and recovery</a>
+        <a href="#troubleshooting">Troubleshooting</a>
+      </nav>
+
+      <section id="setup">
+        <h2>Get started</h2>
+        <ol>
+          <li>Choose a shared instance using the <a href="hosting.html">hosting guide</a>.
+            HTTPS and SSH are transport choices; neither grants room access.</li>
+          <li>Sign in and select the intended tenant. Have its administrator arrange
+            tenant membership for your collaborators.</li>
+          <li>Open the Collaboration panel, choose <strong>Rooms…</strong>, enter a
+            name, and choose <strong>Create shared room</strong>.</li>
+          <li>Select the room. Enter a collaborator's <strong>Member principal ID</strong>,
+            choose Viewer, Editor, or Owner, and choose <strong>Add</strong>.
+            Use the principal ID on this instance, not a GitHub username or email.</li>
+          <li>For database execution, enter a saved <strong>Connection profile ID</strong>
+            and choose <strong>Bind / unbind</strong>. An empty field unbinds the room.</li>
+          <li>Collaborators can choose <strong>Join</strong> after an owner grants
+            membership, then work on the same room-backed document.</li>
+        </ol>
+        <p>Room administration shows members and retained shared results. Use
+          <strong>Refresh</strong> to reload the room list. Selecting a room loads
+          its details; it does not change the active room's People list.</p>
+        <p><strong>Leave</strong> removes your membership; closing a tab or losing
+          a socket is only a disconnect. A room must retain an owner. Treat
+          <strong>Delete</strong> as a durable room action, not a way to disconnect.</p>
+        <p>Vim remains the editor interaction mode. <kbd>:</kbd> opens the command
+          palette in normal mode; <kbd>Esc</kbd> cancels the current interaction.
+          See the <a href="index.html">keyboard reference</a> for execution commands.</p>
+      </section>
+
+      <section id="permissions">
+        <h2>Permissions intersect</h2>
+        <table class="compact">
+          <thead><tr><th>Room role</th><th>Room permission</th></tr></thead>
+          <tbody>
+            <tr><td>Viewer</td><td>Observe shared documents, presence, and available results; no document edits or query execution.</td></tr>
+            <tr><td>Editor</td><td>Edit and execute when tenant permissions and connection policy also allow it.</td></tr>
+            <tr><td>Owner</td><td>Administer the room and its membership; database restrictions still apply.</td></tr>
+          </tbody>
+        </table>
+        <p>An operation needs permission from every applicable layer: tenant,
+          room, and connection profile. Read-only rules and explicit denials are
+          not overridden by room ownership. <strong>Join does not grant a role.</strong></p>
+        <p>Removing tenant or room membership revokes live room access. Expired
+          or revoked login sessions also end their sockets. Reconnecting cannot
+          restore a removed grant; an authorized administrator must restore access.</p>
+      </section>
+
+      <section id="execution">
+        <h2>Connections and shared results</h2>
+        <p>A bound room uses a server-owned database connection. The database
+          hostname is resolved from the Sift server, not each desktop. With SSH,
+          forwarding reaches Sift; the remote Sift process still connects to the
+          database from its own network.</p>
+        <p>Connection credentials stay behind the server's secret store. Room
+          membership does not reveal them, and a room connection is not another
+          member's personal transaction session.</p>
+        <p>Completed room runs publish immutable result references. Each reader
+          pages independently: scrolling on one desktop does not advance another
+          reader's cursor. Query results are not merged using the document CRDT.</p>
+        <p class="note">Shared results are temporary, not an archive. The server
+          retains up to 32 results per room, expires idle results after 10 minutes,
+          and loses these process-local results on restart. Large results can
+          spill to encrypted temporary files. Export anything you need to keep.</p>
+      </section>
+
+      <section id="sync">
+        <h2>Editing and recovery</h2>
+        <p>Only query text uses the CRDT. The server validates an update and commits
+          it to metadata before acknowledging and broadcasting it. Presence,
+          selections, database sessions, and results have separate lifecycles.</p>
+        <p>Reconnect reattaches and compares document version vectors to recover
+          missing updates. A slow consumer may need a document resync instead of
+          replay from the bounded event buffer. Sync payloads and incomplete
+          transfers have size limits; they are not unbounded memory queues.</p>
+        <p>Presence uses a 30-second heartbeat lease. A disconnected peer can remain
+          visible briefly until the socket closes or its lease expires. Server drain
+          closes room sockets and releases their presence and live-writer leases.</p>
+        <p>Server-acknowledged text survives a server restart. Do not assume an
+          unacknowledged local edit is durable just because it is visible in an
+          editor; preserve your local buffer before resetting a failed replica.</p>
+      </section>
+
+      <section id="troubleshooting">
+        <h2>Troubleshooting</h2>
+        <table class="compact">
+          <thead><tr><th>Symptom</th><th>Check first</th></tr></thead>
+          <tbody>
+            <tr><td>Cannot find or join a room</td><td>Verify instance identity, selected tenant, tenant membership, and the owner's room grant.</td></tr>
+            <tr><td>Can read but cannot edit or run</td><td>Check Viewer roles, the room binding, and connection read-only/operation policy.</td></tr>
+            <tr><td>Database host is unreachable</td><td>Check DNS, routing, and database permissions from the Sift server's machine.</td></tr>
+            <tr><td>Presence disappears</td><td>Check heartbeat delivery, WebSocket proxy support, login expiry, and membership revocation.</td></tr>
+            <tr><td>Duplicate writer or replica conflict</td><td>Independent editors need distinct replica identities. Do not clone live replica state into two simultaneous writers.</td></tr>
+            <tr><td>Result reference is unavailable</td><td>It may have expired, been evicted by newer runs, or disappeared on restart. Review before rerunning SQL, especially writes.</td></tr>
+          </tbody>
+        </table>
+      </section>
+      <footer>
+        Related: <a href="hosting.html">Hosting</a> ·
+        <a href="configuration.html">sift.toml ownership and apply</a> ·
+        <a href="index.html">Vim keyboard reference</a>
+      </footer>
+    </main>
+  </body>
+</html>
