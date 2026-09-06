@@ -19,6 +19,7 @@ pub struct Shutdown {
 #[derive(Default)]
 struct ShutdownInner {
     draining: AtomicBool,
+    drain_started: tokio::sync::Notify,
     in_flight: AtomicUsize,
 }
 
@@ -31,14 +32,21 @@ impl Shutdown {
     /// Flip into the draining state. Idempotent; returns `true` only for the
     /// call that actually started the drain.
     pub fn begin_drain(&self) -> bool {
-        !self.inner.draining.swap(true, Ordering::AcqRel)
+        let started = !self.inner.draining.swap(true, Ordering::AcqRel);
+        if started {
+            self.inner.drain_started.notify_waiters();
+        }
+        started
     }
 
     /// Resolve when draining starts. Stream pacing selects against this so a
     /// token-bucket wait never delays shutdown.
     pub async fn wait_for_drain_start(&self) {
-        while !self.is_draining() {
-            tokio::time::sleep(Duration::from_millis(25)).await;
+        let notified = self.inner.drain_started.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_draining() {
+            notified.await;
         }
     }
 
@@ -112,6 +120,25 @@ mod tests {
         assert_eq!(s.in_flight(), 1);
         drop(g2);
         assert_eq!(s.in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn drain_wakes_all_registered_waiters_and_late_waiters() {
+        let shutdown = Shutdown::default();
+        let mut waiters = Vec::new();
+        for _ in 0..32 {
+            let waiter = Box::pin(shutdown.wait_for_drain_start());
+            waiters.push(waiter);
+        }
+        // Poll each future first, exercising the broadcast registration path.
+        for waiter in &mut waiters {
+            assert!(futures::poll!(waiter.as_mut()).is_pending());
+        }
+        shutdown.begin_drain();
+        for waiter in &mut waiters {
+            assert!(futures::poll!(waiter.as_mut()).is_ready());
+        }
+        assert!(futures::poll!(Box::pin(shutdown.wait_for_drain_start())).is_ready());
     }
 
     #[tokio::test]

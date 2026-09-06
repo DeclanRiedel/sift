@@ -1837,6 +1837,7 @@ async fn room_websocket_membership_revocation(remove_tenant: bool) {
             .get_room_member(room.id, member.id)
             .unwrap()
             .is_some());
+        assert!(client.join_room(ApiRoomId(room.id.0)).await.is_err());
     } else {
         metadata
             .remove_room_member_authorized(
@@ -3234,6 +3235,50 @@ async fn two_online_editors_converge() {
     assert_eq!(replica_b.text(), "select 1 where id = 1");
     assert_eq!(replica_a.text(), replica_b.text());
 
+    server.abort();
+}
+
+#[tokio::test]
+async fn room_socket_drain_releases_presence_and_subscription() {
+    room_socket_cleanup(true).await;
+}
+
+#[tokio::test]
+async fn room_socket_disconnect_releases_presence_and_subscription() {
+    room_socket_cleanup(false).await;
+}
+
+async fn room_socket_cleanup(draining: bool) {
+    let state = test_state_with_metadata(true);
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let (room, _) = seed_room_document(&metadata, "select 1");
+    let rooms = state.rooms.clone();
+    let shutdown = state.shutdown.clone();
+    let (url, server) = serve_app(state).await;
+    let client = sift_client_sdk::Client::new(url);
+    let mut socket = client
+        .connect_room_websocket(ApiRoomId(room.id.0))
+        .await
+        .unwrap();
+    socket.attach("drain-test").await.unwrap();
+    assert!(rooms.is_active(room.id.0));
+    if draining {
+        shutdown.begin_drain();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while socket.next().await.is_ok() {}
+        })
+        .await
+        .expect("drain closes room sockets promptly");
+    }
+    drop(socket);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while rooms.is_active(room.id.0) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("socket cleanup releases room runtime promptly");
+    assert!(rooms.presence(room.id.0).is_empty());
     server.abort();
 }
 

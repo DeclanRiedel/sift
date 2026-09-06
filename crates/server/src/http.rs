@@ -6116,6 +6116,7 @@ async fn join_metadata_room(
     let room = room_id(id)?;
     let principal = auth.principal_id;
     let member = metadata_blocking(move || {
+        ensure_room_permission(&metadata, &auth, room, RoomPermission::Read)?;
         metadata
             .get_room_member(room, principal)?
             .ok_or(ApiError::Forbidden(
@@ -18693,16 +18694,18 @@ async fn ws_room(
     Ok(ws.on_upgrade(move |socket| {
         crate::correlation::scope(correlation_id, async move {
             let room = room_row.id;
-            if let Err(error) = handle_room_ws(
-                state.clone(),
-                metadata,
-                auth,
-                room,
-                room_row.tenant_id,
-                socket,
-            )
-            .await
-            {
+            let outcome = tokio::select! {
+                result = handle_room_ws(
+                    state.clone(),
+                    metadata,
+                    auth,
+                    room,
+                    room_row.tenant_id,
+                    socket,
+                ) => result,
+                _ = state.shutdown.wait_for_drain_start() => Ok(()),
+            };
+            if let Err(error) = outcome {
                 tracing::warn!(room_id = %room.0, error = %error, "room websocket ended with error");
             }
             // handle_room_ws has dropped its subscription and attachment; if
@@ -18735,7 +18738,8 @@ async fn handle_room_ws(
     loop {
         let (presence_rx, doc_rx) = subscription.receivers();
         tokio::select! {
-            Some(message) = receiver.next() => {
+            message = receiver.next() => {
+                let Some(message) = message else { break };
                 let message = message.map_err(|error| ApiError::BadRequest(error.to_string()))?;
                 let Message::Text(text) = message else {
                     if matches!(message, Message::Close(_)) {
