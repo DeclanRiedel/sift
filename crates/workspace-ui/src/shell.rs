@@ -1175,6 +1175,7 @@ fn provider_display_name(provider_id: &sift_protocol::ProviderId) -> Option<&'st
     match provider_id.as_str() {
         "sift/postgres" => Some("PostgreSQL"),
         "sift/sql-server" => Some("SQL Server"),
+        "sift/sqlite" => Some("SQLite"),
         _ => None,
     }
 }
@@ -15124,6 +15125,7 @@ impl WorkspaceShell {
                 .and_then(|provider| match provider.as_str() {
                     "sift/postgres" => Some(sift_protocol::Engine::Postgres),
                     "sift/sql-server" => Some(sift_protocol::Engine::SqlServer),
+                    "sift/sqlite" => Some(sift_protocol::Engine::Sqlite),
                     _ => None,
                 })
                 .unwrap_or(sift_protocol::Engine::Postgres);
@@ -19904,9 +19906,23 @@ impl WorkspaceShell {
         self.database_wizard_step = DatabaseWizardStep::Details;
         for (input, value) in [
             (&self.database_name_input, profile.name),
-            (&self.database_host_input, text("host")),
+            (
+                &self.database_host_input,
+                text(if profile.provider_id.as_str() == "sift/sqlite" {
+                    "root_id"
+                } else {
+                    "host"
+                }),
+            ),
             (&self.database_port_input, number("port")),
-            (&self.database_catalog_input, text("database")),
+            (
+                &self.database_catalog_input,
+                text(if profile.provider_id.as_str() == "sift/sqlite" {
+                    "path"
+                } else {
+                    "database"
+                }),
+            ),
             (&self.database_user_input, text("user")),
         ] {
             input.update(cx, |input, cx| input.set_text(&value, cx));
@@ -19989,6 +20005,9 @@ impl WorkspaceShell {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
             .or_else(|| Some("prefer".into()));
+        if self.selected_database_provider.as_deref() == Some("sift/sqlite") {
+            self.selected_database_ssl_mode = Some(text("mode"));
+        }
         self.configure_database_tab_order(cx);
         cx.notify();
     }
@@ -20158,12 +20177,48 @@ impl WorkspaceShell {
         self.selected_database_ssl_mode = Some(
             match self.selected_database_provider.as_deref() {
                 Some("sift/sql-server") => "require",
+                Some("sift/sqlite") => "read_only",
                 _ => "prefer",
             }
             .into(),
         );
         self.database_port_input
             .update(cx, |input, cx| input.set_text(port, cx));
+        let sqlite = self.selected_database_provider.as_deref() == Some("sift/sqlite");
+        self.database_host_input.update(cx, |input, cx| {
+            input.set_placeholder(
+                if sqlite {
+                    "Server file root ID"
+                } else {
+                    "Database host"
+                },
+                cx,
+            )
+        });
+        self.database_catalog_input.update(cx, |input, cx| {
+            input.set_placeholder(
+                if sqlite {
+                    "Relative file path, e.g. demo.db"
+                } else {
+                    "Database (optional)"
+                },
+                cx,
+            )
+        });
+        if sqlite {
+            for field in [
+                &self.database_port_input,
+                &self.database_user_input,
+                &self.database_password_input,
+                &self.database_timeout_input,
+                &self.database_pool_min_input,
+                &self.database_pool_max_input,
+                &self.database_session_variables_input,
+                &self.database_startup_sql_input,
+            ] {
+                field.update(cx, |input, cx| input.set_text("", cx));
+            }
+        }
         self.configure_database_tab_order(cx);
         cx.notify();
     }
@@ -20191,6 +20246,15 @@ impl WorkspaceShell {
         fields.push(self.database_folder_input.clone());
         fields.push(self.database_tags_input.clone());
 
+        if self.selected_database_provider.as_deref() == Some("sift/sqlite") {
+            fields = vec![
+                self.database_name_input.clone(),
+                self.database_host_input.clone(),
+                self.database_catalog_input.clone(),
+                self.database_folder_input.clone(),
+                self.database_tags_input.clone(),
+            ];
+        }
         let handles = fields
             .iter()
             .map(|field| field.focus_handle(cx))
@@ -20208,6 +20272,18 @@ impl WorkspaceShell {
         }
         if self.selected_database_provider.is_none() {
             return Some("Select a database type".into());
+        }
+        if self.selected_database_provider.as_deref() == Some("sift/sqlite") {
+            for (label, input) in [
+                ("Connection name", &self.database_name_input),
+                ("Server file root ID", &self.database_host_input),
+                ("Relative database path", &self.database_catalog_input),
+            ] {
+                if input.read(cx).text().trim().is_empty() {
+                    return Some(format!("{label} is required"));
+                }
+            }
+            return None;
         }
         let required = [
             ("Connection name", &self.database_name_input),
@@ -20483,7 +20559,28 @@ impl WorkspaceShell {
                 }
             }
         }
-        let credentials = (!password.is_empty()).then(|| serde_json::json!({"password": password}));
+        if provider_id.as_str() == "sift/sqlite" {
+            configuration = serde_json::Map::from_iter([
+                (
+                    "root_id".into(),
+                    serde_json::json!(self.database_host_input.read(cx).text().trim()),
+                ),
+                (
+                    "path".into(),
+                    serde_json::json!(self.database_catalog_input.read(cx).text().trim()),
+                ),
+                (
+                    "mode".into(),
+                    serde_json::json!(self
+                        .selected_database_ssl_mode
+                        .as_deref()
+                        .filter(|mode| matches!(*mode, "read_only" | "read_write"))
+                        .unwrap_or("read_only")),
+                ),
+            ]);
+        }
+        let credentials = (provider_id.as_str() != "sift/sqlite" && !password.is_empty())
+            .then(|| serde_json::json!({"password": password}));
         let mut tags = self
             .database_tags_input
             .read(cx)
@@ -46365,6 +46462,45 @@ mod tests {
         assert_eq!(tenant_id, 7);
         assert_eq!(configuration["host"], "db.internal");
         assert_eq!(credentials.unwrap()["password"], "secret");
+    }
+
+    #[gpui::test]
+    fn sqlite_connection_test_uses_server_root_path_and_no_credentials(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_database_tenant = Some(7);
+            shell.database_password_input.update(cx, |input, cx| {
+                input.set_text("previous-provider-password", cx)
+            });
+            shell.select_database_provider("sift/sqlite".into(), cx);
+            for (input, value) in [
+                (&shell.database_name_input, "Local SQLite"),
+                (&shell.database_host_input, "analysis"),
+                (&shell.database_catalog_input, "warehouse.db"),
+            ] {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+            shell.test_database_connection(cx);
+        });
+        let ExecutorCommand::TestConnectionProfile {
+            configuration,
+            credentials,
+            provider_id,
+            ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("SQLite test command")
+        };
+        assert_eq!(provider_id.as_str(), "sift/sqlite");
+        assert_eq!(configuration["root_id"], "analysis");
+        assert_eq!(configuration["path"], "warehouse.db");
+        assert_eq!(configuration["mode"], "read_only");
+        assert!(configuration.get("host").is_none());
+        assert!(credentials.is_none());
     }
 
     #[gpui::test]

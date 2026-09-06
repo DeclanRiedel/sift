@@ -18,6 +18,7 @@ pub enum OperationKind {
     ManageExtension,
     ManageInstanceConfiguration,
     BackupState,
+    InspectMetadata,
     RestoreState,
     InvokeExtension,
     ApproveOperation,
@@ -108,7 +109,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 100] = [
+    pub const ALL: [Self; 101] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -122,6 +123,7 @@ impl OperationKind {
         Self::ManageExtension,
         Self::ManageInstanceConfiguration,
         Self::BackupState,
+        Self::InspectMetadata,
         Self::RestoreState,
         Self::InvokeExtension,
         Self::ApproveOperation,

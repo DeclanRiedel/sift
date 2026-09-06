@@ -70,7 +70,7 @@ fn migration_kind(version: u32) -> Result<MigrationKind> {
     match version {
         6 => Ok(MigrationKind::LegacyContract),
         19 => Ok(MigrationKind::Contract),
-        26 | 27 => Ok(MigrationKind::Data),
+        26 | 27 | 46 => Ok(MigrationKind::Data),
         1..=5 | 7..=18 | 20..=25 | 28..=45 => Ok(MigrationKind::Expand),
         _ => Err(MetadataError::InvalidMigrationHistory(format!(
             "embedded V{version} has no lifecycle classification"
@@ -5987,13 +5987,13 @@ mod tests {
         assert!(!path.exists());
         let status = store.migration_status().unwrap();
         assert_eq!(status.current_version, 0);
-        assert_eq!(status.latest_version, 45);
-        assert_eq!(status.pending.len(), 45);
+        assert_eq!(status.latest_version, 46);
+        assert_eq!(status.pending.len(), 46);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::MigrationRequired {
                 current: 0,
-                latest: 45
+                latest: 46
             })
         ));
         assert!(!path.exists());
@@ -6013,7 +6013,7 @@ mod tests {
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let report = store.apply_migrations(false).unwrap();
         assert_eq!(report.from_version, 1);
-        assert_eq!(report.to_version, 45);
+        assert_eq!(report.to_version, 46);
         let backup = report.backup.expect("existing schema is backed up");
         assert!(backup.is_file());
 
@@ -6050,7 +6050,7 @@ mod tests {
 
         store.apply_migrations(false).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 45);
+        assert_eq!(status.current_version, 46);
         assert_eq!(status.minimum_compatible_version, 19);
     }
 
@@ -6092,7 +6092,7 @@ mod tests {
                         store.ensure_schema_current(),
                         Err(MetadataError::MigrationRequired {
                             current,
-                            latest: 45
+                            latest: 46
                         }) if current == fixture.schema_version
                     ),
                     "{} should require migration",
@@ -6120,7 +6120,7 @@ mod tests {
                         "{}",
                         fixture.name
                     );
-                    assert_eq!(report.to_version, 45, "{}", fixture.name);
+                    assert_eq!(report.to_version, 46, "{}", fixture.name);
                 }
             }
         }
@@ -6139,7 +6139,7 @@ mod tests {
             .execute(
                 "INSERT INTO refinery_schema_history
                  (version, name, applied_on, checksum)
-                VALUES (46, 'future_additive_fixture', '2026-08-17T00:00:00Z', '1')",
+                VALUES (47, 'future_additive_fixture', '2026-08-17T00:00:00Z', '1')",
                 [],
             )
             .unwrap();
@@ -6148,8 +6148,8 @@ mod tests {
 
         let store = MetadataStore::open(&path, Arc::new(MemorySecretStore::new())).unwrap();
         let status = store.migration_status().unwrap();
-        assert_eq!(status.current_version, 46);
-        assert_eq!(status.latest_version, 45);
+        assert_eq!(status.current_version, 47);
+        assert_eq!(status.latest_version, 46);
         assert!(status.pending.is_empty());
         store
             .ensure_schema_current()
@@ -6157,20 +6157,20 @@ mod tests {
         assert!(store.apply_migrations(false).unwrap().applied.is_empty());
 
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 46).unwrap();
+        connection.pragma_update(None, "user_version", 47).unwrap();
         drop(connection);
         assert!(matches!(
             store.ensure_schema_current(),
             Err(MetadataError::BinaryTooOld {
-                minimum: 46,
-                latest: 45
+                minimum: 47,
+                latest: 46
             })
         ));
         assert!(matches!(
             store.apply_migrations(false),
             Err(MetadataError::BinaryTooOld {
-                minimum: 46,
-                latest: 45
+                minimum: 47,
+                latest: 46
             })
         ));
     }
@@ -6290,6 +6290,45 @@ mod tests {
         assert_eq!(identities.len(), 1);
         assert_eq!(identities[0].method, AuthIdentityMethod::Legacy);
         assert_eq!(identities[0].subject, "legacy:test");
+    }
+
+    #[test]
+    fn sqlite_discriminator_migration_preserves_profiles_and_credential_references() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure_connection(&conn).unwrap();
+        migrations::migrations::runner()
+            .set_target(refinery::Target::Version(45))
+            .run(&mut conn)
+            .unwrap();
+        conn.execute_batch("INSERT INTO tenant VALUES(1,'local','personal','now','now'); INSERT INTO principal(id,external_id,display_name,created_at,updated_at) VALUES(1,'local:test','test','now','now'); INSERT INTO connection_profile(id,tenant_id,name,engine,spec_json,credential_mode,tags_json,created_by,created_at,updated_at,provider_id,configuration_json,semantic_engine) VALUES(9,1,'kept','sql_server','{}','per_user','[]',1,'now','now','sift/sql-server','{}','sql_server'); INSERT INTO connection_credential VALUES(9,1,'opaque-test-handle','now','now');").unwrap();
+        migrations::migrations::runner().run(&mut conn).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT engine,semantic_engine FROM connection_profile WHERE id=9",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("sql_server".into(), "sql_server".into())
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM connection_credential WHERE connection_profile_id=9",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        conn.execute("UPDATE connection_profile SET engine='sqlite',semantic_engine='sqlite',provider_id='sift/sqlite' WHERE id=9",[]).unwrap();
+        assert!(conn
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query([])
+            .unwrap()
+            .next()
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -549,7 +549,7 @@ impl SemanticRegistry {
             return Err(Error::InvalidRequest);
         }
         let replacement = match dialect_flavor(&dialect_id)? {
-            Flavor::Postgres => format!(
+            Flavor::Postgres | Flavor::Sqlite => format!(
                 "\"{}\".\"{}\"",
                 object.schema.replace('"', "\"\""),
                 object.name.replace('"', "\"\"")
@@ -1006,6 +1006,7 @@ fn parse(
     let flavor = match dialect_id.as_str() {
         "sift/postgresql" => Flavor::Postgres,
         "sift/tsql" => Flavor::Tsql,
+        "sift/sqlite" => Flavor::Sqlite,
         other => return Err(Error::DialectUnavailable(other.to_string())),
     };
     let source: Arc<str> = Arc::from(text);
@@ -1014,6 +1015,7 @@ fn parse(
     let dialect: Box<dyn Dialect> = match flavor {
         Flavor::Postgres => Box::new(PostgreSqlDialect {}),
         Flavor::Tsql => Box::new(MsSqlDialect {}),
+        Flavor::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
     };
     // Tokenize once for both the document-wide resource ceiling and the
     // common valid-document parse path. Invalid documents fall back to
@@ -1115,6 +1117,7 @@ fn tokenize_and_validate(source: &str, flavor: Flavor) -> (usize, bool) {
     let dialect: Box<dyn Dialect> = match flavor {
         Flavor::Postgres => Box::new(PostgreSqlDialect {}),
         Flavor::Tsql => Box::new(MsSqlDialect {}),
+        Flavor::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
     };
     match Tokenizer::new(&*dialect, source).tokenize_with_location() {
         Ok(tokens) => {
@@ -1137,12 +1140,14 @@ fn source_digest(source: &str) -> String {
 enum Flavor {
     Postgres,
     Tsql,
+    Sqlite,
 }
 
 fn dialect_flavor(dialect_id: &sift_protocol::DialectId) -> Result<Flavor, Error> {
     match dialect_id.as_str() {
         "sift/postgresql" => Ok(Flavor::Postgres),
         "sift/tsql" => Ok(Flavor::Tsql),
+        "sift/sqlite" => Ok(Flavor::Sqlite),
         other => Err(Error::DialectUnavailable(other.to_string())),
     }
 }
@@ -1419,6 +1424,7 @@ fn inspect_query_safety(
     let dialect: Box<dyn Dialect> = match flavor {
         Flavor::Postgres => Box::new(PostgreSqlDialect {}),
         Flavor::Tsql => Box::new(MsSqlDialect {}),
+        Flavor::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
     };
     let mut diagnostics = Vec::new();
     for statement in statements.iter().filter(|statement| !statement.recovered) {
@@ -1730,7 +1736,7 @@ fn classify_usage(source: &str, range: TextRange) -> SqlUsageKind {
 
 fn render_identifier(identifier: &str, flavor: Flavor) -> String {
     match flavor {
-        Flavor::Postgres => format!("\"{}\"", identifier.replace('"', "\"\"")),
+        Flavor::Postgres | Flavor::Sqlite => format!("\"{}\"", identifier.replace('"', "\"\"")),
         Flavor::Tsql => format!("[{}]", identifier.replace(']', "]]")),
     }
 }
@@ -2093,6 +2099,10 @@ fn split_statements(
     let mut block_depth = 0u32;
     let mut dollar_tag: Option<Vec<u8>> = None;
     let mut paren_depth = 0i32;
+    let mut sqlite_prefix = Vec::new();
+    let mut sqlite_trigger = false;
+    let mut sqlite_body = false;
+    let mut sqlite_cases = 0u32;
     while index < bytes.len() {
         if index % 4096 == 0 && canceled.load(Ordering::Relaxed) {
             return Err(Error::Canceled);
@@ -2168,10 +2178,12 @@ fn split_statements(
         } else if bytes[index..].starts_with(b"/*") {
             block_depth = 1;
             index += 2;
-        } else if matches!(bytes[index], b'\'' | b'"') {
+        } else if matches!(bytes[index], b'\'' | b'"')
+            || (flavor == Flavor::Sqlite && bytes[index] == b'`')
+        {
             quote = Some(bytes[index]);
             index += 1;
-        } else if flavor == Flavor::Tsql && bytes[index] == b'[' {
+        } else if matches!(flavor, Flavor::Tsql | Flavor::Sqlite) && bytes[index] == b'[' {
             bracket = true;
             index += 1;
         } else if flavor == Flavor::Postgres && bytes[index] == b'$' {
@@ -2181,14 +2193,43 @@ fn split_statements(
             } else {
                 index += 1;
             }
+        } else if flavor == Flavor::Sqlite
+            && (bytes[index].is_ascii_alphabetic() || bytes[index] == b'_')
+        {
+            let start = index;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            let word = source[start..index].to_ascii_uppercase();
+            if sqlite_prefix.len() < 3 {
+                sqlite_prefix.push(word.clone());
+                sqlite_trigger = sqlite_prefix == ["CREATE", "TRIGGER"]
+                    || sqlite_prefix == ["CREATE", "TEMP", "TRIGGER"]
+                    || sqlite_prefix == ["CREATE", "TEMPORARY", "TRIGGER"]
+                    || sqlite_trigger;
+            }
+            if sqlite_trigger {
+                match word.as_str() {
+                    "BEGIN" => sqlite_body = true,
+                    "CASE" if sqlite_body => sqlite_cases += 1,
+                    "END" if sqlite_body && sqlite_cases > 0 => sqlite_cases -= 1,
+                    "END" if sqlite_body => sqlite_body = false,
+                    _ => {}
+                }
+            }
         } else if bytes[index] == b'(' {
             paren_depth += 1;
             index += 1;
         } else if bytes[index] == b')' {
             paren_depth -= 1;
             index += 1;
-        } else if bytes[index] == b';' && paren_depth <= 0 {
+        } else if bytes[index] == b';' && paren_depth <= 0 && !sqlite_body {
             boundaries.push(index + 1);
+            sqlite_prefix.clear();
+            sqlite_trigger = false;
+            sqlite_cases = 0;
             index += 1;
         } else {
             index += 1;
@@ -2197,7 +2238,13 @@ fn split_statements(
     if *boundaries.last().unwrap() != bytes.len() {
         boundaries.push(bytes.len());
     }
-    if quote.is_some() || bracket || block_depth > 0 || dollar_tag.is_some() || paren_depth != 0 {
+    if quote.is_some()
+        || bracket
+        || block_depth > 0
+        || dollar_tag.is_some()
+        || paren_depth != 0
+        || sqlite_body
+    {
         diagnostics.push(SemanticDiagnostic {
             id: format!("{revision}:scanner:unclosed"),
             severity: DiagnosticSeverity::Error,
@@ -2309,6 +2356,7 @@ fn semantic_hover(
     let dialect: Box<dyn Dialect> = match flavor {
         Flavor::Postgres => Box::new(PostgreSqlDialect {}),
         Flavor::Tsql => Box::new(MsSqlDialect {}),
+        Flavor::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
     };
     let semantic = semantic_tokens(&*dialect, source);
     let relations = completion_relations(&semantic);
@@ -2770,6 +2818,7 @@ fn prepare_star_expansion(
     let dialect: Box<dyn Dialect> = match flavor {
         Flavor::Postgres => Box::new(PostgreSqlDialect {}),
         Flavor::Tsql => Box::new(MsSqlDialect {}),
+        Flavor::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
     };
     let statement = &source[statement_range.start as usize..statement_range.end as usize];
     let qualifier = star_qualifier(source, star);
@@ -3291,7 +3340,7 @@ fn quote_semantic_identifier(identifier: &str, flavor: Flavor) -> String {
         return identifier.to_string();
     }
     match flavor {
-        Flavor::Postgres => format!("\"{}\"", identifier.replace('"', "\"\"")),
+        Flavor::Postgres | Flavor::Sqlite => format!("\"{}\"", identifier.replace('"', "\"\"")),
         Flavor::Tsql => format!("[{}]", identifier.replace(']', "]]")),
     }
 }
@@ -3309,12 +3358,14 @@ pub fn detect_completion_context(
     let flavor = match dialect_id.as_str() {
         "sift/postgresql" => Flavor::Postgres,
         "sift/tsql" => Flavor::Tsql,
+        "sift/sqlite" => Flavor::Sqlite,
         other => return Err(Error::DialectUnavailable(other.to_string())),
     };
     let (prefix_start, prefix) = extract_prefix(sql, cursor, flavor);
     let dialect: Box<dyn Dialect> = match flavor {
         Flavor::Postgres => Box::new(PostgreSqlDialect {}),
         Flavor::Tsql => Box::new(MsSqlDialect {}),
+        Flavor::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
     };
     let tokens = semantic_tokens(&*dialect, &sql[..prefix_start]);
     // Bindings can be declared after the cursor (`SELECT u.| FROM users u`),
@@ -3967,6 +4018,23 @@ mod tests {
             symbol.target.as_deref() == Some("refresh_jobs")
                 && symbol.usage_kind == SqlUsageKind::Call
         }));
+    }
+
+    #[test]
+    fn sqlite_trigger_selection_keeps_body_and_case_expressions_together() {
+        let source = "-- setup\nCREATE TEMP TRIGGER audit AFTER UPDATE ON items BEGIN INSERT INTO log VALUES(CASE WHEN new.x=1 THEN 'a;b' ELSE 'c' END); UPDATE items SET x=2; END; SELECT `semi;colon`, [another;column] FROM items;";
+        let mut diagnostics = Vec::new();
+        let spans = split_statements(
+            source,
+            Flavor::Sqlite,
+            1,
+            &AtomicBool::new(false),
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert_eq!(spans.len(), 2);
+        assert!(source[spans[0].0.start as usize..spans[0].0.end as usize].ends_with("END;"));
+        assert!(diagnostics.is_empty());
     }
 
     #[test]

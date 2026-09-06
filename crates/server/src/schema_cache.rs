@@ -398,6 +398,7 @@ impl SchemaCache {
         let task_cache = self.clone();
         let task_spec_hash = spec_hash.clone();
         let task = match engine {
+            Engine::Sqlite => return,
             Engine::Postgres => tokio::spawn(async move {
                 pg_listen_task(spec_clone, driver, cache, task_spec_hash.clone()).await;
                 task_cache.inner.invalidators.remove(&task_spec_hash);

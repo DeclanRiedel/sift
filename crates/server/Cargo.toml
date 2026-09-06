@@ -16,6 +16,7 @@ sift-sql-variables = { workspace = true }
 sift-snippets = { workspace = true }
 sift-driver-api = { workspace = true, features = ["mock"] }
 sift-driver-postgres = { workspace = true }
+sift-driver-sqlite = { workspace = true }
 sift-driver-sqlserver = { workspace = true }
 sift-extension-protocol = { workspace = true }
 sift-plugin-host = { workspace = true }
@@ -54,6 +55,7 @@ serde_json = { workspace = true }
 schemars = { workspace = true }
 roxmltree = { workspace = true }
 rpassword = { workspace = true }
+rusqlite = { workspace = true }
 rand_core = { workspace = true }
 reqwest = { workspace = true }
 semver = { workspace = true }

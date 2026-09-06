@@ -259,6 +259,9 @@ fn render_change(
         .as_ref()
         .or(change.object_before.as_ref())
         .ok_or_else(|| MigrationRenderError::InvalidChangeShape(change.id.clone()))?;
+    if engine == Engine::Sqlite {
+        return unsupported(change, node);
+    }
     // A catalog may be useful for navigation while lacking a lossless migration
     // projection. Refuse changes to the marked object or any of its children.
     for graph in [from_nodes, to_nodes] {
@@ -483,6 +486,7 @@ fn drop_sql(
             crate::ddl::quote_ident(&node.name, engine)
         )),
         CatalogNodeKind::Index => match engine {
+            Engine::Sqlite => unsupported(change, node),
             Engine::Postgres => {
                 let schema = schema_ancestor(change, parent, nodes)?;
                 Ok(format!(
@@ -625,6 +629,7 @@ fn alter_sql(
     )?;
     let name = crate::ddl::quote_ident(&before.name, engine);
     match engine {
+        Engine::Sqlite => unsupported(change, before),
         Engine::Postgres => {
             let mut clauses = Vec::new();
             if before_column.type_ref != after_column.type_ref {
@@ -691,6 +696,11 @@ fn column_default(column: &sift_protocol::ColumnMetadata, engine: Engine) -> Opt
             .postgres
             .as_ref()
             .and_then(|facets| facets.default_expr.as_deref()),
+        Engine::Sqlite => column
+            .facets
+            .sqlite
+            .as_ref()
+            .and_then(|f| f.default_expr.as_deref()),
         Engine::SqlServer => column
             .facets
             .sql_server
@@ -736,6 +746,11 @@ fn render_column(
             .postgres
             .as_ref()
             .and_then(|facets| facets.default_expr.as_deref()),
+        Engine::Sqlite => column
+            .facets
+            .sqlite
+            .as_ref()
+            .and_then(|f| f.default_expr.as_deref()),
         Engine::SqlServer => column
             .facets
             .sql_server

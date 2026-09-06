@@ -1119,6 +1119,7 @@ ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
             auto_increment: row.try_get::<i32, _>(5).map_err(ms_err)?.unwrap_or(0) == 1,
             primary_key: row.try_get::<bool, _>(6).map_err(ms_err)?.unwrap_or(false),
             facets: sift_protocol::EngineColumnFacets {
+                sqlite: None,
                 postgres: None,
                 sql_server: Some(sift_protocol::MssqlColumnFacets {
                     tds_type: Some(type_name.to_string()),
@@ -1808,6 +1809,7 @@ ORDER BY c.ORDINAL_POSITION
                 auto_increment,
                 primary_key,
                 facets: sift_protocol::EngineColumnFacets {
+                    sqlite: None,
                     postgres: None,
                     sql_server: Some(sift_protocol::MssqlColumnFacets {
                         tds_type: Some(type_name.to_string()),
@@ -2019,6 +2021,7 @@ fn ms_col(col: &tiberius::Column) -> ColumnMetadata {
         auto_increment: false,
         primary_key: false,
         facets: sift_protocol::EngineColumnFacets {
+            sqlite: None,
             postgres: None,
             sql_server: Some(sift_protocol::MssqlColumnFacets {
                 tds_type: Some(format!("{:?}", col.column_type())),

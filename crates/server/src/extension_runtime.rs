@@ -971,7 +971,7 @@ repository = "https://example.invalid/acme/conformance"
 minimum_sift_version = "0.1.0"
 
 [compatibility]
-public_protocol = {{ minimum = 1, maximum = 1 }}
+public_protocol = {{ minimum = 2, maximum = 2 }}
 extension_rpc = {{ minimum = 1, maximum = 1 }}
 driver_rpc = {{ minimum = 1, maximum = 1 }}
 
@@ -1043,7 +1043,7 @@ repository = "https://example.invalid/acme/broken"
 minimum_sift_version = "0.1.0"
 
 [compatibility]
-public_protocol = {{ minimum = 1, maximum = 1 }}
+public_protocol = {{ minimum = 2, maximum = 2 }}
 extension_rpc = {{ minimum = 1, maximum = 1 }}
 driver_rpc = {{ minimum = 1, maximum = 1 }}
 

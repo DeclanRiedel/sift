@@ -465,7 +465,7 @@
         # real (non-mock) server from that root.
         desktopDemo = pkgs.writeShellApplication {
           name = "sift-desktop-demo";
-          runtimeInputs = with pkgs; [ coreutils curl git gnugrep gnused jq nix openssl postgresql util-linux ];
+          runtimeInputs = with pkgs; [ coreutils curl git gnugrep gnused jq nix openssl postgresql sqlite util-linux ];
           text = ''
             set -Eeuo pipefail
 
@@ -549,6 +549,7 @@
             run_in_dev cargo build --profile release-dev -p sift-server -p sift-desktop
 
             phase 4 "Prepare the reproducible instance"
+            sh "$repo/examples/reproducible-instance/scripts/dev-seed-sqlite.sh" "$instance_root/demo-data/demo.db"
             cp "$repo/examples/reproducible-instance/sift.toml" "$instance_root/sift.toml"
             rm -f -- "$instance_root/sift.lock"
             sed -i \
@@ -593,7 +594,8 @@ EOF
 
             echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift credential=<destination-local> ssl=prefer"
             echo "Sift instance root: $instance_root"
-            echo "Sift connection: demo/postgres (managed by sift.toml)"
+            echo "Sift connections: demo/postgres and demo/sqlite (managed by sift.toml)"
+            echo "SQLite query: SELECT * FROM main.order_summary ORDER BY placed_at DESC;"
             echo "Seeded query: SELECT * FROM lab.order_summary ORDER BY placed_at DESC;"
             echo "Large result query: SELECT * FROM lab.large ORDER BY id;"
             echo "Postgres log: $pglog"
@@ -628,7 +630,7 @@ EOF
             fi
             seed_protocol="$(curl -fsS -X POST "$seed_base_url/v1/handshake" \
               -H 'content-type: application/json' \
-              -d '{"client_version":"sift-desktop-demo","client_kind":"automation","protocol":{"minimum":1,"maximum":1}}' \
+              -d '{"client_version":"sift-desktop-demo","client_kind":"automation","protocol":{"minimum":2,"maximum":2}}' \
               | jq -er .selected_protocol)"
             demo_tenant_id="$(curl -fsS "$seed_base_url/v1/metadata/tenants" \
               -H "x-sift-protocol-version: $seed_protocol" \
@@ -646,6 +648,32 @@ EOF
 
             phase 7 "Start the desktop and supervised Sift server"
             run_in_dev cargo run --profile release-dev -p sift-desktop -- --instance-root "$instance_root" "$@"
+          '';
+        };
+
+        demoSqlite = pkgs.writeShellApplication {
+          name = "sift-demo-sqlite";
+          runtimeInputs = with pkgs; [ coreutils sqlite ];
+          text = ''
+            repo="''${SIFT_REPO:-$PWD}"
+            exec sh "$repo/examples/reproducible-instance/scripts/dev-seed-sqlite.sh" "$@"
+          '';
+        };
+
+        desktopMetadata = pkgs.writeShellApplication {
+          name = "sift-desktop-metadata";
+          runtimeInputs = with pkgs; [ coreutils nix ];
+          text = ''
+            repo="''${SIFT_REPO:-$PWD}"
+            source_root="''${1:-''${SIFT_DESKTOP_DEMO_INSTANCE_ROOT:-''${TMPDIR:-/tmp}/sift-desktop-demo-instance-$(id -u)}}"
+            if [ "$#" -gt 0 ]; then shift; fi
+            inspection_parent="$(mktemp -d "''${TMPDIR:-/tmp}/sift-metadata-inspection.XXXXXXXX")"
+            inspection_root="$inspection_parent/instance"
+            cd "$repo"
+            nix develop "$repo" --command cargo build --profile release-dev -p sift-server -p sift-desktop
+            nix develop "$repo" --command cargo run --profile release-dev -p sift-server --bin sift -- metadata inspect "$source_root" "$inspection_root"
+            echo "Inspection snapshot retained at $inspection_root"
+            exec nix develop "$repo" --command cargo run --profile release-dev -p sift-desktop -- --instance-root "$inspection_root" "$@"
           '';
         };
 
@@ -769,8 +797,10 @@ EOF
               sift-test                 Run cargo nextest for the whole workspace.
               sift-check                Run cargo check for the whole workspace.
               sift-desktop              Run the native GPUI desktop client.
-              sift-desktop-demo         Seeded Postgres + real backend + registered connection + desktop.
+              sift-desktop-demo         Seeded Postgres + SQLite + real backend + desktop.
               sift-desktop-demo-wiki    Run desktop demo + keyboard-language wiki together.
+              sift-demo-sqlite          Create the SQLite fixture once, preserving existing files.
+              sift-desktop-metadata    Open a read-only inspection snapshot of Sift's metadata.
               sift-dev-secret-key       Generate the ignored local metadata secret key file.
               sift-dev-mssql            Manage a local SQL Server docker container for live-mssql tests.
                                         Sub: start | stop | reset | password | status. Password is
@@ -816,6 +846,8 @@ EOF
             desktop
             desktopDemo
             desktopDemoWiki
+            demoSqlite
+            desktopMetadata
             devSecretKey
             devMssql
           ];
@@ -885,6 +917,14 @@ EOF
           desktop-demo = {
             type = "app";
             program = "${desktopDemo}/bin/sift-desktop-demo";
+          };
+          sift-demo-sqlite = {
+            type = "app";
+            program = "${demoSqlite}/bin/sift-demo-sqlite";
+          };
+          sift-desktop-metadata = {
+            type = "app";
+            program = "${desktopMetadata}/bin/sift-desktop-metadata";
           };
           sift-desktop-demo-wiki = {
             type = "app";

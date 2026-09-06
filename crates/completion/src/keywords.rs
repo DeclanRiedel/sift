@@ -230,6 +230,14 @@ pub fn keyword_groups_for(engine: Engine) -> [&'static [&'static str]; 3] {
     let engine_keywords = match engine {
         Engine::Postgres => PG_KEYWORDS,
         Engine::SqlServer => MSSQL_KEYWORDS,
+        Engine::Sqlite => &[
+            "PRAGMA",
+            "REPLACE",
+            "RETURNING",
+            "STRICT",
+            "WITHOUT ROWID",
+            "EXPLAIN QUERY PLAN",
+        ],
     };
     [STATEMENT_LEADS, COMMON_KEYWORDS, engine_keywords]
 }
@@ -238,5 +246,32 @@ pub fn functions_for(engine: Engine) -> &'static [&'static str] {
     match engine {
         Engine::Postgres => PG_FUNCTIONS,
         Engine::SqlServer => MSSQL_FUNCTIONS,
+        Engine::Sqlite => &[
+            "ABS",
+            "CHANGES",
+            "COALESCE",
+            "COUNT",
+            "DATE",
+            "DATETIME",
+            "GROUP_CONCAT",
+            "HEX",
+            "IFNULL",
+            "IIF",
+            "JULIANDAY",
+            "JSON_EXTRACT",
+            "LENGTH",
+            "LOWER",
+            "MAX",
+            "MIN",
+            "PRINTF",
+            "ROUND",
+            "SQLITE_VERSION",
+            "STRFTIME",
+            "SUBSTR",
+            "SUM",
+            "TOTAL",
+            "TYPEOF",
+            "UPPER",
+        ],
     }
 }

@@ -34,6 +34,7 @@ pub enum SslMode {
 pub enum EngineConnectionSpec {
     Postgres(PgConnectionSpec),
     SqlServer(MssqlConnectionSpec),
+    Sqlite(SqliteConnectionSpec),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -138,5 +139,68 @@ mod tests {
         let value = serde_json::to_value(&config).unwrap();
         assert_eq!(value["session_variables"]["tenant"], "analytics");
         assert_eq!(value["startup_sql"][0], "SET DEADLOCK_PRIORITY LOW");
+    }
+}
+
+/// Server-approved SQLite path passed to the native driver. Public profiles use
+/// SqliteFileConfiguration, never this resolved path.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SqliteConnectionSpec {
+    pub file_path: String,
+    pub read_only: bool,
+    pub busy_timeout_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SqliteFileConfiguration {
+    pub root_id: String,
+    pub path: String,
+    #[serde(default)]
+    pub mode: SqliteOpenMode,
+    #[serde(default = "sqlite_busy_timeout")]
+    pub busy_timeout_ms: u32,
+}
+fn sqlite_busy_timeout() -> u32 {
+    1000
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SqliteOpenMode {
+    #[default]
+    ReadOnly,
+    ReadWrite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SqliteRootConfig {
+    pub path: String,
+    /// Explicit tenant IDs. Empty denies every tenant.
+    #[serde(default)]
+    pub allowed_tenants: Vec<i64>,
+    #[serde(default = "sqlite_read_only")]
+    pub read_only: bool,
+}
+fn sqlite_read_only() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SqliteDriverConfig {
+    pub roots: BTreeMap<String, SqliteRootConfig>,
+    pub max_connections: usize,
+}
+impl Default for SqliteDriverConfig {
+    fn default() -> Self {
+        Self {
+            roots: BTreeMap::new(),
+            max_connections: 8,
+        }
     }
 }

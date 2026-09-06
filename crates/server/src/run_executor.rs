@@ -239,7 +239,16 @@ async fn execute_run(
                     session.id,
                     BeginTransactionRequest {
                         connection: connection.id,
-                        mode: sift_protocol::TxMode::default(),
+                        mode: sift_protocol::TxMode {
+                            isolation: if profile.provider_id
+                                == sift_protocol::Engine::Sqlite.provider_id()
+                            {
+                                sift_protocol::IsolationLevel::Serializable
+                            } else {
+                                sift_protocol::IsolationLevel::ReadCommitted
+                            },
+                            ..Default::default()
+                        },
                     },
                     sift_protocol::OperationKind::ExecuteRun,
                 )
@@ -345,7 +354,16 @@ async fn execute_run(
                         session.id,
                         BeginTransactionRequest {
                             connection: connection.id,
-                            mode: sift_protocol::TxMode::default(),
+                            mode: sift_protocol::TxMode {
+                                isolation: if profile.provider_id
+                                    == sift_protocol::Engine::Sqlite.provider_id()
+                                {
+                                    sift_protocol::IsolationLevel::Serializable
+                                } else {
+                                    sift_protocol::IsolationLevel::ReadCommitted
+                                },
+                                ..Default::default()
+                            },
                         },
                         sift_protocol::OperationKind::ExecuteRun,
                     )
@@ -675,6 +693,13 @@ fn value_for_kind(
 ) -> ApiResult<Value> {
     if value.is_null() {
         let type_name = match (engine, kind) {
+            (sift_protocol::Engine::Sqlite, RunVariableKind::String | RunVariableKind::Decimal) => {
+                "TEXT"
+            }
+            (
+                sift_protocol::Engine::Sqlite,
+                RunVariableKind::Integer | RunVariableKind::Boolean,
+            ) => "INTEGER",
             (sift_protocol::Engine::Postgres, RunVariableKind::String) => "text",
             (sift_protocol::Engine::Postgres, RunVariableKind::Integer) => "int8",
             (sift_protocol::Engine::Postgres, RunVariableKind::Decimal) => "numeric",

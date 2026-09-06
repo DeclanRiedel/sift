@@ -1,10 +1,11 @@
 # SQLite provider design
 
-Status: **designed for implementation, 2026-09-06; not implemented or graduated.**
+Status: **implemented, 2026-09-07; final graduation validation in progress.**
 Requested before queuing the four tasks in
 [the overnight handoff](database-provider-overnight.md). Implementation follows
 the bounded [PostgreSQL/SQL Server graduation](postgres-sqlserver-graduation.md).
-This plan records proposed decisions; graduate proven decisions into an ADR.
+The design below is retained with its initial scope; the implemented advanced
+scope and commands are documented in [SQLite connections](../SQLITE.md).
 
 ## Outcome and integration choice
 
@@ -279,14 +280,14 @@ visible and does not block ordinary valid SQL execution except policy controls.
 
 ## Implementation slices and acceptance
 
-- [ ] S1: Protocol/configuration design and compatibility note, provider identity,
+- [x] S1: Protocol/configuration design and compatibility note, provider identity,
       typed SQLite spec/facets, root policy, descriptor and disabled capability
       dispatch. Add crate using the pinned bundled SQLite dependency.
-- [ ] S2: Admitted workers, open/ping/close, guarded SQL, streamed runtime values,
+- [x] S2: Admitted workers, open/ping/close, guarded SQL, streamed runtime values,
       parameters/batches, cancellation/deadlines, transactions and error mapping.
-- [ ] S3: Shallow/deep metadata, exact DDL, revision/cache ownership, stable-key
+- [x] S3: Shallow/deep metadata, exact DDL, revision/cache ownership, stable-key
       inline DML; gate graph/migrations/bulk/plan features explicitly.
-- [ ] S4: SQLite semantic pack, query variables, file-profile UI, read-only and
+- [x] S4: SQLite semantic pack, query variables, file-profile UI, read-only and
       isolation selection, existing Vim query/result/export/transaction flows.
 - [ ] S5: Complete focused engine/server/UI contract tests, workspace checks,
       provider support docs and evidence. Graduate an ADR only for proven scope.
@@ -334,3 +335,31 @@ columns; omit authentication sessions, tokens, secret handles and credential
 configuration. Deny generic access to the live metadata database and its aliases.
 The command opens that snapshot through the normal audited connection path and
 labels it as a snapshot with its creation time. It must not imply live refresh.
+
+Implementation clarification: protocol 2 adds the default `Driver::as_sqlite`
+downcast as well as public SQLite data shapes. Its engine operations live in
+SqliteExt; core execution/transaction signatures retain their semantics. The
+protocol bump gates this additive trait surface under ADR-017. Saved file profiles
+and connection testing are supported; the legacy network-shaped ad-hoc request
+rejects SQLite and directs callers to saved profiles. Desktop metadata, plans
+and semantic reads share SQLite's query handle so temp objects and transaction
+visibility remain connection-local. Busy requests fail promptly instead of
+opening a second file handle with different visibility. Read-only file policy
+narrows a requested transaction mode and is returned in TransactionInfo.
+
+SQLite CSV import will support atomic Abort and Skip conflict policies; row
+quarantine is excluded initially. It uses parameterized batches and an explicit
+Serializable transaction, including optional table creation. A failure rolls back
+all changes; a failed rollback invalidates the connection. Decimal and temporal
+columns inferred for new tables use TEXT. Explicit target affinities still own
+SQLite's conversions. Estimated plan detail remains native text with IDs; no
+synthetic cost or runtime estimates are added.
+
+IDE integration requires a revisioned navigation catalog for hover and saved
+plans. Add `driver.schema.catalog@1` for this narrower surface: ReadCatalogGraph
+may return table/column/index/constraint navigation with explicit partial
+coverage. It does not advertise `driver.schema.graph@1`; diagrams, schema
+snapshots/diff/migration and dependency analysis remain gated. Catalog generation
+is bounded, preserves per-handle temp visibility, and reports omitted dependency
+coverage. This replaces the initial assumption that all semantic workflows could
+use shallow/deep snapshots without a revisioned catalog response.

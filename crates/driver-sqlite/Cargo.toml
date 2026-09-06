@@ -1,0 +1,20 @@
+[package]
+name = "sift-driver-sqlite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sift-protocol = { workspace = true }
+sift-core = { workspace = true }
+sift-driver-api = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+rusqlite = { workspace = true, features = ["hooks", "limits", "column_decltype"] }
+serde_json = { workspace = true }
+sqlparser = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

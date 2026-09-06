@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum Engine {
     Postgres,
     SqlServer,
+    Sqlite,
 }
 
 impl Engine {
@@ -14,6 +15,7 @@ impl Engine {
         match self {
             Engine::Postgres => "postgres",
             Engine::SqlServer => "sql_server",
+            Engine::Sqlite => "sqlite",
         }
     }
 
@@ -24,6 +26,7 @@ impl Engine {
         crate::ProviderId::new(match self {
             Engine::Postgres => "sift/postgres",
             Engine::SqlServer => "sift/sql-server",
+            Engine::Sqlite => "sift/sqlite",
         })
         .expect("bundled provider ids are valid")
     }
@@ -32,6 +35,7 @@ impl Engine {
         crate::DialectId::new(match self {
             Engine::Postgres => "sift/postgresql",
             Engine::SqlServer => "sift/tsql",
+            Engine::Sqlite => "sift/sqlite",
         })
         .expect("bundled dialect ids are valid")
     }
@@ -57,6 +61,7 @@ impl std::str::FromStr for Engine {
         match s {
             "postgres" | "postgresql" | "pg" => Ok(Engine::Postgres),
             "sql_server" | "sqlserver" | "mssql" => Ok(Engine::SqlServer),
+            "sqlite" | "sqlite3" => Ok(Engine::Sqlite),
             other => Err(format!("unknown engine: {other}")),
         }
     }

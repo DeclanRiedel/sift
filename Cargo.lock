@@ -7740,6 +7740,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sift-driver-sqlite"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rusqlite",
+ "serde_json",
+ "sift-core",
+ "sift-driver-api",
+ "sift-protocol",
+ "sqlparser",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "sift-driver-sqlserver"
 version = "0.1.0"
 dependencies = [
@@ -7902,6 +7917,7 @@ dependencies = [
  "reqwest",
  "roxmltree 0.20.0",
  "rpassword",
+ "rusqlite",
  "schemars 0.8.22",
  "semver",
  "serde",
@@ -7914,6 +7930,7 @@ dependencies = [
  "sift-doc",
  "sift-driver-api",
  "sift-driver-postgres",
+ "sift-driver-sqlite",
  "sift-driver-sqlserver",
  "sift-extension-protocol",
  "sift-instance-config",

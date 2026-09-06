@@ -5605,6 +5605,7 @@ impl ResultsView {
                 let engine = match response.engine {
                     sift_protocol::Engine::Postgres => "PostgreSQL",
                     sift_protocol::Engine::SqlServer => "SQL Server",
+                    sift_protocol::Engine::Sqlite => "SQLite",
                 };
                 let node_count = self.rendered_plan_nodes.len();
                 let analyzed = response.analyzed;

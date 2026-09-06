@@ -182,6 +182,22 @@ impl BuiltinProviderAdapter {
     pub fn new(driver: Arc<dyn Driver>) -> Self {
         let engine = driver.engine();
         let (provider_id, dialect_id, name, capabilities) = match engine {
+            Engine::Sqlite => (
+                "sift/sqlite",
+                "sift/sqlite",
+                "SQLite",
+                vec![
+                    "driver.core@1",
+                    "driver.transactions@1",
+                    "driver.schema.shallow@1",
+                    "driver.schema.deep@1",
+                    "driver.schema.catalog@1",
+                    "driver.cancel@1",
+                    "driver.savepoints@1",
+                    "driver.explain@1",
+                    "driver.bulk@1",
+                ],
+            ),
             Engine::Postgres => (
                 "sift/postgres",
                 "sift/postgresql",
@@ -227,7 +243,11 @@ impl BuiltinProviderAdapter {
                 },
                 display_name: name.into(),
                 configuration_schema: builtin_configuration_schema(engine),
-                credential_schema: builtin_credential_schema(),
+                credential_schema: if engine == Engine::Sqlite {
+                    serde_json::json!({"type":"object","additionalProperties":false,"properties":{}})
+                } else {
+                    builtin_credential_schema()
+                },
                 configuration_schema_version: 1,
                 capabilities: capabilities
                     .into_iter()
@@ -236,7 +256,11 @@ impl BuiltinProviderAdapter {
                         limits: Default::default(),
                     })
                     .collect(),
-                quality: Some(ProviderQuality::SiftCertified),
+                quality: if engine == Engine::Sqlite {
+                    Some(ProviderQuality::IdeCapable)
+                } else {
+                    Some(ProviderQuality::SiftCertified)
+                },
                 available: true,
             },
             driver,
@@ -262,6 +286,19 @@ impl DatabaseProvider for BuiltinProviderAdapter {
         &self,
         mut request: ProviderOpenRequest,
     ) -> Result<ProviderConnectionHandle, DriverError> {
+        if self.driver.engine() == Engine::Sqlite {
+            let handle = open_sqlite(
+                self.driver.as_ref(),
+                &request.configuration,
+                &request.credentials,
+                request.tenant_id,
+            )
+            .await?;
+            return Ok(ProviderConnectionHandle::new(
+                Engine::Sqlite.provider_id(),
+                handle,
+            ));
+        }
         let password = request
             .credentials
             .remove("password")
@@ -495,6 +532,7 @@ impl RuntimeDriver {
                 match provider.provider.descriptor().provider.dialect_id.as_str() {
                     "sift/postgresql" => Some(Engine::Postgres),
                     "sift/tsql" => Some(Engine::SqlServer),
+                    "sift/sqlite" => Some(Engine::Sqlite),
                     _ => None,
                 }
             }
@@ -525,6 +563,14 @@ impl RuntimeDriver {
 
     pub fn supports_operation(&self, operation: sift_protocol::OperationKind) -> bool {
         use sift_protocol::OperationKind;
+        if operation == OperationKind::ReadCatalogGraph && self.supports("driver.schema.catalog@1")
+        {
+            return true;
+        }
+        if operation == OperationKind::BulkInsert && self.semantic_engine() == Some(Engine::Sqlite)
+        {
+            return false;
+        }
         let capability = match operation {
             OperationKind::PingConnection
             | OperationKind::ExecuteQuery
@@ -620,6 +666,9 @@ impl RuntimeDriver {
         }
     }
 
+    pub fn as_sqlite(&self) -> Option<&dyn sift_driver_api::SqliteExt> {
+        self.legacy_driver().and_then(|driver| driver.as_sqlite())
+    }
     pub fn as_pg(&self) -> Option<&dyn sift_driver_api::PgExt> {
         self.legacy_driver().and_then(|driver| driver.as_pg())
     }
@@ -636,6 +685,11 @@ impl RuntimeDriver {
     ) -> Result<RuntimeConnectionHandle, DriverError> {
         match self {
             Self::Builtin { driver, .. } => {
+                if driver.engine() == Engine::Sqlite {
+                    return open_sqlite(driver.as_ref(), configuration, credentials, tenant_id)
+                        .await
+                        .map(RuntimeConnectionHandle::Builtin);
+                }
                 let configuration =
                     normalize_builtin_configuration(configuration.clone(), driver.engine());
                 let mut spec: sift_protocol::ConnectionSpec = serde_json::from_value(configuration)
@@ -767,6 +821,7 @@ impl RuntimeDriver {
             return Ok(None);
         };
         match driver.engine() {
+            Engine::Sqlite => Ok(None),
             Engine::Postgres => match driver.as_pg() {
                 Some(extension) => extension.observe_progress(handle.clone(), cursor).await,
                 None => Ok(None),
@@ -838,6 +893,7 @@ fn normalize_builtin_configuration(
                 match engine {
                     Engine::Postgres => "postgres",
                     Engine::SqlServer => "sql_server",
+                    Engine::Sqlite => "sqlite",
                 }
                 .into(),
             )
@@ -1394,6 +1450,13 @@ impl DriverRegistryBuilder {
 }
 
 fn builtin_configuration_schema(engine: Engine) -> serde_json::Value {
+    if engine == Engine::Sqlite {
+        return serde_json::json!({
+            "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,"required":["root_id","path"],
+            "properties":{"root_id":{"type":"string","minLength":1},"path":{"type":"string","minLength":1},"mode":{"type":"string","enum":["read_only","read_write"],"default":"read_only"},"busy_timeout_ms":{"type":"integer","minimum":0,"maximum":5000,"default":1000}}
+        });
+    }
+
     let mut properties = serde_json::Map::new();
     properties.insert(
         "host".into(),
@@ -1419,6 +1482,7 @@ fn builtin_configuration_schema(engine: Engine) -> serde_json::Value {
         }),
     );
     let engine_properties = match engine {
+        Engine::Sqlite => unreachable!("SQLite configuration returned above"),
         Engine::Postgres => serde_json::json!({
             "type": ["object", "null"],
             "additionalProperties": false,
@@ -1657,6 +1721,36 @@ pub(crate) fn driver_value(value: Value) -> DriverValue {
             display: display_text,
         },
     }
+}
+
+async fn open_sqlite(
+    driver: &dyn Driver,
+    configuration: &serde_json::Value,
+    credentials: &HashMap<String, Vec<u8>>,
+    tenant_id: Option<i64>,
+) -> Result<sift_driver_api::ConnHandle, DriverError> {
+    if !credentials.is_empty() {
+        return Err(DriverError::new(
+            Code::InvalidParameterValue,
+            "SQLite profiles do not accept credentials",
+        ));
+    }
+    let request = serde_json::from_value(configuration.clone()).map_err(|_| {
+        DriverError::new(
+            Code::InvalidParameterValue,
+            "SQLite requires root_id/path/mode configuration",
+        )
+    })?;
+    driver
+        .as_sqlite()
+        .ok_or_else(|| {
+            DriverError::new(
+                Code::UnsupportedForEngine,
+                "SQLite file admission unavailable",
+            )
+        })?
+        .open_file(request, tenant_id)
+        .await
 }
 
 #[cfg(test)]

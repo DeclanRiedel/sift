@@ -1,16 +1,21 @@
 kind = "sift-lock"
 format_version = 1
 manifest_id = "b654b918-b1f1-4d70-924d-e4c1014f482f"
-configuration_digest = "sha256:287554109625f793d871b7648e20ce69c646905fba074b5bf8ed3d59ba781595"
+configuration_digest = "sha256:a7fca774ba374ee2367f747fea05866e55aef4ce28b4447d9ea4a241adcc770a"
 extensions = []
 platforms = []
 
 [sift]
 version = "0.1.0"
-protocol = 1
-schema_digest = "sha256:5680d8e75c7f2c527429fb3cd66a003cebe5a60ca7af9d73ccb8270d95807d0c"
+protocol = 2
+schema_digest = "sha256:ded8cccff12811dc579e06abf56428a426555fc7e5c4156822c2a6db64cd127c"
 
 [[providers]]
 name = "postgres"
 schema_version = 1
 schema_digest = "sha256:e2e494a9df4ac2df9ac7e513dd0f818aac6622cacf86f077067b7263beea1664"
+
+[[providers]]
+name = "sqlite"
+schema_version = 1
+schema_digest = "sha256:4b3a0d0d4bd7de3d561f91ce55a3600d3a4679e2ccc6136525cac2ba6815ed0d"

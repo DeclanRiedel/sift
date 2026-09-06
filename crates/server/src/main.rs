@@ -724,6 +724,23 @@ fn build_registry(cfg: &Config) -> DriverRegistry {
     // Register SQL Server via tiberius. Connections still open lazily per
     // OpenConnection request.
     builder = builder.register(sift_driver_sqlserver::MssqlDriver::new());
+    let mut protected = vec![
+        cfg.runtime_state_dir(),
+        cfg.metadata
+            .path
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(sift_metadata::MetadataStore::default_local_path),
+    ];
+    if let Some(key) = &cfg.metadata.secret_key_file {
+        protected.push(key.into());
+    }
+    builder = builder.register(sift_driver_sqlite::SqliteDriver::with_files(
+        sift_driver_sqlite::FilePolicy {
+            config: cfg.drivers.sqlite.clone(),
+            protected,
+        },
+    ));
 
     builder.build()
 }

@@ -1794,9 +1794,11 @@ impl SessionStore {
 
         let authorized =
             self.authorize_connection_operation(session_id, conn_id, operation, None, &[])?;
-        authorized
-            .driver
-            .require_capability("driver.schema.graph@1")?;
+        if !authorized.driver.supports("driver.schema.catalog@1") {
+            authorized
+                .driver
+                .require_capability("driver.schema.graph@1")?;
+        }
         if request.refresh {
             if let Some(spec) = self.spec_for_conn(session_id, conn_id)? {
                 self.inner.schema_cache.invalidate_spec(&spec);
@@ -1840,9 +1842,12 @@ impl SessionStore {
         let provider = entry.driver.provider().clone();
         let database_identity = digest_bytes(
             "dbfp:",
-            &serde_json::to_vec(&(provider.clone(), &entry.configuration)).map_err(|error| {
-                ApiError::Internal(format!("serialize database identity: {error}"))
-            })?,
+            &if provider.provider_id == Engine::Sqlite.provider_id() {
+                serde_json::to_vec(&(&provider, &entry.configuration, session_id, conn_id))
+            } else {
+                serde_json::to_vec(&(&provider, &entry.configuration))
+            }
+            .map_err(|error| ApiError::Internal(format!("serialize database identity: {error}")))?,
         );
         let revision_key = digest_bytes(
             "catrev:",
@@ -2804,7 +2809,9 @@ impl SessionStore {
             .connections
             .get(&conn_id)
             .ok_or(ApiError::ConnectionNotFound(conn_id))?;
-        if entry.driver.legacy_driver().is_none() {
+        if entry.driver.legacy_driver().is_none()
+            || entry.driver.semantic_engine() == Some(Engine::Sqlite)
+        {
             return Ok(None);
         }
         serde_json::from_value(entry.configuration.clone())
@@ -3264,8 +3271,14 @@ impl SessionStore {
         // path; this is idempotent.
         self.inner.cursors.remove(cursor);
         self.inner.cursor_resource_guards.remove(&cursor);
-        if entry.driver.semantic_engine() == Some(Engine::SqlServer) {
-            self.with_session(&session_id, |s| s.connections.remove(&conn_id))?;
+        if matches!(
+            entry.driver.semantic_engine(),
+            Some(Engine::SqlServer | Engine::Sqlite)
+        ) {
+            self.with_session(&session_id, |s| {
+                drain_connection_transactions(s, conn_id);
+                s.connections.remove(&conn_id)
+            })?;
             // Also invoke driver.close so the driver-level socket/FD is
             // returned promptly instead of relying on ConnHandle::Drop.
             // Best-effort — the driver has already dropped its state, so
@@ -3275,13 +3288,13 @@ impl SessionStore {
                     session_id = %session_id,
                     conn_id = %conn_id,
                     %error,
-                    "driver.close after mssql cancel returned error"
+                    "driver.close after cancel invalidation returned error"
                 );
             }
             tracing::info!(
                 session_id = %session_id,
                 conn_id = %conn_id,
-                "removed sqlserver connection after cancel abort"
+                "removed connection and transactions after cancel invalidation"
             );
         }
         Ok(())
@@ -3618,6 +3631,13 @@ impl SessionStore {
         let driver_name = name.clone();
         self.run_bounded("savepoint", async move {
             match driver.engine() {
+                Engine::Sqlite => {
+                    driver
+                        .as_sqlite()
+                        .ok_or_else(|| missing_ext(Engine::Sqlite, "SqliteExt"))?
+                        .savepoint(&tx_handle, &driver_name)
+                        .await
+                }
                 Engine::Postgres => {
                     let pg = driver
                         .as_pg()
@@ -3668,6 +3688,13 @@ impl SessionStore {
         let tx_id = req.tx_id;
         self.run_bounded("rollback_to_savepoint", async move {
             match driver.engine() {
+                Engine::Sqlite => {
+                    driver
+                        .as_sqlite()
+                        .ok_or_else(|| missing_ext(Engine::Sqlite, "SqliteExt"))?
+                        .rollback_to(&tx_handle, &name)
+                        .await
+                }
                 Engine::Postgres => {
                     let pg = driver
                         .as_pg()
@@ -3734,6 +3761,13 @@ impl SessionStore {
         let tx_id = req.tx_id;
         self.run_bounded("release_savepoint", async move {
             match driver.engine() {
+                Engine::Sqlite => {
+                    driver
+                        .as_sqlite()
+                        .ok_or_else(|| missing_ext(Engine::Sqlite, "SqliteExt"))?
+                        .release_savepoint(&tx_handle, &name)
+                        .await
+                }
                 Engine::Postgres => {
                     let pg = driver
                         .as_pg()
@@ -3754,10 +3788,14 @@ impl SessionStore {
         })
         .await?;
         self.update_savepoints(session_id, tx_id, |savepoints| {
-            if let Some(savepoint) = savepoints.iter_mut().find(|savepoint| {
+            if let Some(index) = savepoints.iter().position(|savepoint| {
                 savepoint.name == state_name && savepoint.state == SavepointState::Active
             }) {
-                savepoint.state = SavepointState::Released;
+                for savepoint in savepoints.iter_mut().skip(index) {
+                    if savepoint.state == SavepointState::Active {
+                        savepoint.state = SavepointState::Released;
+                    }
+                }
             }
         })?;
         Ok(())
@@ -4090,7 +4128,19 @@ impl SessionStore {
                         session_id,
                         sift_protocol::BeginTransactionRequest {
                             connection: conn_id,
-                            mode: sift_protocol::TxMode::default(),
+                            mode: sift_protocol::TxMode {
+                                isolation: if self
+                                    .get_conn_entry(session_id, conn_id)?
+                                    .driver
+                                    .engine()
+                                    == Engine::Sqlite
+                                {
+                                    sift_protocol::IsolationLevel::Serializable
+                                } else {
+                                    sift_protocol::IsolationLevel::ReadCommitted
+                                },
+                                ..Default::default()
+                            },
                         },
                         sift_protocol::OperationKind::ApplyEdits,
                     )
@@ -5133,7 +5183,7 @@ impl SessionStore {
                     .unwrap_or_default();
                 let fetch = row_cap + 1;
                 let sql = match engine {
-                    Engine::Postgres => {
+                    Engine::Postgres | Engine::Sqlite => {
                         format!("SELECT {select_columns} FROM {table_sql}{where_sql} LIMIT {fetch}")
                     }
                     Engine::SqlServer => {

@@ -35,3 +35,6 @@ mssql-data/
 # Editor / OS
 *.log
 .DS_Store
+
+# Writable SQLite demo data is local; only its deterministic seed is committed.
+/examples/reproducible-instance/demo-data/

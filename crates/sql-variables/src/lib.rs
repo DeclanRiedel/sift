@@ -107,6 +107,7 @@ pub fn compile(
     let bind_limit = match engine {
         Engine::Postgres => 65_535,
         Engine::SqlServer => 2_100,
+        Engine::Sqlite => 32_766,
     };
 
     for reference in references {
@@ -211,6 +212,7 @@ fn placeholder(engine: Engine, number: usize) -> String {
     match engine {
         Engine::Postgres => format!("${number}"),
         Engine::SqlServer => format!("@P{number}"),
+        Engine::Sqlite => format!("?{number}"),
     }
 }
 
@@ -225,7 +227,7 @@ fn quote_qualified_identifier(engine: Engine, identifier: &str) -> Option<String
                 return None;
             }
             Some(match engine {
-                Engine::Postgres => format!("\"{}\"", part.replace('"', "\"\"")),
+                Engine::Postgres | Engine::Sqlite => format!("\"{}\"", part.replace('"', "\"\"")),
                 Engine::SqlServer => format!("[{}]", part.replace(']', "]]")),
             })
         })
@@ -239,6 +241,7 @@ fn native_parameter_offset(engine: Engine, sql: &str) -> usize {
     for index in 0..bytes.len() {
         let prefix = match engine {
             Engine::Postgres if bytes[index] == b'$' => 1,
+            Engine::Sqlite if bytes[index] == b'?' => 1,
             Engine::SqlServer
                 if bytes[index] == b'@'
                     && bytes

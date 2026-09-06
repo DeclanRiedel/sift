@@ -147,6 +147,7 @@ async fn bulk_enrich_tree(
             auto_increment,
             primary_key,
             facets: sift_protocol::EngineColumnFacets {
+                sqlite: None,
                 postgres: Some(sift_protocol::PgColumnFacets {
                     oid: Some(type_oid),
                     array_dims: u8::try_from(array_dims).unwrap_or(u8::MAX),
@@ -1068,6 +1069,7 @@ async fn query_columns(
             auto_increment,
             primary_key: pk_columns.contains(&col_name),
             facets: sift_protocol::EngineColumnFacets {
+                sqlite: None,
                 postgres: Some(sift_protocol::PgColumnFacets {
                     oid: Some(type_oid),
                     array_dims: u8::try_from(array_dims).unwrap_or(u8::MAX),

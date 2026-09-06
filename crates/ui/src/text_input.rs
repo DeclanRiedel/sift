@@ -96,6 +96,16 @@ impl TextInput {
         cx.notify();
     }
 
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder = placeholder.into();
+        self.aria_label = self.placeholder.clone();
+        cx.notify();
+    }
+
     pub fn set_text(&mut self, content: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.content = content.into();
         let cursor = self.content.len();

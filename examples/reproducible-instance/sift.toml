@@ -71,3 +71,31 @@ allow_export = false
 
 [connections.lifecycle]
 prevent_destroy = true
+
+[server.drivers.sqlite]
+max_connections = 8
+
+[server.drivers.sqlite.roots.demo]
+path = "demo-data"
+allowed_tenants = [1]
+read_only = false
+
+[[connections]]
+name = "demo/sqlite"
+tenant = "demo"
+provider = "sqlite"
+credential_mode = "shared"
+tags = ["demo", "local", "sqlite"]
+
+[connections.sqlite]
+root_id = "demo"
+path = "demo.db"
+mode = "read_write"
+
+[connections.policy]
+allow_sql = true
+allow_schema_read = true
+allow_export = true
+
+[connections.lifecycle]
+prevent_destroy = true

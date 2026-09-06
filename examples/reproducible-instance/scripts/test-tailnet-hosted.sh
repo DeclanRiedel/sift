@@ -136,7 +136,7 @@ expected_instance=$(sed -n '2p' "$payload")
 password=$(sed -n '3p' "$payload")
 handshake=$(curl -fsS --connect-timeout 5 --max-time 15 -X POST \
   -H 'content-type: application/json' \
-  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":1,"maximum":1}}' \
+  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":2,"maximum":2}}' \
   "$origin/v1/handshake")
 protocol=$(jq -r .selected_protocol <<<"$handshake")
 test "$(jq -r .instance_id <<<"$handshake")" = "$expected_instance"
@@ -278,7 +278,7 @@ if [[ $https_ready != 1 ]]; then
 fi
 first=$(curl -fsS -X POST \
   -H 'content-type: application/json' \
-  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":1,"maximum":1}}' \
+  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":2,"maximum":2}}' \
   "http://127.0.0.1:$port/v1/handshake")
 first_instance=$(jq -r .instance_id <<<"$first")
 first_generation=$(jq -r .daemon_generation <<<"$first")
@@ -290,7 +290,7 @@ stop_server
 start_server
 second=$(curl -fsS -X POST \
   -H 'content-type: application/json' \
-  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":1,"maximum":1}}' \
+  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":2,"maximum":2}}' \
   "http://127.0.0.1:$port/v1/handshake")
 second_instance=$(jq -r .instance_id <<<"$second")
 second_generation=$(jq -r .daemon_generation <<<"$second")

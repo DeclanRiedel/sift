@@ -110,6 +110,7 @@ pub struct CatalogColumn {
 /// `(schema, table, column, type, parent_object_kind)`.
 pub fn bulk_columns_sql(engine: Engine) -> &'static str {
     match engine {
+        Engine::Sqlite => "SELECT 'main',s.name,c.name,c.type,s.type FROM main.sqlite_schema s JOIN pragma_table_xinfo(s.name,'main') c WHERE s.type IN ('table','view') AND s.name NOT LIKE 'sqlite_%' UNION ALL SELECT 'temp',s.name,c.name,c.type,s.type FROM temp.sqlite_schema s JOIN pragma_table_xinfo(s.name,'temp') c WHERE s.type IN ('table','view') AND s.name NOT LIKE 'sqlite_%'",
         Engine::Postgres => {
             "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, \
                     CASE cls.relkind \
@@ -258,6 +259,7 @@ pub fn data_search_sql(
     let (op, param) = match engine {
         Engine::Postgres => ("ILIKE", "$1"),
         Engine::SqlServer => ("LIKE", "@P1"),
+        Engine::Sqlite => ("LIKE", "?1"),
     };
     let preds: Vec<String> = text_cols
         .iter()
@@ -265,7 +267,7 @@ pub fn data_search_sql(
         .collect();
     let where_sql = preds.join(" OR ");
     let sql = match engine {
-        Engine::Postgres => {
+        Engine::Postgres | Engine::Sqlite => {
             format!("SELECT {select} FROM {table_sql} WHERE {where_sql} LIMIT {limit}")
         }
         Engine::SqlServer => {

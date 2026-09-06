@@ -101,7 +101,7 @@ fn predicate(engine: Engine, filter: &ResultFilter) -> Result<String, String> {
     }
     let literal = sql_string(value, engine);
     let text_column = match engine {
-        Engine::Postgres => format!("LOWER(CAST({column} AS text))"),
+        Engine::Postgres | Engine::Sqlite => format!("LOWER(CAST({column} AS text))"),
         Engine::SqlServer => format!("LOWER(CAST({column} AS nvarchar(max)))"),
     };
     let text_literal = format!("LOWER({literal})");
@@ -109,6 +109,7 @@ fn predicate(engine: Engine, filter: &ResultFilter) -> Result<String, String> {
         ResultFilterOperator::Contains | ResultFilterOperator::NotContains => {
             let expression = match engine {
                 Engine::Postgres => format!("POSITION({text_literal} IN {text_column}) > 0"),
+                Engine::Sqlite => format!("INSTR({text_column}, {text_literal}) > 0"),
                 Engine::SqlServer => format!("CHARINDEX({text_literal}, {text_column}) > 0"),
             };
             if filter.operator == ResultFilterOperator::NotContains {
@@ -119,9 +120,11 @@ fn predicate(engine: Engine, filter: &ResultFilter) -> Result<String, String> {
         }
         ResultFilterOperator::StartsWith => match engine {
             Engine::Postgres => format!("POSITION({text_literal} IN {text_column}) = 1"),
+            Engine::Sqlite => format!("INSTR({text_column}, {text_literal}) = 1"),
             Engine::SqlServer => format!("CHARINDEX({text_literal}, {text_column}) = 1"),
         },
         ResultFilterOperator::EndsWith => match engine {
+            Engine::Sqlite => format!("({text_literal} = '' OR SUBSTR({text_column}, -LENGTH({text_literal})) = {text_literal})"),
             Engine::Postgres => {
                 format!("RIGHT({text_column}, LENGTH({text_literal})) = {text_literal}")
             }
@@ -150,7 +153,7 @@ fn validate_column(column: &str) -> Result<(), String> {
 fn sql_string(value: &str, engine: Engine) -> String {
     let escaped = value.replace('\'', "''");
     match engine {
-        Engine::Postgres => format!("'{escaped}'"),
+        Engine::Postgres | Engine::Sqlite => format!("'{escaped}'"),
         Engine::SqlServer => format!("N'{escaped}'"),
     }
 }

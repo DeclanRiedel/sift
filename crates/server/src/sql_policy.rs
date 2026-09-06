@@ -161,6 +161,7 @@ fn enforce_sql(
     let statements = match engine {
         Engine::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql),
         Engine::SqlServer => Parser::parse_sql(&MsSqlDialect {}, sql),
+        Engine::Sqlite => Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, sql),
     }
     .map_err(|_| ApiError::Forbidden("restricted connection requires classifiable SQL".into()))?;
     if statements.is_empty() {
@@ -379,14 +380,14 @@ fn normalize_ident(engine: Engine, ident: &sqlparser::ast::Ident) -> String {
 fn normalize_selector(engine: Engine, value: &str) -> String {
     match engine {
         Engine::Postgres => value.to_string(),
-        Engine::SqlServer => value.to_lowercase(),
+        Engine::SqlServer | Engine::Sqlite => value.to_lowercase(),
     }
 }
 
 fn normalize(engine: Engine, value: &str) -> String {
     match engine {
         Engine::Postgres => value.to_lowercase(),
-        Engine::SqlServer => value.to_lowercase(),
+        Engine::SqlServer | Engine::Sqlite => value.to_lowercase(),
     }
 }
 

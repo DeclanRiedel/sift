@@ -182,6 +182,10 @@ pub trait Driver: Send + Sync {
 
     /// Downcast to the SQL Server extension trait. `None` if this driver is
     /// not SQL Server.
+    fn as_sqlite(&self) -> Option<&dyn SqliteExt> {
+        None
+    }
+
     fn as_mssql(&self) -> Option<&dyn MssqlExt> {
         None
     }
@@ -374,4 +378,24 @@ impl Default for IdCounter {
 /// disconnect signal; monitor failures are represented by channel closure.
 pub struct NativeProgressStream {
     pub updates: mpsc::Receiver<NativeExecutionProgress>,
+}
+
+/// Native SQLite operations. File admission remains behind the tenant-aware
+/// provider adapter; resolved paths never become public profile configuration.
+#[async_trait::async_trait]
+pub trait SqliteExt: Send + Sync {
+    async fn savepoint(&self, tx: &TxHandle, name: &str) -> Result<(), DriverError>;
+    async fn rollback_to(&self, tx: &TxHandle, name: &str) -> Result<(), DriverError>;
+    async fn release_savepoint(&self, tx: &TxHandle, name: &str) -> Result<(), DriverError>;
+
+    async fn open_file(
+        &self,
+        configuration: sift_protocol::SqliteFileConfiguration,
+        tenant_id: Option<i64>,
+    ) -> Result<ConnHandle, DriverError>;
+    async fn object_ddl(
+        &self,
+        c: ConnHandle,
+        object: sift_protocol::ObjectPath,
+    ) -> Result<String, DriverError>;
 }

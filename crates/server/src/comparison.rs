@@ -535,6 +535,7 @@ fn render_predicate(
             let marker = match engine {
                 Engine::Postgres => format!("${}", params.len()),
                 Engine::SqlServer => format!("@P{}", params.len()),
+                Engine::Sqlite => format!("?{}", params.len()),
             };
             let operator = match operator {
                 ComparePredicateOperator::Eq => "=",

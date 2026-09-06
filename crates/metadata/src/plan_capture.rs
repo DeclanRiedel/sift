@@ -380,6 +380,7 @@ fn engine_text(engine: Engine) -> &'static str {
     match engine {
         Engine::Postgres => "postgres",
         Engine::SqlServer => "sql_server",
+        Engine::Sqlite => "sqlite",
     }
 }
 
@@ -387,6 +388,7 @@ fn parse_engine(value: &str) -> Result<Engine> {
     match value {
         "postgres" => Ok(Engine::Postgres),
         "sql_server" => Ok(Engine::SqlServer),
+        "sqlite" => Ok(Engine::Sqlite),
         value => Err(MetadataError::InvalidEnum {
             field: "plan_capture.engine",
             value: value.into(),

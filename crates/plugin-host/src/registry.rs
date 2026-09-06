@@ -275,7 +275,10 @@ fn validate_development_manifest(
     manifest: &ExtensionManifest,
 ) -> Result<(), RegistryError> {
     if manifest.schema_version != 1
-        || !manifest.compatibility.public_protocol.contains(1)
+        || !manifest
+            .compatibility
+            .public_protocol
+            .contains(sift_protocol::PROTOCOL_VERSION_NUMBER)
         || !manifest
             .compatibility
             .extension_rpc
@@ -393,7 +396,7 @@ repository = "https://example.invalid/acme/development"
 minimum_sift_version = "0.2.0"
 
 [compatibility]
-public_protocol = { minimum = 1, maximum = 1 }
+public_protocol = { minimum = 2, maximum = 2 }
 extension_rpc = { minimum = 1, maximum = 1 }
 driver_rpc = { minimum = 1, maximum = 1 }
 "#;

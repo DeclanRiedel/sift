@@ -48,6 +48,7 @@ pub(crate) async fn explain_as(
     let engine = store.conn_entry(session_id, conn_id)?.driver.engine();
     validate_explain_sql(engine, &req.sql)?;
     match engine {
+        Engine::Sqlite => explain_sqlite(store, session_id, conn_id, req, operation).await,
         Engine::Postgres => explain_pg(store, session_id, conn_id, req, operation).await,
         Engine::SqlServer => explain_mssql(store, session_id, conn_id, req, operation).await,
     }
@@ -57,6 +58,7 @@ fn validate_explain_sql(engine: Engine, sql: &str) -> ApiResult<()> {
     let dialect: Box<dyn sqlparser::dialect::Dialect> = match engine {
         Engine::Postgres => Box::new(sqlparser::dialect::PostgreSqlDialect {}),
         Engine::SqlServer => Box::new(sqlparser::dialect::MsSqlDialect {}),
+        Engine::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
     };
     let statements = sqlparser::parser::Parser::parse_sql(dialect.as_ref(), sql).map_err(|_| {
         ApiError::BadRequest("explain requires a supported single query or DML statement".into())
@@ -624,6 +626,91 @@ fn mssql_node(node: roxmltree::Node) -> PlanNode {
         .map(mssql_node)
         .collect();
     p
+}
+
+async fn explain_sqlite(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    request: &ExplainRequest,
+    operation: sift_protocol::OperationKind,
+) -> ApiResult<ExplainResponse> {
+    if request.analyze {
+        return Err(DriverError::new(
+            Code::UnsupportedForEngine,
+            "SQLite supports estimated EXPLAIN QUERY PLAN only",
+        )
+        .into());
+    }
+    let response = store
+        .execute_http_as(
+            session,
+            exec(
+                connection,
+                format!("EXPLAIN QUERY PLAN {}", request.sql),
+                request.params.clone(),
+                None,
+            ),
+            operation,
+        )
+        .await?;
+    let mut entries = std::collections::BTreeMap::new();
+    let mut raw = Vec::new();
+    for row in response.rows {
+        let [Value::Int64(id), Value::Int64(parent), Value::Int64(aux), Value::Text(detail)] =
+            row.values.as_slice()
+        else {
+            return Err(ApiError::Internal("unexpected SQLite plan row".into()));
+        };
+        let mut node = PlanNode::new(detail.clone());
+        node.extra.insert("id".into(), (*id).into());
+        node.extra.insert("parent".into(), (*parent).into());
+        node.extra.insert("aux".into(), (*aux).into());
+        raw.push(serde_json::json!({"id":id,"parent":parent,"aux":aux,"detail":detail}));
+        if entries.insert(*id, (*parent, node)).is_some() {
+            return Err(ApiError::Internal("duplicate SQLite plan node".into()));
+        }
+    }
+    fn build(
+        id: i64,
+        entries: &mut std::collections::BTreeMap<i64, (i64, PlanNode)>,
+        depth: usize,
+    ) -> ApiResult<PlanNode> {
+        if depth > 64 {
+            return Err(ApiError::BadRequest(
+                "SQLite plan exceeds display depth".into(),
+            ));
+        }
+        let (_, mut node) = entries
+            .remove(&id)
+            .ok_or_else(|| ApiError::Internal("invalid SQLite plan parent".into()))?;
+        let children = entries
+            .iter()
+            .filter_map(|(key, (parent, _))| (*parent == id).then_some(*key))
+            .collect::<Vec<_>>();
+        for child in children {
+            node.children.push(build(child, entries, depth + 1)?);
+        }
+        Ok(node)
+    }
+    let roots = entries
+        .iter()
+        .filter_map(|(id, (parent, _))| (!entries.contains_key(parent)).then_some(*id))
+        .collect::<Vec<_>>();
+    let mut root = PlanNode::new("SQLite query plan");
+    for id in roots {
+        root.children.push(build(id, &mut entries, 0)?);
+    }
+    if !entries.is_empty() {
+        return Err(ApiError::Internal("cyclic SQLite plan parent graph".into()));
+    }
+    Ok(ExplainResponse {
+        engine: Engine::Sqlite,
+        analyzed: false,
+        root,
+        raw: serde_json::to_string_pretty(&raw).map_err(|e| ApiError::Internal(e.to_string()))?,
+        warnings: vec![],
+    })
 }
 
 #[cfg(test)]

@@ -19,6 +19,8 @@ pub fn personal_starter(
     operator.subject = github_subject.into();
     operator.login_hint = None;
     manifest.tenants[0].name = "default".into();
+    manifest.connections.truncate(1);
+    manifest.server.drivers.sqlite = Default::default();
     let connection = &mut manifest.connections[0];
     connection.name = "default/postgres".into();
     connection.tenant = "default".into();

@@ -65,6 +65,9 @@ pub async fn import(
         });
     }
 
+    if engine == Engine::Sqlite {
+        return import_sqlite(store, session, connection, request, prepared, table).await;
+    }
     if request.create_table {
         let ddl = create_table_sql(&table, &prepared.columns, engine, &request.type_mappings);
         store
@@ -134,6 +137,7 @@ fn validate_type_mappings(
     let dialect: &dyn Dialect = match engine {
         Engine::Postgres => &PostgreSqlDialect {},
         Engine::SqlServer => &MsSqlDialect {},
+        Engine::Sqlite => &sqlparser::dialect::SQLiteDialect {},
     };
     for (column, sql_type) in &request.type_mappings {
         if !prepared
@@ -324,6 +328,14 @@ fn create_table_sql(
 
 fn inferred_sql(inferred: InferredCsvType, engine: Engine) -> &'static str {
     match (inferred, engine) {
+        (InferredCsvType::Boolean, Engine::Sqlite) => "INTEGER",
+        (
+            InferredCsvType::Decimal
+            | InferredCsvType::Date
+            | InferredCsvType::TimestampTz
+            | InferredCsvType::Text,
+            Engine::Sqlite,
+        ) => "TEXT",
         (InferredCsvType::Boolean, Engine::Postgres) => "boolean",
         (InferredCsvType::Boolean, Engine::SqlServer) => "bit",
         (InferredCsvType::Int64, _) => "bigint",
@@ -362,6 +374,7 @@ async fn ingest_abort(
     store
         .run_bounded("csv_import", async move {
             match driver.engine() {
+                Engine::Sqlite => Err(missing_ext(Engine::Sqlite)),
                 Engine::Postgres => {
                     let pg = driver
                         .as_pg()
@@ -458,7 +471,7 @@ async fn ingest_skip(
             .join(", ");
         let insert = format!("INSERT INTO {table} ({column_sql}) VALUES ({values})");
         let sql = match engine {
-            Engine::Postgres => format!("{insert} ON CONFLICT DO NOTHING"),
+            Engine::Postgres | Engine::Sqlite => format!("{insert} ON CONFLICT DO NOTHING"),
             Engine::SqlServer => format!(
                 "BEGIN TRY {insert}; SELECT CAST(1 AS bigint) AS sift_inserted; END TRY BEGIN CATCH IF ERROR_NUMBER() IN (2601, 2627) SELECT CAST(0 AS bigint) AS sift_inserted; ELSE THROW; END CATCH"
             ),
@@ -489,7 +502,7 @@ async fn ingest_skip(
             Err(error) => return Err(error),
         };
         let did_insert = match engine {
-            Engine::Postgres => response.affected_rows.unwrap_or(0) > 0,
+            Engine::Postgres | Engine::Sqlite => response.affected_rows.unwrap_or(0) > 0,
             Engine::SqlServer => {
                 response
                     .rows
@@ -519,6 +532,7 @@ fn cast_placeholder(engine: Engine, index: usize, target_type: &str) -> String {
     match engine {
         Engine::Postgres => format!("CAST(${index} AS text)::{target_type}"),
         Engine::SqlServer => format!("CAST(@P{index} AS {target_type})"),
+        Engine::Sqlite => format!("?{index}"),
     }
 }
 
@@ -660,6 +674,165 @@ fn missing_ext(engine: Engine) -> DriverError {
         format!("{engine} import extension is not registered"),
     )
     .with_engine(engine)
+}
+
+async fn import_sqlite(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    request: CsvImportRequest,
+    prepared: PreparedCsv,
+    table: String,
+) -> ApiResult<CsvImportResponse> {
+    use sift_protocol::{
+        BeginTransactionRequest, EndTransactionRequest, IsolationLevel, OperationKind, TxHandleRef,
+        TxMode,
+    };
+    if request.conflict_policy == CsvConflictPolicy::Quarantine {
+        return Err(DriverError::new(
+            Code::UnsupportedForEngine,
+            "SQLite CSV quarantine is unsupported; choose abort or skip",
+        )
+        .into());
+    }
+    let transaction = store
+        .begin_transaction_as(
+            session,
+            BeginTransactionRequest {
+                connection,
+                mode: TxMode {
+                    isolation: IsolationLevel::Serializable,
+                    ..Default::default()
+                },
+            },
+            OperationKind::ImportCsv,
+        )
+        .await?;
+    let tx = Some(TxHandleRef {
+        tx_id: transaction.tx_id,
+        connection,
+        mode: transaction.mode,
+    });
+    let work = async {
+        if request.create_table {
+            let mut command = execute_request(
+                connection,
+                create_table_sql(
+                    &table,
+                    &prepared.columns,
+                    Engine::Sqlite,
+                    &request.type_mappings,
+                ),
+                vec![],
+            );
+            command.tx = tx.clone();
+            store
+                .execute_http_as(session, command, OperationKind::ImportCsv)
+                .await?;
+        }
+        let column_sql = prepared
+            .columns
+            .iter()
+            .map(|column| quote_ident(&column.name, Engine::Sqlite))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let width = prepared.columns.len();
+        if width == 0 || width > 2000 {
+            return Err(ApiError::BadRequest(
+                "SQLite CSV column count must be 1..2000".into(),
+            ));
+        }
+        let mut inserted = 0;
+        for batch in
+            prepared.records[request.resume_from_row as usize..].chunks((32766 / width).min(128))
+        {
+            let mut params = Vec::with_capacity(batch.len() * width);
+            let mut groups = Vec::new();
+            for record in batch {
+                let mut slots = Vec::new();
+                for (value, column) in record.iter().zip(&prepared.columns) {
+                    params.push(match value {
+                        None => Value::Null,
+                        Some(value) if column.inferred_type == InferredCsvType::Boolean => {
+                            match value.to_ascii_lowercase().as_str() {
+                                "true" => Value::Bool(true),
+                                "false" => Value::Bool(false),
+                                _ => Value::Text(value.clone()),
+                            }
+                        }
+                        Some(value) => Value::Text(value.clone()),
+                    });
+                    slots.push(format!("?{}", params.len()));
+                }
+                groups.push(format!("({})", slots.join(", ")));
+            }
+            let suffix = if request.conflict_policy == CsvConflictPolicy::Skip {
+                " ON CONFLICT DO NOTHING"
+            } else {
+                ""
+            };
+            let mut command = execute_request(
+                connection,
+                format!(
+                    "INSERT INTO {table} ({column_sql}) VALUES {}{suffix}",
+                    groups.join(", ")
+                ),
+                params,
+            );
+            command.tx = tx.clone();
+            inserted += store
+                .execute_http_as(session, command, OperationKind::ImportCsv)
+                .await?
+                .affected_rows
+                .unwrap_or(0);
+        }
+        Ok::<_, ApiError>(inserted)
+    }
+    .await;
+    let end = EndTransactionRequest {
+        connection,
+        tx_id: transaction.tx_id,
+    };
+    let inserted = match work {
+        Ok(count) => match store
+            .commit_transaction_as(session, end.clone(), OperationKind::ImportCsv)
+            .await
+        {
+            Ok(()) => count,
+            Err(error) => {
+                if store
+                    .rollback_transaction_as(session, end, OperationKind::ImportCsv)
+                    .await
+                    .is_err()
+                {
+                    let _ = store.close_connection(session, connection).await;
+                }
+                return Err(error);
+            }
+        },
+        Err(error) => {
+            if store
+                .rollback_transaction_as(session, end, OperationKind::ImportCsv)
+                .await
+                .is_err()
+            {
+                let _ = store.close_connection(session, connection).await;
+            }
+            return Err(error);
+        }
+    };
+    let total = prepared.records.len() as u64;
+    Ok(CsvImportResponse {
+        table: request.table,
+        columns: prepared.columns,
+        table_created: request.create_table,
+        rows_inserted: inserted,
+        rows_skipped: total - request.resume_from_row - inserted,
+        rows_validated: total,
+        resume_from_row: total,
+        dry_run: false,
+        quarantined_rows: vec![],
+    })
 }
 
 #[cfg(test)]

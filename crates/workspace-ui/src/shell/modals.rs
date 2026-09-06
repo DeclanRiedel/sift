@@ -3874,6 +3874,7 @@ impl WorkspaceShell {
                                     )
                                 })
                         });
+                    let sqlite=selected_provider.as_deref()==Some("sift/sqlite");
                     let (security_label, security_options): (&str, &[(&str, &str)]) =
                         if selected_provider.as_deref() == Some("sift/sql-server") {
                             (
@@ -4118,6 +4119,7 @@ impl WorkspaceShell {
                                                 )
                                                 .child(div().flex().flex_1().flex_wrap().gap_1().children(tenant_rows)),
                                         )
+                                        .when(!sqlite, |form| form
                                         .child(
                                             div()
                                                 .flex()
@@ -4211,8 +4213,25 @@ impl WorkspaceShell {
                                                 cx.notify();
                                             })),
                                         )
+                                        )
+                                        .when(sqlite, |form| form
+                                            .child(div().text_sm().text_color(colors.muted_text).child("Open an existing SQLite file on the Sift server. The root must be configured for this workspace."))
+                                            .child(field("CONNECTION NAME",self.database_name_input.clone()))
+                                            .child(field("SERVER FILE ROOT ID",self.database_host_input.clone()))
+                                            .child(field("RELATIVE DATABASE PATH",self.database_catalog_input.clone()))
+                                            .child(div().flex().gap_2().children([("read_only","Read-only"),("read_write","Read-write")].into_iter().map(|(mode,label)| div().id(mode).px_2().py_1().border_1().border_color(colors.subtle_border).when(selected_ssl_mode.as_deref()==Some(mode),|row|row.bg(colors.accent_muted)).on_click(cx.listener(move |shell,_,_,cx|{shell.selected_database_ssl_mode=Some(mode.into());cx.notify();})).child(label))))
+                                            .child(field("FOLDER",self.database_folder_input.clone()))
+                                            .child(field("TAGS",self.database_tags_input.clone()))
+                                        )
                                 })
-                                .when(step == DatabaseWizardStep::Review, |form| {
+                                .when(step == DatabaseWizardStep::Review && sqlite, |form| form
+                                    .child(review_row("Database type","SQLite".into()))
+                                    .child(review_row("Connection name",self.database_name_input.read(cx).text().to_string()))
+                                    .child(review_row("Server file root ID",self.database_host_input.read(cx).text().to_string()))
+                                    .child(review_row("Relative database path",self.database_catalog_input.read(cx).text().to_string()))
+                                    .child(review_row("Access",selected_ssl_mode.clone().unwrap_or_else(||"read_only".into()).replace('_'," ")))
+                                )
+                                .when(step == DatabaseWizardStep::Review && !sqlite, |form| {
                                     form
                                         .child(review_row("Database type", provider_name.to_owned()))
                                         .child(review_row("Workspace", tenant_name))

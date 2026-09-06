@@ -12,6 +12,7 @@ members = [
     "crates/driver-api",
     "crates/driver-postgres",
     "crates/driver-sqlserver",
+    "crates/driver-sqlite",
     "crates/metadata",
     "crates/doc",
     "crates/semantic",
@@ -42,6 +43,7 @@ sift-sql-variables = { path = "crates/sql-variables", version = "0.1.0" }
 sift-snippets = { path = "crates/snippets", version = "0.1.0" }
 sift-driver-api = { path = "crates/driver-api", version = "0.1.0" }
 sift-driver-postgres = { path = "crates/driver-postgres", version = "0.1.0" }
+sift-driver-sqlite = { path = "crates/driver-sqlite", version = "0.1.0" }
 sift-driver-sqlserver = { path = "crates/driver-sqlserver", version = "0.1.0" }
 sift-metadata = { path = "crates/metadata", version = "0.1.0" }
 sift-doc = { path = "crates/doc", version = "0.1.0" }

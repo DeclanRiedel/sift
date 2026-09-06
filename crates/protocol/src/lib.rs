@@ -5,9 +5,9 @@
 //! networking, no filesystem.
 
 /// Current wire protocol version.
-pub const PROTOCOL_VERSION_NUMBER: u32 = 1;
+pub const PROTOCOL_VERSION_NUMBER: u32 = 2;
 /// Header representation of [`PROTOCOL_VERSION_NUMBER`].
-pub const PROTOCOL_VERSION: &str = "1";
+pub const PROTOCOL_VERSION: &str = "2";
 
 pub mod auth;
 pub mod automation;
@@ -70,12 +70,13 @@ pub use catalog::*;
 pub use change_ledger::*;
 pub use column::{
     EngineColumnFacets, MssqlColumnFacets, Nullability, PgColumnFacets, PrimitiveType,
-    TypeCategory, TypeRef,
+    SqliteColumnFacets, TypeCategory, TypeRef,
 };
 pub use comparison::*;
 pub use connection::{
     AccessMode as ConnAccessMode, EngineConnectionSpec, MssqlConnectionSpec, PgConnectionSpec,
-    ServerInfo, SslMode,
+    ServerInfo, SqliteConnectionSpec, SqliteDriverConfig, SqliteFileConfiguration, SqliteOpenMode,
+    SqliteRootConfig, SslMode,
 };
 pub use crdt::{
     CrdtCursor, CrdtSnapshot, CrdtUpdate, DocumentFrontier, DocumentVersion, ReplicaId,

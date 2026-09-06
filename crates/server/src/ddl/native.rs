@@ -8,6 +8,12 @@ pub(super) async fn table(
     engine: Engine,
 ) -> Result<String, DriverError> {
     let template = match engine {
+        Engine::Sqlite => {
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "use native SQLite object DDL",
+            ))
+        }
         Engine::Postgres => include_str!("sql/postgres-table.sql"),
         Engine::SqlServer => include_str!("sql/sqlserver-table.sql"),
     };
@@ -33,6 +39,12 @@ pub(super) async fn trigger(
         })?
         .replace('\'', "''");
     let sql = match engine {
+        Engine::Sqlite => {
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "use native SQLite object DDL",
+            ))
+        }
         Engine::Postgres => format!(
             r#"
 SELECT CASE WHEN count(*) > 1 THEN 'sift:unsupported:trigger name is ambiguous within schema'
@@ -66,6 +78,12 @@ pub(super) async fn user_type(
 ) -> Result<String, DriverError> {
     let name = qualified_name(object, engine).replace('\'', "''");
     let sql = match engine {
+        Engine::Sqlite => {
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "use native SQLite object DDL",
+            ))
+        }
         Engine::Postgres => format!(
             r#"
 SELECT CASE t.typtype

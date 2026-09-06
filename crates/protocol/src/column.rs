@@ -109,6 +109,8 @@ pub enum TypeCategory {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EngineColumnFacets {
     #[serde(default)]
+    pub sqlite: Option<Box<SqliteColumnFacets>>,
+    #[serde(default)]
     pub postgres: Option<PgColumnFacets>,
     #[serde(default)]
     pub sql_server: Option<MssqlColumnFacets>,
@@ -141,4 +143,16 @@ pub struct MssqlColumnFacets {
     /// Catalog-rendered DEFAULT constraint expression, if one exists.
     #[serde(default)]
     pub default_expr: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SqliteColumnFacets {
+    pub declared_type: String,
+    pub affinity: String,
+    pub default_expr: Option<String>,
+    pub primary_key_ordinal: u32,
+    #[serde(default)]
+    pub virtual_table: bool,
+    /// SQLite table_xinfo: 0 ordinary, 1 hidden, 2 virtual generated, 3 stored generated.
+    pub hidden: u8,
 }

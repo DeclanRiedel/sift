@@ -162,6 +162,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ManageExtension
         | ManageInstanceConfiguration
         | BackupState
+        | InspectMetadata
         | RestoreState => Some("administrator context required"),
         RefreshAuthSession
         | Logout

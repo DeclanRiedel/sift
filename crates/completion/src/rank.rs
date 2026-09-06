@@ -630,7 +630,7 @@ fn quote_ident_if_needed(name: &str, engine: Engine) -> String {
         return name.to_string();
     }
     match engine {
-        Engine::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+        Engine::Postgres | Engine::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
         Engine::SqlServer => format!("[{}]", name.replace(']', "]]")),
     }
 }

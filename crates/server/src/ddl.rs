@@ -36,6 +36,14 @@ pub async fn generate_ddl(
     handle: sift_driver_api::ConnHandle,
     object: ObjectPath,
 ) -> Result<ObjectDdl, DriverError> {
+    if driver.engine() == Engine::Sqlite {
+        let ddl = driver
+            .as_sqlite()
+            .ok_or_else(|| DriverError::new(Code::UnsupportedForEngine, "SQLite DDL unavailable"))?
+            .object_ddl(handle, object.clone())
+            .await?;
+        return Ok(ObjectDdl { path: object, ddl });
+    }
     let kind = object.kind.unwrap_or(ObjectKind::Table);
     let engine = driver.engine();
     let ddl = match kind {
@@ -81,6 +89,12 @@ async fn generate_view_ddl(
     let qname = qualified_name(object, engine);
     let is_materialized = matches!(kind, ObjectKind::MaterializedView);
     let (sql, prefix) = match (engine, is_materialized) {
+        (Engine::Sqlite, _) => {
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "use native SQLite object DDL",
+            ))
+        }
         (Engine::Postgres, false) => (
             format!(
                 "SELECT pg_get_viewdef('{}'::regclass, true)",
@@ -129,6 +143,12 @@ async fn generate_routine_ddl(
 ) -> Result<String, DriverError> {
     let qname = qualified_name(object, engine);
     let sql = match engine {
+        Engine::Sqlite => {
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "SQLite routines are unsupported",
+            ))
+        }
         Engine::Postgres => {
             let regprocedure = pg_regprocedure_name(object);
             format!(
@@ -214,14 +234,14 @@ async fn fetch_scalar_text(
 pub(crate) fn qualified_name(path: &ObjectPath, engine: Engine) -> String {
     let schema = path.schema.as_deref();
     match (engine, schema) {
-        (Engine::Postgres, Some(s)) => {
+        (Engine::Postgres | Engine::Sqlite, Some(s)) => {
             format!(
                 "{}.{}",
                 quote_ident(s, engine),
                 quote_ident(&path.name, engine)
             )
         }
-        (Engine::Postgres, None) => quote_ident(&path.name, engine),
+        (Engine::Postgres | Engine::Sqlite, None) => quote_ident(&path.name, engine),
         (Engine::SqlServer, Some(s)) => {
             format!(
                 "{}.{}",
@@ -235,7 +255,7 @@ pub(crate) fn qualified_name(path: &ObjectPath, engine: Engine) -> String {
 
 pub(crate) fn quote_ident(name: &str, engine: Engine) -> String {
     match engine {
-        Engine::Postgres => {
+        Engine::Postgres | Engine::Sqlite => {
             let escaped = name.replace('"', "\"\"");
             format!("\"{escaped}\"")
         }
@@ -280,6 +300,13 @@ fn primitive_to_sql(p: sift_protocol::PrimitiveType, engine: Engine) -> String {
     };
     match engine {
         Engine::Postgres => pg.to_string(),
+        Engine::Sqlite => match p {
+            P::Int16 | P::Int32 | P::Int64 | P::Bool => "INTEGER",
+            P::Float32 | P::Float64 => "REAL",
+            P::Blob => "BLOB",
+            _ => "TEXT",
+        }
+        .to_string(),
         Engine::SqlServer => ms.to_string(),
     }
 }

@@ -622,6 +622,7 @@ fn prepare_state_for_instance(
 /// query holds its driver connection until the terminal page, so catalog and
 /// migration work must not share that physical connection.
 struct QueryContext {
+    sqlite: bool,
     instance_id: String,
     client: Client,
     session: SessionId,
@@ -1645,7 +1646,14 @@ async fn run_query_executor(
                         .begin_transaction(
                             opened.session,
                             opened.connection,
-                            sift_protocol::TxMode::default(),
+                            if opened.sqlite {
+                                sift_protocol::TxMode {
+                                    isolation: sift_protocol::IsolationLevel::Serializable,
+                                    ..Default::default()
+                                }
+                            } else {
+                                sift_protocol::TxMode::default()
+                            },
                         )
                         .await
                         .map(|transaction| {
@@ -6240,7 +6248,7 @@ async fn open_query_context(
         .await
         .map_err(|error| format!("opening a session failed: {error}"))?
         .id;
-    let connection = client
+    let connection_info = client
         .open_connection_from_profile(
             session,
             OpenConnectionFromProfileRequest {
@@ -6249,54 +6257,67 @@ async fn open_query_context(
             },
         )
         .await
-        .map_err(|error| format!("opening a connection failed: {error}"))?
-        .id;
-    let metadata_connection = match client
-        .open_connection_from_profile(
-            session,
-            OpenConnectionFromProfileRequest {
-                tenant_id,
-                profile_id,
-            },
-        )
-        .await
-    {
-        Ok(connection) => connection.id,
-        Err(error) => {
-            let _ = client.close_session(session).await;
-            return Err(format!("opening a metadata connection failed: {error}"));
+        .map_err(|error| format!("opening a connection failed: {error}"))?;
+    let sqlite = connection_info.provider_id.as_str() == "sift/sqlite";
+    let connection = connection_info.id;
+    let metadata_connection = if sqlite {
+        connection
+    } else {
+        match client
+            .open_connection_from_profile(
+                session,
+                OpenConnectionFromProfileRequest {
+                    tenant_id,
+                    profile_id,
+                },
+            )
+            .await
+        {
+            Ok(connection) => connection.id,
+            Err(error) => {
+                let _ = client.close_session(session).await;
+                return Err(format!("opening a metadata connection failed: {error}"));
+            }
         }
     };
-    let plan_connection = match client
-        .open_connection_from_profile(
-            session,
-            OpenConnectionFromProfileRequest {
-                tenant_id,
-                profile_id,
-            },
-        )
-        .await
-    {
-        Ok(connection) => connection.id,
-        Err(error) => {
-            let _ = client.close_session(session).await;
-            return Err(format!("opening a plan connection failed: {error}"));
+    let plan_connection = if sqlite {
+        connection
+    } else {
+        match client
+            .open_connection_from_profile(
+                session,
+                OpenConnectionFromProfileRequest {
+                    tenant_id,
+                    profile_id,
+                },
+            )
+            .await
+        {
+            Ok(connection) => connection.id,
+            Err(error) => {
+                let _ = client.close_session(session).await;
+                return Err(format!("opening a plan connection failed: {error}"));
+            }
         }
     };
-    let semantic_connection = match client
-        .open_connection_from_profile(
-            session,
-            OpenConnectionFromProfileRequest {
-                tenant_id,
-                profile_id,
-            },
-        )
-        .await
-    {
-        Ok(connection) => connection.id,
-        Err(error) => {
-            let _ = client.close_session(session).await;
-            return Err(format!("opening a semantic connection failed: {error}"));
+    let semantic_connection = if sqlite {
+        connection
+    } else {
+        match client
+            .open_connection_from_profile(
+                session,
+                OpenConnectionFromProfileRequest {
+                    tenant_id,
+                    profile_id,
+                },
+            )
+            .await
+        {
+            Ok(connection) => connection.id,
+            Err(error) => {
+                let _ = client.close_session(session).await;
+                return Err(format!("opening a semantic connection failed: {error}"));
+            }
         }
     };
     let (semantic, controls) = tokio::sync::mpsc::unbounded_channel();
@@ -6308,6 +6329,7 @@ async fn open_query_context(
         events.clone(),
     )));
     Ok(QueryContext {
+        sqlite,
         instance_id: server.instance().id,
         client,
         session,
@@ -6331,6 +6353,9 @@ async fn open_ad_hoc_query_context(
     credentials: Option<serde_json::Value>,
     events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
 ) -> Result<QueryContext, String> {
+    if provider_id.as_str() == "sift/sqlite" {
+        return Err("Use a saved SQLite file profile with an authorized server root".into());
+    }
     if let (Some(configuration), Some(credentials)) = (
         configuration.as_object_mut(),
         credentials.and_then(|value| value.as_object().cloned()),
@@ -6380,6 +6405,7 @@ async fn open_ad_hoc_query_context(
         events.clone(),
     )));
     Ok(QueryContext {
+        sqlite: false,
         instance_id: server.instance().id,
         client,
         session,

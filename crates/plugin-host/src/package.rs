@@ -528,7 +528,10 @@ fn validate_manifest(manifest: &ExtensionManifest, lock: &PackageLock) -> Result
         .map_err(|error| PackageError::InvalidManifest(error.to_string()))?;
     Version::parse(&manifest.minimum_sift_version)
         .map_err(|error| PackageError::InvalidManifest(error.to_string()))?;
-    if !manifest.compatibility.public_protocol.contains(1)
+    if !manifest
+        .compatibility
+        .public_protocol
+        .contains(sift_protocol::PROTOCOL_VERSION_NUMBER)
         || !manifest
             .compatibility
             .extension_rpc
@@ -1018,7 +1021,7 @@ repository = "https://example.invalid/acme/example"
 minimum_sift_version = "0.2.0"
 
 [compatibility]
-public_protocol = { minimum = 1, maximum = 1 }
+public_protocol = { minimum = 2, maximum = 2 }
 extension_rpc = { minimum = 1, maximum = 1 }
 driver_rpc = { minimum = 1, maximum = 1 }
 "#;

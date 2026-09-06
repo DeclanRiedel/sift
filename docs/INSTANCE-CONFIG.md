@@ -1,5 +1,9 @@
 # Reproducible server instances
 
+SQLite uses credential-free root/path profiles instead of connection strings.
+See [SQLite connections and metadata inspection](SQLITE.md) for configuration,
+seeded demos and the local inspection command.
+
 A Sift server root contains two portable files:
 
 - `sift.toml` is the editable desired state: server settings, immutable GitHub

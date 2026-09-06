@@ -13,6 +13,12 @@ pub(super) async fn generate_sequence_ddl(
     // https://www.postgresql.org/docs/current/catalog-pg-sequence.html
     // https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-sequences-transact-sql
     let sql = match engine {
+        Engine::Sqlite => {
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "use native SQLite object DDL",
+            ))
+        }
         Engine::Postgres => format!(
             r#"
 SELECT format(

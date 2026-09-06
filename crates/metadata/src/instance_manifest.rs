@@ -415,6 +415,7 @@ impl MetadataStore {
                 let (provider_id, engine) = match connection.provider {
                     ManifestProvider::Postgres => ("sift/postgres", "postgres"),
                     ManifestProvider::SqlServer => ("sift/sql-server", "sql_server"),
+                    ManifestProvider::Sqlite => ("sift/sqlite", "sqlite"),
                 };
                 let credential_mode = match connection.credential_mode {
                     ManifestCredentialMode::Shared => "shared",
@@ -841,6 +842,11 @@ fn desired_slots(manifest: &Manifest) -> crate::Result<BTreeMap<String, DesiredS
             let kind = match connection.provider {
                 ManifestProvider::Postgres => CredentialKind::Postgres,
                 ManifestProvider::SqlServer => CredentialKind::SqlServer,
+                ManifestProvider::Sqlite => {
+                    return Err(MetadataError::InstanceManifestConflict(
+                        "SQLite credentials are unsupported".into(),
+                    ))
+                }
             };
             let value = serde_json::json!({
                 "provider": connection.provider,
@@ -1402,7 +1408,10 @@ mod tests {
         ));
 
         let mut destroyable = manifest;
-        destroyable.connections[0].lifecycle.prevent_destroy = false;
+        for connection in &mut destroyable.connections {
+            connection.lifecycle.prevent_destroy = false;
+        }
+        let connection_count = destroyable.connections.len();
         let destroyable_lock =
             LockFile::generate(&destroyable, env!("CARGO_PKG_VERSION"), 1).unwrap();
         store
@@ -1416,6 +1425,6 @@ mod tests {
             .apply_instance_manifest(&empty, &empty_lock, 3, true)
             .await
             .unwrap();
-        assert_eq!(result.deleted, 1);
+        assert_eq!(result.deleted, connection_count as u64);
     }
 }

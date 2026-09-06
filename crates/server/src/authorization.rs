@@ -75,6 +75,7 @@ pub fn authorize(
             | ManageTenantLimits
             | ManageInstanceConfiguration
             | BackupState
+            | InspectMetadata
             | RestoreState
     ) && !scope.instance_admin
     {

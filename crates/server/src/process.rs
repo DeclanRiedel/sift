@@ -16,6 +16,13 @@ pub async fn list(
 ) -> ApiResult<Vec<DatabaseProcess>> {
     let engine = store.conn_entry(session, connection)?.driver.engine();
     let sql = match engine {
+        Engine::Sqlite => {
+            return Err(DriverError::new(
+                Code::UnsupportedForEngine,
+                "SQLite process control is unsupported",
+            )
+            .into())
+        }
         Engine::Postgres => PG_LIST,
         Engine::SqlServer => MSSQL_LIST,
     };
@@ -53,6 +60,7 @@ pub async fn kill(
     }
     let engine = store.conn_entry(session, connection)?.driver.engine();
     let (sql, params) = match engine {
+        Engine::Sqlite => return Err(DriverError::new(Code::UnsupportedForEngine,"SQLite process control is unsupported").into()),
         Engine::Postgres => (
             "SELECT pg_terminate_backend($1::bigint::int) WHERE $1::bigint::int <> pg_backend_pid()".to_string(),
             vec![Value::Int64(process_id)],

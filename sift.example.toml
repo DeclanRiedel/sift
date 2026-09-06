@@ -20,6 +20,13 @@ filter = "sift=info,tower_http=info"
 mock = false
 mock_extra = false
 
+# SQLite files require an explicit server root and tenant IDs. No roots means
+# file access is disabled. See docs/SQLITE.md; instance manifests use server.drivers.
+# [drivers.sqlite.roots.analysis]
+# path = "/operator-controlled/databases"
+# allowed_tenants = [1]
+# read_only = true
+
 [timeouts]
 request_secs = 30
 shutdown_drain_secs = 30

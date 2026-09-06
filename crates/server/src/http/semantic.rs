@@ -429,10 +429,10 @@ pub(super) async fn prepare_catalog_snippet(
             "catalog template requires between 1 and 1000 ordered columns".into(),
         ));
     }
-    let engine = if graph.provider.dialect_id.as_str() == "sift/tsql" {
-        sift_protocol::Engine::SqlServer
-    } else {
-        sift_protocol::Engine::Postgres
+    let engine = match graph.provider.dialect_id.as_str() {
+        "sift/tsql" => sift_protocol::Engine::SqlServer,
+        "sift/sqlite" => sift_protocol::Engine::Sqlite,
+        _ => sift_protocol::Engine::Postgres,
     };
     let quote = |name: &str| crate::ddl::quote_ident(name, engine);
     let qualified = request.object.schema.as_ref().map_or_else(

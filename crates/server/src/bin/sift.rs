@@ -22,6 +22,7 @@ async fn main() -> anyhow::Result<()> {
             serve_mcp(client, options.context).await
         }
         Some("instance") => instance_command(&arguments[1..]).await,
+        Some("metadata") => metadata_command(&arguments[1..]).await,
         Some("help" | "--help" | "-h") | None => {
             print_usage();
             Ok(())
@@ -33,6 +34,111 @@ async fn main() -> anyhow::Result<()> {
 const MANIFEST_FILE: &str = "sift.toml";
 const LOCK_FILE: &str = "sift.lock";
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
+
+async fn metadata_command(arguments: &[String]) -> anyhow::Result<()> {
+    if arguments.len() != 3 || arguments[0] != "inspect" {
+        bail!("usage: sift metadata inspect <source-instance-root> <new-inspection-root>");
+    }
+    let source = sift_server::instance_runtime::load_applied_instance(&arguments[1], None)?;
+    let database = source
+        .config
+        .metadata
+        .path
+        .as_deref()
+        .context("source instance has no metadata database")?;
+    sift_server::metadata_inspection::require_local_owner(Path::new(database))?;
+    let subject = &source
+        .root
+        .manifest
+        .identity
+        .github_principals
+        .iter()
+        .find(|p| p.bootstrap)
+        .context("source instance has no bootstrap owner")?
+        .subject;
+    let mut manifest = sift_instance_config::personal_starter(
+        uuid::Uuid::new_v4(),
+        "sift-metadata-inspection",
+        subject,
+    )?;
+    let connection = &mut manifest.connections[0];
+    connection.name = "sift/metadata-inspection".into();
+    connection.provider = sift_instance_config::Provider::Sqlite;
+    connection.connection_string.clear();
+    connection.credential = None;
+    connection.sqlite = Some(sift_protocol::SqliteFileConfiguration {
+        root_id: "inspection".into(),
+        path: "metadata.db".into(),
+        mode: sift_protocol::SqliteOpenMode::ReadOnly,
+        busy_timeout_ms: 1000,
+    });
+    connection.tags = vec!["read-only".into(), "snapshot".into()];
+    connection.policy.allow_export = true;
+    manifest.server.drivers.sqlite = sift_protocol::SqliteDriverConfig {
+        roots: std::collections::BTreeMap::from([(
+            "inspection".into(),
+            sift_protocol::SqliteRootConfig {
+                path: "inspection".into(),
+                allowed_tenants: vec![1],
+                read_only: true,
+            },
+        )]),
+        max_connections: 4,
+    };
+    manifest.normalize();
+    manifest.validate()?;
+    let lock = LockFile::generate(
+        &manifest,
+        sift_server::VERSION,
+        sift_protocol::PROTOCOL_VERSION_NUMBER,
+    )?;
+    let root = PathBuf::from(&arguments[2]);
+    // No replacement of an existing instance or snapshot. Private from creation.
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&root)
+        .context("create new inspection root")?;
+    let data = root.join("inspection");
+    builder.create(&data)?;
+    let count = tokio::task::spawn_blocking({
+        let database = PathBuf::from(database);
+        move || sift_server::metadata_inspection::snapshot(&database, &data.join("metadata.db"))
+    })
+    .await??;
+    write_new(
+        &root.join(MANIFEST_FILE),
+        manifest.to_toml_pretty()?.as_bytes(),
+    )?;
+    write_new(&root.join(LOCK_FILE), lock.to_toml_pretty()?.as_bytes())?;
+    let instance = sift_server::instance_runtime::InstanceRoot::open(&root)?;
+    instance.apply(&instance.default_state_dir(), false).await?;
+    let applied = sift_server::instance_runtime::load_applied_instance(&root, None)?;
+    let store = sift_server::metadata_runtime::open_metadata_store(&applied.config)?
+        .context("inspection metadata disabled")?;
+    let summary = sift_protocol::Operation::InspectMetadata.audit_summary();
+    store.record_operation_audit(sift_metadata::NewOperationAudit {
+        actor_principal_id: None,
+        action: summary.action,
+        target: summary.target,
+        target_id: None,
+        status: "succeeded".into(),
+        result_code: None,
+        row_count: Some(i64::try_from(count)?),
+        error_message: None,
+        correlation_id: None,
+    })?;
+    println!(
+        "Created read-only metadata inspection ({count} rows) at {}",
+        root.display()
+    );
+    println!("Open with: sift-desktop --instance-root {}", root.display());
+    Ok(())
+}
 
 async fn instance_command(arguments: &[String]) -> anyhow::Result<()> {
     let Some(command) = arguments.first().map(String::as_str) else {
@@ -529,6 +635,7 @@ fn sync_parent(parent: &Path) -> anyhow::Result<()> {
 }
 
 fn print_usage() {
+    println!("  sift metadata inspect <source-instance-root> <new-inspection-root>");
     println!(
         "sift instance <command>\nsift mcp --server <url> --token-file <path> [context options]"
     );

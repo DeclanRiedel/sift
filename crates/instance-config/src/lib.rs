@@ -176,6 +176,7 @@ impl LogConfig {
 pub struct DriverConfig {
     pub mock: bool,
     pub mock_extra: bool,
+    pub sqlite: sift_protocol::SqliteDriverConfig,
 }
 
 impl DriverConfig {
@@ -643,7 +644,10 @@ pub struct ConnectionConfig {
     pub name: String,
     pub tenant: String,
     pub provider: Provider,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub connection_string: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sqlite: Option<sift_protocol::SqliteFileConfiguration>,
     pub credential_mode: CredentialMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
@@ -662,6 +666,7 @@ pub struct ConnectionConfig {
 pub enum Provider {
     Postgres,
     SqlServer,
+    Sqlite,
 }
 
 impl Provider {
@@ -669,6 +674,7 @@ impl Provider {
         match self {
             Self::Postgres => "postgres",
             Self::SqlServer => "sql-server",
+            Self::Sqlite => "sqlite",
         }
     }
 }
@@ -677,10 +683,43 @@ impl ConnectionConfig {
     /// Convert the credential-free connection string into the built-in
     /// provider's typed public configuration. Secret fields are never added.
     pub fn provider_configuration(&self) -> Result<serde_json::Value, ConfigError> {
+        if self.provider == Provider::Sqlite {
+            if self.credential.is_some()
+                || self.credential_mode != CredentialMode::Shared
+                || !self.connection_string.is_empty()
+            {
+                return validation(
+                    "connections.sqlite",
+                    "SQLite uses a file configuration and no credentials",
+                );
+            }
+            let Some(config) = &self.sqlite else {
+                return validation(
+                    "connections.sqlite",
+                    "SQLite file configuration is required",
+                );
+            };
+            if config.root_id.is_empty() || config.path.is_empty() || config.busy_timeout_ms > 5000
+            {
+                return validation(
+                    "connections.sqlite",
+                    "root_id/path and a 0..5000ms busy timeout are required",
+                );
+            }
+            return serde_json::to_value(config)
+                .map_err(|e| ConfigError::Serialization(e.to_string()));
+        }
+        if self.sqlite.is_some() {
+            return validation(
+                "connections.sqlite",
+                "file configuration is only valid for SQLite",
+            );
+        }
         validate_connection_string("connection_string", self.provider, &self.connection_string)?;
         match self.provider {
             Provider::Postgres => postgres_provider_configuration(&self.connection_string),
             Provider::SqlServer => sql_server_provider_configuration(&self.connection_string),
+            Provider::Sqlite => unreachable!("SQLite returns above"),
         }
     }
 }
@@ -1041,11 +1080,7 @@ impl Manifest {
             if !tenants.contains(connection.tenant.as_str()) {
                 return validation(format!("{base}.tenant"), "references an unknown tenant");
             }
-            validate_connection_string(
-                &format!("{base}.connection_string"),
-                connection.provider,
-                &connection.connection_string,
-            )?;
+            connection.provider_configuration()?;
             match (connection.credential_mode, connection.credential.as_deref()) {
                 (CredentialMode::Shared, Some(slot)) => {
                     validate_credential_ref(&format!("{base}.credential"), slot)?;
@@ -1058,6 +1093,7 @@ impl Manifest {
                         }
                     }
                 }
+                (CredentialMode::Shared, None) if connection.provider == Provider::Sqlite => {}
                 (CredentialMode::Shared, None) => {
                     return validation(
                         format!("{base}.credential"),
@@ -1179,6 +1215,12 @@ impl Manifest {
                     kind: match connection.provider {
                         Provider::Postgres => CredentialKind::Postgres,
                         Provider::SqlServer => CredentialKind::SqlServer,
+                        Provider::Sqlite => {
+                            return validation(
+                                "connections.sqlite",
+                                "SQLite cannot use credentials",
+                            )
+                        }
                     },
                 });
             }
@@ -1713,6 +1755,7 @@ fn validate_connection_string(
     match provider {
         Provider::Postgres => validate_postgres_connection_string(path, value),
         Provider::SqlServer => validate_sql_server_connection_string(path, value),
+        Provider::Sqlite => validation(path, "SQLite requires file configuration"),
     }
 }
 

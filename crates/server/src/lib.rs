@@ -33,6 +33,7 @@ pub mod identity;
 pub mod instance_configuration;
 pub mod instance_runtime;
 pub mod keyed_lock;
+pub mod metadata_inspection;
 pub mod metadata_runtime;
 pub mod migration;
 pub mod plan;

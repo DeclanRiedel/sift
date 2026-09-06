@@ -1,5 +1,8 @@
 # Development on Windows and NixOS
 
+For seeded SQLite demos, server file-root configuration and the one-command
+read-only inspection of Sift's own metadata, see [SQLite connections](SQLITE.md).
+
 Build and run Sift natively on each host. The desktop can connect to either
 server over the same API. Windows does not need WSL or a local database for
 the regular workspace tests.

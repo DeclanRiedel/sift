@@ -214,6 +214,7 @@ pub struct DriversConfig {
     /// If true, register `MockDriver` for an extra synthetic engine slot.
     /// Off by default.
     pub mock_extra: bool,
+    pub sqlite: sift_protocol::SqliteDriverConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

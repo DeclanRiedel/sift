@@ -295,11 +295,15 @@ exclusions. Broader engine administration remains separate work.
 - [ ] SQL Server Agent
 - [ ] SQL Server server-settings browser
 - [x] SQLite provider design ([scope and acceptance](sqlite-provider.md))
-- [ ] SQLite provider implementation (after scoped two-engine graduation)
+- [x] SQLite provider implementation (protocol 2; scoped Linux file support)
+- [x] SQLite managed savepoints, estimated plans and atomic CSV import
+- [x] SQLite seeded desktop demos and read-only Sift metadata inspection command
 
-SQLite design completion is a planning milestone only. Its provider is not yet
-available. The [overnight handoff](database-provider-overnight.md) contains four
-sequential tasks with explicit acceptance dependencies.
+SQLite is implemented with explicit server roots, bounded workers, dynamic
+values, native DDL, keyed edits and a partial IDE navigation catalog. Full
+dependency graphs/migrations, actual plans, native bulk targets, maintenance and
+Windows file access remain outside its scope. See [SQLite support](../SQLITE.md)
+and the [overnight handoff](database-provider-overnight.md).
 
 ### Platform and operations
 

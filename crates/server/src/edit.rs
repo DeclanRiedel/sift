@@ -42,6 +42,18 @@ pub(crate) fn plan_from_object(
     info: &ObjectInfo,
     edit_set: &EditSet,
 ) -> Result<EditPlan, DriverError> {
+    if engine == Engine::Sqlite
+        && (info.kind != sift_protocol::ObjectKind::Table
+            || info
+                .columns
+                .iter()
+                .any(|c| c.facets.sqlite.as_ref().is_some_and(|f| f.virtual_table)))
+    {
+        return Err(DriverError::new(
+            Code::UnsupportedForEngine,
+            "SQLite views and virtual tables cannot be edited",
+        ));
+    }
     let identity = resolve_identity(info, engine)?;
     let id_columns = identity_columns(&identity);
     let column_names: Vec<&str> = info.columns.iter().map(|c| c.name.as_str()).collect();
@@ -57,6 +69,24 @@ pub(crate) fn plan_from_object(
 
     let mut statements = Vec::with_capacity(ordered.len());
     for (edit_index, edit) in ordered {
+        if engine == Engine::Sqlite {
+            let changes = match edit {
+                RowEdit::Insert { values } => values.as_slice(),
+                RowEdit::Update { changes, .. } => changes.as_slice(),
+                RowEdit::Delete { .. } => &[],
+            };
+            if changes.iter().any(|cell| {
+                info.columns.iter().any(|column| {
+                    column.name == cell.column
+                        && column.facets.sqlite.as_ref().is_some_and(|f| f.hidden != 0)
+                })
+            }) {
+                return Err(DriverError::new(
+                    Code::InvalidParameterValue,
+                    "SQLite generated/hidden columns cannot be written",
+                ));
+            }
+        }
         let stmt = match edit {
             RowEdit::Insert { values } => gen_insert(
                 engine,
@@ -130,6 +160,7 @@ impl Binder {
         match self.engine {
             Engine::Postgres => format!("${n}"),
             Engine::SqlServer => format!("@P{n}"),
+            Engine::Sqlite => format!("?{n}"),
         }
     }
 }
@@ -141,7 +172,14 @@ fn resolve_identity(info: &ObjectInfo, engine: Engine) -> Result<IdentitySource,
         .filter(|c| c.primary_key)
         .map(|c| c.name.clone())
         .collect();
-    if !pk.is_empty() {
+    if !pk.is_empty()
+        && (engine != Engine::Sqlite
+            || info
+                .columns
+                .iter()
+                .filter(|c| c.primary_key)
+                .all(|c| c.nullable == sift_protocol::Nullability::NotNullable))
+    {
         return Ok(IdentitySource::PrimaryKey { columns: pk });
     }
     // Fall back to a single non-nullable UNIQUE index.
@@ -153,7 +191,11 @@ fn resolve_identity(info: &ObjectInfo, engine: Engine) -> Result<IdentitySource,
         .collect();
     if let Some(idx) = info.indexes.iter().find(|i| {
         i.unique
+            && i.partial_predicate.is_none()
             && !i.columns.is_empty()
+            && i.columns
+                .iter()
+                .all(|name| info.columns.iter().any(|c| c.name == *name))
             && i.columns.iter().all(|c| !nullable.contains(c.as_str()))
     }) {
         return Ok(IdentitySource::UniqueIndex {
@@ -248,7 +290,9 @@ fn comparison(binder: &mut Binder, engine: Engine, column: &str, value: &Value) 
 fn returning_clause(engine: Engine, id_columns: &[String], position: ReturningPos) -> String {
     let cols: Vec<String> = id_columns.iter().map(|c| quote_ident(c, engine)).collect();
     match (engine, position) {
-        (Engine::Postgres, ReturningPos::Trailing) => format!(" RETURNING {}", cols.join(", ")),
+        (Engine::Postgres | Engine::Sqlite, ReturningPos::Trailing) => {
+            format!(" RETURNING {}", cols.join(", "))
+        }
         (Engine::SqlServer, ReturningPos::Output) => {
             let outs: Vec<String> = id_columns
                 .iter()
@@ -289,7 +333,7 @@ fn gen_insert(
     let sql = if col_idents.is_empty() {
         // No user-supplied columns (all db-assigned) — emit engine default row.
         match engine {
-            Engine::Postgres => format!(
+            Engine::Postgres | Engine::Sqlite => format!(
                 "INSERT INTO {table_sql} DEFAULT VALUES{}",
                 returning_clause(engine, id_columns, ReturningPos::Trailing)
             ),
@@ -302,7 +346,7 @@ fn gen_insert(
         let cols = col_idents.join(", ");
         let vals = placeholders.join(", ");
         match engine {
-            Engine::Postgres => format!(
+            Engine::Postgres | Engine::Sqlite => format!(
                 "INSERT INTO {table_sql} ({cols}) VALUES ({vals}){}",
                 returning_clause(engine, id_columns, ReturningPos::Trailing)
             ),

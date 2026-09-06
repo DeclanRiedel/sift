@@ -19,7 +19,7 @@ protocol_version="$(
     -d '{
       "client_version":"sift-demo-postgres",
       "client_kind":"automation",
-      "protocol":{"minimum":1,"maximum":1}
+      "protocol":{"minimum":2,"maximum":2}
     }' \
     | jq -er .selected_protocol
 )"
