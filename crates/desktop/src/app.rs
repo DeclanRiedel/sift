@@ -493,12 +493,13 @@ impl SiftWindow {
             WorkspaceShell::new(state, settings, store, Some(settings_store), window, cx)
         });
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (presence_sender, presence_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
+        // Presence also carries ordered repository events: backpressure, do not drop.
+        let (presence_sender, presence_receiver) = tokio::sync::mpsc::channel(128);
+        let (command_sender, command_receiver) = sift_workspace_ui::ExecutorSender::channel(128);
         let (event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (document_sender, document_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (document_event_sender, document_event_receiver) =
-            tokio::sync::mpsc::unbounded_channel();
+        // These events contain full CRDT snapshots. Keep the pending set small.
+        let (document_event_sender, document_event_receiver) = tokio::sync::mpsc::channel(8);
         let (instance_sender, instance_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (instance_event_sender, instance_event_receiver) =
             tokio::sync::mpsc::unbounded_channel();
@@ -696,7 +697,7 @@ async fn check_connection_health(context: &QueryContext) -> ConnectionHealthRepo
 /// runs queries against it. The UI thread never touches the SDK directly.
 async fn run_query_executor(
     mut targets: tokio::sync::watch::Receiver<DesktopServer>,
-    mut commands: tokio::sync::mpsc::UnboundedReceiver<ExecutorCommand>,
+    mut commands: tokio::sync::mpsc::Receiver<ExecutorCommand>,
     events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
 ) {
     let mut context: Option<QueryContext> = None;
@@ -7355,7 +7356,7 @@ async fn supervise_instances(
     mut targets: tokio::sync::watch::Receiver<DesktopServer>,
     mut restored_workspace_id: Option<i64>,
     sender: tokio::sync::mpsc::UnboundedSender<sift_workspace_ui::LifecycleEvent>,
-    presence_sender: tokio::sync::mpsc::UnboundedSender<sift_workspace_ui::PresenceEvent>,
+    presence_sender: tokio::sync::mpsc::Sender<sift_workspace_ui::PresenceEvent>,
 ) {
     let mut attempt = 0_u32;
     loop {
@@ -7458,7 +7459,7 @@ async fn supervise_instances(
                 changed = targets.changed() => {
                     if changed.is_err() { return; }
                     restored_workspace_id = None;
-                    let _ = presence_sender.send(sift_workspace_ui::PresenceEvent::Left);
+                    let _ = presence_sender.send(sift_workspace_ui::PresenceEvent::Left).await;
                     continue;
                 },
             }
@@ -7472,7 +7473,9 @@ async fn supervise_instances(
                 },
             }
         };
-        let _ = presence_sender.send(sift_workspace_ui::PresenceEvent::Left);
+        let _ = presence_sender
+            .send(sift_workspace_ui::PresenceEvent::Left)
+            .await;
         match disconnected {
             Err(
                 reason @ (sift_workspace_ui::DegradedReason::AuthenticationExpired
@@ -7506,7 +7509,7 @@ enum RoomDocumentInput {
 async fn run_room_document_supervisor(
     mut targets: tokio::sync::watch::Receiver<DesktopServer>,
     mut commands: tokio::sync::mpsc::UnboundedReceiver<RoomDocumentCommand>,
-    events: tokio::sync::mpsc::UnboundedSender<RoomDocumentEvent>,
+    events: tokio::sync::mpsc::Sender<RoomDocumentEvent>,
 ) {
     let mut documents: HashMap<
         i64,
@@ -7558,10 +7561,10 @@ async fn run_room_document_supervisor(
                                         position: document.position,
                                         snapshot: document.crdt_state,
                                     },
-                                ));
+                                )).await;
                             }
                             Err(message) => {
-                                let _ = events.send(RoomDocumentEvent::ServiceFailed(message));
+                                let _ = events.send(RoomDocumentEvent::ServiceFailed(message)).await;
                             }
                         }
                     }
@@ -7592,7 +7595,7 @@ async fn run_room_document_supervisor(
                                 let _ = events.send(RoomDocumentEvent::Failed {
                                     document_id,
                                     message,
-                                });
+                                }).await;
                             }
                         });
                         documents.insert(document_id, (task, sender));
@@ -7630,12 +7633,36 @@ async fn run_room_document_supervisor(
     }
 }
 
+/// Reserve delivery capacity before allocating a full snapshot. A slow or closed
+/// UI must not accumulate serialized copies of the same replica in memory.
+async fn send_room_snapshot(
+    events: &tokio::sync::mpsc::Sender<RoomDocumentEvent>,
+    document_id: i64,
+    replica: &RoomReplica,
+    synced: bool,
+) -> Result<(), String> {
+    let permit = events
+        .reserve()
+        .await
+        .map_err(|_| "room document view closed".to_owned())?;
+    let snapshot = replica
+        .persist()
+        .map_err(|error| format!("snapshotting room replica failed: {error}"))?
+        .1;
+    permit.send(RoomDocumentEvent::Text {
+        document_id,
+        snapshot,
+        synced,
+    });
+    Ok(())
+}
+
 async fn run_room_document(
     server: DesktopServer,
     source: sift_workspace_ui::RoomDocumentSource,
     snapshot: Vec<u8>,
     mut updates: tokio::sync::mpsc::UnboundedReceiver<RoomDocumentInput>,
-    events: tokio::sync::mpsc::UnboundedSender<RoomDocumentEvent>,
+    events: tokio::sync::mpsc::Sender<RoomDocumentEvent>,
 ) -> Result<(), String> {
     let client = server.client().await?;
     let mut replica = RoomReplica::new(
@@ -7655,14 +7682,7 @@ async fn run_room_document(
     room.connect(&mut replica)
         .await
         .map_err(|error| format!("room sync failed: {error}"))?;
-    let _ = events.send(RoomDocumentEvent::Text {
-        document_id: source.document_id,
-        snapshot: replica
-            .persist()
-            .map_err(|error| format!("snapshotting room replica failed: {error}"))?
-            .1,
-        synced: true,
-    });
+    send_room_snapshot(&events, source.document_id, &replica, true).await?;
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     heartbeat.tick().await;
     loop {
@@ -7679,35 +7699,21 @@ async fn run_room_document(
                         // Do not momentarily roll the editor back to an intermediate
                         // ACK when more local updates are already queued.
                         if updates.is_empty() {
-                            let _ = events.send(RoomDocumentEvent::Text {
-                                document_id: source.document_id,
-                                snapshot: replica
-                                    .persist()
-                                    .map_err(|error| format!("snapshotting room replica failed: {error}"))?
-                                    .1,
-                                synced: true,
-                            });
+                            send_room_snapshot(&events, source.document_id, &replica, true).await?;
                         }
                     }
                     RoomDocumentInput::Flush(generation) => {
                         let _ = events.send(RoomDocumentEvent::Flushed {
                             document_id: source.document_id,
                             generation,
-                        });
+                        }).await;
                     }
                 }
             }
             incoming = room.next(&mut replica) => {
                 match incoming.map_err(|error| format!("receiving room update failed: {error}"))? {
                     Ingest::Progress | Ingest::Acked(_) | Ingest::Synced(_) => {
-                        let _ = events.send(RoomDocumentEvent::Text {
-                            document_id: source.document_id,
-                            snapshot: replica
-                                .persist()
-                                .map_err(|error| format!("snapshotting room replica failed: {error}"))?
-                                .1,
-                            synced: replica.pending_count() == 0,
-                        });
+                        send_room_snapshot(&events, source.document_id, &replica, replica.pending_count() == 0).await?;
                     }
                     Ingest::Error { message, .. } => return Err(message),
                     Ingest::Resync | Ingest::Ignored => {}
@@ -7819,6 +7825,46 @@ pub fn display_rects(cx: &App) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn room_snapshots_wait_for_capacity_and_stop_when_the_view_closes() {
+        let replica = RoomReplica::new(7, 1, None).unwrap();
+        let (events, mut received) = tokio::sync::mpsc::channel(1);
+        events
+            .send(RoomDocumentEvent::Flushed {
+                document_id: 7,
+                generation: 1,
+            })
+            .await
+            .unwrap();
+        let pending = send_room_snapshot(&events, 7, &replica, true);
+        tokio::pin!(pending);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut pending)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            received.recv().await,
+            Some(RoomDocumentEvent::Flushed { .. })
+        ));
+        pending.await.unwrap();
+        let Some(RoomDocumentEvent::Text {
+            document_id,
+            snapshot,
+            synced,
+        }) = received.recv().await
+        else {
+            panic!("expected snapshot after the flush marker");
+        };
+        assert_eq!(document_id, 7);
+        assert!(synced);
+        RoomReplica::new(7, 2, Some(&snapshot)).unwrap();
+        drop(received);
+        assert!(send_room_snapshot(&events, 7, &replica, true)
+            .await
+            .is_err());
+    }
 
     #[test]
     fn server_restart_backoff_is_bounded_and_resets_per_ready_cycle() {

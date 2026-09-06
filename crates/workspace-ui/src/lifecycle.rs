@@ -409,7 +409,7 @@ pub async fn stream_room_presence(
     client: Client,
     room_id: RoomId,
     client_id: String,
-    sender: mpsc::UnboundedSender<PresenceEvent>,
+    sender: mpsc::Sender<PresenceEvent>,
 ) -> Result<(), DegradedReason> {
     let mut socket = client
         .connect_room_websocket(room_id)
@@ -425,6 +425,7 @@ pub async fn stream_room_presence(
             attachment_id,
             presence,
         })
+        .await
         .is_err()
     {
         return Ok(());
@@ -438,7 +439,7 @@ pub async fn stream_room_presence(
                 if let RoomServerMessage::Error { message } = &message {
                     return Err(room_error_reason(message));
                 }
-                if sender.send(PresenceEvent::Message(message)).is_err() {
+                if sender.send(PresenceEvent::Message(message)).await.is_err() {
                     return Ok(());
                 }
             }

@@ -50,6 +50,8 @@ mod app_bar;
 mod bottom_tools;
 mod catalog_diagram;
 mod commands;
+mod dispatch;
+pub use dispatch::ExecutorSender;
 mod database_monitor;
 mod dock_layout;
 mod docks;
@@ -9656,7 +9658,7 @@ pub struct WorkspaceShell {
     _room_document_task: Option<Task<()>>,
     _executor_task: Option<Task<()>>,
     _instance_task: Option<Task<()>>,
-    executor_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorCommand>>,
+    executor_sender: Option<ExecutorSender>,
     room_document_sender: Option<tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>>,
     room_document_generations: HashMap<i64, u64>,
     running_queries: HashMap<u64, u64>,
@@ -11598,7 +11600,7 @@ impl WorkspaceShell {
 
     pub fn attach_presence(
         &mut self,
-        mut receiver: tokio::sync::mpsc::UnboundedReceiver<PresenceEvent>,
+        mut receiver: tokio::sync::mpsc::Receiver<PresenceEvent>,
         cx: &mut Context<Self>,
     ) {
         self._presence_task = Some(cx.spawn(async move |shell, cx| {
@@ -11698,7 +11700,7 @@ impl WorkspaceShell {
     pub fn attach_room_documents(
         &mut self,
         sender: tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>,
-        mut receiver: tokio::sync::mpsc::UnboundedReceiver<RoomDocumentEvent>,
+        mut receiver: tokio::sync::mpsc::Receiver<RoomDocumentEvent>,
         cx: &mut Context<Self>,
     ) {
         self.room_document_sender = Some(sender);
@@ -11855,14 +11857,31 @@ impl WorkspaceShell {
     /// outcomes back onto the UI thread.
     pub fn attach_executor(
         &mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<ExecutorCommand>,
+        sender: ExecutorSender,
         mut receiver: tokio::sync::mpsc::UnboundedReceiver<ExecutorEvent>,
         cx: &mut Context<Self>,
     ) {
+        let mut failures = sender.failures();
         self.executor_sender = Some(sender);
         self.reconcile_saved_query_tabs(cx);
         self._executor_task = Some(cx.spawn(async move |shell, cx| {
-            while let Some(event) = receiver.recv().await {
+            loop {
+                let event = tokio::select! {
+                    event = receiver.recv() => {
+                        let Some(event) = event else { break };
+                        event
+                    },
+                    changed = failures.changed() => {
+                        if changed.is_err() { break; }
+                        let message = *failures.borrow_and_update();
+                        if let Some(message) = message {
+                            if shell.update(cx, |shell, cx| shell.show_toast(message.into(), cx)).is_err() {
+                                break;
+                            }
+                        }
+                        continue;
+                    },
+                };
                 if shell
                     .update(cx, |shell, cx| shell.on_executor_event(event, cx))
                     .is_err()
@@ -41022,7 +41041,7 @@ mod tests {
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             let editor = shell.panes[0].read(cx).editor(1).unwrap().clone();
@@ -41147,7 +41166,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
 
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
@@ -41205,7 +41224,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
 
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
@@ -41282,7 +41301,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let mut snapshot =
             sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
         snapshot.trees.push(sift_protocol::CatalogTree {
@@ -41821,7 +41840,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let (instance_sender, mut instance_receiver) = tokio::sync::mpsc::unbounded_channel();
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
@@ -41917,7 +41936,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
 
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
@@ -42027,7 +42046,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
 
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
@@ -42073,7 +42092,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.connection_status = ConnectionStatus::Connected {
@@ -42172,7 +42191,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.connection_status = ConnectionStatus::Connected {
@@ -42318,7 +42337,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let connection = ConnectionNavEntry {
             id: 9,
             tenant_id: 4,
@@ -42891,7 +42910,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
 
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
@@ -43410,7 +43429,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.connection_status = ConnectionStatus::Connected {
@@ -43506,7 +43525,7 @@ mod tests {
     fn catalog_migration_workflow_is_executor_owned(cx: &mut TestAppContext) {
         let window = shell(cx);
         let workspace = window.root(cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.prepare_catalog_migration(cx);
@@ -43523,7 +43542,7 @@ mod tests {
     fn catalog_snapshot_manager_loads_before_comparison(cx: &mut TestAppContext) {
         let window = shell(cx);
         let workspace = window.root(cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.open_catalog_snapshots(cx);
@@ -43540,7 +43559,7 @@ mod tests {
     fn running_catalog_migration_can_refresh_and_cancel(cx: &mut TestAppContext) {
         let window = shell(cx);
         let workspace = window.root(cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let run: sift_protocol::MigrationRun = serde_json::from_value(serde_json::json!({
             "id": "00000000-0000-0000-0000-000000000001",
             "plan_id": "00000000-0000-0000-0000-000000000002",
@@ -43576,7 +43595,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.connection_status = ConnectionStatus::Connected {
@@ -43668,7 +43687,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.csv_import_preview =
@@ -43721,7 +43740,7 @@ mod tests {
     fn production_mutations_require_explicit_confirmation(cx: &mut TestAppContext) {
         let window = shell(cx);
         let workspace = window.root(cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.connection_status = ConnectionStatus::Connected {
@@ -43749,7 +43768,7 @@ mod tests {
     fn outcome_unknown_never_reruns_without_second_confirmation(cx: &mut TestAppContext) {
         let window = shell(cx);
         let workspace = window.root(cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.connection_status = ConnectionStatus::Connected {
@@ -44418,12 +44437,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn command_overload_is_visible_even_when_a_caller_ignores_the_result(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(1);
+        let (_events, events) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_executor(sender.clone(), events, cx);
+            sender.send(ExecutorCommand::LoadSessions).unwrap();
+            let _ = sender.send(ExecutorCommand::Disconnect);
+        });
+        cx.run_until_parked();
+        assert!(workspace.read_with(&cx, |shell, _| shell
+            .toasts
+            .iter()
+            .any(|toast| toast.message.contains("not queued"))));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadSessions)
+        ));
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[gpui::test]
     fn delayed_ide_command_never_replays_into_the_sql_editor(cx: &mut TestAppContext) {
         let window = shell(cx);
         let any_window = window.into();
         let mut cx = VisualTestContext::from_window(any_window, cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         let (_events, events) = tokio::sync::mpsc::unbounded_channel();
         let editor = workspace.read_with(&cx, |workspace, cx| {
             let pane = workspace.panes[workspace.active_pane].read(cx);
@@ -44742,7 +44785,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
             let item_id = workspace.panes[workspace.active_pane]
@@ -45470,7 +45513,7 @@ mod tests {
     fn full_result_transform_is_dispatched_to_the_executor(cx: &mut TestAppContext) {
         let window = shell(cx);
         let workspace = window.root(cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.apply_server_result_transform(
@@ -45508,7 +45551,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.queue_result_export(
@@ -46505,7 +46548,7 @@ mod tests {
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         let (_events, events) = tokio::sync::mpsc::unbounded_channel();
         workspace.update(&mut cx, |shell, cx| {
             shell.attach_executor(sender, events, cx);
@@ -46608,7 +46651,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, _commands) = ExecutorSender::channel(128);
         let (_events, events) = tokio::sync::mpsc::unbounded_channel();
         let (acknowledge, mut acknowledged) = tokio::sync::oneshot::channel();
         workspace.update(&mut cx, |shell, cx| {
@@ -46717,7 +46760,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
         workspace.update(&mut cx, |shell, cx| {
             shell.attach_executor(sender, event_receiver, cx);
@@ -46859,7 +46902,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             let now = chrono::Utc::now();
@@ -46955,7 +46998,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             let now = chrono::Utc::now();
@@ -47032,7 +47075,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_database_tenant = Some(7);
@@ -47115,7 +47158,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
         workspace.update(&mut cx, |shell, cx| {
             shell.attach_executor(sender, event_receiver, cx);
@@ -47233,7 +47276,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_database_tenant = Some(7);
@@ -47329,7 +47372,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let (_event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
         workspace.update(&mut cx, |shell, cx| {
             shell.attach_executor(sender, event_receiver, cx);
@@ -47655,7 +47698,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_database_tenant = Some(3);
@@ -47927,7 +47970,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell
@@ -48126,7 +48169,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         let sql = "select 1;\nupdate jobs set done = true;";
         let (item_id, revision) = workspace.update_in(&mut cx, |shell, window, cx| {
             let pane = shell.panes[shell.active_pane].clone();
@@ -48415,7 +48458,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let item_count = workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.lifecycle.tenants = vec![crate::TenantNavEntry {
@@ -48542,7 +48585,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.lifecycle.tenants = vec![crate::TenantNavEntry {
@@ -48847,7 +48890,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.lifecycle.tenants = vec![crate::TenantNavEntry {
@@ -48904,7 +48947,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_workspace_id = Some(42);
@@ -48974,7 +49017,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_workspace_id = Some(42);
@@ -49018,7 +49061,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.active_bottom_tool = BottomTool::Automations;
@@ -49048,7 +49091,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.automation_configurations =
@@ -49103,7 +49146,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.active_bottom_tool = BottomTool::Automations;
@@ -49155,7 +49198,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_workspace_id = Some(42);
@@ -49215,7 +49258,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_workspace_id = Some(42);
@@ -49276,7 +49319,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_workspace_id = Some(42);
@@ -49316,7 +49359,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.select_bottom_tool(BottomTool::Monitor, cx);
@@ -49500,7 +49543,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         let timestamp = "2026-08-28T10:00:00Z".parse().unwrap();
         let saved = sift_api_types::SavedQuery {
             id: sift_api_types::SavedQueryId(10),
@@ -49571,7 +49614,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         let history = sift_api_types::QueryHistory {
             id: sift_api_types::QueryHistoryId(41),
             principal_id: sift_api_types::PrincipalId(7),
@@ -49690,7 +49733,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         let history = sift_api_types::QueryHistory {
             id: sift_api_types::QueryHistoryId(41),
             principal_id: sift_api_types::PrincipalId(7),
@@ -49993,7 +50036,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         let timestamp = "2026-08-28T10:00:00Z".parse().unwrap();
         let saved = sift_api_types::SavedQuery {
             id: sift_api_types::SavedQueryId(9),
@@ -50092,7 +50135,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
 
         let item_id = workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
@@ -50206,7 +50249,7 @@ mod tests {
         let window = shell_with_state(state, cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         let (_events_sender, events) = tokio::sync::mpsc::unbounded_channel();
 
         workspace.update(&mut cx, |shell, cx| {
@@ -50270,7 +50313,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let saved = sift_api_types::SavedQuery {
             id: sift_api_types::SavedQueryId(7),
             tenant_id: sift_api_types::TenantId(1),
@@ -50512,7 +50555,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let transaction = sift_protocol::TransactionInfo {
             tx_id: sift_protocol::TxId::new(9),
             connection: sift_protocol::ConnectionId(2),
@@ -50591,7 +50634,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.transaction_state = TransactionUiState::Active {
@@ -50642,7 +50685,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let transaction = sift_protocol::TransactionInfo {
             tx_id: sift_protocol::TxId::new(11),
             connection: sift_protocol::ConnectionId(2),
@@ -50703,7 +50746,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.executor_sender = Some(sender);
             shell.connection_status = ConnectionStatus::Connected {
@@ -51359,7 +51402,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let source = DatabaseObjectSource {
             instance_id: "local".into(),
             tenant_id: 1,
@@ -51575,7 +51618,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
 
         let (item_id, results) = workspace.update_in(&mut cx, |shell, window, cx| {
             shell.open_table_preview(
@@ -51795,7 +51838,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
 
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.open_table_preview(
@@ -51943,7 +51986,7 @@ mod tests {
     fn diff_hunk_stage_routes_revision_guarded_command(cx: &mut TestAppContext) {
         let window = shell(cx);
         let workspace = window.root(cx).unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
         let path = sift_protocol::WorkspacePath::new("query.sql").unwrap();
         let side = sift_protocol::VcsDiffSide::IndexToWorktree;
         let hunk_id = "hunk:query.sql:1:1:1:1:abc".to_owned();
@@ -52055,7 +52098,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
             shell.selected_workspace_id = Some(42);
@@ -52106,7 +52149,7 @@ mod tests {
     ) {
         let window = shell(cx);
         let workspace = window.root(cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update(cx, |shell, cx| {
             shell.selected_workspace_id = Some(7);
             shell.repository.select_workspace(Some(7));
@@ -52256,7 +52299,7 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
-        let (sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut commands) = ExecutorSender::channel(128);
 
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
