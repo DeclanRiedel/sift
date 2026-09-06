@@ -1,0 +1,2 @@
+// GPUI's Windows backend loads application icon resource 1.
+1 ICON "sift-icon.ico"

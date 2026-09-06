@@ -208,6 +208,7 @@ fn main() {
                     window_bounds: Some(window_bounds),
                     titlebar: Some(gpui::TitlebarOptions {
                         title: Some(format!("Sift · {platform}").into()),
+                        appears_transparent: cfg!(target_os = "windows"),
                         ..Default::default()
                     }),
                     app_id: Some(APP_ID.into()),

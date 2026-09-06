@@ -579,6 +579,7 @@ impl SiftWindow {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(gpui::TitlebarOptions {
                     title: Some(format!("Sift · {platform}").into()),
+                    appears_transparent: cfg!(target_os = "windows"),
                     ..Default::default()
                 }),
                 app_id: Some(crate::platform::APP_ID.into()),

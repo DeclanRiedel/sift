@@ -7671,6 +7671,7 @@ dependencies = [
 name = "sift-desktop"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "futures",
  "gpui",
  "gpui_platform",
