@@ -9197,6 +9197,7 @@ struct ActiveQuerySnapshot {
     saved_source: Option<SavedQuerySource>,
 }
 
+mod explorer_filter;
 mod query_history;
 
 pub struct WorkspaceShell {
@@ -16775,6 +16776,7 @@ impl WorkspaceShell {
 
     fn build_visible_connection_items(&self) -> Vec<ConnectionTreeItem> {
         let mut items = Vec::new();
+        let mut search_buffer = String::new();
         if self.show_favorite_database_objects {
             items.extend(
                 self.favorite_database_objects
@@ -16888,14 +16890,9 @@ impl WorkspaceShell {
                             if !self.schema_search_filters.contains(&group) {
                                 continue;
                             }
-                            let object_count = schema
-                                .objects
-                                .iter()
-                                .filter(|object| {
-                                    ObjectGroupKind::from_object_kind(object.kind) == group
-                                })
-                                .count();
-                            if object_count == 0 {
+                            if !schema.objects.iter().any(|object| {
+                                ObjectGroupKind::from_object_kind(object.kind) == group
+                            }) {
                                 continue;
                             }
                             items.push(ConnectionTreeItem {
@@ -16920,6 +16917,20 @@ impl WorkspaceShell {
                             for object in schema.objects.iter().filter(|object| {
                                 ObjectGroupKind::from_object_kind(object.kind) == group
                             }) {
+                                // Filter borrowed metadata before cloning profile, catalog,
+                                // schema, and object strings for each visible tree row.
+                                if self.connections_find_open
+                                    && !explorer_filter::matches_object(
+                                        &catalog.name,
+                                        &schema.name,
+                                        &object.name,
+                                        object.kind,
+                                        &self.connections_find_query,
+                                        &mut search_buffer,
+                                    )
+                                {
+                                    continue;
+                                }
                                 items.push(ConnectionTreeItem {
                                     depth: 5,
                                     action: ConnectionTreeAction::Object(DatabaseObjectTarget {

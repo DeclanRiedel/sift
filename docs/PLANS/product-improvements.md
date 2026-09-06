@@ -12,7 +12,8 @@ The canonical feature inventory remains the source of product feature status.
 - [x] Separate desktop semantic/query worker domains and task lifetimes; broader command dispatch remains incremental.
 - [x] Consolidate supported interaction paths around Vim.
 - [x] Extract metadata pool and SDK vault/automation/transfer APIs without interface changes; remaining domains are incremental.
-- [ ] Measure responsiveness and memory with existing large fixtures.
+- [x] Establish release responsiveness and benchmark-process memory baseline.
+- [ ] Meet measured frame/memory budgets across representative platforms.
 - [ ] Complete crash/restart/offline/auth-expiry recovery validation.
 - [x] Verify existing inspection UI and fix independent/nested join findings.
 - [ ] Complete foreign-key JOIN assistance, then explicit multi-hop path selection.
@@ -108,3 +109,9 @@ Trigger/type/generated-column/collation fidelity and SQL Server live round trips
 remain open. Sources used for catalog field semantics:
 [PostgreSQL pg_sequence](https://www.postgresql.org/docs/current/catalog-pg-sequence.html)
 and [SQL Server sys.sequences](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-sequences-transact-sql).
+
+Performance milestone: all 13 existing release benchmarks completed, followed by
+same-fixture schema-filter comparisons and a direct executable memory run.
+Schema-filter p95 fell from 34.505 to 9.593 ms; 120 Hz target remains unmet.
+Twenty existing connection/UI tests, the qualified/Unicode filter regression,
+and workspace Clippy passed. See [measured results](performance-measurements.md).

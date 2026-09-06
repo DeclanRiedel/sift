@@ -482,6 +482,9 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       saved locally. Query text continues to restore through its room document.
 - [ ] Meet measured typing, first-result, scroll, and memory budgets on large
       fixtures.
+      Local release baseline and schema-filter improvement are recorded in
+      [performance measurements](performance-measurements.md); full acceptance
+      remains open.
       **Partial:** the GPUI benchmark gate now covers large Vim documents,
       first-result paint, a retained 10,000-row grid, a 100,000-object schema
       filter, 20,000 Git status rows, query outlines, change-ledger rendering,
