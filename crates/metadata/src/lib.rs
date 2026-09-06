@@ -4094,10 +4094,8 @@ impl MetadataStore {
         Ok(document)
     }
 
-    /// Insert a pre-Phase-G legacy document row (`crdt_format_version = 0`,
-    /// `crdt_state` holding raw text bytes). Such rows are only ever produced by
-    /// databases created before the Loro migration; this seam lets the
-    /// server-side upgrader be exercised end-to-end.
+    /// Seed a raw-text document (`crdt_format_version = 0`) for end-to-end
+    /// migration tests. Normal document creation stores a Loro snapshot.
     #[doc(hidden)]
     pub fn insert_legacy_document(
         &self,

@@ -4,7 +4,7 @@
 //!
 //! The trait is object-safe: every method takes `&self`, returns a boxed
 //! future via `async_trait`, and returns a concrete protocol-crate type.
-//! That lets the server hold a `HashMap<Engine, Arc<dyn Driver>>` registry.
+//! The server registry holds built-in drivers behind `Arc<dyn Driver>`.
 //!
 //! Extension trait **declarations** live here (so the `as_pg` / `as_mssql`
 //! default downcasts on `Driver` can name them), but their **impls** live
@@ -20,8 +20,6 @@ use sift_protocol::{
 };
 use tokio::sync::mpsc;
 
-// Re-export so callers can use `sift_driver_api::TxMode` etc. without
-// reaching into the protocol crate by hand.
 pub use sift_protocol::{
     IsolationLevel, ObjectKind, ObjectPath, SchemaDepth, SchemaFilter, TxAccessMode,
 };
@@ -29,11 +27,6 @@ pub use sift_protocol::{
 /// Opaque connection handle. Concrete newtype over `Arc<ConnHandleInner>`
 /// so the trait stays object-safe (no associated type). The driver maps
 /// `id` to its own typed connection in its own internal map.
-///
-/// This does not carry a `Weak<dyn Driver>` backref. The server's registry
-/// is in scope wherever a ConnHandle is used; that suffices. The backref is
-/// a documented ADR-017 candidate for an explicit future pass if cross-task
-/// cancel/close without the registry in scope turns out to be a real need.
 #[derive(Clone)]
 pub struct ConnHandle(Arc<ConnHandleInner>);
 

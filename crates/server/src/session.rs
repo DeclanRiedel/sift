@@ -438,12 +438,10 @@ impl SessionStore {
             }));
     }
 
-    /// Access the cursor registry (for tests and future wiring).
     pub fn cursor_registry(&self) -> &CursorRegistry {
         &self.inner.cursors
     }
 
-    /// Access the schema cache (for tests, metrics, and config wiring).
     pub fn schema_cache(&self) -> &SchemaCache {
         &self.inner.schema_cache
     }
@@ -4208,8 +4206,8 @@ impl SessionStore {
 
     /// Build or reuse the per-connection schema-search index. Built from a
     /// shallow schema snapshot (objects) plus one bulk catalog query
-    /// (columns); cached with a TTL. Synchronous build means the index is
-    /// always `Ready` in v1 (background pre-warm is a future enhancement).
+    /// (columns); cached with a TTL. Cache misses await the build before
+    /// returning a `Ready` index.
     async fn search_index_for(
         &self,
         session_id: SessionId,

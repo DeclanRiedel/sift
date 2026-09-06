@@ -1,9 +1,8 @@
 #![recursion_limit = "512"]
 
-//! `sift-server` — workspace server. The server is the product; clients
-//! (desktop GPUI, future web) are thin stateless consumers of its HTTP API
-//! (ADR-001, ADR-002). Local-first by default (ADR-010): same binary runs
-//! in-process alongside the desktop client or as a daemon for hosted use.
+//! `sift-server` — server-owned workspace behavior exposed through HTTP and
+//! WebSocket APIs (ADR-001, ADR-002). The desktop supervises a separate local
+//! server process or connects to a remote server.
 
 pub mod authorization;
 pub mod autocomplete;

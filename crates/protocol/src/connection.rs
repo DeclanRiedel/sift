@@ -4,20 +4,16 @@ use crate::ProviderRef;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// All a driver needs to open a connection. The engine is NOT carried here
-/// — the caller (server registry, MockDriver tests) already knows which
-/// engine the spec is destined for, because drivers are registered per
-/// engine. Carrying `engine` here collided with `OpenConnectionRequest`'s
-/// `#[serde(flatten)]` of the spec; the envelope is the single source of
-/// truth for engine selection.
+/// Built-in driver connection parameters. The request envelope selects the
+/// provider; this spec does not duplicate that selection.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ConnectionSpec {
     pub host: String,
     pub port: Option<u16>,
     pub database: Option<String>,
     pub user: String,
-    /// Plaintext for now; later moved to OS keychain. The field stays —
-    /// the *source* changes.
+    /// Secret material for connection setup. Never log or persist it in metadata;
+    /// managed profiles resolve credentials through the server's secret store.
     pub password: Option<String>,
     pub ssl_mode: Option<SslMode>,
     pub engine_specific: Option<EngineConnectionSpec>,

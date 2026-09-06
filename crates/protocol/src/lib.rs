@@ -1,8 +1,7 @@
 //! `sift-protocol` — pure serde types, no I/O (ADR-004).
 //!
-//! The public contract consumed by the server, the desktop binary, and the
-//! future wasm web client. Holds operation enums, request/response structs,
-//! error codes, and serde models — and nothing else. No `tokio`, no
+//! The public contract shared by the server and its clients: operation enums,
+//! request/response structs, error codes, and serde models. No `tokio`, no
 //! networking, no filesystem.
 
 /// Current wire protocol version.

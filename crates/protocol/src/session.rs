@@ -1,7 +1,4 @@
-//! Server-facing protocol types: session and connection ids, open/info
-//! envelopes, and the execute response shape. These belong in `protocol`
-//! (pure serde, ADR-004) so the desktop binary, future wasm client, and
-//! the server all share them.
+//! Session and connection IDs, open/info envelopes, and execution responses.
 
 use serde::{Deserialize, Serialize};
 

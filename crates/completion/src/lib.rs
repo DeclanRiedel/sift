@@ -1,15 +1,12 @@
 //! `sift-completion` — SQL autocomplete engine.
 //!
-//! Pure Rust; no I/O, no tokio. Consumed by the server (via the HTTP
-//! autocomplete route) and by any future client that wants to compute
-//! completions locally from a cached `SchemaSnapshot`.
+//! Pure Rust; no I/O or Tokio. The server supplies SQL context and a schema
+//! snapshot to compute ranked completions.
 //!
 //! The public entry point is [`complete`]. Given a request (SQL + cursor
 //! byte offset), a schema snapshot, and the engine, it returns a
 //! [`CompletionResponse`] with ranked candidates.
 //!
-//! Design notes parallel the existing `crates/server/src/ddl.rs` server-side
-//! composition pattern — no new `Driver` trait method (ADR-017).
 
 use sift_protocol::completion::{CompletionRequest, CompletionResponse};
 use sift_protocol::{Engine, SchemaSnapshot};

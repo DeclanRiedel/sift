@@ -20,8 +20,8 @@ pub const TEXT_ROOT: &str = "text";
 
 /// Generate a durable, random, non-zero replica peer id from the OS RNG.
 ///
-/// A future durable client persists this alongside the replica snapshot and
-/// reuses it; two concurrent writers must never share one document's peer id.
+/// Persist this alongside the replica snapshot before reusing it; two concurrent
+/// writers must never share one document's peer id.
 pub fn random_peer_id() -> u64 {
     let mut buf = [0u8; 8];
     getrandom::getrandom(&mut buf).expect("OS RNG is available");

@@ -1,5 +1,5 @@
-//! Figment-backed configuration. Layered: defaults → `sift.toml` (if
-//! present) → `SIFT_` env vars. No file is required for local-mode startup.
+//! Development configuration: defaults → optional `sift.toml` → `SIFT_` env vars.
+//! Locked instances instead load policy through `instance_runtime`.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,8 +23,7 @@ pub enum Transport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum RuntimeMode {
-    /// Parent-owned foreground lifecycle. A future desktop may link the
-    /// runtime directly; the standalone binary remains foreground-owned.
+    /// Parent-owned foreground lifecycle.
     #[default]
     InProcess,
     /// Long-lived user/service process with singleton descriptor state.

@@ -4,7 +4,7 @@
 //! protocol: bootstrap or catch-up sync, chunk reassembly, local edits with
 //! stable update ids held until durable ACK, idempotent application of peer
 //! commits, and resync on runtime-epoch change. It does **not** persist replica
-//! state to disk; a future durable client must store a Loro snapshot together
+//! state to disk; callers must store a Loro snapshot together
 //! with its peer id before reusing that peer id.
 
 use std::collections::HashSet;
@@ -150,7 +150,7 @@ impl RoomReplica {
         ReplicaId(self.replica_id)
     }
 
-    /// Export the peer id plus snapshot for storage by a future durable client.
+    /// Export the peer id and snapshot together for durable storage.
     pub fn persist(&self) -> Result<(u64, Vec<u8>), DocError> {
         Ok((self.replica_id, self.replica.export_snapshot()?))
     }
