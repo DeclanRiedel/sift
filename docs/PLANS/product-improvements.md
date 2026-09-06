@@ -8,10 +8,10 @@ The canonical feature inventory remains the source of product feature status.
 - [x] Reconcile the historical desktop API checklist with canonical feature status.
 - [x] Bound active metadata connections and extract pool ownership.
 - [ ] Split workspace shell by feature state and event ownership.
-- [ ] Split HTTP handlers by domain while preserving authorization and audit.
-- [ ] Separate desktop executor domains and task lifetimes.
+- [x] Split HTTP handlers by domain while preserving authorization and audit.
+- [x] Separate desktop semantic/query worker domains and task lifetimes; broader command dispatch remains incremental.
 - [ ] Consolidate supported interaction paths around Vim.
-- [ ] Modularize metadata and SDK domain APIs without interface changes.
+- [x] Extract metadata pool and SDK vault/automation/transfer APIs without interface changes; remaining domains are incremental.
 - [ ] Measure responsiveness and memory with existing large fixtures.
 - [ ] Complete crash/restart/offline/auth-expiry recovery validation.
 - [ ] Surface unsafe mutation and Cartesian JOIN inspections.
@@ -48,3 +48,21 @@ release, simultaneous admission). Workspace Clippy passed. Full workspace tests
 are running; the HTTP error regression checks the typed `metadata_busy` 503.
 Generated incremental build artifacts were cleared to recover disk capacity;
 source files and dependency caches were retained.
+
+## Design: domain extraction
+
+Keep HTTP routing/middleware in `http.rs`, moving domain handlers together while
+retaining existing session services and authorization helpers. Route names,
+operation IDs, auditing, and query isolation remain unchanged. SDK domain modules
+continue implementing the same `Client`; this is a source organization change.
+Desktop semantic jobs and streamed queries get separate task-owner modules;
+semantic revision state stays private to its worker. Existing contract and
+stale-work tests validate the moves.
+
+Domain extraction: workspace Clippy and full workspace tests passed, including
+doc tests. HTTP execution, semantic, vault, repository, and automation handlers
+now live in domain modules. SDK vault/automation/transfer methods preserve their
+`Client` interface. Desktop semantic state and its six worker tests moved with
+the worker; streamed-query recovery lives separately. Workspace query history
+owns its state and event handling in one module. Broader shell decomposition
+remains open rather than claiming the entire shell has been redesigned.

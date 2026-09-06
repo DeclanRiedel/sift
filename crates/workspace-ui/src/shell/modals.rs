@@ -68,11 +68,11 @@ impl WorkspaceShell {
                             "Loading saved queries…".into()
                         }
                         CommandPaletteMode::SavedQueries => "No matching saved queries".into(),
-                        CommandPaletteMode::QueryHistory if self.query_history_loading => {
+                        CommandPaletteMode::QueryHistory if self.query_history.loading => {
                             "Loading query history…".into()
                         }
                         CommandPaletteMode::QueryHistory => self
-                            .query_history_error
+                            .query_history.error
                             .clone()
                             .unwrap_or_else(|| "No matching query history".into())
                             .into(),

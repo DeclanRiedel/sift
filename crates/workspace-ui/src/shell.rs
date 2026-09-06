@@ -9200,7 +9200,10 @@ struct ActiveQuerySnapshot {
     saved_source: Option<SavedQuerySource>,
 }
 
+mod query_history;
+
 pub struct WorkspaceShell {
+    query_history: query_history::QueryHistoryState,
     focus_handle: FocusHandle,
     connections_focus_handle: FocusHandle,
     collaboration_focus_handle: FocusHandle,
@@ -9292,12 +9295,6 @@ pub struct WorkspaceShell {
     show_recent_database_objects: bool,
     command_projection_revision: u64,
     command_projection_cache: RefCell<Option<(CommandProjectionKey, Arc<Vec<CommandSpec>>)>>,
-    query_history_focus_handle: FocusHandle,
-    query_history_input: Entity<TextInput>,
-    query_history_filter_open: bool,
-    query_history_status_filter: QueryHistoryStatusFilter,
-    query_history_selected: usize,
-    query_history_scroll_handle: UniformListScrollHandle,
     dark_theme: bool,
     show_frame_metrics: bool,
     navigation_hint_modifier_held: bool,
@@ -9516,12 +9513,6 @@ pub struct WorkspaceShell {
     pending_saved_query_metadata_update: Option<PendingSavedQueryMetadataUpdate>,
     saved_query_delete_confirmation: Option<sift_api_types::SavedQueryId>,
     pending_saved_query_deletion: Option<(String, sift_api_types::SavedQueryId)>,
-    query_history_rows: Vec<sift_api_types::QueryHistory>,
-    query_history_instance: Option<String>,
-    query_history_generation: u64,
-    query_history_loading: bool,
-    query_history_error: Option<String>,
-    query_history_next_cursor: Option<String>,
     result_cell_edit_target: Option<ResultCellEditTarget>,
     staged_result_edits: Vec<StagedResultEdit>,
     staged_result_deletes: Vec<StagedResultDelete>,
@@ -10130,9 +10121,10 @@ impl WorkspaceShell {
         )
         .detach();
         cx.observe(&query_history_input, |shell, _, cx| {
-            shell.query_history_selected = 0;
+            shell.query_history.selected = 0;
             shell
-                .query_history_scroll_handle
+                .query_history
+                .scroll_handle
                 .scroll_to_item(0, ScrollStrategy::Top);
             cx.notify();
         })
@@ -10236,9 +10228,9 @@ impl WorkspaceShell {
                     }
                     CommandPaletteMode::QueryHistory => {
                         let instance = shell.selected_instance_id.as_deref().unwrap_or("local");
-                        if shell.query_history_instance.as_deref() != Some(instance)
-                            && !shell.query_history_loading
-                            && shell.query_history_error.is_none()
+                        if shell.query_history.instance.as_deref() != Some(instance)
+                            && !shell.query_history.loading
+                            && shell.query_history.error.is_none()
                         {
                             shell.refresh_query_history(cx);
                         }
@@ -10456,6 +10448,10 @@ impl WorkspaceShell {
             explorer_view_name_input,
             explorer_view_menu_open: false,
             explorer_views,
+            query_history: query_history::QueryHistoryState::new(
+                query_history_input,
+                cx.focus_handle(),
+            ),
             grid_layouts,
             repository_filter_input,
             repository_filter_open: false,
@@ -10535,12 +10531,6 @@ impl WorkspaceShell {
             show_recent_database_objects,
             command_projection_revision: 0,
             command_projection_cache: RefCell::new(None),
-            query_history_focus_handle: cx.focus_handle(),
-            query_history_input,
-            query_history_filter_open: false,
-            query_history_status_filter: QueryHistoryStatusFilter::All,
-            query_history_selected: 0,
-            query_history_scroll_handle: UniformListScrollHandle::new(),
             dark_theme: theme.appearance == ThemeAppearance::Dark,
             show_frame_metrics: false,
             navigation_hint_modifier_held: false,
@@ -10746,12 +10736,6 @@ impl WorkspaceShell {
             pending_saved_query_metadata_update: None,
             saved_query_delete_confirmation: None,
             pending_saved_query_deletion: None,
-            query_history_rows: Vec::new(),
-            query_history_instance: None,
-            query_history_generation: 0,
-            query_history_loading: false,
-            query_history_error: None,
-            query_history_next_cursor: None,
             result_cell_edit_target: None,
             staged_result_edits: Vec::new(),
             staged_result_deletes: Vec::new(),
@@ -13187,51 +13171,7 @@ impl WorkspaceShell {
                 append,
                 page,
             } => {
-                if self.query_history_instance.as_deref() != Some(instance_id.as_str())
-                    || self.query_history_generation != generation
-                {
-                    return;
-                }
-                self.query_history_loading = false;
-                let selected_id = self
-                    .filtered_query_history(cx)
-                    .get(self.query_history_selected)
-                    .map(|entry| entry.id);
-                match page {
-                    Ok(page) => {
-                        if append {
-                            let known = self
-                                .query_history_rows
-                                .iter()
-                                .map(|entry| entry.id)
-                                .collect::<HashSet<_>>();
-                            self.query_history_rows.extend(
-                                page.items
-                                    .into_iter()
-                                    .filter(|entry| !known.contains(&entry.id)),
-                            );
-                        } else {
-                            self.query_history_rows = page.items;
-                        }
-                        self.query_history_next_cursor = page.next_cursor;
-                        self.query_history_error = None;
-                        self.query_history_selected = selected_id
-                            .and_then(|id| {
-                                self.filtered_query_history(cx)
-                                    .iter()
-                                    .position(|entry| entry.id == id)
-                            })
-                            .unwrap_or_else(|| {
-                                self.query_history_selected
-                                    .min(self.filtered_query_history(cx).len().saturating_sub(1))
-                            });
-                    }
-                    Err(message) => {
-                        self.query_history_error = Some(message.clone());
-                        self.record_runtime_error(None, "Load query history", message, cx);
-                    }
-                }
-                cx.notify();
+                self.apply_global_query_history(instance_id, generation, append, page, cx);
             }
             ExecutorEvent::ObjectDdlFailed { item_id, message } => {
                 if !self.pending_object_ddl.remove(&item_id) {
@@ -20849,7 +20789,7 @@ impl WorkspaceShell {
         if panel == LeftPanel::QueryHistory && self.left_dock.presentation.open {
             self.refresh_query_history(cx);
             self.focused_surface = WorkspaceSurface::QueryHistory;
-            self.query_history_focus_handle.focus(window, cx);
+            self.query_history.focus_handle.focus(window, cx);
         }
         if panel == LeftPanel::QueryOutline && self.left_dock.presentation.open {
             self.request_query_outline(cx);
@@ -26537,7 +26477,7 @@ impl WorkspaceShell {
             ),
             LeftPanel::QueryHistory => (
                 WorkspaceSurface::QueryHistory,
-                self.query_history_focus_handle.clone(),
+                self.query_history.focus_handle.clone(),
             ),
             LeftPanel::QueryOutline => (
                 WorkspaceSurface::QueryOutline,
@@ -26609,10 +26549,10 @@ impl WorkspaceShell {
                 self.query_outline_filter_open = false;
             }
             LeftPanel::QueryHistory
-                if self.query_history_filter_open
-                    && self.query_history_input.read(cx).text().trim().is_empty() =>
+                if self.query_history.filter_open
+                    && self.query_history.input.read(cx).text().trim().is_empty() =>
             {
-                self.query_history_filter_open = false;
+                self.query_history.filter_open = false;
             }
             LeftPanel::Collaboration
             | LeftPanel::Connections
@@ -31767,7 +31707,8 @@ impl WorkspaceShell {
             }
             CommandPaletteMode::QueryHistory => {
                 let mut matches = self
-                    .query_history_rows
+                    .query_history
+                    .rows
                     .iter()
                     .filter(|entry| !entry.sql_text.starts_with("sqlfp:"))
                     .cloned()
@@ -32405,282 +32346,6 @@ impl WorkspaceShell {
             "x" => self.execute_selected_query_outline(cx),
             "/" => self.open_query_outline_filter(window, cx),
             "r" => self.request_query_outline(cx),
-            "escape" => self.focus_active_pane(window, cx),
-            _ => return,
-        }
-        cx.stop_propagation();
-        cx.notify();
-    }
-
-    fn query_history_connection_name(&self, profile_id: Option<i64>) -> String {
-        let Some(profile_id) = profile_id else {
-            return "No connection".into();
-        };
-        self.lifecycle
-            .tenants
-            .iter()
-            .flat_map(|tenant| &tenant.connections)
-            .find(|connection| connection.id == profile_id)
-            .map(|connection| connection.name.clone())
-            .unwrap_or_else(|| format!("Connection {profile_id}"))
-    }
-
-    fn filtered_query_history(&self, cx: &App) -> Vec<sift_api_types::QueryHistory> {
-        let query = self
-            .query_history_input
-            .read(cx)
-            .text()
-            .trim()
-            .to_lowercase();
-        self.query_history_rows
-            .iter()
-            .filter(|entry| {
-                if !self.query_history_status_filter.matches(&entry.status) {
-                    return false;
-                }
-                if query.is_empty() {
-                    return true;
-                }
-                let status = match entry.status {
-                    sift_api_types::QueryStatus::Ok => "ok success",
-                    sift_api_types::QueryStatus::Error => "error failed",
-                    sift_api_types::QueryStatus::Canceled => "canceled cancelled",
-                };
-                entry.sql_text.to_lowercase().contains(&query)
-                    || entry
-                        .error_message
-                        .as_deref()
-                        .is_some_and(|message| message.to_lowercase().contains(&query))
-                    || self
-                        .query_history_connection_name(
-                            entry.connection_profile_id.map(|profile| profile.0),
-                        )
-                        .to_lowercase()
-                        .contains(&query)
-                    || status.contains(&query)
-                    || entry
-                        .started_at
-                        .format("%Y-%m-%d %H:%M:%S")
-                        .to_string()
-                        .contains(&query)
-            })
-            .cloned()
-            .collect()
-    }
-
-    fn request_global_query_history(&mut self, cursor: Option<String>, cx: &mut Context<Self>) {
-        if self.query_history_loading {
-            return;
-        }
-        let instance_id = self
-            .selected_instance_id
-            .clone()
-            .unwrap_or_else(|| "local".into());
-        let Some(sender) = &self.executor_sender else {
-            let message = "Query history executor is unavailable".to_owned();
-            self.query_history_error = Some(message.clone());
-            self.record_runtime_error(None, "Load query history", message, cx);
-            return;
-        };
-        let sent = sender
-            .send(ExecutorCommand::LoadGlobalHistory {
-                instance_id: instance_id.clone(),
-                generation: self.query_history_generation.wrapping_add(1),
-                cursor,
-            })
-            .is_ok();
-        if sent {
-            self.query_history_instance = Some(instance_id);
-            self.query_history_generation = self.query_history_generation.wrapping_add(1);
-            self.query_history_loading = true;
-            self.query_history_error = None;
-        } else {
-            let message = "Query history executor stopped".to_owned();
-            self.query_history_error = Some(message.clone());
-            self.record_runtime_error(None, "Load query history", message, cx);
-        }
-        cx.notify();
-    }
-
-    fn refresh_query_history(&mut self, cx: &mut Context<Self>) {
-        self.query_history_rows.clear();
-        self.query_history_loading = false;
-        self.query_history_next_cursor = None;
-        self.query_history_error = None;
-        self.query_history_selected = 0;
-        self.query_history_scroll_handle
-            .scroll_to_item(0, ScrollStrategy::Top);
-        self.request_global_query_history(None, cx);
-    }
-
-    fn open_query_history_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.active_left_panel = LeftPanel::QueryHistory;
-        self.left_dock.presentation.open = true;
-        self.query_history_filter_open = false;
-        self.query_history_input
-            .update(cx, |input, cx| input.set_text("", cx));
-        self.refresh_query_history(cx);
-        self.focused_surface = WorkspaceSurface::QueryHistory;
-        self.query_history_focus_handle.focus(window, cx);
-        self.fit_side_docks_to_width(self.window_presentation.bounds.width);
-        self.persist(cx);
-        cx.notify();
-    }
-
-    fn activate_selected_query_history(
-        &mut self,
-        action: QueryHistoryAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let entry = self
-            .filtered_query_history(cx)
-            .get(self.query_history_selected)
-            .cloned();
-        let Some(entry) = entry else {
-            return;
-        };
-        self.activate_query_history_entry(entry, action, window, cx);
-    }
-
-    fn activate_query_history_entry(
-        &mut self,
-        entry: sift_api_types::QueryHistory,
-        action: QueryHistoryAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if entry.sql_text.starts_with("sqlfp:") {
-            self.show_toast(
-                "This history entry stores only a query fingerprint".into(),
-                cx,
-            );
-            return;
-        }
-        if action == QueryHistoryAction::Run {
-            let historical_profile = entry.connection_profile_id.map(|profile| profile.0);
-            let active_profile = match self.connection_status {
-                ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
-                _ => None,
-            };
-            if historical_profile.is_some() && historical_profile != active_profile {
-                let connection = self.query_history_connection_name(historical_profile);
-                let message =
-                    format!("Connect to {connection} before rerunning this history entry");
-                self.query_history_error = Some(message.clone());
-                self.record_runtime_error(None, "Rerun query history", message, cx);
-                cx.notify();
-                return;
-            }
-        }
-        self.new_query(window, cx);
-        let Some(pane) = self.panes.get(self.active_pane).cloned() else {
-            return;
-        };
-        let Some(item_id) = pane.read(cx).active_item().map(|item| item.id) else {
-            return;
-        };
-        pane.update(cx, |pane, cx| {
-            if let Some(editor) = pane.editor(item_id) {
-                editor.update(cx, |editor, cx| {
-                    editor.replace_text_from_owner(&entry.sql_text, cx)
-                });
-            }
-            if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
-                item.dirty = true;
-            }
-            cx.notify();
-        });
-        self.persist(cx);
-        if action == QueryHistoryAction::Save {
-            self.save_active_query_with_profile(
-                entry.connection_profile_id.map(|profile| profile.0),
-                cx,
-            );
-        } else if action == QueryHistoryAction::Run {
-            self.execute_database_item(item_id, entry.sql_text, cx);
-        }
-    }
-
-    fn open_selected_query_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.activate_selected_query_history(QueryHistoryAction::Open, window, cx);
-    }
-
-    fn move_query_history_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let last = self.filtered_query_history(cx).len().saturating_sub(1);
-        self.query_history_selected = self
-            .query_history_selected
-            .saturating_add_signed(delta)
-            .min(last);
-        self.query_history_scroll_handle
-            .scroll_to_item(self.query_history_selected, ScrollStrategy::Nearest);
-        cx.notify();
-    }
-
-    fn open_query_history_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.query_history_filter_open = true;
-        self.query_history_input.focus_handle(cx).focus(window, cx);
-        cx.notify();
-    }
-
-    fn close_query_history_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.query_history_filter_open = false;
-        self.query_history_input
-            .update(cx, |input, cx| input.set_text("", cx));
-        self.query_history_focus_handle.focus(window, cx);
-        cx.notify();
-    }
-
-    fn set_query_history_status_filter(
-        &mut self,
-        filter: QueryHistoryStatusFilter,
-        cx: &mut Context<Self>,
-    ) {
-        self.query_history_status_filter = filter;
-        self.query_history_selected = 0;
-        self.query_history_scroll_handle
-            .scroll_to_item(0, ScrollStrategy::Top);
-        cx.notify();
-    }
-
-    fn handle_query_history_key(
-        &mut self,
-        event: &gpui::KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.query_history_filter_open {
-            return;
-        }
-        let modifiers = event.keystroke.modifiers;
-        if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
-            return;
-        }
-        if modifiers.shift {
-            match event.keystroke.key.as_str() {
-                "l" | "L" => {
-                    if let Some(cursor) = self.query_history_next_cursor.clone() {
-                        self.request_global_query_history(Some(cursor), cx);
-                    }
-                }
-                "r" | "R" => self.refresh_query_history(cx),
-                _ => return,
-            }
-            cx.stop_propagation();
-            cx.notify();
-            return;
-        }
-        match event.keystroke.key.as_str() {
-            "j" | "down" => self.move_query_history_selection(1, cx),
-            "k" | "up" => self.move_query_history_selection(-1, cx),
-            "enter" => self.open_selected_query_history(window, cx),
-            "/" => self.open_query_history_filter(window, cx),
-            "r" => self.activate_selected_query_history(QueryHistoryAction::Run, window, cx),
-            "s" => self.activate_selected_query_history(QueryHistoryAction::Save, window, cx),
-            "1" => self.set_query_history_status_filter(QueryHistoryStatusFilter::All, cx),
-            "2" => self.set_query_history_status_filter(QueryHistoryStatusFilter::Success, cx),
-            "3" => self.set_query_history_status_filter(QueryHistoryStatusFilter::Failed, cx),
-            "4" => self.set_query_history_status_filter(QueryHistoryStatusFilter::Canceled, cx),
             "escape" => self.focus_active_pane(window, cx),
             _ => return,
         }
@@ -36641,7 +36306,7 @@ impl WorkspaceShell {
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::QueryHistory,
                 |dock| {
                     dock.key_context("SiftQueryHistory")
-                        .track_focus(&self.query_history_focus_handle)
+                        .track_focus(&self.query_history.focus_handle)
                         .on_key_down(cx.listener(WorkspaceShell::handle_query_history_key))
                 },
             )
@@ -38754,7 +38419,7 @@ impl WorkspaceShell {
                                             )
                                             .square(px(24.))
                                             .icon_size(12.)
-                                            .disabled(self.query_history_loading)
+                                            .disabled(self.query_history.loading)
                                             .on_click(cx.listener(|shell, _, _, cx| {
                                                 shell.refresh_query_history(cx)
                                             })),
@@ -38771,7 +38436,7 @@ impl WorkspaceShell {
                                 .items_center()
                                 .gap_1()
                                 .children(QueryHistoryStatusFilter::ALL.map(|filter| {
-                                    let selected = self.query_history_status_filter == filter;
+                                    let selected = self.query_history.status_filter == filter;
                                     div()
                                         .id(format!(
                                             "query-history-status-filter-{}",
@@ -38814,7 +38479,7 @@ impl WorkspaceShell {
                                 .child(format!("{} failed", performance.failures))
                                 .when(performance.timed_runs == 0, |row| row.opacity(0.55)),
                         )
-                        .when(self.query_history_filter_open, |panel| {
+                        .when(self.query_history.filter_open, |panel| {
                             panel.child(
                                 div()
                                     .debug_selector(|| "query-history-filter-bar".into())
@@ -38841,7 +38506,7 @@ impl WorkspaceShell {
                                             .flex_1()
                                             .min_w_0()
                                             .overflow_hidden()
-                                            .child(self.query_history_input.clone()),
+                                            .child(self.query_history.input.clone()),
                                     )
                                     .child(
                                         div()
@@ -38851,7 +38516,7 @@ impl WorkspaceShell {
                                     ),
                             )
                         })
-                        .children(self.query_history_error.as_ref().map(|message| {
+                        .children(self.query_history.error.as_ref().map(|message| {
                             Self::dock_panel_state(
                                 "query-history-error-state",
                                 message.clone(),
@@ -38859,7 +38524,7 @@ impl WorkspaceShell {
                             )
                         }))
                         .when(
-                            self.query_history_loading && self.query_history_rows.is_empty(),
+                            self.query_history.loading && self.query_history.rows.is_empty(),
                             |panel| {
                                 panel.child(Self::dock_panel_state(
                                     "query-history-loading-state",
@@ -38869,9 +38534,9 @@ impl WorkspaceShell {
                             },
                         )
                         .when(
-                            !self.query_history_loading
-                                && self.query_history_rows.is_empty()
-                                && self.query_history_error.is_none(),
+                            !self.query_history.loading
+                                && self.query_history.rows.is_empty()
+                                && self.query_history.error.is_none(),
                             |panel| {
                                 panel.child(Self::dock_panel_state(
                                     "query-history-empty-state",
@@ -38881,7 +38546,7 @@ impl WorkspaceShell {
                             },
                         )
                         .when(
-                            !self.query_history_rows.is_empty() && entry_count == 0,
+                            !self.query_history.rows.is_empty() && entry_count == 0,
                             |panel| {
                                 panel.child(Self::dock_panel_state(
                                     "query-history-no-match-state",
@@ -38901,7 +38566,7 @@ impl WorkspaceShell {
                                             entries.get(index).cloned().map(|entry| (index, entry))
                                         })
                                         .map(|(index, entry)| {
-                                            let selected = index == shell.query_history_selected;
+                                            let selected = index == shell.query_history.selected;
                                             let redacted = entry.sql_text.starts_with("sqlfp:");
                                             let sql = if redacted {
                                                 "Query text not stored".to_owned()
@@ -38958,12 +38623,12 @@ impl WorkspaceShell {
                                                                       event: &gpui::MouseDownEvent,
                                                                       window,
                                                                       cx| {
-                                                                    shell.query_history_selected =
+                                                                    shell.query_history.selected =
                                                                         index;
                                                                     shell.focused_surface =
                                                                         WorkspaceSurface::QueryHistory;
                                                                     shell
-                                                                        .query_history_focus_handle
+                                                                        .query_history.focus_handle
                                                                         .focus(window, cx);
                                                                     if event.click_count >= 2 {
                                                                         shell
@@ -39027,7 +38692,7 @@ impl WorkspaceShell {
                             .flex_1()
                             .min_h_0()
                             .w_full()
-                            .track_scroll(&self.query_history_scroll_handle),
+                            .track_scroll(&self.query_history.scroll_handle),
                         )
                         .when(self.navigation_hints_visible(), |panel| panel.child(
                             div()
@@ -49663,20 +49328,22 @@ mod tests {
                 cx,
             );
             shell
-                .query_history_input
+                .query_history
+                .input
                 .update(cx, |input, cx| input.set_text("warehouse", cx));
             assert_eq!(shell.filtered_query_history(cx).len(), 1);
             shell
-                .query_history_input
+                .query_history
+                .input
                 .update(cx, |input, cx| input.set_text("failed", cx));
             assert_eq!(shell.filtered_query_history(cx).len(), 1);
         });
         cx.simulate_keystrokes("/");
-        workspace.read_with(&cx, |shell, _| assert!(shell.query_history_filter_open));
+        workspace.read_with(&cx, |shell, _| assert!(shell.query_history.filter_open));
         cx.simulate_keystrokes("escape");
         workspace.read_with(&cx, |shell, cx| {
-            assert!(!shell.query_history_filter_open);
-            assert!(shell.query_history_input.read(cx).text().is_empty());
+            assert!(!shell.query_history.filter_open);
+            assert!(shell.query_history.input.read(cx).text().is_empty());
         });
         cx.simulate_keystrokes("2");
         workspace.read_with(&cx, |shell, cx| {
@@ -49751,7 +49418,7 @@ mod tests {
                 profile_id: 2,
                 name: "Warehouse".into(),
             };
-            shell.query_history_error = None;
+            shell.query_history.error = None;
             cx.notify();
         });
         assert!(commands.try_recv().is_err());
@@ -49814,7 +49481,7 @@ mod tests {
                 cx,
             );
             assert_eq!(
-                shell.query_history_error.as_deref(),
+                shell.query_history.error.as_deref(),
                 Some("history permission denied")
             );
             assert!(shell.global_problems.last().is_some_and(|problem| {
@@ -50787,9 +50454,9 @@ mod tests {
 
         workspace.update(&mut cx, |shell, cx| {
             shell.active_left_panel = LeftPanel::QueryHistory;
-            shell.query_history_rows.clear();
-            shell.query_history_loading = false;
-            shell.query_history_error = None;
+            shell.query_history.rows.clear();
+            shell.query_history.loading = false;
+            shell.query_history.error = None;
             cx.notify();
         });
         cx.run_until_parked();
