@@ -259,6 +259,26 @@ fn render_change(
         .as_ref()
         .or(change.object_before.as_ref())
         .ok_or_else(|| MigrationRenderError::InvalidChangeShape(change.id.clone()))?;
+    // A catalog may be useful for navigation while lacking a lossless migration
+    // projection. Refuse changes to the marked object or any of its children.
+    for graph in [from_nodes, to_nodes] {
+        let mut current = graph.get(&node.id).copied();
+        for _ in 0..=graph.len() {
+            let Some(candidate) = current else { break };
+            if candidate
+                .extra
+                .get("migration_unsupported")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                return unsupported(change, node);
+            }
+            current = candidate
+                .parent_id
+                .as_ref()
+                .and_then(|id| graph.get(id).copied());
+        }
+    }
     match change.kind {
         SchemaChangeKind::Unknown => unsupported(change, node),
         SchemaChangeKind::Alter => alter_sql(engine, change, from_nodes, to_nodes).map(Some),
@@ -282,7 +302,8 @@ fn create_sql(
             "CREATE SCHEMA {};",
             crate::ddl::quote_ident(&node.name, engine)
         )),
-        CatalogNodeKind::Table | CatalogNodeKind::PartitionedTable => {
+        CatalogNodeKind::PartitionedTable => unsupported(change, node),
+        CatalogNodeKind::Table => {
             let columns = graph
                 .data
                 .nodes
@@ -695,6 +716,15 @@ fn render_column(
     let CatalogNodeDetails::Column { column } = &node.details else {
         return unsupported(change, node);
     };
+    if column.auto_increment
+        || column
+            .facets
+            .postgres
+            .as_ref()
+            .is_some_and(|facets| facets.is_identity)
+    {
+        return unsupported(change, node);
+    }
     let mut sql = format!(
         "{} {}",
         crate::ddl::quote_ident(&node.name, engine),
@@ -979,6 +1009,45 @@ mod tests {
             plan.groups[0].statements[0].sql,
             "ALTER TABLE \"public\".\"events\" ALTER COLUMN \"id\" TYPE text, ALTER COLUMN \"id\" DROP NOT NULL;"
         );
+    }
+
+    #[test]
+    fn native_fidelity_fence_rejects_changes_to_child_columns() {
+        let mut from = graph(true);
+        from.data
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == CatalogNodeKind::Table)
+            .unwrap()
+            .extra
+            .insert("migration_unsupported".into(), true.into());
+        let mut to = from.clone();
+        let node = to
+            .data
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == CatalogNodeKind::Column)
+            .unwrap();
+        let CatalogNodeDetails::Column { column } = &mut node.details else {
+            unreachable!()
+        };
+        column.nullable = Nullability::Nullable;
+        let diff = sift_core::schema_diff::diff_catalogs(source(), &from, source(), &to, &[], None)
+            .unwrap();
+        for engine in [Engine::Postgres, Engine::SqlServer] {
+            assert!(matches!(
+                render_plan(
+                    engine,
+                    &diff,
+                    &from,
+                    &to,
+                    &[],
+                    CatalogRevision(1),
+                    &MigrationOptions::default()
+                ),
+                Err(MigrationRenderError::UnsupportedChange { .. })
+            ));
+        }
     }
 
     #[test]

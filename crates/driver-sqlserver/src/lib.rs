@@ -202,10 +202,11 @@ impl MssqlDriver {
     }
 
     async fn put_conn(&self, c: &ConnHandle, conn: MssqlConn) {
-        if self.inner.invalidated.contains(&c.id()) {
+        let mut conns = self.inner.conns.lock().await;
+        if self.inner.invalidated.contains(&c.id()) || !self.inner.specs.contains_key(&c.id()) {
             drop(conn);
         } else {
-            self.inner.conns.lock().await.insert(c.id(), conn);
+            conns.insert(c.id(), conn);
         }
     }
 }
@@ -471,6 +472,7 @@ impl Driver for MssqlDriver {
         for task in aborted {
             let _ = task.await;
         }
+        self.inner.specs.remove(&c.id());
         self.inner.conns.lock().await.remove(&c.id());
         self.inner.conn_pool_key.remove(&c.id());
         self.inner.invalidated.remove(&c.id());
@@ -486,6 +488,56 @@ impl Driver for MssqlDriver {
 
 #[async_trait]
 impl MssqlExt for MssqlDriver {
+    async fn estimated_plan(&self, c: ConnHandle, sql: String) -> Result<String, DriverError> {
+        let mut conn = self.take_conn(&c).await?;
+        let captured = async {
+            conn.simple_query("SET SHOWPLAN_XML ON")
+                .await
+                .map_err(ms_err)?
+                .into_results()
+                .await
+                .map_err(ms_err)?;
+            let mut rows = conn.simple_query(sql).await.map_err(ms_err)?;
+            let mut plan = None;
+            while let Some(item) = rows.next().await {
+                if let QueryItem::Row(row) = item.map_err(ms_err)? {
+                    let text = row.try_get::<&str, _>(0).map_err(ms_err)?;
+                    if let Some(text) = text {
+                        if text.len() > 16 * 1024 * 1024 {
+                            return Err(DriverError::new(
+                                Code::ResultTooLarge,
+                                "estimated plan exceeds 16 MiB",
+                            ));
+                        }
+                        if text.contains("ShowPlanXML") {
+                            plan = Some(text.to_owned());
+                        }
+                    }
+                }
+            }
+            plan.ok_or_else(|| {
+                DriverError::new(Code::DriverInternal, "SHOWPLAN_XML returned no plan")
+            })
+        }
+        .await;
+        let restored = async {
+            conn.simple_query("SET SHOWPLAN_XML OFF")
+                .await
+                .map_err(ms_err)?
+                .into_results()
+                .await
+                .map_err(ms_err)?;
+            Ok::<_, DriverError>(())
+        }
+        .await;
+        if let Err(error) = restored {
+            self.inner.invalidated.insert(c.id());
+            return Err(error);
+        }
+        self.put_conn(&c, conn).await;
+        captured
+    }
+
     async fn observe_progress(
         &self,
         c: ConnHandle,
@@ -589,7 +641,13 @@ async fn run_query(
             return Ok::<_, DriverError>(());
         }
 
-        let mut stream = conn.query(req.sql, &param_refs).await.map_err(ms_err)?;
+        // Unparameterized batches must use the session's SQL batch channel.
+        // sp_executesql gives SET and temporary-object creation a nested scope.
+        let mut stream = if param_refs.is_empty() {
+            conn.simple_query(req.sql).await.map_err(ms_err)?
+        } else {
+            conn.query(req.sql, &param_refs).await.map_err(ms_err)?
+        };
         let mut batch = Vec::with_capacity(ROW_BATCH_SIZE);
         while let Some(item) = stream.next().await {
             match item.map_err(ms_err)? {
@@ -1454,6 +1512,30 @@ WHERE t.is_user_defined = 1 AND t.is_table_type = 0
         }
     }
 
+    let fidelity_rows = conn.query(r#"
+SELECT s.name,t.name,CONVERT(varchar(64),HASHBYTES('SHA2_256',
+    (SELECT c.name,c.is_identity,c.is_computed,c.collation_name,c.max_length,c.precision,c.scale,
+        cc.definition,cc.is_persisted,CONVERT(nvarchar(100),ic.seed_value) seed_value,
+        CONVERT(nvarchar(100),ic.increment_value) increment_value
+     FROM sys.columns c LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id
+     LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
+     WHERE c.object_id=t.object_id ORDER BY c.column_id FOR JSON PATH)),2)
+FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id
+WHERE EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id=t.object_id AND
+    (c.is_identity=1 OR c.is_computed=1 OR c.collation_name<>CONVERT(nvarchar(128),DATABASEPROPERTYEX(DB_NAME(),'Collation'))))
+"#, &[]).await.map_err(ms_err)?.into_first_result().await.map_err(ms_err)?;
+    for row in fidelity_rows {
+        let key = (mssql_string(&row, 0)?, mssql_string(&row, 1)?);
+        if let Some(index) = object_nodes.get(&key).and_then(|id| node_indexes.get(id)) {
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+            graph.nodes[*index]
+                .extra
+                .insert("native_column_shape".into(), mssql_string(&row, 2)?.into());
+        }
+    }
+
     let rows = conn
         .query(
             r#"
@@ -1985,6 +2067,9 @@ fn ms_value(row: &tiberius::Row, idx: usize) -> Value {
                 Value::TimestampTz(v.into())
             })
         }
+        ColumnType::Xml => ms_decode::<&tiberius::xml::XmlData>(row, idx, ty, |value| {
+            Value::Text(value.to_string())
+        }),
         ColumnType::SSVariant | ColumnType::Udt => Value::Native {
             provider_id: Engine::SqlServer.provider_id(),
             type_name: format!("{ty:?}"),

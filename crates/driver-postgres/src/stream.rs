@@ -19,13 +19,29 @@ use crate::{pg_err, PgDriver};
 const ROW_BATCH_SIZE: usize = 128;
 const MAX_DECODE_WARNINGS: usize = 100;
 
+#[derive(Clone)]
+struct PageSender {
+    sender: mpsc::Sender<Page>,
+    canceled: tokio_util::sync::CancellationToken,
+}
+
+impl PageSender {
+    async fn send(&self, page: Page) -> Result<(), ()> {
+        tokio::select! {
+            biased;
+            _ = self.canceled.cancelled() => Err(()),
+            result = self.sender.send(page) => result.map_err(|_| ()),
+        }
+    }
+}
+
 struct QueryJob {
     inner: Arc<PgDriverInner>,
     conn_id: u64,
     slot_kind: SlotKind,
     conn: PooledConn,
     cursor_id_num: u64,
-    page_tx: mpsc::Sender<Page>,
+    page_tx: PageSender,
     sql: String,
     params: Vec<Value>,
 }
@@ -45,6 +61,11 @@ pub(crate) async fn execute_query(
     // driver-side production to HTTP/WS consumption without buffering large
     // result sets in memory.
     let (page_tx, page_rx) = mpsc::channel::<Page>(1);
+    let cancel_output = tokio_util::sync::CancellationToken::new();
+    let page_tx = PageSender {
+        sender: page_tx,
+        canceled: cancel_output.clone(),
+    };
 
     // Register before spawning so cancel() racing the query's start still
     // finds the entry, and so close() can abort/drain cursors belonging to
@@ -57,6 +78,7 @@ pub(crate) async fn execute_query(
         .get(&conn_id)
         .map_or(0, |pid| *pid);
     let progress_kind = crate::progress::classify(&req.sql);
+    let (completed_tx, completed) = tokio::sync::watch::channel(false);
     driver.inner.cursors.insert(
         cursor_id_num,
         CursorEntry {
@@ -64,6 +86,9 @@ pub(crate) async fn execute_query(
             backend_pid,
             progress_kind,
             cancel_token,
+            cancel_gate: Arc::new(tokio::sync::Mutex::new(())),
+            cancel_output,
+            completed,
             task: std::sync::Mutex::new(None),
         },
     );
@@ -71,16 +96,20 @@ pub(crate) async fn execute_query(
     let inner = Arc::clone(&driver.inner);
     let ExecuteRequest { sql, params, .. } = req;
 
-    let task = tokio::spawn(run_query(QueryJob {
-        inner,
-        conn_id,
-        slot_kind,
-        conn,
-        cursor_id_num,
-        page_tx,
-        sql,
-        params,
-    }));
+    let task = tokio::spawn(async move {
+        run_query(QueryJob {
+            inner,
+            conn_id,
+            slot_kind,
+            conn,
+            cursor_id_num,
+            page_tx,
+            sql,
+            params,
+        })
+        .await;
+        let _ = completed_tx.send(true);
+    });
     if let Some(entry) = driver.inner.cursors.get(&cursor_id_num) {
         *entry.task.lock().unwrap() = Some(task);
     }
@@ -363,17 +392,42 @@ fn params_to_pg(params: Vec<Value>) -> Result<Vec<Box<dyn ToSql + Sync + Send>>,
             Value::Uuid(v) => Box::new(v),
             Value::Json(v) => Box::new(v),
             Value::Native { display_text, .. } => Box::new(PgNativeText(display_text)),
-            Value::Interval(_) => {
-                return Err(DriverError::new(
-                    Code::UnsupportedForEngine,
-                    "parameter type is not supported by Postgres driver yet",
-                )
-                .with_engine(sift_protocol::Engine::Postgres));
+            Value::Interval(value) => {
+                let micros = value
+                    .num_microseconds()
+                    .filter(|micros| chrono::Duration::microseconds(*micros) == value)
+                    .ok_or_else(|| {
+                        DriverError::new(
+                    Code::InvalidParameterValue,
+                    "PostgreSQL interval parameters require an exact i64 microsecond duration",
+                ).with_engine(sift_protocol::Engine::Postgres)
+                    })?;
+                Box::new(PgInterval(micros))
             }
         };
         out.push(param);
     }
     Ok(out)
+}
+
+#[derive(Debug)]
+struct PgInterval(i64);
+
+impl ToSql for PgInterval {
+    fn to_sql(
+        &self,
+        _: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.extend_from_slice(&self.0.to_be_bytes());
+        out.extend_from_slice(&0i32.to_be_bytes()); // days
+        out.extend_from_slice(&0i32.to_be_bytes()); // calendar months
+        Ok(IsNull::No)
+    }
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::INTERVAL
+    }
+    tokio_postgres::types::to_sql_checked!();
 }
 
 #[derive(Debug)]
@@ -665,6 +719,14 @@ async fn finish(
     conn: PooledConn,
     cursor_id_num: u64,
 ) {
+    let gate = inner
+        .cursors
+        .get(&cursor_id_num)
+        .map(|entry| Arc::clone(&entry.cancel_gate));
+    let _guard = match gate.as_ref() {
+        Some(gate) => Some(gate.lock().await),
+        None => None,
+    };
     if inner.cursors.remove(&cursor_id_num).is_some() {
         inner.restore(conn_id, slot_kind, conn).await;
     } else {
@@ -744,6 +806,22 @@ mod tests {
         assert!(has_multiple_statements(
             "CREATE FUNCTION f() RETURNS void AS $$ BEGIN NULL; END $$ LANGUAGE plpgsql; SELECT 1"
         ));
+    }
+
+    #[test]
+    fn interval_binding_rejects_lossy_precision_and_wrong_types() {
+        assert!(params_to_pg(vec![Value::Interval(chrono::Duration::nanoseconds(1))]).is_err());
+        let params =
+            params_to_pg(vec![Value::Interval(chrono::Duration::microseconds(-17))]).unwrap();
+        let mut bytes = BytesMut::new();
+        params[0]
+            .to_sql_checked(&Type::INTERVAL, &mut bytes)
+            .unwrap();
+        assert_eq!(&bytes[..8], &(-17i64).to_be_bytes());
+        assert_eq!(&bytes[8..], &[0; 8]);
+        assert!(params[0]
+            .to_sql_checked(&Type::INT8, &mut BytesMut::new())
+            .is_err());
     }
 
     #[test]

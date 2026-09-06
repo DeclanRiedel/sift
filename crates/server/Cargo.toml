@@ -86,6 +86,8 @@ stress-1m = []
 # stays green; local invocation follows the same instructions as
 # `sift-driver-postgres --features live-pg`.
 live-pg = []
+# Enables the SQL Server native DDL acceptance fixtures.
+live-mssql = []
 
 [dev-dependencies]
 sift-driver-api = { workspace = true, features = ["mock"] }

@@ -90,6 +90,26 @@ regression passed. Workspace Clippy passed for the semantic change.
 
 ## Design: sequence DDL
 
+Graduation follow-up: object DDL will read native catalog definitions directly
+through existing isolated Driver execution. This preserves type modifiers,
+identity configuration, computed expressions, collations and index definitions
+without extending the public schema solely for export. Trigger/type dispatch is
+added to existing object kinds. Complex table shapes outside the export contract
+must return UnsupportedForEngine; schema-diff/migration fidelity remains separately
+gated where their metadata cannot represent a shape. No protocol bump is needed
+for this server-only DDL implementation; SQLite public-shape changes remain gated.
+
+Live acceptance also exposed SQL Server session-scope execution and SHOWPLAN
+ownership bugs. Unparameterized queries use the native SQL batch channel, keeping
+SET and temporary objects at session scope. Estimated plan capture moves into a
+default-unsupported MssqlExt method that holds the physical connection through
+SHOWPLAN on/query/off; concurrent commands cannot inherit that state. The server
+still authorizes and isolates the operation. Parameterized estimates declare
+local variable types without embedding values and return an explicit no-sniffing
+warning. Only one parsed query/DML statement is accepted for explain; failures
+invalidate uncertain connections. Core Driver signatures and response shape stay
+unchanged. SQL Server actual plans remain explicitly unsupported for this scope.
+
 Generate sequence definitions through existing Driver execution and server-owned
 DDL isolation. Read configured type, start, increment, bounds, cycle, and cache
 from engine catalogs. Do not advance the sequence or export its runtime counter.

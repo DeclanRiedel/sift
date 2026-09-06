@@ -44,11 +44,42 @@ pub(crate) async fn explain_as(
     operation: sift_protocol::OperationKind,
 ) -> ApiResult<ExplainResponse> {
     store.authorize_connection_operation(session_id, conn_id, operation, Some(&req.sql), &[])?;
+
     let engine = store.conn_entry(session_id, conn_id)?.driver.engine();
+    validate_explain_sql(engine, &req.sql)?;
     match engine {
         Engine::Postgres => explain_pg(store, session_id, conn_id, req, operation).await,
         Engine::SqlServer => explain_mssql(store, session_id, conn_id, req, operation).await,
     }
+}
+
+fn validate_explain_sql(engine: Engine, sql: &str) -> ApiResult<()> {
+    let dialect: Box<dyn sqlparser::dialect::Dialect> = match engine {
+        Engine::Postgres => Box::new(sqlparser::dialect::PostgreSqlDialect {}),
+        Engine::SqlServer => Box::new(sqlparser::dialect::MsSqlDialect {}),
+    };
+    let statements = sqlparser::parser::Parser::parse_sql(dialect.as_ref(), sql).map_err(|_| {
+        ApiError::BadRequest("explain requires a supported single query or DML statement".into())
+    })?;
+    use sqlparser::ast::Statement;
+    if statements.len() != 1
+        || !matches!(
+            statements.first(),
+            Some(
+                Statement::Query(_)
+                    | Statement::Insert(_)
+                    | Statement::Update { .. }
+                    | Statement::Delete(_)
+                    | Statement::Merge { .. }
+            )
+        )
+    {
+        return Err(ApiError::BadRequest(
+            "explain requires a single query or DML statement".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 async fn explain_pg(
@@ -65,7 +96,7 @@ async fn explain_pg(
     };
     let sql = format!("{prefix}{}", req.sql);
 
-    let resp = if req.analyze && !is_plain_read(&req.sql) {
+    let resp = if req.analyze {
         // Running the statement for real would commit side effects; wrap in a
         // transaction that always rolls back.
         let mut rows = run_seq_rollback(
@@ -110,7 +141,7 @@ async fn explain_mssql(
     session_id: SessionId,
     conn_id: ConnectionId,
     req: &ExplainRequest,
-    operation: sift_protocol::OperationKind,
+    _operation: sift_protocol::OperationKind,
 ) -> ApiResult<ExplainResponse> {
     if req.analyze {
         return Err(ApiError::Driver(
@@ -122,49 +153,112 @@ async fn explain_mssql(
             .with_engine(Engine::SqlServer),
         ));
     }
-    // `SET SHOWPLAN_XML ON` must be its own batch; once on, the next statement
-    // returns its plan XML instead of executing. Turn it back off afterwards so
-    // the (single-session) connection returns data again.
-    store
-        .execute_http_as(
-            session_id,
-            exec(conn_id, "SET SHOWPLAN_XML ON".into(), vec![], None),
-            operation,
-        )
-        .await?;
-    let plan_resp = store
-        .execute_http_as(
-            session_id,
-            exec(conn_id, req.sql.clone(), req.params.clone(), None),
-            operation,
-        )
+    store.validate_execute_tx(session_id, conn_id, None)?;
+    let sql = mssql_plan_batch(&req.sql, &req.params)?;
+    let entry = store.conn_entry(session_id, conn_id)?;
+    let driver = entry
+        .driver
+        .legacy_driver()
+        .cloned()
+        .ok_or_else(|| ApiError::BadRequest("native SQL Server provider required".into()))?;
+    let handle = entry
+        .handle
+        .builtin()
+        .cloned()
+        .ok_or_else(|| ApiError::BadRequest("native SQL Server connection required".into()))?;
+    let resources = store.reserve_query_resources(&entry)?;
+    let (_, max_bytes) = store.result_limits();
+    let captured = store
+        .run_bounded("estimated plan", async move {
+            let _resources = resources;
+            driver
+                .as_mssql()
+                .ok_or_else(|| {
+                    DriverError::new(
+                        Code::UnsupportedForEngine,
+                        "SQL Server plan backend unavailable",
+                    )
+                })?
+                .estimated_plan(handle, sql)
+                .await
+        })
         .await;
-    let off = store
-        .execute_http_as(
-            session_id,
-            exec(conn_id, "SET SHOWPLAN_XML OFF".into(), vec![], None),
-            operation,
-        )
-        .await;
-    if let Err(e) = off {
-        tracing::warn!(error = %e, "failed to disable SHOWPLAN_XML after explain");
+    let xml = match captured {
+        Ok(xml) => xml,
+        Err(error) => {
+            let _ = store.close_connection(session_id, conn_id).await;
+            return Err(error);
+        }
+    };
+    if xml.len() > max_bytes {
+        return Err(ApiError::Driver(DriverError::new(
+            Code::ResultTooLarge,
+            "estimated plan exceeds result byte limit",
+        )));
     }
-    let plan_resp = plan_resp?;
-
-    let xml = first_text(&plan_resp).ok_or_else(|| {
-        ApiError::Driver(
-            DriverError::new(Code::DriverInternal, "SHOWPLAN_XML returned no plan")
-                .with_engine(Engine::SqlServer),
-        )
-    })?;
     let root = parse_mssql_plan(&xml).map_err(ApiError::Driver)?;
     Ok(ExplainResponse {
         engine: Engine::SqlServer,
         analyzed: false,
         root,
         raw: xml,
-        warnings: Vec::new(),
+        warnings: if req.params.is_empty() {
+            Vec::new()
+        } else {
+            vec![sift_protocol::DriverWarning::new(
+                "Estimated plan uses declared local parameter types, not sniffed runtime values",
+            )]
+        },
     })
+}
+
+// SHOWPLAN does not execute the sp_executesql RPC wrapper used for binds.
+// Declare local variables in a SQL batch; never interpolate parameter values.
+fn mssql_plan_batch(sql: &str, params: &[Value]) -> ApiResult<String> {
+    use sqlparser::{dialect::MsSqlDialect, parser::Parser, tokenizer::Token};
+    let mut batch = String::new();
+    for (index, value) in params.iter().enumerate() {
+        let type_name = match value {
+            Value::Bool(_) => "bit",
+            Value::Int16(_) => "smallint",
+            Value::Int32(_) => "int",
+            Value::Int64(_) => "bigint",
+            Value::Float32(_) => "real",
+            Value::Float64(_) => "float",
+            Value::Text(_) | Value::Decimal(_) | Value::Json(_) => "nvarchar(max)",
+            Value::Blob(_) => "varbinary(max)",
+            Value::Date(_) => "date",
+            Value::Time(_) => "time",
+            Value::Timestamp(_) => "datetime2",
+            Value::TimestampTz(_) => "datetimeoffset",
+            Value::Uuid(_) => "uniqueidentifier",
+            Value::TypedNull { type_name } => {
+                if type_name.len() > 256 {
+                    return Err(ApiError::BadRequest("invalid plan parameter type".into()));
+                }
+                let mut parser = Parser::new(&MsSqlDialect {})
+                    .try_with_sql(type_name)
+                    .map_err(|_| ApiError::BadRequest("invalid plan parameter type".into()))?;
+                let parsed = parser
+                    .parse_data_type()
+                    .map_err(|_| ApiError::BadRequest("invalid plan parameter type".into()))?;
+                if parser.peek_token().token != Token::EOF {
+                    return Err(ApiError::BadRequest("invalid plan parameter type".into()));
+                }
+                batch.push_str(&format!("DECLARE @P{} {};\n", index + 1, parsed));
+                continue;
+            }
+            Value::Null | Value::Interval(_) | Value::Native { .. } => {
+                return Err(ApiError::Driver(DriverError::new(
+                    Code::UnsupportedForEngine,
+                    "SQL Server plan parameters require supported values or explicit typed NULLs",
+                )));
+            }
+        };
+        batch.push_str(&format!("DECLARE @P{} {type_name};\n", index + 1));
+    }
+    batch.push_str(sql);
+    Ok(batch)
 }
 
 /// Run each statement under one transaction, then always roll back. Returns the
@@ -221,7 +315,8 @@ async fn run_seq_rollback(
         )
         .await
     {
-        tracing::warn!(error = %e, "rollback after EXPLAIN ANALYZE failed");
+        let _ = store.close_connection(session_id, conn_id).await;
+        return Err(e);
     }
     match failure {
         Some(e) => Err(e),
@@ -380,29 +475,10 @@ fn ratio(left: Option<f64>, right: Option<f64>) -> Option<f64> {
         .map(|(left, right)| right / left)
 }
 
-/// A statement whose leading keyword makes it a guaranteed read (no side
-/// effects). Anything else is wrapped in a rolled-back transaction for ANALYZE.
-fn is_plain_read(sql: &str) -> bool {
-    let kw: String = sql
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect::<String>()
-        .to_ascii_uppercase();
-    matches!(kw.as_str(), "SELECT" | "SHOW" | "VALUES" | "TABLE")
-}
-
 fn first_json(resp: &ExecuteResponse) -> Option<serde_json::Value> {
     match resp.rows.first()?.values.first()? {
         Value::Json(v) => Some(v.clone()),
         Value::Text(s) => serde_json::from_str(s).ok(),
-        _ => None,
-    }
-}
-
-fn first_text(resp: &ExecuteResponse) -> Option<String> {
-    match resp.rows.first()?.values.first()? {
-        Value::Text(s) => Some(s.clone()),
         _ => None,
     }
 }
@@ -555,14 +631,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_plain_read_classifies() {
-        assert!(is_plain_read("SELECT * FROM t"));
-        assert!(is_plain_read("  select 1"));
-        assert!(!is_plain_read("INSERT INTO t VALUES (1)"));
-        assert!(!is_plain_read(
-            "WITH x AS (...) INSERT INTO t SELECT * FROM x"
-        ));
-        assert!(!is_plain_read("UPDATE t SET a = 1"));
+    fn explain_rejects_batches_and_session_controls() {
+        for engine in [Engine::Postgres, Engine::SqlServer] {
+            assert!(validate_explain_sql(engine, "SELECT 1; DELETE FROM users").is_err());
+            assert!(validate_explain_sql(engine, "SET SHOWPLAN_XML OFF").is_err());
+            assert!(validate_explain_sql(engine, "SELECT ';' AS value").is_ok());
+        }
+    }
+
+    #[test]
+    fn mssql_plan_declarations_never_interpolate_values_or_type_statements() {
+        let sql = mssql_plan_batch("SELECT @P1", &[Value::Text("private-value'".into())]).unwrap();
+        assert_eq!(sql, "DECLARE @P1 nvarchar(max);\nSELECT @P1");
+        assert!(mssql_plan_batch(
+            "SELECT @P1",
+            &[Value::TypedNull {
+                type_name: "int; DROP TABLE users".into()
+            }]
+        )
+        .is_err());
+        assert_eq!(
+            mssql_plan_batch(
+                "SELECT @P1",
+                &[Value::TypedNull {
+                    type_name: "numeric(18,4)".into()
+                }]
+            )
+            .unwrap(),
+            "DECLARE @P1 NUMERIC(18,4);\nSELECT @P1"
+        );
     }
 
     #[test]

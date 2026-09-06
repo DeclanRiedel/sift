@@ -29,6 +29,7 @@ type Boxed<T> = Box<dyn FnOnce() -> T + Send + 'static>;
 /// every expectation explicitly.
 #[derive(Default)]
 struct Queues {
+    estimated_plan: VecDeque<Boxed<Result<String, DriverError>>>,
     open: VecDeque<Boxed<Result<ServerInfo, DriverError>>>,
     ping: VecDeque<Boxed<Result<ServerInfo, DriverError>>>,
     schema: VecDeque<Boxed<Result<SchemaSnapshot, DriverError>>>,
@@ -208,6 +209,13 @@ impl MockDriverBuilder {
             .schema_delays
             .back_mut()
             .expect("schema_delay requires a queued schema result") = delay;
+        self
+    }
+
+    pub fn estimated_plan_ok(mut self, xml: String) -> Self {
+        self.state
+            .estimated_plan
+            .push_back(Box::new(move || Ok(xml)));
         self
     }
 
@@ -483,6 +491,14 @@ impl PgExt for MockDriver {
 
 #[async_trait]
 impl MssqlExt for MockDriver {
+    async fn estimated_plan(&self, _c: ConnHandle, _sql: String) -> Result<String, DriverError> {
+        self.record("estimated_plan");
+        MockDriver::pop(
+            &mut self.state.lock().unwrap().estimated_plan,
+            "estimated_plan",
+        )
+    }
+
     async fn use_database(&self, _c: ConnHandle, _db: &str) -> Result<(), DriverError> {
         self.record("use_database");
         Ok(())

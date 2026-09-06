@@ -154,7 +154,7 @@ impl Driver for PgDriver {
 
     #[tracing::instrument(skip_all, fields(engine = "postgres", cursor = cursor.0))]
     async fn cancel(&self, c: ConnHandle, cursor: CursorId) -> Result<(), DriverError> {
-        let token = {
+        let (token, gate, cancel_output, mut completed) = {
             let entry = self
                 .inner
                 .cursors
@@ -171,7 +171,12 @@ impl Driver for PgDriver {
                 )
                 .with_engine(Engine::Postgres));
             }
-            entry.cancel_token.clone()
+            (
+                entry.cancel_token.clone(),
+                Arc::clone(&entry.cancel_gate),
+                entry.cancel_output.clone(),
+                entry.completed.clone(),
+            )
         };
         // Match the SSL mode the original conn used. Postgres deployments
         // configured with `hostssl` reject a NoTls cancel socket, and the
@@ -183,6 +188,14 @@ impl Driver for PgDriver {
             .and_then(|s| s.ssl_mode)
             .unwrap_or(sift_protocol::SslMode::Prefer);
         let cancel = async {
+            let guard = gate.lock().await;
+            if !self.inner.cursors.contains_key(&cursor.0) {
+                return Err(DriverError::new(
+                    Code::CursorNotFound,
+                    "cursor already completed",
+                ));
+            }
+            cancel_output.cancel();
             match ssl_mode {
                 sift_protocol::SslMode::Require
                 | sift_protocol::SslMode::VerifyCa
@@ -196,6 +209,12 @@ impl Driver for PgDriver {
                         .await
                         .map_err(pg_err)?;
                 }
+            }
+            drop(guard);
+            // Do not acknowledge reusable connection state before the worker
+            // has restored its slot. Closing the task also closes this watch.
+            if !*completed.borrow() {
+                let _ = completed.changed().await;
             }
             Ok::<_, DriverError>(())
         };

@@ -91,10 +91,6 @@ async fn setup(
     (router, sid, conn.id)
 }
 
-fn text_col(name: &str) -> ColumnMetadata {
-    ColumnMetadata::new(name, TypeRef::Primitive(PrimitiveType::Text))
-}
-
 /// One PG EXPLAIN (FORMAT JSON) row: a single json-typed cell.
 fn pg_plan_pages() -> Vec<Page> {
     let plan = serde_json::json!([{
@@ -208,29 +204,7 @@ async fn mssql_explain_estimate_parses_showplan_xml() {
 </RelOp>
 </QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>"#;
     let driver = base_builder(Engine::SqlServer)
-        // SET SHOWPLAN_XML ON
-        .execute_ok(vec![Page::Done {
-            affected_rows: None,
-            warnings: vec![],
-        }])
-        // the query, returning the plan XML
-        .execute_ok(vec![
-            Page::NextResult {
-                columns: vec![text_col("Microsoft SQL Server 2005 XML Showplan")],
-            },
-            Page::Rows {
-                rows: vec![Row::new(vec![Value::Text(xml.into())])],
-            },
-            Page::Done {
-                affected_rows: None,
-                warnings: vec![],
-            },
-        ])
-        // SET SHOWPLAN_XML OFF
-        .execute_ok(vec![Page::Done {
-            affected_rows: None,
-            warnings: vec![],
-        }])
+        .estimated_plan_ok(xml.into())
         .build();
     let (router, sid, cid) = setup(driver, "sift/sql-server", 1433).await;
 

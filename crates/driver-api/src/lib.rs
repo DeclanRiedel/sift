@@ -238,6 +238,16 @@ pub trait PgExt: Send + Sync {
 /// SQL Server-specific operations. Impl lives in `sift-driver-sqlserver`.
 #[async_trait::async_trait]
 pub trait MssqlExt: Send + Sync {
+    /// Capture an estimated plan while exclusively owning the TDS session.
+    /// The caller supplies a validated SQL batch, including local parameter
+    /// declarations. Implementations must restore SHOWPLAN or discard the socket.
+    async fn estimated_plan(&self, _c: ConnHandle, _sql: String) -> Result<String, DriverError> {
+        Err(DriverError::new(
+            sift_protocol::Code::UnsupportedForEngine,
+            "estimated plans are unavailable on this SQL Server backend",
+        ))
+    }
+
     /// Observe `sys.dm_exec_requests` for a supported active command without
     /// sharing the executing TDS session.
     async fn observe_progress(

@@ -925,3 +925,52 @@ async fn close_mid_query_does_not_panic() {
         .await
         .expect("close mid-query completes within 5s");
 }
+
+#[tokio::test]
+async fn interval_parameter_round_trip_preserves_negative_microseconds() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    let value = Value::Interval(chrono::Duration::microseconds(-172800000017));
+    let pages = drain(
+        driver
+            .execute(
+                conn.clone(),
+                sift_protocol::ExecuteRequest {
+                    sql: "SELECT $1::interval".into(),
+                    params: vec![value.clone()],
+                    transform: None,
+                },
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(pages.iter().any(|page| matches!(page, Page::Rows { rows } if rows.iter().any(|row| row.values == vec![value.clone()]))));
+    assert!(!pages.iter().any(|page| matches!(page, Page::Error { .. })));
+    driver.close(conn).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancel_backpressured_stream_releases_connection_before_acknowledging() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    let stream = driver
+        .execute(
+            conn.clone(),
+            sift_protocol::ExecuteRequest::new("SELECT generate_series(1,1000000)"),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        driver.cancel(conn.clone(), stream.cursor_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // Keep the original receiver stalled: cleanup must not depend on consuming it.
+    driver.ping(conn.clone()).await.unwrap();
+    drop(stream);
+    driver.close(conn).await.unwrap();
+}

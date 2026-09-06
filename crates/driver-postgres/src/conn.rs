@@ -71,6 +71,9 @@ pub(crate) struct CursorEntry {
     pub(crate) backend_pid: i32,
     pub(crate) progress_kind: Option<crate::progress::PgProgressKind>,
     pub(crate) cancel_token: tokio_postgres::CancelToken,
+    pub(crate) cancel_gate: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) cancel_output: tokio_util::sync::CancellationToken,
+    pub(crate) completed: tokio::sync::watch::Receiver<bool>,
     pub(crate) task: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 

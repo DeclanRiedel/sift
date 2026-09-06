@@ -470,6 +470,32 @@ async fn enrich_graph_identity_and_foreign_keys(
         }
     }
 
+    // The portable projection cannot safely recreate these native column shapes.
+    // Keep a fingerprint so changes remain visible, and fence migration rendering.
+    let fidelity_rows = conn.query(
+        "SELECT n.nspname,c.relname, md5(string_agg(
+            concat_ws('|',a.attname,format_type(a.atttypid,a.atttypmod),a.attidentity,a.attgenerated,
+                a.attcollation::regcollation::text,pg_get_expr(d.adbin,d.adrelid)), E'\\n' ORDER BY a.attnum))
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+         JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+         JOIN pg_type ty ON ty.oid=a.atttypid
+         LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+         WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p')
+         GROUP BY n.nspname,c.relname,c.relkind
+         HAVING c.relkind='p' OR bool_or(a.attidentity<>'' OR a.attgenerated<>'' OR a.atttypmod<>-1
+             OR a.attcollation<>ty.typcollation)", &[&schemas]).await.map_err(pg_err)?;
+    for row in fidelity_rows {
+        let key = (row.get::<_, String>(0), row.get::<_, String>(1));
+        if let Some(index) = object_nodes.get(&key).and_then(|id| node_indexes.get(id)) {
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+            graph.nodes[*index]
+                .extra
+                .insert("native_column_shape".into(), row.get::<_, String>(2).into());
+        }
+    }
+
     let foreign_keys = conn
         .query(
             "SELECT sn.nspname, sc.relname, con.conname,

@@ -6,11 +6,9 @@
 //!
 //! Strategy per object kind:
 //!
-//! - **Tables** (both engines): use `Driver::schema(Deep)` to fetch
-//!   columns / indexes / constraints / triggers, then format a
-//!   `CREATE TABLE` with inline PK/UNIQUE/CHECK/FK constraints,
-//!   followed by standalone `CREATE INDEX` statements for
-//!   non-constraint indexes.
+//! - **Tables**: read native catalogs through `Driver::execute`, preserving
+//!   column and index definitions rather than reconstructing from the lossy
+//!   explorer schema projection. Unsupported table properties fail explicitly.
 //! - **Views / Materialized Views / Procedures / Functions**: use
 //!   engine-native catalog functions via `Driver::execute`:
 //!   - PG: `pg_get_viewdef(oid)`, `pg_get_functiondef(oid)`. The
@@ -21,12 +19,13 @@
 //! DDL layer runs alongside HTTP handlers and depends only on
 //! primitives that already exist.
 
+mod native;
 mod sequence;
 
 use sift_driver_api::Driver;
 use sift_protocol::{
-    Code, ConstraintKind, DriverError, Engine, ExecuteRequest, ObjectDdl, ObjectInfo, ObjectKind,
-    ObjectPath, Page, SchemaDepth, SchemaScope, TypeRef, Value,
+    Code, DriverError, Engine, ExecuteRequest, ObjectDdl, ObjectKind, ObjectPath, Page, TypeRef,
+    Value,
 };
 
 /// Fetch and format DDL for `object` on `driver`. Dispatches by
@@ -41,8 +40,10 @@ pub async fn generate_ddl(
     let engine = driver.engine();
     let ddl = match kind {
         ObjectKind::Table | ObjectKind::PartitionedTable => {
-            generate_table_ddl(driver, handle, &object, engine).await?
+            native::table(driver, handle, &object, engine).await?
         }
+        ObjectKind::Trigger => native::trigger(driver, handle, &object, engine).await?,
+        ObjectKind::Type => native::user_type(driver, handle, &object, engine).await?,
         ObjectKind::Sequence => {
             sequence::generate_sequence_ddl(driver, handle, &object, engine).await?
         }
@@ -68,190 +69,6 @@ pub async fn generate_ddl(
         }
     };
     Ok(ObjectDdl { path: object, ddl })
-}
-
-async fn generate_table_ddl(
-    driver: &dyn Driver,
-    handle: sift_driver_api::ConnHandle,
-    object: &ObjectPath,
-    engine: Engine,
-) -> Result<String, DriverError> {
-    // Reuse the deep schema pass to get columns/indexes/constraints/
-    // triggers in one round-trip.
-    let scope = SchemaScope {
-        depth: SchemaDepth::Deep {
-            object: object.clone(),
-        },
-        filter: None,
-    };
-    let snap = driver.schema(handle, scope).await?;
-    let info = snap
-        .trees
-        .iter()
-        .flat_map(|t| t.schemas.iter())
-        .flat_map(|s| s.objects.iter())
-        .find(|o| o.name == object.name)
-        .cloned()
-        .ok_or_else(|| {
-            DriverError::new(
-                Code::UndefinedObject,
-                "object not found in deep schema snapshot",
-            )
-            .with_engine(engine)
-        })?;
-    Ok(format_table_ddl(object, &info, engine))
-}
-
-fn format_table_ddl(path: &ObjectPath, info: &ObjectInfo, engine: Engine) -> String {
-    let mut out = String::new();
-    let qname = qualified_name(path, engine);
-    out.push_str("CREATE TABLE ");
-    out.push_str(&qname);
-    out.push_str(" (\n");
-
-    let mut lines: Vec<String> = info
-        .columns
-        .iter()
-        .map(|col| {
-            let pg_serial = matches!(engine, Engine::Postgres) && is_pg_serial_column(col);
-            let sql_type = if pg_serial {
-                match &col.type_ref {
-                    TypeRef::Primitive(sift_protocol::PrimitiveType::Int16) => "smallserial",
-                    TypeRef::Primitive(sift_protocol::PrimitiveType::Int32) => "serial",
-                    TypeRef::Primitive(sift_protocol::PrimitiveType::Int64) => "bigserial",
-                    _ => unreachable!("serial detection only accepts integer primitives"),
-                }
-                .to_owned()
-            } else {
-                type_to_sql(&col.type_ref, engine)
-            };
-            let mut line = format!("    {} {}", quote_ident(&col.name, engine), sql_type);
-            match engine {
-                Engine::Postgres => {
-                    if let Some(facets) = &col.facets.postgres {
-                        if facets.is_identity {
-                            line.push_str(" GENERATED ALWAYS AS IDENTITY");
-                        } else if !pg_serial {
-                            if let Some(default) = &facets.default_expr {
-                                line.push_str(" DEFAULT ");
-                                line.push_str(default);
-                            }
-                        }
-                    }
-                }
-                Engine::SqlServer => {
-                    if col.auto_increment {
-                        line.push_str(" IDENTITY(1,1)");
-                    } else if let Some(default) = col
-                        .facets
-                        .sql_server
-                        .as_ref()
-                        .and_then(|facets| facets.default_expr.as_deref())
-                    {
-                        line.push_str(" DEFAULT ");
-                        line.push_str(default);
-                    }
-                }
-            }
-            if matches!(col.nullable, sift_protocol::Nullability::NotNullable) {
-                line.push_str(" NOT NULL");
-            }
-            line
-        })
-        .collect();
-
-    // Inline PK / UNIQUE / CHECK / FK constraints. We use each
-    // constraint's `definition` when the driver provided it (PG's
-    // `pg_get_constraintdef` is authoritative). SQL Server's driver
-    // fills `definition` for CHECK/FK/DEFAULT but not for the PK
-    // constraint on the base table; fall back to a synthesized form.
-    for c in &info.constraints {
-        let clause = if let Some(def) = &c.definition {
-            let name = quote_ident(&c.name, engine);
-            format!("    CONSTRAINT {name} {def}")
-        } else {
-            constraint_fallback(c, engine)
-        };
-        lines.push(clause);
-    }
-
-    out.push_str(&lines.join(",\n"));
-    out.push_str("\n)");
-    if matches!(engine, Engine::Postgres) {
-        out.push(';');
-    } else {
-        out.push_str(";\nGO");
-    }
-
-    // Standalone CREATE INDEX for indexes that aren't already
-    // enforcing a PK/UNIQUE constraint (those are inlined above).
-    let constraint_index_names: std::collections::HashSet<&str> =
-        info.constraints.iter().map(|c| c.name.as_str()).collect();
-    for idx in &info.indexes {
-        if idx.primary_key {
-            continue;
-        }
-        if constraint_index_names.contains(idx.name.as_str()) {
-            continue;
-        }
-        out.push('\n');
-        out.push_str(&format_index_ddl(path, idx, engine));
-    }
-    out
-}
-
-fn is_pg_serial_column(col: &sift_protocol::ColumnMetadata) -> bool {
-    col.auto_increment
-        && matches!(
-            &col.type_ref,
-            TypeRef::Primitive(
-                sift_protocol::PrimitiveType::Int16
-                    | sift_protocol::PrimitiveType::Int32
-                    | sift_protocol::PrimitiveType::Int64
-            )
-        )
-        && col
-            .facets
-            .postgres
-            .as_ref()
-            .and_then(|facets| facets.default_expr.as_deref())
-            .is_some_and(|default| default.trim_start().starts_with("nextval("))
-}
-
-fn constraint_fallback(c: &sift_protocol::ConstraintInfo, engine: Engine) -> String {
-    let name = quote_ident(&c.name, engine);
-    let cols: Vec<String> = c.columns.iter().map(|c| quote_ident(c, engine)).collect();
-    let cols_joined = cols.join(", ");
-    match c.kind {
-        ConstraintKind::PrimaryKey => {
-            format!("    CONSTRAINT {name} PRIMARY KEY ({cols_joined})")
-        }
-        ConstraintKind::Unique => {
-            format!("    CONSTRAINT {name} UNIQUE ({cols_joined})")
-        }
-        _ => format!(
-            "    -- constraint {name} ({:?}) definition unavailable",
-            c.kind
-        ),
-    }
-}
-
-fn format_index_ddl(path: &ObjectPath, idx: &sift_protocol::IndexInfo, engine: Engine) -> String {
-    let name = quote_ident(&idx.name, engine);
-    let qname = qualified_name(path, engine);
-    let cols: Vec<String> = idx.columns.iter().map(|c| quote_ident(c, engine)).collect();
-    let cols_joined = cols.join(", ");
-    let unique = if idx.unique { "UNIQUE " } else { "" };
-    let mut out = format!("CREATE {unique}INDEX {name} ON {qname} ({cols_joined})");
-    if let Some(pred) = &idx.partial_predicate {
-        out.push_str(" WHERE ");
-        out.push_str(pred);
-    }
-    out.push(';');
-    if matches!(engine, Engine::SqlServer) {
-        out.push_str("\nGO");
-    }
-    out
 }
 
 async fn generate_view_ddl(
@@ -530,61 +347,5 @@ mod tests {
             routine_args: Some(Vec::new()),
         };
         assert_eq!(pg_regprocedure_name(&path), "\"public\".\"answer\"()");
-    }
-
-    #[test]
-    fn table_ddl_preserves_pg_defaults_and_identity() {
-        let mut id = sift_protocol::ColumnMetadata::new(
-            "id",
-            TypeRef::Primitive(sift_protocol::PrimitiveType::Int64),
-        );
-        id.nullable = sift_protocol::Nullability::NotNullable;
-        id.facets.postgres = Some(sift_protocol::PgColumnFacets {
-            oid: Some(20),
-            array_dims: 0,
-            is_identity: true,
-            default_expr: None,
-            enum_values: None,
-        });
-        let mut status = sift_protocol::ColumnMetadata::new(
-            "status",
-            TypeRef::Primitive(sift_protocol::PrimitiveType::Text),
-        );
-        status.facets.postgres = Some(sift_protocol::PgColumnFacets {
-            oid: Some(25),
-            array_dims: 0,
-            is_identity: false,
-            default_expr: Some("'new'::text".into()),
-            enum_values: None,
-        });
-        let mut legacy_id = sift_protocol::ColumnMetadata::new(
-            "legacy_id",
-            TypeRef::Primitive(sift_protocol::PrimitiveType::Int32),
-        );
-        legacy_id.auto_increment = true;
-        legacy_id.facets.postgres = Some(sift_protocol::PgColumnFacets {
-            oid: Some(23),
-            array_dims: 0,
-            is_identity: false,
-            default_expr: Some("nextval('jobs_legacy_id_seq'::regclass)".into()),
-            enum_values: None,
-        });
-        let mut info = ObjectInfo::new("jobs", ObjectKind::Table);
-        info.columns = vec![id, status, legacy_id];
-        let ddl = format_table_ddl(
-            &ObjectPath {
-                catalog: None,
-                schema: Some("public".into()),
-                name: "jobs".into(),
-                kind: Some(ObjectKind::Table),
-                routine_args: None,
-            },
-            &info,
-            Engine::Postgres,
-        );
-        assert!(ddl.contains("\"id\" bigint GENERATED ALWAYS AS IDENTITY NOT NULL"));
-        assert!(ddl.contains("\"status\" text DEFAULT 'new'::text"));
-        assert!(ddl.contains("\"legacy_id\" serial"));
-        assert!(!ddl.contains("jobs_legacy_id_seq"));
     }
 }

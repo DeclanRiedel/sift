@@ -743,7 +743,7 @@ impl SessionStore {
         ))
     }
 
-    fn reserve_query_resources(
+    pub(crate) fn reserve_query_resources(
         &self,
         entry: &ConnectionEntryClone,
     ) -> ApiResult<
@@ -811,7 +811,7 @@ impl SessionStore {
             .store(max_bytes, Ordering::Relaxed);
     }
 
-    fn result_limits(&self) -> (usize, usize) {
+    pub(crate) fn result_limits(&self) -> (usize, usize) {
         (
             self.inner.max_result_rows.load(Ordering::Relaxed),
             self.inner.max_result_bytes.load(Ordering::Relaxed),
@@ -3895,7 +3895,7 @@ impl SessionStore {
         }
     }
 
-    fn validate_execute_tx(
+    pub(crate) fn validate_execute_tx(
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
