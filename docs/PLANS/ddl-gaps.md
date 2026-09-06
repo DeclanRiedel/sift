@@ -1,7 +1,13 @@
 # DDL — known gaps
 
-Status: **active code-grounded backlog, audited 2026-09-01.** Resolved items
+Status: **active code-grounded backlog, reconciled 2026-09-06.** Resolved items
 remain summarized only where they explain the boundary of an open item.
+
+The [two-engine graduation checklist](postgres-sqlserver-graduation.md) now
+sets execution priority. Generated columns, collations, identity fidelity,
+partition/index fidelity, and SQL Server round trips are graduation scope
+decisions rather than indefinitely parked work. Historical priority labels
+below retain context; use the graduation checklist when choosing the next task.
 
 Snapshot of what the Phase D DDL generator (`crates/server/src/ddl.rs`)
 does *not* cover today, ordered by priority. Each entry names the
@@ -23,6 +29,8 @@ of what already works.
 3. PG identity and legacy serial columns, plus SQL Server identity columns,
    are rendered explicitly. Serial columns use the pseudo-type instead of
    copying a `nextval(...)` expression that references the source sequence.
+   This is basic rendering only: PostgreSQL identity mode/options and SQL
+   Server seed/increment are still lost (ALWAYS and IDENTITY(1,1) are forced).
 
 ## Priority 2 — natural next batch (unimplemented `ObjectKind`s users can already ask for)
 
@@ -89,5 +97,10 @@ of what already works.
 
 ## What order to tackle
 
-Priority 2 items are independent and can each land as isolated changes.
-Priority 3/4 wait for a concrete driver need.
+Follow the graduation checklist: define supported scope, fix lossy DDL and
+missing in-scope objects, then prove both engines with live round trips.
+PartitionedTable currently uses the plain table formatter; preserve partition
+definitions or fail explicitly. The index formatter reconstructs only column
+names, uniqueness, and predicates; audit richer properties before claiming
+fidelity. Synonyms, extensions, and optional AST-equivalence checks can remain
+deferred. Public metadata/object-kind changes require design and protocol review.

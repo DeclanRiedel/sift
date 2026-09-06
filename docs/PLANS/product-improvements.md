@@ -19,7 +19,13 @@ The canonical feature inventory remains the source of product feature status.
 - [ ] Complete foreign-key JOIN assistance, then explicit multi-hop path selection.
 - [x] Harden existing saved layouts and verify bounded foreign-key value selection.
 - [ ] Improve DDL fidelity and engine round-trip coverage.
-- [ ] Add transfer dry-run, quarantine, resume, and type-mapping workflows.
+- [ ] Complete [PostgreSQL/SQL Server graduation](postgres-sqlserver-graduation.md)
+      before starting the SQLite provider; defer broad DBA functionality.
+- [x] Design [SQLite provider scope and acceptance](sqlite-provider.md).
+- [ ] Implement SQLite after the first three [overnight tasks](database-provider-overnight.md)
+      establish scoped two-engine graduation.
+- [x] Add transfer dry-run preview.
+- [ ] Complete quarantine report retrieval, durable resume, and type-mapping workflows.
 - [ ] Add operational metrics/traces and monitoring workflows.
 - [ ] Complete Vim/accessibility/platform and signed-update validation.
 

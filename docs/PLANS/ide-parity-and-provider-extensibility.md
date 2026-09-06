@@ -1,6 +1,6 @@
 # SQL IDE and DBMS Feature Coverage
 
-Status: **active-development feature inventory, audited 2026-09-01.** This is
+Status: **active-development feature inventory, reconciled 2026-09-06.** This is
 the canonical checkbox list for choosing product features. It is not a release
 roadmap and has no release date, version scope, beta boundary, or claim of
 readiness. A checked feature may still need hardening, accessibility,
@@ -9,6 +9,10 @@ performance, documentation, and cross-platform work.
 Legend: `[x]` usable feature slice exists · `[~]` partial or server-only · `[ ]`
 missing. Choose new feature work from `[~]` and `[ ]`; use Phase M for desktop
 architecture and validation work.
+
+For the bounded PostgreSQL/SQL Server support milestone and next-provider
+sequence, use the [driver graduation checklist](postgres-sqlserver-graduation.md).
+Core Driver contract is already locked; engine graduation evidence remains open.
 
 ## SQL IDE
 
@@ -236,16 +240,23 @@ in FROM relations. These warnings do not rewrite or block SQL.
 - [x] Bounded streaming
 - [x] Transfer scheduling
 - [x] Import schema and type inference UI
-- [ ] Dry-run transfer UI
+- [x] Dry-run transfer UI
 - [ ] Error quarantine
 - [ ] Resumable transfer UI
 - [ ] Cross-engine type-mapping editor
 - [ ] Parquet support
 
+Transfer preview is implemented. Quarantine report retrieval, durable resume
+with checkpoints/source validation, and a dedicated type-mapping editor remain
+open; existing preview and result plumbing do not complete those workflows.
+
 ### Backup, restore, and maintenance
 
-- [~] Sift state backup and restore
-- [~] Metadata migration lifecycle
+- [x] Sift state backup and restore
+- [x] Metadata migration lifecycle
+- [ ] Sift backup scheduling and retention
+- [ ] Sift backup remote/object-store destinations
+- [ ] Tenant-selective Sift restore and disaster-recovery orchestration
 - [x] Scheduled runs
 - [x] Durable task history
 - [x] Task cancellation and recovery
@@ -257,7 +268,14 @@ in FROM relations. These warnings do not rewrite or block SQL.
 - [ ] Table and index maintenance
 - [ ] Integrity checks
 
+The checked Sift recovery features are implemented operator CLI workflows
+(ADRs 038/039), not connected-database backups or a complete recovery UI.
+
 ### Engine-specific depth
+
+Partial rows below have existing implementations. Close their declared scope
+and live evidence through the graduation checklist; do not rebuild them from
+scratch or require the administration features below for graduation.
 
 - [~] PostgreSQL schema introspection
 - [~] PostgreSQL plans
@@ -274,6 +292,12 @@ in FROM relations. These warnings do not rewrite or block SQL.
 - [ ] SQL Server Query Store
 - [ ] SQL Server Agent
 - [ ] SQL Server server-settings browser
+- [x] SQLite provider design ([scope and acceptance](sqlite-provider.md))
+- [ ] SQLite provider implementation (after scoped two-engine graduation)
+
+SQLite design completion is a planning milestone only. Its provider is not yet
+available. The [overnight handoff](database-provider-overnight.md) contains four
+sequential tasks with explicit acceptance dependencies.
 
 ### Platform and operations
 
