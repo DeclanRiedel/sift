@@ -9,7 +9,7 @@
   mutations, and scroll long member lists.
 - [x] Add a linked Shared Rooms wiki guide grounded in actual desktop commands,
   membership rules, connection ownership, sync, results, and recovery behavior.
-- [ ] Run formatting, workspace Clippy/tests, and commit verified milestones.
+- [x] Run formatting, workspace Clippy/tests, and commit verified milestones.
 
 Design: keep room attachment, writer leases, and subscription owned by the
 socket future. Dropping that future releases them; shutdown must not wait for
@@ -22,3 +22,9 @@ Targeted evidence: six shutdown tests, two room disconnect/drain tests, two
 membership-revocation tests, and the UI room-state isolation regression pass.
 The wiki has 50 valid local links/anchors. No external infrastructure was used;
 wiki layout was inspected in source, not verified with native screenshots.
+
+Final validation passed: `cargo fmt --check`, workspace Clippy with all targets
+and warnings denied, `cargo test --workspace --quiet` (including 410 UI tests),
+and `git diff --check`. Desktop linking used the existing temporary
+`LIBRARY_PATH=/tmp/sift-refactor-HGLfxo` alias for the installed XKB library.
+Commits: `f3e03b7` infrastructure, `ac60c74` room administration, `d1194b9` wiki.
