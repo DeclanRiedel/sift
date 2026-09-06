@@ -45,8 +45,8 @@ explicitly. Do not enable CI or introduce smoke scripts.
 ## Milestone evidence
 
 Metadata admission: three focused tests passed (capacity/reuse, failed-open
-release, simultaneous admission). Workspace Clippy passed. Full workspace tests
-are running; the HTTP error regression checks the typed `metadata_busy` 503.
+release, simultaneous admission). Workspace Clippy and full workspace tests
+passed; the HTTP error regression checks the typed `metadata_busy` 503.
 Generated incremental build artifacts were cleared to recover disk capacity;
 source files and dependency caches were retained.
 
@@ -115,3 +115,21 @@ same-fixture schema-filter comparisons and a direct executable memory run.
 Schema-filter p95 fell from 34.505 to 9.593 ms; 120 Hz target remains unmet.
 Twenty existing connection/UI tests, the qualified/Unicode filter regression,
 and workspace Clippy passed. See [measured results](performance-measurements.md).
+
+## Design: transfer preview safety
+
+Expose existing server dry-run behavior as a Preview action and Vim `p` shortcut.
+The preview flag travels with asynchronous file selection so later UI changes
+cannot turn a preview into a write. A dry run preserves the input resume cursor;
+validation alone must never mark rows as imported. Show preview/quarantine
+outcomes explicitly. Bound file reads before allocation and during reading.
+Keep reliable durable checkpoint/source-fingerprint resume as separate work.
+
+Transfer preview milestone: full workspace tests passed, followed by focused UI
+tests after adding cancellation response invalidation. The server import
+integration regression confirms dry runs leave the resume cursor unchanged and
+do not consume a write. Local upload reads reject files over 64 MiB before
+allocation and also bound reads if the file grows. Preview is available through
+a button and Vim `p`; late worker completion cannot overwrite cancellation.
+Durable resume, a dedicated type-mapping editor, and quarantine report retrieval
+remain open.

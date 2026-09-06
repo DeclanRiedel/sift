@@ -82,7 +82,8 @@ pub struct CsvImportResponse {
     /// Number of source data rows validated, including skipped conflicts.
     #[serde(default)]
     pub rows_validated: u64,
-    /// First source row not covered by this completed response.
+    /// First source row not covered by completed writes/skips. Dry runs retain
+    /// the request cursor because validation does not import any rows.
     #[serde(default)]
     pub resume_from_row: u64,
     #[serde(default)]

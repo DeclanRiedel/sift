@@ -59,7 +59,7 @@ pub async fn import(
             rows_inserted: 0,
             rows_skipped: 0,
             rows_validated: row_count,
-            resume_from_row: row_count,
+            resume_from_row: request.resume_from_row,
             dry_run: true,
             quarantined_rows: Vec::new(),
         });

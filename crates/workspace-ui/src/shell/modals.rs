@@ -7346,9 +7346,14 @@ impl WorkspaceShell {
                             artifact.byte_len,
                             artifact.digest
                         ),
-                        sift_protocol::TransferExecutionResult::Import { result, .. } => format!(
-                            "Imported {} row(s), skipped {} · {}",
-                            result.rows_inserted, result.rows_skipped, result.table
+                        sift_protocol::TransferExecutionResult::Import { result, .. } if result.dry_run => format!(
+                            "Preview: validated {} source row(s) · {}. No rows written. Resume row remains {}.",
+                            result.rows_validated, result.table, result.resume_from_row
+                        ),
+                        sift_protocol::TransferExecutionResult::Import { result, quarantine_artifact } => format!(
+                            "Imported {} row(s), skipped {}, quarantined {} · {}{}",
+                            result.rows_inserted, result.rows_skipped, result.quarantined_rows.len(), result.table,
+                            quarantine_artifact.as_ref().map(|artifact| format!(" · Quarantine report {}", artifact.id.0)).unwrap_or_default()
                         ),
                         sift_protocol::TransferExecutionResult::Validated {
                             direction,
@@ -7643,6 +7648,15 @@ impl WorkspaceShell {
                                                     )
                                                 })
                                                 .child(
+                                                    Button::new("preview-transfer-recipe", "Preview")
+                                                        .debug_selector("preview-transfer-recipe")
+                                                        .tone(ButtonTone::Neutral)
+                                                        .disabled(self.transfer_recipe_edit.is_none() || self.transfer_execution_pending)
+                                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                                            shell.execute_selected_transfer_recipe(true, cx)
+                                                        })),
+                                                )
+                                                .child(
                                                     Button::new(
                                                         "execute-transfer-recipe",
                                                         if self.transfer_execution_pending {
@@ -7659,7 +7673,7 @@ impl WorkspaceShell {
                                                             || self.transfer_execution_pending,
                                                     )
                                                     .on_click(cx.listener(|shell, _, _, cx| {
-                                                        shell.execute_selected_transfer_recipe(cx)
+                                                        shell.execute_selected_transfer_recipe(false, cx)
                                                     })),
                                                 ),
                                         ),

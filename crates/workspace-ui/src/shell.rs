@@ -9199,6 +9199,7 @@ struct ActiveQuerySnapshot {
 
 mod explorer_filter;
 mod query_history;
+mod transfer_input;
 
 pub struct WorkspaceShell {
     query_history: query_history::QueryHistoryState,
@@ -14384,6 +14385,14 @@ impl WorkspaceShell {
                                 format!(
                                     "Transfer created artifact {} · {} bytes",
                                     artifact.id.0, artifact.byte_len
+                                )
+                            }
+                            sift_protocol::TransferExecutionResult::Import { result, .. }
+                                if result.dry_run =>
+                            {
+                                format!(
+                                    "Transfer preview validated {} source row(s); no rows written",
+                                    result.rows_validated
                                 )
                             }
                             sift_protocol::TransferExecutionResult::Import { result, .. } => {
@@ -24293,7 +24302,12 @@ impl WorkspaceShell {
             "G" if count > 0 => self.edit_transfer_recipe(count - 1, cx),
             "n" => self.clear_transfer_recipe_editor(cx),
             "v" if self.transfer_recipe_edit.is_some() => self.validate_transfer_recipe(cx),
-            "x" if self.transfer_recipe_edit.is_some() => self.execute_selected_transfer_recipe(cx),
+            "x" if self.transfer_recipe_edit.is_some() => {
+                self.execute_selected_transfer_recipe(false, cx)
+            }
+            "p" if self.transfer_recipe_edit.is_some() => {
+                self.execute_selected_transfer_recipe(true, cx)
+            }
             "R" => self.request_transfer_recipes(cx),
             "escape" => self.dismiss_modal(&DismissModal, window, cx),
             _ => return,
@@ -24559,7 +24573,7 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn execute_selected_transfer_recipe(&mut self, cx: &mut Context<Self>) {
+    fn execute_selected_transfer_recipe(&mut self, preview_only: bool, cx: &mut Context<Self>) {
         if self.transfer_execution_pending {
             return;
         }
@@ -24585,7 +24599,14 @@ impl WorkspaceShell {
                     cx.notify();
                     return;
                 };
-                self.start_transfer_recipe(recipe.id, Some(query.sql_text), None, None, cx);
+                self.start_transfer_recipe(
+                    recipe.id,
+                    Some(query.sql_text),
+                    None,
+                    None,
+                    preview_only,
+                    cx,
+                );
             }
             sift_protocol::TransferDirection::Import => {
                 let table = match self.parse_transfer_table(cx) {
@@ -24612,7 +24633,7 @@ impl WorkspaceShell {
                     };
                     let read_path = path.clone();
                     let data = background
-                        .spawn(async move { std::fs::read(read_path) })
+                        .spawn(async move { transfer_input::read(&read_path) })
                         .await;
                     let _ = shell.update(cx, |shell, cx| match data {
                         Ok(data) if data.len() <= 64 * 1024 * 1024 => shell.start_transfer_recipe(
@@ -24620,6 +24641,7 @@ impl WorkspaceShell {
                             None,
                             Some(data),
                             Some(table),
+                            preview_only,
                             cx,
                         ),
                         Ok(_) => shell.show_error_toast(
@@ -24643,6 +24665,7 @@ impl WorkspaceShell {
         sql: Option<String>,
         data: Option<Vec<u8>>,
         table: Option<sift_protocol::ObjectPath>,
+        preview_only: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(sender) = &self.executor_sender else {
@@ -24661,10 +24684,11 @@ impl WorkspaceShell {
             .iter()
             .find(|recipe| recipe.id == recipe_id)
             .map(|recipe| &recipe.options);
-        let dry_run = reliability
-            .and_then(|options| options.get("dry_run"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        let dry_run = preview_only
+            || reliability
+                .and_then(|options| options.get("dry_run"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
         let resume_from_row = reliability
             .and_then(|options| options.get("resume_from_row"))
             .and_then(serde_json::Value::as_u64)
@@ -24712,6 +24736,8 @@ impl WorkspaceShell {
                 generation: self.transfer_execution_generation,
             });
         }
+        // A completion already queued by the worker must not replace cancellation.
+        self.transfer_execution_generation = self.transfer_execution_generation.wrapping_add(1);
         self.transfer_execution_pending = false;
         self.transfer_recipes_error =
             Some("Transfer request cancelled locally; refresh artifacts before retrying".into());
@@ -48579,6 +48605,7 @@ mod tests {
                 Some("select * from events".into()),
                 None,
                 None,
+                true,
                 cx,
             );
         });
@@ -48588,17 +48615,34 @@ mod tests {
                 generation: 1,
                 recipe_id: sift_protocol::TransferRecipeId(7),
                 sql: Some(sql),
+                dry_run: true,
                 ..
             }) if sql == "select * from events"
         ));
         cx.run_until_parked();
         assert!(cx.debug_bounds("execute-transfer-recipe").is_some());
+        assert!(cx.debug_bounds("preview-transfer-recipe").is_some());
         workspace.update(&mut cx, |shell, cx| shell.cancel_transfer_recipe(cx));
         assert!(matches!(
             commands.try_recv(),
             Ok(ExecutorCommand::CancelTransferRecipe { generation: 1 })
         ));
         assert!(!workspace.read_with(&cx, |shell, _| shell.transfer_execution_pending));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::TransferRecipeExecutionFinished {
+                    generation: 1,
+                    result: Err("late worker response".into()),
+                },
+                cx,
+            );
+            assert!(shell.transfer_execution_result.is_none());
+            assert!(shell
+                .transfer_recipes_error
+                .as_deref()
+                .unwrap()
+                .contains("cancelled locally"));
+        });
     }
 
     #[gpui::test]

@@ -123,6 +123,32 @@ async fn csv_import_skip_reports_inserted_and_duplicate_rows() {
         resume_from_row: 0,
         type_mappings: Default::default(),
     };
+    // Preview must not consume source rows or driver execution results.
+    let preview = CsvImportRequest {
+        dry_run: true,
+        resume_from_row: 1,
+        ..request.clone()
+    };
+    let preview_response = router
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/v1/sessions/{}/connections/{}/import/csv",
+                session.id, connection.id
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&preview).unwrap()))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview_response.status(), StatusCode::OK);
+    let preview_response: CsvImportResponse = json(preview_response.into_body()).await;
+    assert!(preview_response.dry_run);
+    assert_eq!(preview_response.rows_validated, 2);
+    assert_eq!(preview_response.rows_inserted, 0);
+    assert_eq!(preview_response.resume_from_row, 1);
+
     let response = router
         .clone()
         .oneshot(
