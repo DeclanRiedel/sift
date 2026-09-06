@@ -2665,7 +2665,6 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::Settings => {
-                    let vim_mode_default = self.vim_mode_default();
                     let dark_theme = self.dark_theme;
                     let toggle_row = |id: &'static str,
                                       title: &'static str,
@@ -2745,17 +2744,6 @@ impl WorkspaceShell {
                                         .child("Preferences are stored on this device."),
                                 ),
                         )
-                        .child(toggle_row(
-                            "settings-vim-default",
-                            "Vim mode by default",
-                            "New SQL and TOML editors start in Vim normal mode.",
-                            vim_mode_default,
-                            Box::new(cx.listener(
-                                |shell: &mut WorkspaceShell, _, _, cx| {
-                                    shell.toggle_vim_mode_default(cx)
-                                },
-                            )) as sift_ui::ClickHandler,
-                        ))
                         .child(
                             div().pt_3().border_t_1().border_color(colors.subtle_border).flex().items_center().justify_between().gap_3()
                                 .child(div().flex().flex_col().gap_1().child("API tokens").child(div().text_xs().text_color(colors.muted_text).child("Create and revoke tokens for API clients.")))
@@ -3127,29 +3115,11 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::Keymaps => {
-                    let profile = self.keyboard_profile();
-                    let vim_editor = self.vim_mode_default();
                     let keymaps_path = self
                         .settings_store
                         .as_ref()
                         .map(|store| store.keymaps_path().display().to_string())
                         .unwrap_or_else(|| "keymaps.json unavailable".into());
-                    let profile_button = |id: &'static str,
-                                          label: &'static str,
-                                          selected: bool,
-                                          profile: KeyboardProfile,
-                                          cx: &mut Context<Self>| {
-                        Button::new(id, label)
-                            .debug_selector(id)
-                            .tone(if selected {
-                                ButtonTone::Accent
-                            } else {
-                                ButtonTone::Neutral
-                            })
-                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                shell.set_keyboard_profile(profile, cx)
-                            }))
-                    };
                     div()
                         .flex()
                         .flex_col()
@@ -3184,93 +3154,10 @@ impl WorkspaceShell {
                         )
                         .child(
                             div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(SectionLabel::new("IDE shortcuts"))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap_2()
-                                        .child(profile_button(
-                                            "keymap-profile-vim",
-                                            "Vim",
-                                            profile == KeyboardProfile::Vim,
-                                            KeyboardProfile::Vim,
-                                            cx,
-                                        ))
-                                        .child(profile_button(
-                                            "keymap-profile-hybrid",
-                                            "Hybrid",
-                                            profile == KeyboardProfile::Hybrid,
-                                            KeyboardProfile::Hybrid,
-                                            cx,
-                                        ))
-                                        .child(profile_button(
-                                            "keymap-profile-standard",
-                                            "Standard",
-                                            profile == KeyboardProfile::Standard,
-                                            KeyboardProfile::Standard,
-                                            cx,
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .child(match profile {
-                                            KeyboardProfile::Vim => "Leader commands enabled; conventional IDE shortcuts disabled.",
-                                            KeyboardProfile::Hybrid => "Leader commands and conventional IDE shortcuts are both enabled.",
-                                            KeyboardProfile::Standard => "Conventional IDE shortcuts enabled; leader commands disabled.",
-                                        }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .pt_3()
-                                .border_t_1()
-                                .border_color(colors.subtle_border)
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(SectionLabel::new("Editor default"))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap_2()
-                                        .child(
-                                            Button::new("keymap-editor-vim", "Vim")
-                                                .tone(if vim_editor {
-                                                    ButtonTone::Accent
-                                                } else {
-                                                    ButtonTone::Neutral
-                                                })
-                                                .on_click(cx.listener(|shell, _, _, cx| {
-                                                    if !shell.vim_mode_default() {
-                                                        shell.toggle_vim_mode_default(cx)
-                                                    }
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("keymap-editor-standard", "Standard")
-                                                .tone(if vim_editor {
-                                                    ButtonTone::Neutral
-                                                } else {
-                                                    ButtonTone::Accent
-                                                })
-                                                .on_click(cx.listener(|shell, _, _, cx| {
-                                                    if shell.vim_mode_default() {
-                                                        shell.toggle_vim_mode_default(cx)
-                                                    }
-                                                })),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .child("This controls new SQL tabs. The status-bar mode button still switches the active editor only."),
-                                ),
+                                .id("keymap-profile-vim")
+                                .debug_selector(|| "keymap-profile-vim".into())
+                                .text_sm()
+                                .child("Vim navigation and editing. Customize leader commands below."),
                         )
                         .children(self.keymaps_error.clone().map(|error| {
                             ErrorBanner::new(error).into_any_element()

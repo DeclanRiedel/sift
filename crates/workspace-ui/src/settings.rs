@@ -19,7 +19,6 @@ const fn settings_version() -> u32 {
 #[serde(rename_all = "snake_case")]
 pub enum EditorMode {
     #[default]
-    Standard,
     Vim,
 }
 
@@ -115,7 +114,7 @@ impl Default for AppearanceSettings {
 impl Default for EditorSettings {
     fn default() -> Self {
         Self {
-            default_mode: EditorMode::Standard,
+            default_mode: EditorMode::Vim,
         }
     }
 }
@@ -125,24 +124,16 @@ impl Default for EditorSettings {
 pub enum KeyboardProfile {
     #[default]
     Vim,
-    Hybrid,
-    Standard,
 }
 
 impl KeyboardProfile {
     pub const fn vim_enabled(self) -> bool {
-        matches!(self, Self::Vim | Self::Hybrid)
-    }
-
-    pub const fn standard_enabled(self) -> bool {
-        matches!(self, Self::Standard | Self::Hybrid)
+        matches!(self, Self::Vim)
     }
 
     const fn as_str(self) -> &'static str {
         match self {
             Self::Vim => "vim",
-            Self::Hybrid => "hybrid",
-            Self::Standard => "standard",
         }
     }
 }
@@ -616,7 +607,6 @@ impl SettingsStore {
             .as_value()
             .map(|value| value.decor().clone());
         let mut mode_value = Value::from(match mode {
-            EditorMode::Standard => "standard",
             EditorMode::Vim => "vim",
         });
         if let Some(decor) = decor {
@@ -910,7 +900,7 @@ mod tests {
     fn ui_update_preserves_comments_and_unrelated_settings() {
         let directory = tempfile::tempdir().unwrap();
         let store = SettingsStore::new(directory.path().join("settings.toml"));
-        let source = "# Personal settings\nversion = 1\ncustom = \"keep\"\n\n[editor]\ndefault_mode = \"standard\" # modal\n";
+        let source = "# Personal settings\nversion = 1\ncustom = \"keep\"\n\n[editor]\ndefault_mode = \"vim\" # modal\n";
         store.write_validated(source).unwrap();
 
         let settings = store.save_editor_mode(EditorMode::Vim).unwrap();
@@ -920,22 +910,6 @@ mod tests {
         assert!(updated.contains("# Personal settings"));
         assert!(updated.contains("custom = \"keep\""));
         assert!(updated.contains("# modal"));
-    }
-
-    #[test]
-    fn keyboard_profile_update_supports_all_three_states() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = SettingsStore::new(directory.path().join("settings.toml"));
-        store.save(&UserSettings::default()).unwrap();
-
-        for profile in [
-            KeyboardProfile::Vim,
-            KeyboardProfile::Hybrid,
-            KeyboardProfile::Standard,
-        ] {
-            let settings = store.save_keyboard_profile(profile).unwrap();
-            assert_eq!(settings.keyboard.profile, profile);
-        }
     }
 
     #[test]

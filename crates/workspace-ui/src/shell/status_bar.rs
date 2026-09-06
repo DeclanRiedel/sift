@@ -134,11 +134,9 @@ pub(super) fn render_status_bar(
         },
     );
     let (mode_label, mode_tooltip, vim_entered) = match shell.active_editor_mode(cx) {
-        Some((EditorKeymap::Vim, VimMode::Normal, entered)) => (
-            "NORMAL",
-            "Vim normal mode; click to use the standard keymap",
-            Some(entered),
-        ),
+        Some((EditorKeymap::Vim, VimMode::Normal, entered)) => {
+            ("NORMAL", "Vim normal mode", Some(entered))
+        }
         Some((EditorKeymap::Vim, VimMode::Insert, entered)) => (
             "INSERT",
             "Vim insert mode; Escape returns to normal mode",
@@ -160,26 +158,9 @@ pub(super) fn render_status_bar(
         Some((EditorKeymap::Vim, VimMode::Command, entered)) => {
             ("COMMAND", "Vim command mode", Some(entered))
         }
-        Some((EditorKeymap::Standard, _, _)) => (
-            "STANDARD",
-            "Standard editor keymap; click to enable Vim mode",
-            None,
-        ),
         None => ("NO EDITOR", "No active editor", None),
     };
-    let mode_can_toggle = shell.keyboard_profile() == KeyboardProfile::Hybrid
-        && shell.active_editor_mode(cx).is_some();
-    let mode_tooltip = if mode_can_toggle {
-        mode_tooltip.to_owned()
-    } else {
-        match shell.keyboard_profile() {
-            KeyboardProfile::Vim => "Vim editor keymap is fixed by the Vim keyboard profile".into(),
-            KeyboardProfile::Standard => {
-                "Standard editor keymap is fixed by the Standard keyboard profile".into()
-            }
-            KeyboardProfile::Hybrid => mode_tooltip.to_owned(),
-        }
-    };
+    let mode_tooltip = mode_tooltip.to_owned();
     let editor_buffer = vim_entered.unwrap_or_default();
     let ide_buffer = shell.ide_key_buffer();
     let ide_buffer_label = if ide_buffer.is_empty() {
@@ -503,15 +484,6 @@ pub(super) fn render_status_bar(
                         .flex()
                         .items_center()
                         .text_color(colors.muted_text)
-                        .when(mode_can_toggle, |mode| {
-                            mode.role(Role::Button)
-                                .hover(|button| {
-                                    button.bg(colors.hovered_surface).text_color(colors.text)
-                                })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.toggle_active_editor_keymap(cx)
-                                }))
-                        })
                         .child(mode_label)
                         .tooltip(move |_, cx| cx.new(|_| Tooltip::new(mode_tooltip.clone())).into())
                 })

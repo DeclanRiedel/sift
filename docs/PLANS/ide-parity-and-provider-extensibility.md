@@ -153,9 +153,9 @@ in FROM relations. These warnings do not rewrite or block SQL.
 - [x] Copy as CSV, JSON, SQL, or Markdown
 - [x] JSON and text large viewers
 - [ ] Image and blob viewers
-- [ ] Foreign-key picker
+- [x] Foreign-key picker
 - [x] Aggregate selected cells
-- [ ] Saved grid layouts
+- [x] Saved grid layouts
 
 ### Schema and migration
 

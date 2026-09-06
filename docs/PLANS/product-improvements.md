@@ -10,13 +10,13 @@ The canonical feature inventory remains the source of product feature status.
 - [ ] Split workspace shell by feature state and event ownership.
 - [x] Split HTTP handlers by domain while preserving authorization and audit.
 - [x] Separate desktop semantic/query worker domains and task lifetimes; broader command dispatch remains incremental.
-- [ ] Consolidate supported interaction paths around Vim.
+- [x] Consolidate supported interaction paths around Vim.
 - [x] Extract metadata pool and SDK vault/automation/transfer APIs without interface changes; remaining domains are incremental.
 - [ ] Measure responsiveness and memory with existing large fixtures.
 - [ ] Complete crash/restart/offline/auth-expiry recovery validation.
 - [x] Verify existing inspection UI and fix independent/nested join findings.
 - [ ] Complete foreign-key JOIN assistance, then explicit multi-hop path selection.
-- [ ] Add saved grid layouts and bounded foreign-key value selection.
+- [x] Harden existing saved layouts and verify bounded foreign-key value selection.
 - [ ] Improve DDL fidelity and engine round-trip coverage.
 - [ ] Add transfer dry-run, quarantine, resume, and type-mapping workflows.
 - [ ] Add operational metrics/traces and monitoring workflows.
@@ -80,3 +80,22 @@ SQL safety: existing server diagnostics already reach the editor. Broad UPDATE
 and DELETE statements now also receive join findings; nested FROM relations are
 walked consistently and output stays within the diagnostic cap. Expanded existing
 regression passed. Workspace Clippy passed for the semantic change.
+
+## Design: sequence DDL
+
+Generate sequence definitions through existing Driver execution and server-owned
+DDL isolation. Read configured type, start, increment, bounds, cycle, and cache
+from engine catalogs. Do not advance the sequence or export its runtime counter.
+Use existing object-kind dispatch, so the Driver trait and wire shape do not
+change. Catalog scalar reads must reject absent/NULL/non-text definitions rather
+than returning empty or debug-formatted SQL. PostgreSQL fixtures exercise both
+ascending and descending sequences with non-default options.
+
+Vim/grid milestone: formatting, workspace Clippy, and full workspace tests passed.
+Editors initialize Vim directly; unsupported profile controls/tests are removed.
+Explicit text replacements and undo/redo now resynchronize the Vim engine.
+Grid layout keys include database object identity and a framed column signature;
+ordinal column keys preserve duplicate aliases, and repeated persisted positions
+are deduplicated. Existing foreign-key picker resolves catalog-proven references,
+uses bounded data search, and stages edits through the established edit preview.
+Old unscoped grid keys are not applied to new object-scoped layouts.

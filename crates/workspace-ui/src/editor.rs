@@ -914,7 +914,6 @@ impl JsonSchema {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorKeymap {
-    Standard,
     Vim,
 }
 
@@ -1104,16 +1103,17 @@ impl QueryEditor {
         cx.observe(&find_query, |_, _, cx| cx.notify()).detach();
         cx.observe(&replace_query, |_, _, cx| cx.notify()).detach();
         let vim_store = shared_vim_store(cx);
+        let vim = VimEngine::with_store(document.text(), document.cursor(), vim_store.clone());
         Self {
             focus_handle: cx.focus_handle(),
             document,
             language: EditorLanguage::Sql,
             diff_language: None,
-            keymap: EditorKeymap::Standard,
-            vim_mode: VimMode::Insert,
+            keymap: EditorKeymap::Vim,
+            vim_mode: VimMode::Normal,
             vim_entered: String::new(),
             vim_store,
-            vim: None,
+            vim: Some(vim),
             cursor_blink,
             cursor_event_pending: false,
             revision: 1,
@@ -1266,14 +1266,6 @@ impl QueryEditor {
         &self.vim_entered
     }
 
-    pub fn toggle_keymap(&mut self, cx: &mut Context<Self>) {
-        let keymap = match self.keymap {
-            EditorKeymap::Standard => EditorKeymap::Vim,
-            EditorKeymap::Vim => EditorKeymap::Standard,
-        };
-        self.set_keymap(keymap, cx);
-    }
-
     pub fn set_keymap(&mut self, keymap: EditorKeymap, cx: &mut Context<Self>) {
         if self.keymap == keymap {
             return;
@@ -1286,7 +1278,6 @@ impl QueryEditor {
     fn apply_keymap(&mut self, keymap: EditorKeymap) {
         self.keymap = keymap;
         self.vim_mode = match self.keymap {
-            EditorKeymap::Standard => VimMode::Insert,
             EditorKeymap::Vim => VimMode::Normal,
         };
         self.vim_entered.clear();
@@ -2547,6 +2538,7 @@ impl QueryEditor {
             return;
         }
         if self.document.undo() {
+            self.resync_keymap_after_external_change(cx);
             self.edited(cx);
         }
     }
@@ -2566,6 +2558,7 @@ impl QueryEditor {
             return;
         }
         if self.document.redo() {
+            self.resync_keymap_after_external_change(cx);
             self.edited(cx);
         }
     }
@@ -3359,7 +3352,9 @@ impl EntityInputHandler for QueryEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.vim_text(new_text, cx) {
+        // Explicit platform replacement ranges (including IME commits) replace
+        // text; only ordinary keystrokes enter Vim's command interpreter.
+        if range_utf16.is_none() && self.marked_range.is_none() && self.vim_text(new_text, cx) {
             return;
         }
         if self.read_only {
@@ -3373,6 +3368,7 @@ impl EntityInputHandler for QueryEditor {
         self.adjust_snippet_tabstops(range.clone(), new_text.len());
         self.document.replace_range(range, new_text);
         self.marked_range = None;
+        self.resync_keymap_after_external_change(cx);
         self.edited(cx);
     }
 
@@ -3468,9 +3464,7 @@ impl gpui::Render for QueryEditor {
             (EditorKeymap::Vim, VimMode::Visual | VimMode::Select) => "SiftEditor vim_mode=visual",
             (EditorKeymap::Vim, VimMode::OperatorPending) => "SiftEditor vim_mode=operator_pending",
             (EditorKeymap::Vim, VimMode::Command) => "SiftEditor vim_mode=command",
-            (EditorKeymap::Vim, VimMode::Insert) | (EditorKeymap::Standard, _) => {
-                "SiftEditor vim_mode=insert"
-            }
+            (EditorKeymap::Vim, VimMode::Insert) => "SiftEditor vim_mode=insert",
         };
         div()
             .id("sift-query-editor")
@@ -5022,15 +5016,13 @@ mod tests {
     fn editing_asks_for_analysis_of_the_revision_it_produced(cx: &mut TestAppContext) {
         let (mut cx, editor, spy) = editor_with_spy("sel", cx);
         editor.update_in(&mut cx, |editor, window, cx| {
+            editor.replace_text_in_range(None, "i", window, cx);
             editor.replace_text_in_range(None, "ect", window, cx);
         });
         cx.run_until_parked();
         let revision = editor.read_with(&cx, |editor, _| editor.text_revision());
         let requests = spy.read_with(&cx, |spy, _| spy.0.clone());
-        assert_eq!(
-            requests.last(),
-            Some(&(revision, SemanticRequestKind::Analyze))
-        );
+        assert!(requests.contains(&(revision, SemanticRequestKind::Analyze)));
     }
 
     #[gpui::test]
@@ -5457,6 +5449,8 @@ mod tests {
         // Platform text input flows through the entity's input handler.
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.document.set_selection(6..6, false);
+            editor.apply_keymap(EditorKeymap::Vim);
+            editor.replace_text_in_range(None, "i", window, cx);
             editor.replace_text_in_range(None, " 1", window, cx);
         });
         assert_eq!(
@@ -5712,7 +5706,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let editor = window.root(&mut cx).unwrap();
         editor.update_in(&mut cx, |editor, window, cx| {
-            editor.toggle_keymap(cx);
+            editor.apply_keymap(EditorKeymap::Vim);
             let old_text = editor.document().text().to_owned();
             let old_end = old_text.len();
             editor.vim.as_mut().unwrap().set_cursor(&old_text, old_end);
@@ -5787,6 +5781,7 @@ mod tests {
         cx.run_until_parked();
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.document.set_selection(0..0, false);
+            editor.apply_keymap(EditorKeymap::Vim);
             editor.selection_changed(cx);
             for _ in 0..120 {
                 editor.move_down(&MoveDown, window, cx);
@@ -5810,7 +5805,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let editor = window.root(&mut cx).unwrap();
         editor.update_in(&mut cx, |editor, window, cx| {
-            editor.toggle_keymap(cx);
+            editor.apply_keymap(EditorKeymap::Vim);
             editor.replace_text_in_range(None, "h", window, cx);
             assert_eq!(editor.document.cursor(), 2);
             assert_eq!(editor.document.text(), "abc");
@@ -5837,7 +5832,7 @@ mod tests {
         let editor = window.root(&mut cx).unwrap();
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.document.set_selection(0..0, false);
-            editor.toggle_keymap(cx);
+            editor.apply_keymap(EditorKeymap::Vim);
             editor.replace_text_in_range(None, "}", window, cx);
             assert_eq!(editor.cursor_position(), (2, 1));
             editor.replace_text_in_range(None, "}", window, cx);
@@ -5883,6 +5878,7 @@ mod tests {
         });
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.document.set_selection(0..0, false);
+            editor.apply_keymap(EditorKeymap::Vim);
             editor.move_down(&MoveDown, window, cx);
         });
         cx.run_until_parked();

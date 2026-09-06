@@ -5,7 +5,7 @@
 //! grid virtualizes rows so paint cost tracks the viewport, not cardinality.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -3194,13 +3194,17 @@ impl ResultsView {
         if data.columns.is_empty() {
             return None;
         }
-        let signature = data
-            .columns
-            .iter()
-            .map(|column| format!("{}:{}", column.name, column.type_label))
-            .collect::<Vec<_>>()
-            .join("\u{1f}");
-        let name = |index: usize| data.columns.get(index).map(|column| column.name.clone());
+        // Ordinals distinguish duplicate result aliases. JSON framing prevents
+        // column names containing delimiters from colliding with other schemas.
+        let signature = serde_json::to_string(
+            &data
+                .columns
+                .iter()
+                .map(|column| (&column.name, &column.type_label))
+                .collect::<Vec<_>>(),
+        )
+        .expect("column identities serialize");
+        let name = |index: usize| data.columns.get(index).map(|_| index.to_string());
         let order = self
             .column_order
             .iter()
@@ -3237,28 +3241,25 @@ impl ResultsView {
         let Some(data) = self.state.ready() else {
             return false;
         };
-        let by_name = data
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| (column.name.as_str(), index))
-            .collect::<HashMap<_, _>>();
+        let mut seen = HashSet::new();
         let mut order = layout
             .order
             .iter()
-            .filter_map(|name| by_name.get(name.as_str()).copied())
+            .filter_map(|key| key.parse::<usize>().ok())
+            .filter(|index| *index < data.columns.len())
+            .filter(|index| seen.insert(*index))
             .collect::<Vec<_>>();
         for index in 0..data.columns.len() {
-            if !order.contains(&index) {
+            if seen.insert(index) {
                 order.push(index);
             }
         }
         self.column_order = order;
-        for (index, column) in data.columns.iter().enumerate() {
-            if let Some(width) = layout.widths.get(&column.name) {
+        for index in 0..data.columns.len() {
+            if let Some(width) = layout.widths.get(&index.to_string()) {
                 self.column_widths[index] = width.clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH).round();
             }
-            self.included_columns[index] = !layout.hidden.contains(&column.name);
+            self.included_columns[index] = !layout.hidden.contains(&index.to_string());
         }
         cx.notify();
         true
@@ -6719,6 +6720,43 @@ mod tests {
             view.set_sort(0, Some(SortDirection::Descending), cx);
             assert_eq!(&*view.display_rows, &[2, 1]);
             assert_eq!(view.rendered_rows[0][0].text, "zebra");
+        });
+    }
+
+    #[gpui::test]
+    fn saved_layout_distinguishes_duplicate_aliases_and_rejects_duplicate_positions(
+        cx: &mut TestAppContext,
+    ) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::Ready(ResultData {
+                    columns: vec![
+                        ResultColumn {
+                            name: "id".into(),
+                            type_label: "int".into(),
+                            nullable: false
+                        };
+                        2
+                    ],
+                    rows: vec![Row::new(vec![Value::Int64(1), Value::Int64(2)])],
+                    ..ResultData::default()
+                }),
+                cx,
+            );
+            view.column_order = vec![1, 0];
+            view.column_widths = vec![180., 240.];
+            view.included_columns = vec![true, false];
+            let (_, mut layout) = view.grid_layout().unwrap();
+            assert_eq!(layout.widths.len(), 2);
+            layout.order.extend(["1".into(), "999".into()]);
+            view.column_order = vec![0, 1];
+            view.column_widths = vec![200., 200.];
+            view.included_columns = vec![true, true];
+            assert!(view.apply_grid_layout(&layout, cx));
+            assert_eq!(view.column_order, vec![1, 0]);
+            assert_eq!(view.column_widths, vec![180., 240.]);
+            assert_eq!(view.included_columns, vec![true, false]);
         });
     }
 

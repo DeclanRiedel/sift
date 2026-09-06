@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::settings::EditorMode;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -29,9 +31,8 @@ use crate::results::{
     ResultsView, StreamCompletion, StreamProgress, StreamUpdate,
 };
 use crate::settings::{
-    EditorMode, KeyboardProfile, KeymapSettings, NavigationHints, QueryResultsPlacement,
-    RepositoryGrouping, RepositoryPrimaryAction, RepositorySort, RepositoryView, SettingsStore,
-    UserSettings,
+    KeyboardProfile, KeymapSettings, NavigationHints, QueryResultsPlacement, RepositoryGrouping,
+    RepositoryPrimaryAction, RepositorySort, RepositoryView, SettingsStore, UserSettings,
 };
 use crate::workspace::{child_path, WorkspaceFilesProjection, WorkspaceFilesSnapshot};
 
@@ -4243,7 +4244,7 @@ pub struct Pane {
 impl Pane {
     fn from_presentation(
         pane: PanePresentation,
-        vim_mode_default: bool,
+        _vim_mode_default: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let PanePresentation {
@@ -4285,11 +4286,7 @@ impl Pane {
                 }
                 ItemKind::Query | ItemKind::Schema | ItemKind::Welcome => EditorLanguage::Sql,
             };
-            let keymap = if is_read_only_feed(item.kind) || vim_mode_default {
-                EditorKeymap::Vim
-            } else {
-                EditorKeymap::Standard
-            };
+            let keymap = EditorKeymap::Vim;
             let read_only = is_read_only_feed(item.kind);
             let editor = cx.new(|cx| {
                 let editor = QueryEditor::new(document, cx)
@@ -9812,7 +9809,6 @@ impl WorkspaceShell {
         let explorer_views = state.explorer_views.clone();
         let grid_layouts = state.grid_layouts.clone();
         let explorer_object_kinds = state.explorer_object_kinds.clone();
-        let vim_mode_default = settings.editor.default_mode == EditorMode::Vim;
         // Install the process-wide theme first so every child entity reads the
         // same palette through `ActiveTheme` during construction and render.
         let theme = settings_store
@@ -9840,7 +9836,7 @@ impl WorkspaceShell {
         let panes = workspace
             .panes
             .into_iter()
-            .map(|pane| cx.new(|cx| Pane::from_presentation(pane, vim_mode_default, cx)))
+            .map(|pane| cx.new(|cx| Pane::from_presentation(pane, true, cx)))
             .collect::<Vec<_>>();
         let selection_aggregates = settings.data.selection_aggregates;
         let result_placement = result_placement(settings.data.query_results_placement);
@@ -10187,11 +10183,7 @@ impl WorkspaceShell {
         let instance_configuration_editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(""), cx)
                 .with_language(EditorLanguage::Toml)
-                .with_keymap(if vim_mode_default {
-                    EditorKeymap::Vim
-                } else {
-                    EditorKeymap::Standard
-                })
+                .with_keymap(EditorKeymap::Vim)
         });
         // Re-render the palette as the search text changes so its list filters.
         cx.observe(&query_input, |shell, input, cx| {
@@ -11329,7 +11321,7 @@ impl WorkspaceShell {
 
     fn session_from_presentation(
         workspace: WorkspacePresentation,
-        vim_mode_default: bool,
+        _vim_mode_default: bool,
         selection_aggregates: bool,
         query_results_placement: QueryResultsPlacement,
         window: &mut Window,
@@ -11343,7 +11335,7 @@ impl WorkspaceShell {
         let panes = workspace
             .panes
             .into_iter()
-            .map(|pane| cx.new(|cx| Pane::from_presentation(pane, vim_mode_default, cx)))
+            .map(|pane| cx.new(|cx| Pane::from_presentation(pane, true, cx)))
             .collect::<Vec<_>>();
         let restored_results = panes
             .iter()
@@ -11789,11 +11781,7 @@ impl WorkspaceShell {
                     )
                     .with_language(EditorLanguage::Toml)
                     .with_manifest_schema()
-                    .with_keymap(if self.vim_mode_default() {
-                        EditorKeymap::Vim
-                    } else {
-                        EditorKeymap::Standard
-                    });
+                    .with_keymap(EditorKeymap::Vim);
                     editor.set_manifest_lifecycle(lifecycle.0, lifecycle.1, cx);
                     editor
                 });
@@ -18875,11 +18863,7 @@ impl WorkspaceShell {
         }
         let item_id = self.next_id;
         self.next_id += 1;
-        let keymap = if self.vim_mode_default() {
-            EditorKeymap::Vim
-        } else {
-            EditorKeymap::Standard
-        };
+        let keymap = EditorKeymap::Vim;
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&sql), cx).with_keymap(keymap)
         });
@@ -19433,11 +19417,7 @@ impl WorkspaceShell {
         let item_id = self.next_id;
         self.next_id += 1;
         let title = format!("{}.{}", source.schema, source.object);
-        let keymap = if self.vim_mode_default() {
-            EditorKeymap::Vim
-        } else {
-            EditorKeymap::Standard
-        };
+        let keymap = EditorKeymap::Vim;
         let editor = cx.new(|cx| {
             QueryEditor::new(
                 QueryDocument::with_random_peer("-- Loading canonical object DDL…"),
@@ -19520,11 +19500,7 @@ impl WorkspaceShell {
             .unwrap_or_else(|_| QueryDocument::with_random_peer(""));
         let item_id = self.next_id;
         self.next_id += 1;
-        let keymap = if self.vim_mode_default() {
-            EditorKeymap::Vim
-        } else {
-            EditorKeymap::Standard
-        };
+        let keymap = EditorKeymap::Vim;
         let editor = cx.new(|cx| QueryEditor::new(query_document, cx).with_keymap(keymap));
         let results = self.new_results_view(cx);
         if let Some(pane) = self.panes.get(self.active_pane) {
@@ -19659,11 +19635,7 @@ impl WorkspaceShell {
 
         let item_id = self.next_id;
         self.next_id += 1;
-        let keymap = if self.vim_mode_default() {
-            EditorKeymap::Vim
-        } else {
-            EditorKeymap::Standard
-        };
+        let keymap = EditorKeymap::Vim;
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
                 .with_language(EditorLanguage::Toml)
@@ -19786,11 +19758,7 @@ impl WorkspaceShell {
         }
         let item_id = self.next_id;
         self.next_id += 1;
-        let keymap = if self.vim_mode_default() {
-            EditorKeymap::Vim
-        } else {
-            EditorKeymap::Standard
-        };
+        let keymap = EditorKeymap::Vim;
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
                 .with_language(EditorLanguage::Json)
@@ -20535,10 +20503,10 @@ impl WorkspaceShell {
                 .iter()
                 .find_map(|pane| pane.read(cx).results.get(&item_id).cloned());
             if let Some(results) = results {
-                let layout = results
-                    .read(cx)
-                    .grid_layout()
-                    .and_then(|(signature, _)| self.grid_layouts.get(&signature).cloned());
+                let layout = results.read(cx).grid_layout().and_then(|(signature, _)| {
+                    let key = self.grid_layout_key(item_id, &signature, cx);
+                    self.grid_layouts.get(&key).cloned()
+                });
                 if let Some(layout) = layout {
                     results.update(cx, |results, cx| {
                         results.apply_grid_layout(&layout, cx);
@@ -20550,6 +20518,24 @@ impl WorkspaceShell {
         // Bounded HTTP results have no cursor to correlate with.
         self.record_result_reference(item_id, &state, None, cx);
         cx.notify();
+    }
+
+    fn grid_layout_key(&self, item_id: u64, signature: &str, cx: &App) -> String {
+        let source = self.database_source(item_id, cx);
+        // Profile labels and refresh timestamps do not define object identity.
+        let object = source.as_ref().map(|source| {
+            (
+                &source.instance_id,
+                source.tenant_id,
+                source.profile_id,
+                &source.catalog,
+                &source.schema,
+                &source.object,
+                source.object_kind,
+            )
+        });
+        serde_json::to_string(&("grid-v2", object, &self.selected_instance_id, signature))
+            .expect("grid identity serializes")
     }
 
     fn query_item_title(&self, item_id: u64, cx: &App) -> String {
@@ -23880,11 +23866,7 @@ impl WorkspaceShell {
         let title = format!("{}.sql", query.name);
         let item_id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        let keymap = if self.vim_mode_default() {
-            EditorKeymap::Vim
-        } else {
-            EditorKeymap::Standard
-        };
+        let keymap = EditorKeymap::Vim;
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&query.sql_text), cx)
                 .with_keymap(keymap)
@@ -25279,25 +25261,8 @@ impl WorkspaceShell {
             .and_then(|pane| pane.read(cx).active_editor_mode(cx))
     }
 
-    fn toggle_active_editor_keymap(&mut self, cx: &mut Context<Self>) {
-        if self.keyboard_profile() != KeyboardProfile::Hybrid {
-            return;
-        }
-        let editor = self.panes.get(self.active_pane).and_then(|pane| {
-            let pane = pane.read(cx);
-            pane.active_item().and_then(|item| pane.editor(item.id))
-        });
-        if let Some(editor) = editor {
-            editor.update(cx, |editor, cx| editor.toggle_keymap(cx));
-        }
-    }
-
     fn vim_mode_default(&self) -> bool {
-        match self.keyboard_profile() {
-            KeyboardProfile::Vim => true,
-            KeyboardProfile::Standard => false,
-            KeyboardProfile::Hybrid => self.settings.editor.default_mode == EditorMode::Vim,
-        }
+        true
     }
 
     fn keyboard_profile(&self) -> KeyboardProfile {
@@ -25305,70 +25270,12 @@ impl WorkspaceShell {
     }
 
     fn sync_editor_keymaps_to_profile(&mut self, cx: &mut Context<Self>) {
-        let keymap = match self.keyboard_profile() {
-            KeyboardProfile::Vim => Some(EditorKeymap::Vim),
-            KeyboardProfile::Standard => Some(EditorKeymap::Standard),
-            KeyboardProfile::Hybrid => None,
-        };
-        let Some(keymap) = keymap else {
-            return;
-        };
         for pane in &self.panes {
-            let editors = {
-                let pane = pane.read(cx);
-                pane.editors
-                    .iter()
-                    .map(|(item_id, editor)| {
-                        let read_only_feed = pane
-                            .items
-                            .iter()
-                            .any(|item| item.id == *item_id && is_read_only_feed(item.kind));
-                        (editor.clone(), read_only_feed)
-                    })
-                    .collect::<Vec<_>>()
-            };
-            for (editor, read_only_feed) in editors {
-                let editor_keymap = if read_only_feed {
-                    EditorKeymap::Vim
-                } else {
-                    keymap
-                };
-                editor.update(cx, |editor, cx| editor.set_keymap(editor_keymap, cx));
+            let editors = pane.read(cx).editors.values().cloned().collect::<Vec<_>>();
+            for editor in editors {
+                editor.update(cx, |editor, cx| editor.set_keymap(EditorKeymap::Vim, cx));
             }
         }
-    }
-
-    fn set_keyboard_profile(&mut self, profile: KeyboardProfile, cx: &mut Context<Self>) {
-        if self.keyboard_profile() == profile {
-            return;
-        }
-        let settings_is_open = self.settings_item.is_some_and(|item_id| {
-            self.panes
-                .iter()
-                .any(|pane| pane.read(cx).contains_item(item_id))
-        });
-        if settings_is_open {
-            self.show_toast(
-                "Save or close settings.toml before changing the keymap profile here".into(),
-                cx,
-            );
-            return;
-        }
-        let mut settings = self.settings.clone();
-        settings.keyboard.profile = profile;
-        if let Some(store) = &self.settings_store {
-            settings = match store.save_keyboard_profile(profile) {
-                Ok(settings) => settings,
-                Err(error) => {
-                    self.show_toast(error, cx);
-                    return;
-                }
-            };
-        }
-        self.settings = settings;
-        self.sync_editor_keymaps_to_profile(cx);
-        self.ide_input = None;
-        cx.notify();
     }
 
     /// Swap the process-wide theme and persist the preference. Views read the
@@ -25469,11 +25376,7 @@ impl WorkspaceShell {
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
                 .with_language(EditorLanguage::Toml)
-                .with_keymap(if self.vim_mode_default() {
-                    EditorKeymap::Vim
-                } else {
-                    EditorKeymap::Standard
-                })
+                .with_keymap(EditorKeymap::Vim)
         });
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.update(cx, |pane, cx| {
@@ -25575,38 +25478,6 @@ impl WorkspaceShell {
             });
         })
         .detach();
-    }
-
-    fn toggle_vim_mode_default(&mut self, cx: &mut Context<Self>) {
-        let settings_is_open = self.settings_item.is_some_and(|item_id| {
-            self.panes
-                .iter()
-                .any(|pane| pane.read(cx).contains_item(item_id))
-        });
-        if settings_is_open {
-            self.show_toast(
-                "Save or close settings.toml before changing this preference here".into(),
-                cx,
-            );
-            return;
-        }
-        let mut settings = self.settings.clone();
-        settings.editor.default_mode = if settings.editor.default_mode == EditorMode::Vim {
-            EditorMode::Standard
-        } else {
-            EditorMode::Vim
-        };
-        if let Some(store) = &self.settings_store {
-            settings = match store.save_editor_mode(settings.editor.default_mode) {
-                Ok(settings) => settings,
-                Err(error) => {
-                    self.show_toast(error, cx);
-                    return;
-                }
-            };
-        }
-        self.settings = settings;
-        cx.notify();
     }
 
     fn toggle_selection_aggregates(&mut self, cx: &mut Context<Self>) {
@@ -27227,7 +27098,8 @@ impl WorkspaceShell {
             PaneEvent::GridLayoutChanged { item_id } => {
                 if let Some(results) = emitter.read(cx).results.get(item_id) {
                     if let Some((signature, layout)) = results.read(cx).grid_layout() {
-                        self.grid_layouts.insert(signature, layout);
+                        let key = self.grid_layout_key(*item_id, &signature, cx);
+                        self.grid_layouts.insert(key, layout);
                         self.persist(cx);
                     }
                 }
@@ -39206,8 +39078,6 @@ impl gpui::Render for WorkspaceShell {
             .then(|| Self::render_frame_metrics(window, cx));
         let keymap_context = match self.keyboard_profile() {
             KeyboardProfile::Vim => "SiftWorkspace keymap_profile=vim",
-            KeyboardProfile::Hybrid => "SiftWorkspace keymap_profile=hybrid",
-            KeyboardProfile::Standard => "SiftWorkspace keymap_profile=standard",
         };
         // Docks are built before the element chain so each borrows `cx`
         // sequentially rather than two `when` closures capturing it at once.
@@ -40516,6 +40386,7 @@ mod tests {
             shell.executor_sender = Some(sender);
             let editor = shell.panes[0].read(cx).editor(1).unwrap().clone();
             editor.update(cx, |editor, cx| {
+                editor.replace_text_in_range(None, "i", window, cx);
                 editor.replace_text_in_range(None, "select 'local'", window, cx)
             });
             shell.switch_instance_workspace("hosted:team", window, cx);
@@ -43997,7 +43868,7 @@ mod tests {
         });
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.replace_text_from_owner("select 1", cx);
-            editor.toggle_keymap(cx);
+            editor.set_keymap(EditorKeymap::Vim, cx);
             editor.focus_handle(cx).focus(window, cx);
         });
         let original = editor.read_with(&cx, |editor, _| editor.document().text().to_owned());
@@ -44047,7 +43918,7 @@ mod tests {
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.replace_text_from_owner("abc\ndef", cx);
             if editor.keymap() != EditorKeymap::Vim {
-                editor.toggle_keymap(cx);
+                editor.set_keymap(EditorKeymap::Vim, cx);
             }
             editor.focus_handle(cx).focus(window, cx);
         });
@@ -44115,91 +43986,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn standard_profile_disables_leader_while_hybrid_enables_it(cx: &mut TestAppContext) {
-        let settings = UserSettings {
-            keyboard: crate::settings::KeyboardSettings {
-                profile: KeyboardProfile::Standard,
-            },
-            ..UserSettings::default()
-        };
-        let window = cx.update(|cx| {
-            cx.open_window(Default::default(), |window, cx| {
-                cx.new(|cx| {
-                    WorkspaceShell::new(
-                        PresentationState::default(),
-                        settings,
-                        None,
-                        None,
-                        window,
-                        cx,
-                    )
-                })
-            })
-            .unwrap()
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let workspace = window.root(&mut cx).unwrap();
-        let editor = workspace.read_with(&cx, |workspace, cx| {
-            let pane = workspace.panes[workspace.active_pane].read(cx);
-            pane.editor(pane.active_item().unwrap().id).unwrap()
-        });
-        editor.update_in(&mut cx, |editor, window, cx| {
-            editor.focus_handle(cx).focus(window, cx);
-        });
-        assert_eq!(
-            editor.read_with(&cx, |editor, _| editor.keymap()),
-            EditorKeymap::Standard
-        );
-
-        let footer_mode = cx.debug_bounds("footer-editor-mode").unwrap();
-        cx.simulate_click(footer_mode.center(), Modifiers::default());
-        assert_eq!(
-            editor.read_with(&cx, |editor, _| editor.keymap()),
-            EditorKeymap::Standard,
-            "a fixed Standard profile must not toggle from the footer"
-        );
-
-        cx.simulate_keystrokes("space");
-        assert!(workspace.read_with(&cx, |shell, _| shell.ide_input.is_none()));
-
-        workspace.update(&mut cx, |shell, cx| {
-            shell.set_keyboard_profile(KeyboardProfile::Hybrid, cx)
-        });
-        cx.run_until_parked();
-        let footer_mode = cx.debug_bounds("footer-editor-mode").unwrap();
-        cx.simulate_click(footer_mode.center(), Modifiers::default());
-        assert_eq!(
-            editor.read_with(&cx, |editor, _| editor.keymap()),
-            EditorKeymap::Vim,
-            "Hybrid must unlock the footer toggle"
-        );
-
-        workspace.update(&mut cx, |shell, cx| {
-            shell.set_keyboard_profile(KeyboardProfile::Standard, cx);
-            assert_eq!(editor.read(cx).keymap(), EditorKeymap::Standard);
-            shell.set_keyboard_profile(KeyboardProfile::Vim, cx);
-            assert_eq!(editor.read(cx).keymap(), EditorKeymap::Vim);
-        });
-        cx.run_until_parked();
-        let footer_mode = cx.debug_bounds("footer-editor-mode").unwrap();
-        cx.simulate_click(footer_mode.center(), Modifiers::default());
-        assert_eq!(
-            editor.read_with(&cx, |editor, _| editor.keymap()),
-            EditorKeymap::Vim,
-            "a fixed Vim profile must not toggle from the footer"
-        );
-
-        workspace.update(&mut cx, |shell, cx| {
-            shell.set_keyboard_profile(KeyboardProfile::Hybrid, cx)
-        });
-        cx.simulate_keystrokes("ctrl-k");
-        assert_eq!(
-            workspace.read_with(&cx, |shell, _| shell.ide_key_buffer()),
-            "<leader>"
-        );
-    }
-
-    #[gpui::test]
     fn vim_colon_opens_workspace_command_palette(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -44211,7 +43997,7 @@ mod tests {
         });
 
         editor.update_in(&mut cx, |editor, window, cx| {
-            editor.toggle_keymap(cx);
+            editor.set_keymap(EditorKeymap::Vim, cx);
             editor.replace_text_in_range(None, ":", window, cx);
         });
 
@@ -44408,12 +44194,9 @@ mod tests {
             .debug_bounds("settings-query-results-right")
             .expect("settings modal must expose query/result placement");
         cx.simulate_click(result_placement.center(), Modifiers::default());
-        workspace.update(&mut cx, |workspace, cx| {
-            workspace.toggle_vim_mode_default(cx)
-        });
         workspace.read_with(&cx, |workspace, cx| {
             assert_eq!(workspace.modal(), Some(&Modal::Settings));
-            assert_eq!(workspace.settings.editor.default_mode, EditorMode::Standard);
+            assert_eq!(workspace.settings.editor.default_mode, EditorMode::Vim);
             assert!(workspace.settings.data.selection_aggregates);
             assert_eq!(
                 workspace.settings.data.query_results_placement,
@@ -44523,7 +44306,7 @@ mod tests {
 
         let edited = "version = 1\nname = \"Edited\"\nappearance = \"dark\"\n[colors]\naccent = \"#ff0000\"\n";
         editor.update_in(&mut cx, |editor, window, cx| {
-            editor.set_keymap(EditorKeymap::Standard, cx);
+            editor.set_keymap(EditorKeymap::Vim, cx);
             let end = editor.document().text().encode_utf16().count();
             editor.replace_text_in_range(Some(0..end), edited, window, cx);
         });
@@ -44555,7 +44338,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn keymaps_page_controls_the_three_state_ide_profile(cx: &mut TestAppContext) {
+    fn keymaps_page_edits_vim_command_bindings(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(directory.path().join("settings.toml")));
         settings_store.save(&UserSettings::default()).unwrap();
@@ -44583,8 +44366,6 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("keymap-profile-vim").is_some());
-        assert!(cx.debug_bounds("keymap-profile-hybrid").is_some());
-        assert!(cx.debug_bounds("keymap-profile-standard").is_some());
         assert!(cx.debug_bounds("open-keymaps-file").is_some());
         assert!(cx.debug_bounds("save-keymaps").is_some());
         assert_eq!(
@@ -44592,12 +44373,9 @@ mod tests {
             KeyboardProfile::Vim
         );
 
-        workspace.update(&mut cx, |workspace, cx| {
-            workspace.set_keyboard_profile(KeyboardProfile::Hybrid, cx)
-        });
         assert_eq!(
             workspace.read_with(&cx, |workspace, _| workspace.keyboard_profile()),
-            KeyboardProfile::Hybrid
+            KeyboardProfile::Vim
         );
         assert_eq!(
             workspace.read_with(&cx, |workspace, _| workspace.modal().cloned()),
@@ -51068,7 +50846,7 @@ mod tests {
         });
         editor.update_in(&mut cx, |editor, window, cx| {
             if editor.keymap() != EditorKeymap::Vim {
-                editor.toggle_keymap(cx);
+                editor.set_keymap(EditorKeymap::Vim, cx);
             }
             editor.focus_handle(cx).focus(window, cx);
         });
