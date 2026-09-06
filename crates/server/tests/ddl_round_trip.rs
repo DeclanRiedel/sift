@@ -480,3 +480,69 @@ async fn round_trip_functions_with_argument_signatures() {
 
     driver.close(conn).await.unwrap();
 }
+
+#[tokio::test]
+async fn round_trip_sequence_preserves_configuration() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.expect("open");
+    let schema = unique_schema("seq");
+    exec(&driver, &conn, format!("CREATE SCHEMA \"{schema}\"")).await;
+    for (name, options) in [
+        (
+            "ascending",
+            "AS integer START WITH 17 INCREMENT BY 3 MINVALUE 2 MAXVALUE 999 CACHE 7 CYCLE",
+        ),
+        (
+            "descending",
+            "AS bigint START WITH -17 INCREMENT BY -3 MINVALUE -999 MAXVALUE -2 CACHE 1 NO CYCLE",
+        ),
+    ] {
+        exec(
+            &driver,
+            &conn,
+            format!("CREATE SEQUENCE \"{schema}\".{name} {options}"),
+        )
+        .await;
+        let path = ObjectPath {
+            catalog: None,
+            schema: Some(schema.clone()),
+            name: name.into(),
+            kind: Some(ObjectKind::Sequence),
+            routine_args: None,
+        };
+        let ddl = generate_ddl(&driver, conn.clone(), path.clone())
+            .await
+            .unwrap()
+            .ddl;
+        let expected = if name == "ascending" {
+            [
+                "AS integer",
+                "START WITH 17",
+                "INCREMENT BY 3",
+                "MINVALUE 2",
+                "MAXVALUE 999",
+                "CACHE 7 CYCLE",
+            ]
+        } else {
+            [
+                "AS bigint",
+                "START WITH -17",
+                "INCREMENT BY -3",
+                "MINVALUE -999",
+                "MAXVALUE -2",
+                "CACHE 1 NO CYCLE",
+            ]
+        };
+        for clause in expected {
+            assert!(ddl.contains(clause), "missing {clause}: {ddl}");
+        }
+        exec(&driver, &conn, format!("DROP SEQUENCE \"{schema}\".{name}")).await;
+        exec(&driver, &conn, &ddl).await;
+        assert_eq!(
+            generate_ddl(&driver, conn.clone(), path).await.unwrap().ddl,
+            ddl
+        );
+    }
+    exec(&driver, &conn, format!("DROP SCHEMA \"{schema}\" CASCADE")).await;
+    driver.close(conn).await.unwrap();
+}

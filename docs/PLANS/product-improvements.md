@@ -99,3 +99,12 @@ ordinal column keys preserve duplicate aliases, and repeated persisted positions
 are deduplicated. Existing foreign-key picker resolves catalog-proven references,
 uses bounded data search, and stages edits through the established edit preview.
 Old unscoped grid keys are not applied to new object-scoped layouts.
+
+DDL milestone: sequence generation added for PostgreSQL and SQL Server. Scalar
+catalog reads reject NULL/non-text results and missing terminal pages. Four DDL
+unit tests passed. A PostgreSQL live fixture was added; local `.env` and the
+existing fixture's default socket are absent, so live execution is unverified.
+Trigger/type/generated-column/collation fidelity and SQL Server live round trips
+remain open. Sources used for catalog field semantics:
+[PostgreSQL pg_sequence](https://www.postgresql.org/docs/current/catalog-pg-sequence.html)
+and [SQL Server sys.sequences](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-sequences-transact-sql).

@@ -26,11 +26,11 @@ of what already works.
 
 ## Priority 2 — natural next batch (unimplemented `ObjectKind`s users can already ask for)
 
-4. **`Sequence`.** Both engines have them; today they return
-   `UnsupportedForEngine`. **Fix shape:** PG via
-   `pg_get_expr(seqrelid → pg_class + pg_sequence)` producing
-   `CREATE SEQUENCE ... INCREMENT ... START ... MINVALUE ... MAXVALUE ...`;
-   MSSQL via `sys.sequences`. Adds two dispatch cases + one helper.
+4. **`Sequence` — implemented 2026-09-06.** PostgreSQL `pg_sequence` and
+   SQL Server `sys.sequences` preserve configured type, start, increment, bounds,
+   cycling, and cache. Runtime counters and PostgreSQL `OWNED BY` relationships
+   are not exported. PostgreSQL live round-trip fixtures cover ascending and
+   descending non-default sequences; execution requires a configured live DB.
 
 5. **`Trigger`.** Both engines. **Fix shape:** PG
    `pg_get_triggerdef(oid)`; MSSQL

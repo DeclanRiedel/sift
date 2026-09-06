@@ -21,6 +21,8 @@
 //! DDL layer runs alongside HTTP handlers and depends only on
 //! primitives that already exist.
 
+mod sequence;
+
 use sift_driver_api::Driver;
 use sift_protocol::{
     Code, ConstraintKind, DriverError, Engine, ExecuteRequest, ObjectDdl, ObjectInfo, ObjectKind,
@@ -40,6 +42,9 @@ pub async fn generate_ddl(
     let ddl = match kind {
         ObjectKind::Table | ObjectKind::PartitionedTable => {
             generate_table_ddl(driver, handle, &object, engine).await?
+        }
+        ObjectKind::Sequence => {
+            sequence::generate_sequence_ddl(driver, handle, &object, engine).await?
         }
         ObjectKind::ForeignTable => {
             return Err(DriverError::new(
@@ -349,34 +354,44 @@ async fn fetch_scalar_text(
         .await?;
     let mut rx = stream.rows;
     let mut result: Option<String> = None;
+    let mut completed = false;
     while let Some(page) = rx.recv().await {
         match page {
             Page::Rows { rows } if result.is_none() => {
                 if let Some(row) = rows.into_iter().next() {
                     if let Some(v) = row.values.into_iter().next() {
-                        result = Some(value_to_text(v));
+                        result =
+                            match v {
+                                Value::Text(text) if !text.trim().is_empty() => Some(text),
+                                Value::Null | Value::TypedNull { .. } => None,
+                                _ => return Err(DriverError::new(
+                                    Code::DriverInternal,
+                                    "DDL catalog query did not return a non-empty text definition",
+                                )),
+                            };
                     }
                 }
             }
             Page::Error { error } => return Err(error),
-            Page::Done { .. } => break,
+            Page::Done { .. } => {
+                completed = true;
+                break;
+            }
             _ => {}
         }
+    }
+    if !completed {
+        return Err(DriverError::new(
+            Code::DriverInternal,
+            "DDL catalog stream ended before completion",
+        ));
     }
     result.ok_or_else(|| {
         DriverError::new(
             Code::UndefinedObject,
-            "DDL query returned no rows — object may not exist",
+            "DDL definition is missing or inaccessible",
         )
     })
-}
-
-fn value_to_text(v: Value) -> String {
-    match v {
-        Value::Text(s) => s,
-        Value::Null | Value::TypedNull { .. } => String::new(),
-        other => format!("{other:?}"),
-    }
 }
 
 pub(crate) fn qualified_name(path: &ObjectPath, engine: Engine) -> String {
@@ -455,6 +470,40 @@ fn primitive_to_sql(p: sift_protocol::PrimitiveType, engine: Engine) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn scalar_ddl_rejects_missing_invalid_and_incomplete_definitions() {
+        use sift_driver_api::{mock::MockDriver, ConnHandle};
+        use sift_protocol::Row;
+        for (value, terminal, expected) in [
+            (Value::Null, true, Code::UndefinedObject),
+            (Value::Int64(7), true, Code::DriverInternal),
+            (
+                Value::Text("CREATE VIEW v AS SELECT 1".into()),
+                false,
+                Code::DriverInternal,
+            ),
+        ] {
+            let mut pages = vec![Page::Rows {
+                rows: vec![Row::new(vec![value])],
+            }];
+            if terminal {
+                pages.push(Page::Done {
+                    affected_rows: None,
+                    warnings: Vec::new(),
+                });
+            }
+            let driver = MockDriver::builder().execute_ok(pages).build();
+            let error = fetch_scalar_text(
+                &driver,
+                ConnHandle::new(1, Engine::Postgres),
+                "catalog read".into(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, expected);
+        }
+    }
 
     #[test]
     fn pg_regprocedure_name_includes_argument_signature() {
