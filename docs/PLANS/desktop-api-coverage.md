@@ -1,8 +1,17 @@
 # Desktop API → UI Coverage & Build Priority
 
-Every public `sift-client-sdk` `Client` capability mapped to the desktop UI that
-should expose it, ordered by build priority. This is the working "what next" for
-the Phase M client.
+Status: **historical API wiring checklist; superseded for feature selection.**
+
+Use [the canonical product inventory](ide-parity-and-provider-extensibility.md)
+for current feature status and [Phase M](phase-m-gpui-desktop.md) for desktop
+validation work. The unchecked rows below are historical implementation notes,
+not evidence that a current product workflow is missing. In particular,
+transactions, process monitoring, imports, workspace/Git operations, migrations,
+and automation have since shipped usable desktop slices. Individual SDK methods
+may still lack a direct UI even when their broader workflow is implemented.
+
+This document retains method-level notes for tracing older implementation work;
+revalidate each row against code before using it as a task.
 
 Legend: `[x]` wired to a working UI · `[~]` plumbing/model exists, no dedicated
 UI · `[ ]` not started.
