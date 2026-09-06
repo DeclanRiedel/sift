@@ -12,8 +12,8 @@ Modal geometry belongs to one host; feature views own their content.
 ## Milestones
 
 - [x] Unify CLI/desktop starter manifests through a validated typed generator.
-- [ ] Split HTTP handlers into domain modules without changing router middleware.
-- [ ] Extract feature-owned workspace-shell actions and views.
+- [x] Split HTTP handlers into domain modules without changing router middleware.
+- [x] Extract feature-owned workspace-shell actions and views.
 - [ ] Bound desktop event queues with explicit overload and lossless delivery semantics.
 - [ ] Remove provider-specific SQL construction from shell orchestration; use the server's existing DDL boundary where applicable.
 - [ ] Standardize modal frame geometry, content scrolling and action visibility.
