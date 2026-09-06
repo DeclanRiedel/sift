@@ -92,6 +92,21 @@ Invoke-RestMethod http://127.0.0.1:17474/v1/ready
 ./scripts/dev.ps1 desktop --server-url http://127.0.0.1:17474 --server-name vostro
 ```
 
+In Sift's Connect to Server dialog, select **URL** and enter
+`http://127.0.0.1:17474`. The **SSH** field accepts `user@host` or an OpenSSH
+host alias, not a URL. This forwarding setup carries HTTP inside SSH; it does
+not provide an HTTPS endpoint.
+
+The desktop follows the connected server's handshake capabilities. Without an
+applied `sift.toml`, Add connection opens the database wizard. With an applied
+manifest it opens connection configuration. Unavailable Git, workspace-file,
+and automation entry points are hidden, and their palette commands explain
+why they are disabled. After changing server configuration, restart the server
+so reconnecting clients receive its updated capabilities.
+
+Connection and dialog failures remain in Problems and Notifications after the
+dialog closes. Use the copy icon on an error or notification to copy its text.
+
 **Windows hosts, NixOS connects:** run `./scripts/dev.ps1 server` on Windows.
 In another Windows terminal, keep this reverse tunnel running:
 
