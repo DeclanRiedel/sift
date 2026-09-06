@@ -9557,6 +9557,7 @@ pub struct WorkspaceShell {
     lifecycle: LifecycleProjection,
     presence: RoomPresenceProjection,
     room_members: Vec<sift_api_types::RoomMember>,
+    admin_room_members: Vec<sift_api_types::RoomMember>,
     room_members_loading: bool,
     room_members_error: Option<String>,
     collaboration_section: CollaborationSection,
@@ -10798,6 +10799,7 @@ impl WorkspaceShell {
             lifecycle: LifecycleProjection::default(),
             presence: RoomPresenceProjection::default(),
             room_members: Vec::new(),
+            admin_room_members: Vec::new(),
             room_members_loading: false,
             room_members_error: None,
             collaboration_section: CollaborationSection::default(),
@@ -12392,6 +12394,19 @@ impl WorkspaceShell {
                     Ok(rooms) => {
                         self.administered_rooms = rooms;
                         self.room_admin_error = None;
+                        if let Some(room_id) = self.selected_admin_room {
+                            if self
+                                .administered_rooms
+                                .iter()
+                                .any(|room| room.id.0 == room_id)
+                            {
+                                self.select_admin_room(room_id, cx);
+                            } else {
+                                self.selected_admin_room = None;
+                                self.admin_room_members.clear();
+                                self.room_admin_results.clear();
+                            }
+                        }
                     }
                     Err(error) => self.room_admin_error = Some(error),
                 }
@@ -12404,7 +12419,7 @@ impl WorkspaceShell {
                 self.room_admin_pending = false;
                 match result {
                     Ok((members, results)) => {
-                        self.room_members = members;
+                        self.admin_room_members = members;
                         self.room_admin_results = results;
                         self.room_admin_error = None;
                     }
@@ -12416,11 +12431,7 @@ impl WorkspaceShell {
                 self.room_admin_pending = false;
                 match result {
                     Ok(()) => {
-                        if let Some(room_id) = self.selected_admin_room {
-                            self.select_admin_room(room_id, cx);
-                        } else {
-                            self.open_room_administration(cx);
-                        }
+                        self.open_room_administration(cx);
                     }
                     Err(error) => self.room_admin_error = Some(error),
                 }
@@ -31868,6 +31879,16 @@ impl WorkspaceShell {
 
     fn select_admin_room(&mut self, room_id: i64, cx: &mut Context<Self>) {
         self.selected_admin_room = Some(room_id);
+        self.admin_room_members.clear();
+        self.room_admin_results.clear();
+        let profile = self
+            .administered_rooms
+            .iter()
+            .find(|room| room.id.0 == room_id)
+            .and_then(|room| room.bound_connection_profile_id)
+            .map(|id| id.0.to_string())
+            .unwrap_or_default();
+        self.room_admin_inputs[1].update(cx, |input, cx| input.set_text(profile, cx));
         self.send_room_admin_command(ExecutorCommand::LoadRoomDetails { room_id }, cx);
     }
 
@@ -44910,7 +44931,7 @@ impl WorkspaceShell {
                 }
                 Modal::RoomAdministration => {
                     let rooms = self.administered_rooms.clone();
-                    let members = self.room_members.clone();
+                    let members = self.admin_room_members.clone();
                     let results = self.room_admin_results.clone();
                     div().w_full().h(px(620.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between().child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Room administration")).child(Button::new("refresh-room-administration", "Refresh").tone(ButtonTone::Ghost).loading(self.room_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.open_room_administration(cx)))))
@@ -44922,7 +44943,7 @@ impl WorkspaceShell {
                                 .child(div().flex().gap_2().child(div().flex_1().child(self.room_admin_inputs[1].clone())).child(Button::new("bind-admin-room", "Bind / unbind").tone(ButtonTone::Neutral).disabled(self.selected_admin_room.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.bind_admin_room(cx)))))
                                 .child(div().flex().gap_2().child(div().flex_1().child(self.room_admin_inputs[2].clone())).child(Button::new("cycle-room-role", format!("{:?}", self.room_admin_member_role)).tone(ButtonTone::Ghost).on_click(cx.listener(|shell, _, _, cx| shell.cycle_room_member_role(cx)))).child(Button::new("add-admin-room-member", "Add").tone(ButtonTone::Accent).disabled(self.selected_admin_room.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.add_admin_room_member(cx)))))
                                 .child(SectionLabel::new("Members"))
-                                .child(div().max_h(px(125.)).children(members.into_iter().enumerate().map(|(index, member)| div().id(("admin-room-member", index)).h(px(32.)).px_2().flex().items_center().justify_between().child(format!("Principal {}", member.principal_id.0)).child(div().text_xs().text_color(colors.muted_text).child(format!("{:?}", member.role))))))
+                                .child(div().id("admin-room-members").max_h(px(125.)).flex_none().overflow_y_scroll().children(members.into_iter().enumerate().map(|(index, member)| div().id(("admin-room-member", index)).h(px(32.)).px_2().flex().items_center().justify_between().child(format!("Principal {}", member.principal_id.0)).child(div().text_xs().text_color(colors.muted_text).child(format!("{:?}", member.role))))))
                                 .child(SectionLabel::new("Shared results"))
                                 .child(div().id("admin-room-results").flex_1().min_h_0().overflow_y_scroll().children(results.into_iter().enumerate().map(|(index, result)| div().id(("admin-room-result", index)).min_h(px(48.)).px_2().flex().flex_col().justify_center().border_b_1().border_color(colors.subtle_border).child(format!("{:?} · {} row(s) · {} page(s)", result.status, result.row_count.unwrap_or_default(), result.page_count)).child(div().truncate().text_xs().font_family("monospace").text_color(colors.muted_text).child(result.result_id.to_string()))))))
                         )
@@ -51591,6 +51612,43 @@ mod tests {
             button.left() >= card.left() && button.right() <= card.right(),
             "footer {button:?} outside card {card:?}"
         );
+    }
+
+    #[gpui::test]
+    fn room_administration_does_not_replace_active_room_people(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            let member = |room| sift_api_types::RoomMember {
+                room_id: sift_api_types::RoomId(room),
+                principal_id: sift_api_types::PrincipalId(1),
+                role: sift_api_types::RoomRole::Owner,
+                joined_at: chrono::Utc::now(),
+            };
+            shell.room_members = vec![member(1)];
+            shell.selected_admin_room = Some(2);
+            shell.on_executor_event(
+                ExecutorEvent::RoomDetailsLoaded {
+                    room_id: 2,
+                    result: Ok((vec![member(2)], Vec::new())),
+                },
+                cx,
+            );
+            assert_eq!(shell.room_members[0].room_id.0, 1);
+            assert_eq!(shell.admin_room_members[0].room_id.0, 2);
+            shell.select_admin_room(3, cx);
+            assert!(shell.admin_room_members.is_empty());
+            shell.on_executor_event(
+                ExecutorEvent::RoomDetailsLoaded {
+                    room_id: 2,
+                    result: Ok((vec![member(2)], Vec::new())),
+                },
+                cx,
+            );
+            assert!(shell.admin_room_members.is_empty());
+            assert_eq!(shell.room_members[0].room_id.0, 1);
+        });
     }
 
     #[gpui::test]
