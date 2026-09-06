@@ -6,7 +6,7 @@ The canonical feature inventory remains the source of product feature status.
 ## Milestones
 
 - [x] Reconcile the historical desktop API checklist with canonical feature status.
-- [ ] Bound active metadata connections and extract pool ownership.
+- [x] Bound active metadata connections and extract pool ownership.
 - [ ] Split workspace shell by feature state and event ownership.
 - [ ] Split HTTP handlers by domain while preserving authorization and audit.
 - [ ] Separate desktop executor domains and task lifetimes.
@@ -40,3 +40,11 @@ Run formatting, workspace Clippy with warnings denied, and workspace tests.
 Use focused behavior tests for new concurrency and state transitions; preserve
 existing tests for structural moves. Record external/platform validation limits
 explicitly. Do not enable CI or introduce smoke scripts.
+
+## Milestone evidence
+
+Metadata admission: three focused tests passed (capacity/reuse, failed-open
+release, simultaneous admission). Workspace Clippy passed. Full workspace tests
+are running; the HTTP error regression checks the typed `metadata_busy` 503.
+Generated incremental build artifacts were cleared to recover disk capacity;
+source files and dependency caches were retained.

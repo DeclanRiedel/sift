@@ -33,6 +33,8 @@ pub mod http;
 mod instance_manifest;
 mod migration_run;
 mod plan_capture;
+mod pool;
+use pool::{ConnectionPool, PooledConn};
 mod projection;
 mod repository;
 mod run_configuration;
@@ -372,6 +374,8 @@ pub enum MetadataError {
     SecretStore(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("metadata connection capacity exhausted; retry later")]
+    PoolExhausted,
     #[error("blocking metadata task failed: {0}")]
     BlockingTask(String),
     #[error("metadata schema migration required (current V{current}, latest V{latest}); run `sift-server migrate apply`")]
@@ -447,92 +451,6 @@ pub struct MigrationReport {
 pub struct MigrationLockGuard {
     _file: Option<std::fs::File>,
     path: Option<PathBuf>,
-}
-
-/// Maximum idle connections the file-backed pool retains. Connections are
-/// created on demand (checkout never blocks), but only this many are kept
-/// warm; the rest are closed on check-in. Metadata calls run on Tokio's
-/// bounded blocking pool, so live connections are naturally capped by that.
-const MAX_IDLE_CONNECTIONS: usize = 16;
-
-/// A tiny SQLite connection pool for file-backed stores. In WAL mode multiple
-/// connections read concurrently and writers serialize via `busy_timeout`, so
-/// spreading metadata calls across connections lifts the single-mutex
-/// serialization ceiling (P1-meta-1). The `idle` mutex is held only to pop or
-/// push a connection, never across a query.
-struct ConnectionPool {
-    path: PathBuf,
-    idle: Mutex<Vec<Connection>>,
-}
-
-impl ConnectionPool {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            idle: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Take a warm connection or open a fresh one. Never blocks on other
-    /// callers beyond the brief `idle` lock.
-    fn checkout(self: &Arc<Self>) -> Result<PooledConn> {
-        let reused = self.idle.lock().unwrap().pop();
-        let conn = match reused {
-            Some(conn) => conn,
-            None => {
-                if let Some(parent) = self.path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let conn = Connection::open(&self.path)?;
-                configure_connection(&conn)?;
-                conn
-            }
-        };
-        Ok(PooledConn {
-            conn: Some(conn),
-            pool: Arc::clone(self),
-        })
-    }
-
-    fn checkin(&self, conn: Connection) {
-        let mut idle = self.idle.lock().unwrap();
-        if idle.len() < MAX_IDLE_CONNECTIONS {
-            idle.push(conn);
-        }
-        // Otherwise drop `conn`, closing it.
-    }
-
-    fn clear_idle(&self) {
-        self.idle.lock().unwrap().clear();
-    }
-}
-
-/// A connection borrowed from a [`ConnectionPool`]. Returned to the pool on
-/// drop. Derefs to [`Connection`] so call sites use it like a plain handle.
-struct PooledConn {
-    conn: Option<Connection>,
-    pool: Arc<ConnectionPool>,
-}
-
-impl Drop for PooledConn {
-    fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            self.pool.checkin(conn);
-        }
-    }
-}
-
-impl Deref for PooledConn {
-    type Target = Connection;
-    fn deref(&self) -> &Connection {
-        self.conn.as_ref().expect("connection present until drop")
-    }
-}
-
-impl DerefMut for PooledConn {
-    fn deref_mut(&mut self) -> &mut Connection {
-        self.conn.as_mut().expect("connection present until drop")
-    }
 }
 
 /// Backing store for a [`MetadataStore`]. File-backed stores use a WAL
@@ -7604,23 +7522,6 @@ mod tests {
         let rows = store.list_operation_audit(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].correlation_id.as_deref(), Some("corr-1"));
-    }
-
-    #[test]
-    fn pool_reuses_idle_connections() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("metadata.sqlite");
-        let secrets = Arc::new(MemorySecretStore::new());
-        let store = MetadataStore::open(&path, secrets).unwrap();
-        let Backend::Pool(pool) = &store.backend else {
-            panic!("file-backed store should use the pool backend");
-        };
-        // A checked-in connection is retained and handed back out.
-        let conn = pool.checkout().unwrap();
-        drop(conn);
-        assert_eq!(pool.idle.lock().unwrap().len(), 1);
-        let _conn = pool.checkout().unwrap();
-        assert_eq!(pool.idle.lock().unwrap().len(), 0);
     }
 
     #[test]

@@ -2121,3 +2121,21 @@ commands gain stable independent status, paging, export, and cancellation
 semantics. This requires a protocol-versioned execution migration, a richer
 catalog binding projection, and two maintained dialect corpora instead of one
 permissive generic parser corpus.
+
+
+## ADR-054 — Bounded Metadata Connection Admission
+
+**Status:** Accepted, 2026-09-06.
+
+The file-backed SQLite pool admits at most 16 simultaneous checkouts. Admission
+reserves capacity before opening a connection, never waits for a free slot, and
+returns capacity on both initialization failure and guard drop. Idle connections
+are reused. SQLite retains its existing five-second busy timeout for admitted
+operations. In-memory stores retain their single-connection ownership.
+
+Saturation returns a typed metadata error mapped to HTTP 503 (`metadata_busy`).
+Clients must not automatically replay mutations: a service-level failure is not
+proof that every preceding side effect was rolled back. This bounds active
+SQLite resources independently of Tokio's blocking-thread ceiling. The initial
+limit matches the former idle retention cap; throughput tuning requires measured
+workloads. Pool exhaustion does not change operation auditing or secret storage.

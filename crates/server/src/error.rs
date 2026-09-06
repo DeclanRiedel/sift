@@ -155,6 +155,7 @@ impl ApiError {
                 (StatusCode::UPGRADE_REQUIRED, "protocol_handshake_required")
             }
             ApiError::Metadata(error) => match error {
+                MetadataError::PoolExhausted => (StatusCode::SERVICE_UNAVAILABLE, "metadata_busy"),
                 MetadataError::ConnectionProfileNotFound(_)
                 | MetadataError::RoomNotFound(_)
                 | MetadataError::RoomMemberNotFound { .. }
@@ -435,6 +436,17 @@ impl aide::OperationOutput for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn metadata_saturation_is_service_unavailable() {
+        let response = ApiError::Metadata(MetadataError::PoolExhausted).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["kind"], "metadata_busy");
+    }
 
     #[test]
     fn rate_limit_sets_retry_after() {
