@@ -59,7 +59,9 @@ mod items;
 mod modal_layout;
 mod modals;
 mod pane_layout;
+mod sql_drafts;
 mod status_bar;
+use sql_drafts::*;
 mod vault_actions;
 
 pub use commands::{
@@ -170,82 +172,6 @@ fn automation_run_is_active(run: &sift_protocol::Run) -> bool {
             | sift_protocol::RunState::Preparing
             | sift_protocol::RunState::Running
     )
-}
-
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-fn ddl_quote_identifier(provider_id: &sift_protocol::ProviderId, identifier: &str) -> String {
-    if provider_id.as_str() == "sift/sql-server" {
-        format!("[{}]", identifier.replace(']', "]]"))
-    } else {
-        quote_identifier(identifier)
-    }
-}
-
-fn object_designer_sql(source: &DatabaseObjectSource) -> Option<String> {
-    let schema = ddl_quote_identifier(&source.provider_id, &source.schema);
-    let object = ddl_quote_identifier(&source.provider_id, &source.object);
-    let qualified = format!("{schema}.{object}");
-    let postgres = source.provider_id.as_str().contains("postgres");
-    match source.object_kind {
-        sift_protocol::ObjectKind::Sequence => Some(if postgres {
-            format!("-- Review the current sequence DDL before execution.\nALTER SEQUENCE {qualified}\n    INCREMENT BY 1\n    NO MINVALUE\n    NO MAXVALUE\n    CACHE 1;\n")
-        } else {
-            format!("-- Review the current sequence DDL before execution.\nALTER SEQUENCE {qualified}\n    INCREMENT BY 1\n    NO CACHE;\n")
-        }),
-        sift_protocol::ObjectKind::Trigger => Some(if postgres {
-            format!("-- Replace the function and timing/event after reviewing the object DDL.\nCREATE OR REPLACE TRIGGER {object}\n    BEFORE INSERT ON {schema}.replace_table\n    FOR EACH ROW\n    EXECUTE FUNCTION {schema}.replace_trigger_function();\n")
-        } else {
-            format!("-- Replace the table and body after reviewing the object DDL.\nCREATE OR ALTER TRIGGER {qualified}\nON {schema}.replace_table\nAFTER INSERT\nAS\nBEGIN\n    SET NOCOUNT ON;\nEND;\n")
-        }),
-        sift_protocol::ObjectKind::Type => Some(if postgres {
-            format!("-- PostgreSQL enum evolution is additive; replace the value deliberately.\nALTER TYPE {qualified} ADD VALUE 'new_value';\n")
-        } else {
-            format!("-- SQL Server alias types cannot be altered in place. Create a replacement,\n-- migrate dependants, then drop the old type after review.\nCREATE TYPE {schema}.replace_type FROM nvarchar(255) NULL;\n")
-        }),
-        _ => None,
-    }
-}
-
-fn table_preview_sql(
-    provider_id: &sift_protocol::ProviderId,
-    schema: &str,
-    object: &str,
-) -> String {
-    let qualified = format!("{}.{}", quote_identifier(schema), quote_identifier(object));
-    if provider_id.as_str() == "sift/sql-server" {
-        format!("SELECT TOP (100) * FROM {qualified};")
-    } else {
-        format!("SELECT * FROM {qualified} LIMIT 100;")
-    }
-}
-
-fn type_ref_label(type_ref: &sift_protocol::TypeRef) -> String {
-    match type_ref {
-        sift_protocol::TypeRef::Native { name, .. } => name.clone(),
-        sift_protocol::TypeRef::Primitive(primitive) => match primitive {
-            sift_protocol::PrimitiveType::Int16 => "smallint",
-            sift_protocol::PrimitiveType::Int32 => "integer",
-            sift_protocol::PrimitiveType::Int64 => "bigint",
-            sift_protocol::PrimitiveType::Float32 => "real",
-            sift_protocol::PrimitiveType::Float64 => "double precision",
-            sift_protocol::PrimitiveType::Decimal => "decimal",
-            sift_protocol::PrimitiveType::Bool => "boolean",
-            sift_protocol::PrimitiveType::Text => "text",
-            sift_protocol::PrimitiveType::Blob => "binary",
-            sift_protocol::PrimitiveType::Date => "date",
-            sift_protocol::PrimitiveType::Time => "time",
-            sift_protocol::PrimitiveType::Timestamp => "timestamp",
-            sift_protocol::PrimitiveType::TimestampTz => "timestamp with time zone",
-            sift_protocol::PrimitiveType::Interval => "interval",
-            sift_protocol::PrimitiveType::Uuid => "uuid",
-            sift_protocol::PrimitiveType::Json => "json",
-            sift_protocol::PrimitiveType::Jsonb => "jsonb",
-        }
-        .into(),
-    }
 }
 
 fn index_kind_label(kind: sift_protocol::IndexKind) -> &'static str {
@@ -408,129 +334,6 @@ fn table_detail_nodes<'a>(
         .collect::<Vec<_>>();
     nodes.sort_by(|left, right| left.name.cmp(&right.name));
     nodes
-}
-
-fn catalog_detail_ddl(
-    source: &DatabaseObjectSource,
-    node: &sift_protocol::CatalogNode,
-) -> Option<String> {
-    let qualified_table = format!(
-        "{}.{}",
-        ddl_quote_identifier(&source.provider_id, &source.schema),
-        ddl_quote_identifier(&source.provider_id, &source.object)
-    );
-    match &node.details {
-        sift_protocol::CatalogNodeDetails::Index { index } => {
-            let columns = index
-                .columns
-                .iter()
-                .map(|column| {
-                    if column
-                        .chars()
-                        .all(|character| character.is_alphanumeric() || character == '_')
-                    {
-                        ddl_quote_identifier(&source.provider_id, column)
-                    } else {
-                        column.clone()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            let mut ddl = format!(
-                "-- Catalog-derived index DDL preview\nCREATE {}INDEX {} ON {} ({})",
-                if index.unique { "UNIQUE " } else { "" },
-                ddl_quote_identifier(&source.provider_id, &index.name),
-                qualified_table,
-                columns
-            );
-            if let Some(predicate) = &index.partial_predicate {
-                ddl.push_str(" WHERE ");
-                ddl.push_str(predicate);
-            }
-            ddl.push(';');
-            Some(ddl)
-        }
-        sift_protocol::CatalogNodeDetails::Constraint { constraint } => Some(
-            constraint
-                .definition
-                .as_ref()
-                .map(|definition| {
-                    format!(
-                        "-- Catalog relation definition\nALTER TABLE {} ADD CONSTRAINT {} {};",
-                        qualified_table,
-                        ddl_quote_identifier(&source.provider_id, &constraint.name),
-                        definition.trim().trim_end_matches(';')
-                    )
-                })
-                .unwrap_or_else(|| {
-                    format!(
-                        "-- DDL definition is unavailable for relation {}.",
-                        constraint.name
-                    )
-                }),
-        ),
-        sift_protocol::CatalogNodeDetails::Trigger { trigger } => {
-            Some(trigger.definition.clone().unwrap_or_else(|| {
-                format!(
-                    "-- DDL definition is unavailable for trigger {}.",
-                    trigger.name
-                )
-            }))
-        }
-        _ => None,
-    }
-}
-
-fn catalog_columns_ddl(
-    source: &DatabaseObjectSource,
-    graph: &sift_protocol::CatalogGraph,
-    table_id: &sift_protocol::CatalogObjectId,
-    columns_only: bool,
-) -> String {
-    let qualified_relation = format!(
-        "{}.{}",
-        ddl_quote_identifier(&source.provider_id, &source.schema),
-        ddl_quote_identifier(&source.provider_id, &source.object)
-    );
-    let columns = table_columns(graph, table_id)
-        .into_iter()
-        .filter_map(|node| {
-            let sift_protocol::CatalogNodeDetails::Column { column } = &node.details else {
-                return None;
-            };
-            Some(format!(
-                "    {} {}{}",
-                ddl_quote_identifier(&source.provider_id, &node.name),
-                type_ref_label(&column.type_ref),
-                if column.nullable == sift_protocol::Nullability::NotNullable {
-                    " NOT NULL"
-                } else {
-                    ""
-                }
-            ))
-        })
-        .collect::<Vec<_>>();
-    if matches!(
-        source.object_kind,
-        sift_protocol::ObjectKind::Table
-            | sift_protocol::ObjectKind::ForeignTable
-            | sift_protocol::ObjectKind::PartitionedTable
-    ) {
-        let scope = if columns_only {
-            "-- Columns only; indexes, constraints, triggers, storage, and grants are omitted."
-        } else {
-            "-- Base relation definition; engine-specific storage and grants may be omitted."
-        };
-        format!(
-            "-- Catalog-derived relation DDL preview\n{scope}\nCREATE TABLE {qualified_relation} (\n{}\n);",
-            columns.join(",\n")
-        )
-    } else {
-        format!(
-            "-- Catalog-derived column metadata for {qualified_relation}\n-- Exact relation DDL is unavailable in this UI foundation.\n{}",
-            columns.join("\n")
-        )
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -13442,10 +13245,15 @@ impl WorkspaceShell {
                     cx.notify();
                     return;
                 }
-                self.show_error_toast(
-                    format!("Exact DDL unavailable; showing catalog preview. {message}"),
-                    cx,
-                );
+                for pane in &self.panes {
+                    if pane.update(cx, |pane, cx| {
+                        pane.show_database_item_view(item_id, DatabaseItemView::Ddl,
+                            Some("-- Full DDL is unavailable. Retry after resolving the reported error.".into()), cx)
+                    }) {
+                        break;
+                    }
+                }
+                self.show_error_toast(format!("Full DDL unavailable. {message}"), cx);
             }
             ExecutorEvent::TableMigrationPreviewed { item_id, plan } => {
                 let should_show_ddl = if let Some(designer) = self
@@ -18998,7 +18806,7 @@ impl WorkspaceShell {
         else {
             return;
         };
-        let ddl = catalog_columns_ddl(source, graph, table_id, true);
+        let ddl = catalog_columns_ddl(source, graph, table_id);
         for pane in &self.panes {
             if pane.update(cx, |pane, cx| {
                 pane.show_database_item_view(item_id, DatabaseItemView::Ddl, Some(ddl.clone()), cx)
@@ -19010,37 +18818,10 @@ impl WorkspaceShell {
     }
 
     fn open_table_full_ddl(&mut self, item_id: u64, cx: &mut Context<Self>) {
-        let Some(TableDefinitionState::Ready {
-            source,
-            graph,
-            table_id,
-        }) = self.table_definitions.get(&item_id)
+        let Some(TableDefinitionState::Ready { source, .. }) = self.table_definitions.get(&item_id)
         else {
             return;
         };
-        let mut sections = vec![catalog_columns_ddl(source, graph, table_id, false)];
-        for kind in [
-            sift_protocol::CatalogNodeKind::Constraint,
-            sift_protocol::CatalogNodeKind::Index,
-            sift_protocol::CatalogNodeKind::Trigger,
-        ] {
-            sections.extend(
-                table_detail_nodes(graph, table_id, kind)
-                    .into_iter()
-                    .filter_map(|node| catalog_detail_ddl(source, node)),
-            );
-        }
-        let ddl = format!(
-            "-- Full catalog-derived DDL preview\n-- Review engine-specific details before execution.\n\n{}",
-            sections.join("\n\n")
-        );
-        for pane in &self.panes {
-            if pane.update(cx, |pane, cx| {
-                pane.show_database_item_view(item_id, DatabaseItemView::Ddl, Some(ddl.clone()), cx)
-            }) {
-                break;
-            }
-        }
         if !self.pending_object_ddl.contains(&item_id) {
             if let Some(sender) = &self.executor_sender {
                 if sender
@@ -19052,6 +18833,19 @@ impl WorkspaceShell {
                 {
                     self.pending_object_ddl.insert(item_id);
                 }
+            }
+        }
+        let ddl = if self.pending_object_ddl.contains(&item_id) {
+            "-- Loading the authoritative definition from the server…"
+        } else {
+            "-- Full DDL was not requested. Connect to this object and retry."
+        }
+        .to_owned();
+        for pane in &self.panes {
+            if pane.update(cx, |pane, cx| {
+                pane.show_database_item_view(item_id, DatabaseItemView::Ddl, Some(ddl.clone()), cx)
+            }) {
+                break;
             }
         }
         cx.notify();
@@ -19100,6 +18894,17 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(sql) = sift_snippets::table_preview_sql(
+            &target.connection.provider_id,
+            &target.schema,
+            &target.object,
+        ) else {
+            self.show_toast(
+                "Table preview SQL is not available for this provider".into(),
+                cx,
+            );
+            return;
+        };
         self.record_recent_database_object(&target, cx);
         let DatabaseObjectTarget {
             connection,
@@ -19129,7 +18934,6 @@ impl WorkspaceShell {
         }
         let item_id = self.next_id;
         self.next_id += 1;
-        let sql = table_preview_sql(&source.provider_id, &schema, &object);
         let keymap = if self.vim_mode_default() {
             EditorKeymap::Vim
         } else {
@@ -41103,7 +40907,7 @@ mod tests {
         let sql_server = sift_protocol::ProviderId::new("sift/sql-server").unwrap();
         assert_eq!(
             table_preview_sql(&sql_server, "dbo", "people"),
-            "SELECT TOP (100) * FROM \"dbo\".\"people\";"
+            "SELECT TOP (100) * FROM [dbo].[people];"
         );
     }
 
@@ -42263,10 +42067,14 @@ mod tests {
         workspace.update_in(&mut cx, |shell, _, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             let ddl = pane.editor(item_id).unwrap().read(cx).document().text();
-            assert!(ddl.contains("Full catalog-derived DDL preview"), "{ddl}");
-            assert!(ddl.contains("ADD CONSTRAINT \"people_team_fk\""), "{ddl}");
-            assert!(ddl.contains("CREATE INDEX \"people_name_idx\""), "{ddl}");
-            assert!(ddl.contains("CREATE TRIGGER people_touch"), "{ddl}");
+            assert!(
+                ddl.contains("Loading the authoritative definition"),
+                "{ddl}"
+            );
+            assert!(
+                !ddl.contains("CREATE TABLE"),
+                "partial catalog DDL must not masquerade as a complete definition: {ddl}"
+            );
         });
         workspace.update_in(&mut cx, |shell, _, cx| {
             shell.on_executor_event(
@@ -42284,6 +42092,25 @@ mod tests {
         });
         workspace.update_in(&mut cx, |shell, _, cx| {
             shell.select_table_definition_section(item_id, TableDefinitionSection::Indexes, cx);
+            shell.pending_object_ddl.insert(item_id);
+            shell.on_executor_event(
+                ExecutorEvent::ObjectDdlFailed {
+                    item_id,
+                    message: "permission denied".into(),
+                },
+                cx,
+            );
+            let pane = shell.panes[shell.active_pane].read(cx);
+            assert!(pane
+                .editor(item_id)
+                .unwrap()
+                .read(cx)
+                .document()
+                .text()
+                .contains("Full DDL is unavailable"));
+            assert!(!shell.pending_object_ddl.contains(&item_id));
+        });
+        workspace.update_in(&mut cx, |shell, _, cx| {
             shell.open_table_detail_ddl(
                 item_id,
                 &sift_protocol::CatalogObjectId("index-name".into()),

@@ -5,6 +5,9 @@ use std::ops::Range;
 
 use sift_protocol::{DialectId, SnippetScope, SqlSnippet};
 
+mod object_sql;
+pub use object_sql::{object_designer_sql, table_preview_sql};
+
 pub const MAX_SNIPPETS: usize = 2_000;
 pub const MAX_SNIPPET_BODY_BYTES: usize = 64 * 1024;
 

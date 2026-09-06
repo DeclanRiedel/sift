@@ -114,6 +114,46 @@ async fn wedged_schema_times_out() {
 }
 
 #[tokio::test]
+async fn wedged_ddl_composition_respects_the_request_deadline() {
+    for kind in [
+        sift_protocol::ObjectKind::Table,
+        sift_protocol::ObjectKind::View,
+    ] {
+        let driver = MockDriver::builder()
+            .engine(Engine::Postgres)
+            .schema_pending()
+            .execute_pending()
+            .build();
+        let store = store_with(driver);
+        let session = store.open_session(OpenSessionRequest {
+            tag: None,
+            tenant_id: None,
+        });
+        let conn = store
+            .open_connection(session.id, Engine::Postgres, mock_spec())
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            TIMEOUT * 8,
+            store.ddl_for(
+                session.id,
+                conn.id,
+                sift_protocol::ObjectPath {
+                    catalog: None,
+                    schema: Some("public".into()),
+                    name: "example".into(),
+                    kind: Some(kind),
+                    routine_args: None,
+                },
+            ),
+        )
+        .await
+        .expect("DDL must return within the request deadline");
+        assert_timed_out(result);
+    }
+}
+
+#[tokio::test]
 async fn sqlserver_execute_timeout_discards_connection_after_cancel() {
     // `execute_hang` returns a live cursor then never yields pages, so the
     // server learns the cursor id and cancels it on timeout. SQL Server's

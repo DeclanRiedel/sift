@@ -4011,8 +4011,10 @@ impl SessionStore {
             .builtin()
             .cloned()
             .ok_or_else(native_provider_only)?;
-        let result = crate::ddl::generate_ddl(&*driver, handle, object).await?;
-        Ok(result)
+        self.run_bounded("generate DDL", async move {
+            crate::ddl::generate_ddl(&*driver, handle, object).await
+        })
+        .await
     }
 
     /// Generate the inline-edit DML plan without executing it. Fetches the

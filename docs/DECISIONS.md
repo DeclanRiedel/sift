@@ -691,6 +691,14 @@ called out for `sift-protocol` in the Phase D plan instead live in
 `sift-completion::keywords`. Protocol stays pure serde (ADR-004); the
 tables aren't wire types, they're data the ranker consumes.
 
+The desktop's Full DDL view waits for this audited server operation; it must
+not present a synthesized subset of the catalog as a complete definition.
+Explicitly partial column/index previews remain labelled as such. Static,
+reviewable editor templates live in `sift-snippets`, not the protocol crate;
+preview/designer templates recognize supported providers exactly and return
+no draft for unknown providers. They are editable text, not a second execution
+or catalog-authority path. Execution and migration validation remain server-owned.
+
 **Consequences.** ADR-017 stays intact — no signature change, no
 protocol bump on either feature. `sift-completion` is reusable by the
 eventual desktop client and the wasm client (its interface takes a
