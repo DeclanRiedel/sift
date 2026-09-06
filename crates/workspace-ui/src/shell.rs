@@ -63,6 +63,7 @@ mod sql_drafts;
 mod status_bar;
 use sql_drafts::*;
 mod vault_actions;
+mod vault_views;
 
 pub use commands::{
     CommandContext, CommandDefinition, CommandId, CommandLanguageMatch, CommandRegistry,
@@ -42509,6 +42510,32 @@ mod tests {
             files: Vec::new(),
             truncated: false,
         }));
+    }
+
+    #[gpui::test]
+    fn vault_form_actions_remain_visible_with_long_errors(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.simulate_resize(gpui::size(px(480.), px(320.)));
+        for modal in [Modal::CreateVault, Modal::EditVault] {
+            workspace.update(&mut cx, |shell, cx| {
+                shell.modal = Some(modal.clone());
+                shell.vault_error = Some("A long server validation error. ".repeat(100));
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let card = cx.debug_bounds("modal-card").unwrap();
+            let body = cx.debug_bounds("dialog-body").unwrap();
+            let actions = cx.debug_bounds("dialog-actions").unwrap();
+            assert!(body.size.height > px(0.));
+            assert!(body.bottom() <= actions.top(), "body overlaps actions");
+            assert!(actions.bottom() <= card.bottom(), "actions outside card");
+            assert!(
+                actions.right() <= card.right(),
+                "actions overflow horizontally"
+            );
+        }
     }
 
     #[gpui::test]

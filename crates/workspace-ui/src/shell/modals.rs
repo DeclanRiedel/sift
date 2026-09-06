@@ -6812,99 +6812,8 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
-                Modal::CreateVault => div()
-                    .debug_selector(|| "create-vault".into())
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Create team vault"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(colors.muted_text)
-                            .child("Team vaults start private. Share explicit capabilities after creation."),
-                    )
-                    .child(self.vault_name_input.clone())
-                    .children(self.vault_error.as_ref().map(|message| {
-                        ErrorBanner::new(message.clone())
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                Button::new("cancel-create-vault", "Cancel")
-                                    .tone(ButtonTone::Neutral)
-                                    .on_click(cx.listener(|shell, _, window, cx| {
-                                        shell.dismiss_modal(&DismissModal, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("submit-create-vault", "Create vault")
-                                    .tone(ButtonTone::Accent)
-                                    .disabled(self.vault_loading)
-                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                        shell.submit_create_vault(cx)
-                                    })),
-                            ),
-                    )
-                    .into_any_element(),
-                Modal::EditVault => div()
-                    .debug_selector(|| "edit-vault".into())
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Edit team vault"),
-                    )
-                    .child(self.vault_name_input.clone())
-                    .children(
-                        self.vault_error
-                            .as_ref()
-                            .map(|message| ErrorBanner::new(message.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .child(
-                                Button::new("delete-team-vault", "Delete vault")
-                                    .tone(ButtonTone::DangerMuted)
-                                    .disabled(self.vault_loading)
-                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                        shell.delete_selected_vault(cx)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("cancel-edit-vault", "Cancel")
-                                            .tone(ButtonTone::Neutral)
-                                            .on_click(cx.listener(|shell, _, window, cx| {
-                                                shell.dismiss_modal(&DismissModal, window, cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("submit-edit-vault", "Rename")
-                                            .tone(ButtonTone::Accent)
-                                            .disabled(self.vault_loading)
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.submit_vault_rename(cx)
-                                            })),
-                                    ),
-                            ),
-                    )
-                    .into_any_element(),
+                Modal::CreateVault => self.render_vault_form(false, max_card_height, cx).into_any_element(),
+                Modal::EditVault => self.render_vault_form(true, max_card_height, cx).into_any_element(),
                 Modal::CreateVaultItem => div()
                     .debug_selector(|| "create-vault-item".into())
                     .flex()
@@ -8119,26 +8028,7 @@ impl WorkspaceShell {
                     layer.items_center().justify_center().bg(colors.scrim)
                 })
                 .child(
-                    div()
-                        .id("modal-card")
-                        .debug_selector(|| "modal-card".into())
-                        .occlude()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .when(!data_results, |card| card.w_full().max_w(px(card_width)))
-                        .when(data_results, |card| {
-                            card.w(gpui::relative(0.985))
-                                .h(gpui::relative(0.985))
-                        })
-                        .when(!data_results, |card| card.max_h(max_card_height).overflow_scroll())
-                        .flex()
-                        .flex_col()
-                        .when(padded, |card| card.p_3())
-                        .when(data_results, |card| card.overflow_hidden())
-                        .rounded(cx.theme().metrics.radius_large)
-                        .border_1()
-                        .border_color(colors.strong_border)
-                        .bg(colors.panel)
-                        .shadow_lg()
+                    modal_layout::card(data_results, padded, card_width, max_card_height, colors, cx.theme().metrics)
                         .child(content),
                 )
         })

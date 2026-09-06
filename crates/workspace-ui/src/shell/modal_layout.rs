@@ -1,6 +1,80 @@
 //! Preferred content widths. Viewport constraints belong to the modal host.
 
 use super::{DatabaseWizardStep, Modal};
+use gpui::{div, prelude::*, px, Div, IntoElement, MouseButton, Pixels, Stateful};
+use sift_ui::{ThemeColors, ThemeMetrics};
+
+/// Shared frame for every modal, including the viewport-relative results view.
+/// Content and Vim focus behavior stay with the owning shell feature.
+pub(super) fn card(
+    data_results: bool,
+    padded: bool,
+    width: f32,
+    max_height: Pixels,
+    colors: ThemeColors,
+    metrics: ThemeMetrics,
+) -> Stateful<Div> {
+    div()
+        .id("modal-card")
+        .debug_selector(|| "modal-card".into())
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .when(!data_results, |card| card.w_full().max_w(px(width)))
+        .when(data_results, |card| {
+            card.w(gpui::relative(0.985)).h(gpui::relative(0.985))
+        })
+        .when(!data_results, |card| {
+            card.max_h(max_height).overflow_scroll()
+        })
+        .flex()
+        .flex_col()
+        .when(padded, |card| card.p_3())
+        .when(data_results, |card| card.overflow_hidden())
+        .rounded(metrics.radius_large)
+        .border_1()
+        .border_color(colors.strong_border)
+        .bg(colors.panel)
+        .shadow_lg()
+}
+
+/// A constrained dialog with independently scrollable content and persistent
+/// actions. The host's padding and border must fit inside the card's height cap.
+pub(super) fn dialog(
+    body: impl IntoElement,
+    actions: impl IntoElement,
+    max_card_height: Pixels,
+) -> Div {
+    div()
+        .w_full()
+        .min_h_0()
+        .max_h((max_card_height - px(26.)).max(px(1.)))
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            div()
+                .id("dialog-body")
+                .debug_selector(|| "dialog-body".into())
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(body),
+        )
+        .child(
+            div()
+                .debug_selector(|| "dialog-actions".into())
+                .flex_none()
+                .child(actions),
+        )
+}
+
+pub(super) fn actions() -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_end()
+        .gap_2()
+}
 
 pub(super) fn content_width(modal: &Modal, wizard: DatabaseWizardStep) -> f32 {
     match modal {
