@@ -47034,6 +47034,7 @@ mod tests {
         let workspace = window.root(&mut cx).unwrap();
         let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
+            negotiate_features(shell, &[sift_protocol::handshake::CAPABILITY_WORKSPACE_GIT]);
             shell.executor_sender = Some(sender);
             shell
                 .lifecycle
@@ -51282,6 +51283,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         workspace.update_in(&mut cx, |shell, window, cx| {
+            negotiate_features(shell, &[sift_protocol::handshake::CAPABILITY_WORKSPACE_GIT]);
             shell.repository.select_workspace(Some(7));
             shell.selected_workspace_id = Some(7);
             let (_, request_id) = shell.repository.begin_refresh().unwrap();
