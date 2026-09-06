@@ -2184,3 +2184,69 @@ this milestone. The default-unsupported MssqlExt estimated-plan operation is
 server-internal. SQLite can now proceed with its separately designed public
 protocol/configuration changes. Broader PostgreSQL/SQL Server DBA features stay
 on the canonical product backlog rather than blocking the next provider.
+
+## ADR-056 — Scoped SQLite Provider And Read-Only Metadata Inspection
+
+Status: Accepted, 2026-09-07.
+
+The native `sift/sqlite` provider uses bundled rusqlite on dedicated, admitted
+workers. Its scoped daily-use contract is documented in [SQLITE.md](SQLITE.md)
+and [database-provider-acceptance.md](PLANS/database-provider-acceptance.md).
+Supported Linux file workflows graduate independently from whole-engine DBA
+parity and the broader signed/cross-platform provider certification matrix;
+the runtime quality label is `ide_capable`.
+
+File authority belongs to the server: operator-configured roots, explicit tenant
+IDs, relative existing-file profiles, strict read-only precedence, no credentials,
+and denial of symlinks/hard-link aliases and Sift's live state. Root ownership
+is an operational requirement, not a sandbox against hostile local replacement.
+Unaccepted Windows file handling fails closed. SQLite retains its journal/sync
+settings and can create ordinary sidecars for writable files.
+
+Each admitted connection owns one worker, bounded mailbox/output and one active
+operation. Progress/interrupt/busy handling observes cancellation; cancellation
+discards the connection and managed transaction, with permits retained until
+worker exit. Dynamic values retain storage classes. Managed Serializable
+transactions and savepoints preserve SQLite's retryable COMMIT BUSY behavior;
+raw transaction SQL cannot diverge from server state.
+
+Native stored definitions are the DDL authority. Catalog metadata preserves
+nullable-key, rowid-alias, generated, STRICT and WITHOUT ROWID distinctions.
+The IDE uses a separately advertised **partial navigation catalog**, bypassing
+shared schema caches and preserving physical-handle TEMP visibility. This does
+not authorize full dependency graphs, diagrams, structural migrations or designer
+mutations. Inline writes require proven non-null row identity and reject
+generated/virtual/view targets. Estimated plans retain native detail with absent
+costs; CSV import uses atomic bounded parameter batches. Actual plans, native
+bulk/transfer targets and quarantine import remain unsupported.
+
+Public protocol **2** introduces SQLite engine/configuration/facet shapes and the
+local `InspectMetadata` operation. A default-unsupported `Driver::as_sqlite`
+downcast provides the engine extension while existing core execution/transaction
+signatures remain unchanged. Metadata V046 widens discriminators without dropping
+profile parents or cascading credential references. Extension/driver RPC remain
+version 1; host compatibility checks use the shared public protocol constant.
+Clients and instance/extension locks must be updated together.
+
+The seeded desktop demos add an independent SQLite file and saved connection;
+repeated seeding never replaces existing data. Ordinary personal-instance
+creation does not inherit the demo fixture.
+
+`sift metadata inspect` is a local-file-owner operation that builds a fresh
+allowlisted snapshot and a separate applied instance. It excludes credentials,
+authentication state, configuration, SQL/history and document/vault contents.
+Names and workspace paths remain visible to the source bootstrap identity.
+A consistent read transaction includes committed WAL data; row/value/time limits
+bound extraction. The output records its timestamp, truncation and Operation,
+and the new instance records a durable audit event. The snapshot is opened through
+the ordinary read-only provider path; generic profiles still cannot access or
+modify Sift's live metadata. The Nix launcher builds matching desktop/server
+binaries and opens the snapshot with one command.
+
+Acceptance: seven real-file driver tests, the real SQLite HTTP/SDK integration,
+semantic and GPUI form coverage, metadata upgrade/snapshot coverage, CLI snapshot
+acceptance and Nix wrapper/seed validation passed. Workspace formatting, Clippy
+with warnings denied and tests passed after the final execution-count/row-bound
+fixes. PostgreSQL/SQL Server live driver suites (19/8) and server DDL/plan suites
+(2/5/2) passed with protocol 2. Remaining platform/parser/DBA exclusions are
+explicit in the evidence matrix and do not block work on the IDE.

@@ -6,6 +6,7 @@ use sift_server::{plan, process, DriverRegistry, SessionStore};
 
 async fn acceptance(engine: Engine) {
     let registry = match engine {
+        Engine::Sqlite => panic!("SQLite uses the local sqlite_provider fixture"),
         Engine::Postgres => DriverRegistry::builder()
             .register(sift_driver_postgres::PgDriver::new())
             .build(),

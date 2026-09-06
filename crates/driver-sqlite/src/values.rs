@@ -63,13 +63,6 @@ pub fn decode(value: ValueRef<'_>) -> Result<Value, DriverError> {
         ValueRef::Blob(v) => Value::Blob(v.to_vec()),
     })
 }
-pub fn size(v: &Value) -> usize {
-    match v {
-        Value::Text(v) => v.len(),
-        Value::Blob(v) => v.len(),
-        _ => 16,
-    }
-}
 pub fn affinity(declared: &str) -> &'static str {
     let upper = declared.to_ascii_uppercase();
     if upper.contains("INT") {

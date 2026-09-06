@@ -298,11 +298,25 @@ impl Worker {
             while let Some(row) = rows.next().map_err(db_error)? {
                 self.check()?;
                 let mut cells = Vec::with_capacity(row.as_ref().column_count());
+                let mut row_bytes = 0usize;
                 for i in 0..row.as_ref().column_count() {
-                    let value = values::decode(row.get_ref(i).map_err(db_error)?)?;
-                    page_bytes += values::size(&value);
+                    let raw = row.get_ref(i).map_err(db_error)?;
+                    row_bytes = row_bytes.saturating_add(match raw {
+                        rusqlite::types::ValueRef::Text(v) | rusqlite::types::ValueRef::Blob(v) => {
+                            v.len()
+                        }
+                        _ => 16,
+                    });
+                    if row_bytes > MAX_VALUE_BYTES as usize {
+                        return Err(error(
+                            Code::ResultTooLarge,
+                            "SQLite result row exceeds the 8 MiB limit",
+                        ));
+                    }
+                    let value = values::decode(raw)?;
                     cells.push(value);
                 }
+                page_bytes += row_bytes;
                 page.push(Row::new(cells));
                 if page.len() >= ROWS_PER_PAGE || page_bytes >= 1024 * 1024 {
                     self.page(
@@ -318,7 +332,7 @@ impl Worker {
                 self.page(tx, Page::Rows { rows: page })?;
             }
             drop(rows);
-            if self.effects.load(Ordering::Acquire) == 1 {
+            if statement.is_explain() == 0 && self.effects.load(Ordering::Acquire) == 1 {
                 affected = Some(affected.unwrap_or(0).saturating_add(self.conn.changes()));
             }
         }

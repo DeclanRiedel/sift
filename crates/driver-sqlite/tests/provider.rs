@@ -115,6 +115,25 @@ async fn runtime_values_parameters_and_native_batches() {
     assert_eq!(sets, 3);
     assert_eq!(affected, Some(1));
     assert_eq!(rows[1].values, vec![Value::Text("a;b".into())]);
+    for sql in [
+        "EXPLAIN UPDATE seed SET value='unchanged'",
+        "EXPLAIN QUERY PLAN DELETE FROM seed",
+        "ANALYZE seed",
+    ] {
+        assert_eq!(
+            execute(&f.driver, &c, sql, vec![]).await.unwrap().1,
+            None,
+            "{sql} must not report stale DML counts"
+        );
+    }
+    assert_eq!(
+        execute(&f.driver, &c, "SELECT value FROM seed", vec![])
+            .await
+            .unwrap()
+            .0[0]
+            .values,
+        vec![Value::Text("a;b".into())]
+    );
     let (rows, _, _) = execute(
         &f.driver,
         &c,
@@ -499,6 +518,18 @@ async fn bounded_large_stream_late_cancel_and_auto_rollback() {
         execute(&f.driver, &reopened, "SELECT zeroblob(9000000)", vec![])
             .await
             .is_err()
+    );
+    assert_eq!(
+        execute(
+            &f.driver,
+            &reopened,
+            "SELECT zeroblob(5000000),zeroblob(5000000)",
+            vec![]
+        )
+        .await
+        .unwrap_err()
+        .code,
+        Code::ResultTooLarge
     );
     f.driver.close(reopened).await.unwrap();
 }

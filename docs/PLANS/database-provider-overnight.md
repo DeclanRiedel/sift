@@ -1,7 +1,14 @@
 # Database provider overnight handoff
 
-Status: **tasks 1–3 complete; SQLite implementation in progress, 2026-09-06.**
-SQLite design is complete as a planning artifact, not implementation evidence.
+Status: **tasks 1–4 and the authorized advanced SQLite/demo/inspection work
+complete, 2026-09-07 (ADRs 055/056).**
+
+The task prompts below are retained as the dependency-ordered implementation
+record. [Acceptance evidence](database-provider-acceptance.md) and
+[SQLite support/commands](../SQLITE.md) define the graduated scope. PostgreSQL,
+SQL Server and SQLite no longer block the next IDE milestone. Prioritize IDE
+work over another broad DBA expansion; the remaining engine-specific exclusions
+stay in the canonical backlog.
 
 The user additionally requested advanced SQLite graduation, a seeded SQLite
 connection in `nix run .#sift-desktop-demo-wiki` and related demos, and an easy

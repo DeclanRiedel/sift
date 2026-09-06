@@ -1,6 +1,6 @@
 # SQLite provider design
 
-Status: **implemented, 2026-09-07; final graduation validation in progress.**
+Status: **scoped graduation accepted, 2026-09-07 (ADR-056).**
 Requested before queuing the four tasks in
 [the overnight handoff](database-provider-overnight.md). Implementation follows
 the bounded [PostgreSQL/SQL Server graduation](postgres-sqlserver-graduation.md).
@@ -257,12 +257,12 @@ from writes and preserve existing optimistic conflict/preview/audit behavior.
 
 ## Protocol and integration migration
 
-Current public protocol constant is 1. Adding Engine::Sqlite, SQLite connection
-and column facets is public shape growth under ADR-017: implement a protocol
-bump and explicit compatibility decision, regenerate schemas/OpenAPI/fixtures,
-and update SDK/server/desktop/extension compatibility docs together. Rebase on
-any protocol bump from preceding graduation tasks; do not hard-code a stale
-version or silently expand an already-recorded released contract.
+Implemented public protocol is **2**. Engine::Sqlite, SQLite connection/column
+facets and metadata inspection are public shape growth under ADR-017. Runtime
+OpenAPI/serde schemas derive from these types; protocol/lifecycle/package
+fixtures, SDK/server/desktop and extension-host checks use the new version.
+Existing instance and extension locks must be regenerated. Extension RPC and
+driver RPC remain version 1; see [compatibility and commands](../SQLITE.md).
 
 Audit exhaustive two-engine dispatch in registry configuration/credentials,
 capabilities, session policy, DDL/DML, quoting, SQL variables, semantic Flavor,
@@ -289,8 +289,15 @@ visible and does not block ordinary valid SQL execution except policy controls.
       inline DML; gate graph/migrations/bulk/plan features explicitly.
 - [x] S4: SQLite semantic pack, query variables, file-profile UI, read-only and
       isolation selection, existing Vim query/result/export/transaction flows.
-- [ ] S5: Complete focused engine/server/UI contract tests, workspace checks,
+- [x] S5: Complete focused engine/server/UI contract tests, workspace checks,
       provider support docs and evidence. Graduate an ADR only for proven scope.
+
+S1–S5 and the authorized advanced follow-on are complete for the scope in
+[SQLite support](../SQLITE.md). Savepoints, estimated plans, atomic CSV import,
+partial IDE navigation, seeded demos and local read-only metadata inspection
+have recorded [acceptance evidence](database-provider-acceptance.md). Windows
+file authority, full dependency/migration graphs, actual plans, native bulk
+targets and broader maintenance remain deliberately outside graduation.
 
 Tests use temporary database files and ordinary local workspace tests, with no
 external database service or new smoke script. Cover mixed storage classes,

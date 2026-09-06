@@ -80,6 +80,8 @@ pub fn install(
             | DropTempView { .. }
             | DropTrigger { .. }
             | DropView { .. }
+            | Analyze { .. }
+            | Reindex { .. }
             | AlterTable { .. } => {
                 effects.fetch_or(2, Ordering::AcqRel);
             }

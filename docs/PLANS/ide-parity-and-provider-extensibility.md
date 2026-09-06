@@ -296,6 +296,7 @@ exclusions. Broader engine administration remains separate work.
 - [ ] SQL Server server-settings browser
 - [x] SQLite provider design ([scope and acceptance](sqlite-provider.md))
 - [x] SQLite provider implementation (protocol 2; scoped Linux file support)
+- [x] SQLite scoped provider graduation (ADR-056; explicit platform/DBA exclusions)
 - [x] SQLite managed savepoints, estimated plans and atomic CSV import
 - [x] SQLite seeded desktop demos and read-only Sift metadata inspection command
 

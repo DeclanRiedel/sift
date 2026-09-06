@@ -106,8 +106,9 @@ not a user-database provider and must remain separate.
 The SQLite design selects native integration with the existing Driver trait.
 External Driver RPC v1 need not expand for that slice. The
 [four-task handoff](database-provider-overnight.md) makes implementation dependent
-on the preceding correctness, live-evidence, and graduation tasks. This is
-sequencing guidance, not an implemented SQLite feature or a graduation claim.
+on the preceding correctness, live-evidence, and graduation tasks. Those tasks
+and scoped SQLite implementation/graduation are now complete (ADR-056);
+see [SQLite support and exclusions](../SQLITE.md).
 
 ## Graduation evidence (2026-09-06)
 
