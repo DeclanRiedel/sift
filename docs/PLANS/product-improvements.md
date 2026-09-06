@@ -14,7 +14,7 @@ The canonical feature inventory remains the source of product feature status.
 - [x] Extract metadata pool and SDK vault/automation/transfer APIs without interface changes; remaining domains are incremental.
 - [ ] Measure responsiveness and memory with existing large fixtures.
 - [ ] Complete crash/restart/offline/auth-expiry recovery validation.
-- [ ] Surface unsafe mutation and Cartesian JOIN inspections.
+- [x] Verify existing inspection UI and fix independent/nested join findings.
 - [ ] Complete foreign-key JOIN assistance, then explicit multi-hop path selection.
 - [ ] Add saved grid layouts and bounded foreign-key value selection.
 - [ ] Improve DDL fidelity and engine round-trip coverage.
@@ -66,3 +66,17 @@ now live in domain modules. SDK vault/automation/transfer methods preserve their
 the worker; streamed-query recovery lives separately. Workspace query history
 owns its state and event handling in one module. Broader shell decomposition
 remains open rather than claiming the entire shell has been redesigned.
+
+## Design: Vim-only interaction
+
+Vim is the sole supported settings/editor enum variant. New editors construct
+their Vim engine immediately and begin in normal mode. Remove mode/profile
+switches from settings, keymaps, and status chrome; keep editable leader bindings.
+Remove tests of unsupported profiles while preserving Vim behavior and settings
+persistence tests. Unsupported settings values report the existing decode error;
+no second interaction implementation is retained.
+
+SQL safety: existing server diagnostics already reach the editor. Broad UPDATE
+and DELETE statements now also receive join findings; nested FROM relations are
+walked consistently and output stays within the diagnostic cap. Expanded existing
+regression passed. Workspace Clippy passed for the semantic change.

@@ -111,8 +111,12 @@ delete, import, and export workflows.
 - [x] Hover types and object metadata
 - [ ] Multi-hop JOIN suggestions
 - [x] Star expansion
-- [ ] Unsafe UPDATE/DELETE inspection UI
-- [ ] Cartesian JOIN inspection UI
+- [x] Unsafe UPDATE/DELETE inspection UI
+- [x] Cartesian JOIN inspection UI
+
+Safety inspections appear through revision-bound editor diagnostics. Mutation
+breadth and Cartesian joins are independent findings, including joins nested
+in FROM relations. These warnings do not rewrite or block SQL.
 
 ### Execution and safety
 

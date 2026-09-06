@@ -1460,6 +1460,11 @@ fn inspect_statement_safety(
             "DELETE has no WHERE clause and can remove every row",
             range,
         ),
+        _ => {}
+    }
+    // Mutation breadth and join shape are independent findings. A missing
+    // WHERE clause must not suppress a Cartesian-join warning in the same DML.
+    match statement {
         SqlStatement::Query(query) => inspect_query_joins(query, range, revision, diagnostics),
         SqlStatement::Update { table, from, .. } => {
             inspect_table_with_joins(table, range, revision, diagnostics);
@@ -1503,12 +1508,6 @@ fn inspect_set_expr(
     match expression {
         SetExpr::Select(select) => {
             inspect_from_joins(&select.from, range, revision, diagnostics);
-            for from in &select.from {
-                inspect_nested_factor(&from.relation, range, revision, diagnostics);
-                for join in &from.joins {
-                    inspect_nested_factor(&join.relation, range, revision, diagnostics);
-                }
-            }
         }
         SetExpr::Query(query) => inspect_query_joins(query, range, revision, diagnostics),
         SetExpr::SetOperation { left, right, .. } => {
@@ -1562,7 +1561,9 @@ fn inspect_table_with_joins(
     revision: u64,
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) {
+    inspect_nested_factor(&table.relation, range, revision, diagnostics);
     for join in &table.joins {
+        inspect_nested_factor(&join.relation, range, revision, diagnostics);
         let cartesian = matches!(join.join_operator, JoinOperator::CrossJoin)
             || matches!(
                 join_constraint(&join.join_operator),
@@ -1587,6 +1588,9 @@ fn push_safety_diagnostic(
     message: &str,
     range: TextRange,
 ) {
+    if diagnostics.len() >= MAX_DIAGNOSTICS {
+        return;
+    }
     let ordinal = diagnostics.len();
     diagnostics.push(SemanticDiagnostic {
         id: format!("{revision}:safety:{ordinal}"),
@@ -4309,6 +4313,8 @@ mod tests {
         let source = concat!(
             "update users set email = 'x';",
             "delete from orders;",
+            "update users set email = 'x' from orders cross join accounts;",
+            "delete from users using orders cross join accounts;",
             "select * from users cross join orders;",
             "select * from users, orders;",
             "update users set email = 'safe' where id = 1;",
@@ -4338,21 +4344,21 @@ mod tests {
                 .iter()
                 .filter(|diagnostic| diagnostic.code == "unsafe_update_without_where")
                 .count(),
-            1
+            2
         );
         assert_eq!(
             diagnostics
                 .iter()
                 .filter(|diagnostic| diagnostic.code == "unsafe_delete_without_where")
                 .count(),
-            1
+            2
         );
         assert_eq!(
             diagnostics
                 .iter()
                 .filter(|diagnostic| diagnostic.code == "cartesian_join")
                 .count(),
-            2
+            4
         );
         assert!(diagnostics
             .iter()
