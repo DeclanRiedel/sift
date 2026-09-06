@@ -1532,10 +1532,14 @@ async fn connect_ssh(
         return Err("server name must be between 1 and 120 characters".into());
     }
     if destination.is_empty()
+        || destination.contains("://")
         || destination.starts_with('-')
         || destination.chars().any(char::is_whitespace)
     {
-        return Err("SSH destination must be one OpenSSH host or user@host token".into());
+        return Err(
+            "SSH destination must be user@host or an SSH host alias. For an HTTP URL, select URL."
+                .into(),
+        );
     }
     if state_dir.is_empty()
         || state_dir.starts_with('/')

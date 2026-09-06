@@ -92,6 +92,7 @@ pub(super) fn render_status_bar(
                   badge: Option<usize>,
                   danger: bool| {
         IconButton::new(id, icon_name, tooltip.clone())
+            .debug_selector(id)
             .toggle_state(selected)
             .danger(danger)
             .badge(badge)
@@ -214,39 +215,56 @@ pub(super) fn render_status_bar(
                         shell.select_left_panel(LeftPanel::Connections, window, cx)
                     })),
                 )
-                .child(
-                    button(
-                        "footer-git",
-                        IconName::VersionControl,
-                        "Git workspace".into(),
-                        shell.left_dock.presentation.open
-                            && shell.active_left_panel == LeftPanel::Git,
-                        shell.repository.status().and_then(|status| {
-                            (!status.entries.is_empty()).then_some(status.entries.len())
-                        }),
-                        false,
-                    )
-                    .on_click(cx.listener(|shell, _, window, cx| {
-                        shell.select_left_panel(LeftPanel::Git, window, cx)
-                    })),
+                .children(
+                    (shell
+                        .lifecycle
+                        .supports(sift_protocol::handshake::CAPABILITY_WORKSPACE_GIT))
+                    .then(|| {
+                        button(
+                            "footer-git",
+                            IconName::VersionControl,
+                            "Git workspace".into(),
+                            shell.left_dock.presentation.open
+                                && shell.active_left_panel == LeftPanel::Git,
+                            shell.repository.status().and_then(|status| {
+                                (!status.entries.is_empty()).then_some(status.entries.len())
+                            }),
+                            false,
+                        )
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            shell.select_left_panel(LeftPanel::Git, window, cx)
+                        }))
+                    }),
                 )
-                .children(shell.repository.status().map(|status| {
-                    let branch = status.branch.as_deref().unwrap_or("detached");
-                    let changed = status.entries.len();
-                    div()
-                        .id("footer-git-branch")
-                        .debug_selector(|| "footer-git-branch".into())
-                        .aria_label(format!("Git branch {branch}, {changed} changed path(s)"))
-                        .max_w(px(180.))
-                        .truncate()
-                        .font_family("monospace")
-                        .text_color(if changed == 0 {
-                            colors.muted_text
-                        } else {
-                            colors.accent
+                .children(
+                    shell
+                        .repository
+                        .status()
+                        .filter(|_| {
+                            shell
+                                .lifecycle
+                                .supports(sift_protocol::handshake::CAPABILITY_WORKSPACE_GIT)
                         })
-                        .child(format!("{branch} · {changed}"))
-                }))
+                        .map(|status| {
+                            let branch = status.branch.as_deref().unwrap_or("detached");
+                            let changed = status.entries.len();
+                            div()
+                                .id("footer-git-branch")
+                                .debug_selector(|| "footer-git-branch".into())
+                                .aria_label(format!(
+                                    "Git branch {branch}, {changed} changed path(s)"
+                                ))
+                                .max_w(px(180.))
+                                .truncate()
+                                .font_family("monospace")
+                                .text_color(if changed == 0 {
+                                    colors.muted_text
+                                } else {
+                                    colors.accent
+                                })
+                                .child(format!("{branch} · {changed}"))
+                        }),
+                )
                 .child(
                     button(
                         "footer-collaboration",
@@ -536,33 +554,44 @@ pub(super) fn render_status_bar(
                         })
                 })
                 .child(separator())
-                .child(
-                    button(
-                        "footer-monitor",
-                        IconName::Activity,
-                        "Connection and execution monitor".into(),
-                        shell.bottom_dock.presentation.open
-                            && shell.active_bottom_tool == BottomTool::Monitor,
-                        None,
-                        false,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.select_bottom_tool(BottomTool::Monitor, cx)
-                    })),
+                .children(
+                    (matches!(
+                        shell.connection_status,
+                        super::ConnectionStatus::Connected { .. }
+                    ))
+                    .then(|| {
+                        button(
+                            "footer-monitor",
+                            IconName::Activity,
+                            "Connection and execution monitor".into(),
+                            shell.bottom_dock.presentation.open
+                                && shell.active_bottom_tool == BottomTool::Monitor,
+                            None,
+                            false,
+                        )
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            shell.select_bottom_tool(BottomTool::Monitor, cx)
+                        }))
+                    }),
                 )
-                .child(
-                    button(
-                        "footer-automations",
-                        IconName::Automations,
-                        "Automations".into(),
-                        shell.bottom_dock.presentation.open
-                            && shell.active_bottom_tool == BottomTool::Automations,
-                        None,
-                        false,
-                    )
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.select_bottom_tool(BottomTool::Automations, cx)
-                    })),
+                .children(
+                    (shell
+                        .lifecycle
+                        .supports(sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION))
+                    .then(|| {
+                        button(
+                            "footer-automations",
+                            IconName::Automations,
+                            "Automations".into(),
+                            shell.bottom_dock.presentation.open
+                                && shell.active_bottom_tool == BottomTool::Automations,
+                            None,
+                            false,
+                        )
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            shell.select_bottom_tool(BottomTool::Automations, cx)
+                        }))
+                    }),
                 )
                 .child(separator())
                 .child(

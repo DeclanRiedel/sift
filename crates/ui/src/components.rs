@@ -500,6 +500,7 @@ impl RenderOnce for Button {
 #[derive(IntoElement)]
 pub struct IconButton {
     id: ElementId,
+    debug_selector: Option<SharedString>,
     name: IconName,
     label: SharedString,
     selected: bool,
@@ -517,6 +518,7 @@ impl IconButton {
     pub fn new(id: impl Into<ElementId>, name: IconName, label: impl Into<SharedString>) -> Self {
         Self {
             id: id.into(),
+            debug_selector: None,
             name,
             label: label.into(),
             selected: false,
@@ -529,6 +531,12 @@ impl IconButton {
             tooltip: None,
             on_click: None,
         }
+    }
+
+    /// Optional inline text rendered after the icon.
+    pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.debug_selector = Some(selector.into());
+        self
     }
 
     /// Optional inline text rendered after the icon.
@@ -609,6 +617,9 @@ impl RenderOnce for IconButton {
         };
         let mut button = div()
             .id(self.id.clone())
+            .when_some(self.debug_selector, |el, selector| {
+                el.debug_selector(move || selector.to_string())
+            })
             .role(Role::Button)
             .aria_label(self.label.clone())
             .when(self.square > px(0.), |el| el.size(self.square))
@@ -835,6 +846,7 @@ impl ErrorBanner {
 
 impl RenderOnce for ErrorBanner {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let copy_message = self.message.clone();
         let colors = cx.theme().colors;
         let (border, background, foreground) = match self.tone {
             Tone::Warning => (colors.warning, colors.warning_muted, colors.warning),
@@ -858,6 +870,16 @@ impl RenderOnce for ErrorBanner {
                     .min_w_0()
                     .whitespace_normal()
                     .child(self.message),
+            )
+            .child(
+                IconButton::new("copy-error", IconName::Copy, "Copy error")
+                    .debug_selector("copy-error")
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            copy_message.to_string(),
+                        ));
+                    }),
             )
     }
 }

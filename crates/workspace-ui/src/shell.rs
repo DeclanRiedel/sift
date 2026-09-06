@@ -9356,6 +9356,8 @@ pub struct WorkspaceShell {
     notification_history: Vec<Toast>,
     unread_notifications: usize,
     next_toast_id: u64,
+    reported_inline_errors: std::collections::BTreeMap<&'static str, String>,
+    inline_error_notification_cursor: u64,
     status: StatusBar,
     global_problems: Vec<GlobalProblem>,
     unread_problems: usize,
@@ -10414,6 +10416,8 @@ impl WorkspaceShell {
                 state.selected_diff_side?,
             ))
         });
+        cx.observe_self(|shell, cx| shell.report_inline_errors(cx))
+            .detach();
         Self {
             focus_handle: cx.focus_handle(),
             connections_focus_handle: cx.focus_handle(),
@@ -10512,6 +10516,8 @@ impl WorkspaceShell {
             show_frame_metrics: false,
             navigation_hint_modifier_held: false,
             next_toast_id: 1,
+            reported_inline_errors: std::collections::BTreeMap::new(),
+            inline_error_notification_cursor: 1,
             settings,
             settings_store,
             settings_item: None,
@@ -10869,6 +10875,10 @@ impl WorkspaceShell {
     }
 
     fn apply_operation_capability(&self, mut spec: CommandSpec) -> CommandSpec {
+        if let Some(reason) = self.feature_unavailable_reason(spec.id) {
+            spec.disabled_reason = Some(reason.into());
+            return spec;
+        }
         if spec.disabled_reason.is_some() {
             return spec;
         }
@@ -10931,6 +10941,41 @@ impl WorkspaceShell {
             })
     }
 
+    fn feature_unavailable_reason(&self, command: CommandId) -> Option<&'static str> {
+        use sift_protocol::handshake::*;
+        if command.as_str().starts_with("repository.")
+            && !self.lifecycle.supports(CAPABILITY_WORKSPACE_GIT)
+        {
+            return Some("Git is not enabled by this server's sift.toml");
+        }
+        if matches!(
+            command,
+            CommandId::RefreshWorkspaceFiles
+                | CommandId::CreateWorkspaceFile
+                | CommandId::CreateWorkspaceFolder
+                | CommandId::MoveWorkspaceNode
+                | CommandId::DeleteWorkspaceNode
+                | CommandId::SaveAllWorkspaceDocuments
+                | CommandId::CreateWorkspaceCheckpoint
+                | CommandId::OpenWorkspaceHistory
+                | CommandId::CompareWorkspaceDdl
+                | CommandId::ReconcileWorkspaceProjection
+        ) && !self.lifecycle.supports(CAPABILITY_WORKSPACE_PROJECTIONS)
+        {
+            return Some("Workspace files are not enabled by this server's sift.toml");
+        }
+        if (command.as_str().starts_with("automation.")
+            || matches!(
+                command,
+                CommandId::OpenServerConfiguration | CommandId::FocusAutomations
+            ))
+            && !self.lifecycle.supports(CAPABILITY_INSTANCE_CONFIGURATION)
+        {
+            return Some("This server has no applied sift.toml");
+        }
+        None
+    }
+
     fn require_operation(
         &mut self,
         operation: sift_protocol::OperationKind,
@@ -10979,9 +11024,7 @@ impl WorkspaceShell {
             pane_count: self.panes.len(),
             has_editable_instance: self
                 .lifecycle
-                .selected_instance
-                .as_ref()
-                .is_some_and(|instance| instance.id != "local"),
+                .supports(sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION),
             active_query_running: self
                 .panes
                 .get(self.active_pane)
@@ -11163,6 +11206,20 @@ impl WorkspaceShell {
                             }
                         }
                         shell.lifecycle.apply(event);
+                        if !shell
+                            .lifecycle
+                            .supports(sift_protocol::handshake::CAPABILITY_WORKSPACE_GIT)
+                            && shell.active_left_panel == LeftPanel::Git
+                        {
+                            shell.active_left_panel = LeftPanel::Connections;
+                        }
+                        if !shell
+                            .lifecycle
+                            .supports(sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION)
+                            && shell.active_bottom_tool == BottomTool::Automations
+                        {
+                            shell.active_bottom_tool = BottomTool::Console;
+                        }
                         shell.invalidate_connection_projection();
                         shell.reconcile_room_document_tabs(cx);
                         shell.status.connection = shell.lifecycle.status_label();
@@ -14646,7 +14703,74 @@ impl WorkspaceShell {
     }
 
     fn show_error_toast(&mut self, message: String, cx: &mut Context<Self>) {
+        if !self
+            .global_problems
+            .iter()
+            .any(|problem| problem.message == message)
+        {
+            self.record_runtime_error(None, "Application", message.clone(), cx);
+        }
         self.push_toast(message, ToastTone::Error, cx);
+    }
+
+    /// Keep inline failures available after their dialog closes. Observe state
+    /// transitions so redraws do not repeatedly publish the same error.
+    fn report_inline_errors(&mut self, cx: &mut Context<Self>) {
+        let current: std::collections::BTreeMap<_, _> = [
+            ("Theme", &self.theme_error),
+            ("Keymaps", &self.keymaps_error),
+            ("Room members", &self.room_members_error),
+            ("Vault", &self.vault_error),
+            ("Change ledger", &self.change_ledger_error),
+            ("Repository hosting", &self.repository_hosting_error),
+            ("Automations", &self.automations_error),
+            ("Query outline", &self.query_outline_error),
+            ("Snippet", &self.snippet_error),
+            ("Saved queries", &self.saved_queries_error),
+            ("Result editing", &self.result_edit_error),
+            ("Execution plan", &self.plan_capture_error),
+            ("Parameters", &self.parameter_binding_error),
+            ("Migration", &self.catalog_migration_error),
+            ("Catalog snapshots", &self.catalog_snapshots_error),
+            ("Server", &self.instance_operation_error),
+            ("Server connection", &self.server_connection_error),
+            ("Account", &self.account_error),
+            ("API tokens", &self.api_tokens_error),
+            ("Principals", &self.principal_admin_error),
+            ("DDL sources", &self.ddl_sources_error),
+            ("Rooms", &self.room_admin_error),
+            ("Connection policy", &self.connection_policy_error),
+            ("Tenant usage", &self.tenant_usage_error),
+            ("Git diagnostics", &self.vcs_diagnostics_error),
+            ("Server sessions", &self.server_sessions_error),
+            ("Database connection", &self.database_connection_error),
+        ]
+        .into_iter()
+        .filter_map(|(operation, message)| {
+            message.as_ref().map(|message| (operation, message.clone()))
+        })
+        .collect();
+        let previous = std::mem::replace(&mut self.reported_inline_errors, current.clone());
+        for (operation, message) in current {
+            if previous.get(operation) == Some(&message) {
+                continue;
+            }
+            if !self
+                .global_problems
+                .iter()
+                .any(|problem| problem.message == message)
+            {
+                self.record_runtime_error(None, operation, message.clone(), cx);
+            }
+            if !self.notification_history.iter().any(|notification| {
+                notification.id >= self.inline_error_notification_cursor
+                    && (notification.message == message
+                        || notification.message == format!("{operation}: {message}"))
+            }) {
+                self.show_error_toast(message, cx);
+            }
+        }
+        self.inline_error_notification_cursor = self.next_toast_id;
     }
 
     /// Queue a toast. The newest toast replaces the oldest beyond three
@@ -19888,8 +20012,8 @@ impl WorkspaceShell {
         }
     }
 
-    fn open_connection_url(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit_manifest_section("connections", cx);
+    fn open_connection_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_database_connection(window, cx);
     }
 
     fn submit_connection_url(&mut self, cx: &mut Context<Self>) {
@@ -19955,11 +20079,17 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn open_database_connection(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit_manifest_section("connections", cx);
+    fn open_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .lifecycle
+            .supports(sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION)
+        {
+            self.edit_manifest_section("connections", cx);
+        } else {
+            self.open_legacy_database_connection(window, cx);
+        }
     }
 
-    #[allow(dead_code)]
     fn open_legacy_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing_connection_profile = None;
         self.database_connection_vault_id = None;
@@ -25121,6 +25251,9 @@ impl WorkspaceShell {
 
     fn select_only_git_workspace_if_needed(&mut self, cx: &mut Context<Self>) {
         if self.lifecycle.phase != crate::ConnectionPhase::Ready
+            || !self
+                .lifecycle
+                .supports(sift_protocol::handshake::CAPABILITY_WORKSPACE_GIT)
             || self.selected_workspace_id.is_some()
         {
             return;
@@ -30734,6 +30867,11 @@ impl WorkspaceShell {
             return;
         }
         let command = if self.server_connection_ssh {
+            if base_url.contains("://") {
+                self.server_connection_error = Some("SSH destination must be user@host or an SSH host alias. For an HTTP URL, select URL.".into());
+                cx.notify();
+                return;
+            }
             InstanceCommand::ConnectSsh {
                 profile_id: self.selected_server_profile.clone(),
                 name,
@@ -32592,6 +32730,10 @@ impl WorkspaceShell {
         let row_height = theme.metrics.row_height;
         let rows = app_bar::menu_items(menu)
             .into_iter()
+            .filter(|item| {
+                item.command
+                    .is_none_or(|command| self.feature_unavailable_reason(command).is_none())
+            })
             .enumerate()
             .map(|(index, item)| {
                 let disabled_reason = if item.url.is_some() {
@@ -38775,6 +38917,23 @@ impl gpui::Render for WorkspaceShell {
                                     .whitespace_normal()
                                     .text_sm()
                                     .child(toast.message.clone()),
+                            )
+                            .child(
+                                IconButton::new(
+                                    ("copy-toast", toast.id as usize),
+                                    IconName::Copy,
+                                    "Copy notification",
+                                )
+                                .debug_selector(format!("copy-toast-{}", toast.id))
+                                .on_click({
+                                    let message = toast.message.clone();
+                                    move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            message.clone(),
+                                        ));
+                                    }
+                                }),
                             )
                             .child(icon(IconName::Close, colors.muted_text, 12.))
                     }))
@@ -45982,6 +46141,176 @@ mod tests {
         }
     }
 
+    fn negotiate_features(shell: &mut WorkspaceShell, capabilities: &[&str]) {
+        shell.lifecycle.apply(LifecycleEvent::Negotiated(
+            sift_protocol::HandshakeResponse {
+                server_version: "0.1.0".into(),
+                protocol: sift_protocol::ProtocolRange::exact(1),
+                selected_protocol: 1,
+                instance_id: "test-instance".into(),
+                daemon_generation: "test-generation".into(),
+                deployment: sift_protocol::HandshakeDeployment::Personal,
+                transport: sift_protocol::HandshakeTransport::Loopback,
+                runtime_mode: sift_protocol::HandshakeRuntimeMode::InProcess,
+                capabilities: capabilities.iter().map(|value| (*value).into()).collect(),
+            },
+        ));
+    }
+
+    #[gpui::test]
+    fn server_failure_is_retained_and_inline_copy_keeps_dialog_open(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let message = "Could not reach the server";
+        workspace.update(&mut cx, |shell, cx| {
+            shell.modal = Some(Modal::ServerConnection);
+            shell.on_instance_manager_event(
+                InstanceManagerEvent::Failed {
+                    message: message.into(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.notification_history.len(), 1);
+            assert_eq!(shell.global_problems.len(), 1);
+            assert_eq!(shell.notification_history[0].message, message);
+        });
+        let copy = cx
+            .debug_bounds("copy-error")
+            .expect("inline error copy button");
+        cx.simulate_click(copy.center(), Modifiers::default());
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(message.into())
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            assert_eq!(shell.modal, Some(Modal::ServerConnection));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.notification_history.len(), 1)
+        });
+        workspace.update(&mut cx, |shell, cx| {
+            shell.server_connection_error = None;
+            shell.instance_operation_error = None;
+            shell.modal = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let copy = cx
+            .debug_bounds("copy-toast-1")
+            .expect("notification copy button");
+        cx.simulate_click(copy.center(), Modifiers::default());
+        workspace.read_with(&cx, |shell, _| assert_eq!(shell.toasts.len(), 1));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_instance_manager_event(
+                InstanceManagerEvent::Failed {
+                    message: message.into(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.notification_history.len(), 2)
+        });
+    }
+
+    #[gpui::test]
+    fn ssh_form_rejects_urls_before_sending_connection_request(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.server_connection_ssh = true;
+            shell
+                .server_name_input
+                .update(cx, |input, cx| input.set_text("vostro", cx));
+            shell.server_url_input.update(cx, |input, cx| {
+                input.set_text("https://127.0.0.1:17474", cx)
+            });
+            shell.submit_server_connection(cx);
+            assert!(!shell.server_connection_pending);
+            assert!(shell
+                .server_connection_error
+                .as_ref()
+                .unwrap()
+                .contains("select URL"));
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.notification_history.len(), 1);
+            assert_eq!(shell.global_problems.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn standalone_server_add_connection_opens_wizard(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            negotiate_features(shell, &[]);
+            shell.left_dock.presentation.open = true;
+            shell.active_left_panel = LeftPanel::Connections;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let add = cx
+            .debug_bounds("add-database-connection")
+            .expect("Add connection is visible without a manifest");
+        cx.simulate_click(add.center(), Modifiers::default());
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.modal, Some(Modal::DatabaseConnection));
+            assert!(shell.pending_manifest_path.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn disabled_server_features_are_hidden_and_palette_explains_why(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            negotiate_features(shell, &[]);
+            for command in [
+                CommandId::FocusGit,
+                CommandId::CreateWorkspaceFile,
+                CommandId::NewRunConfiguration,
+                CommandId::OpenServerConfiguration,
+            ] {
+                assert!(shell.command_spec(command, cx).disabled_reason.is_some());
+            }
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("footer-git").is_none());
+        assert!(cx.debug_bounds("footer-automations").is_none());
+        assert!(cx.debug_bounds("footer-monitor").is_none());
+        workspace.update(&mut cx, |shell, cx| {
+            negotiate_features(
+                shell,
+                &[
+                    sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION,
+                    sift_protocol::handshake::CAPABILITY_WORKSPACE_PROJECTIONS,
+                    sift_protocol::handshake::CAPABILITY_WORKSPACE_GIT,
+                ],
+            );
+            assert!(shell
+                .feature_unavailable_reason(CommandId::FocusGit)
+                .is_none());
+            assert!(shell.command_context(cx).has_editable_instance);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("footer-git").is_some());
+        assert!(cx.debug_bounds("footer-automations").is_some());
+    }
+
     #[gpui::test]
     fn database_wizard_entry_routes_to_sift_toml(cx: &mut TestAppContext) {
         let window = shell(cx);
@@ -45991,6 +46320,10 @@ mod tests {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.instance_sender = Some(sender);
+            negotiate_features(
+                shell,
+                &[sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION],
+            );
             shell.open_database_connection(window, cx);
             assert_eq!(shell.pending_manifest_path.as_deref(), Some("connections"));
         });

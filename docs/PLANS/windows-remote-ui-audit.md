@@ -6,9 +6,9 @@ Target: Windows 11 desktop connected through HTTP over SSH forwarding to
 ## Milestones
 
 - [x] Commit the tested native Windows development and hosting baseline.
-- [ ] Use Sift's own window bar on Windows, embed its icon, and keep Wiki under Help.
-- [ ] Make connection creation and feature visibility follow the connected server.
-- [ ] Make connection and other dialog failures discoverable and copyable.
+- [x] Use Sift's own window bar on Windows, embed its icon, and keep Wiki under Help.
+- [x] Make connection creation and feature visibility follow the connected server.
+- [x] Make connection and other dialog failures discoverable and copyable.
 - [ ] Verify the native frontend against vostro and record bounded benchmarks.
 
 ## Findings and intended behavior

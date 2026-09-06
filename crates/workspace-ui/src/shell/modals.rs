@@ -2038,9 +2038,9 @@ impl WorkspaceShell {
                                         .text_xs()
                                         .text_color(colors.muted_text)
                                         .child(if ssh {
-                                            "Uses your OpenSSH config and host-key policy"
+                                            "Enter user@host or an SSH host alias, not a URL"
                                         } else {
-                                            "Connect directly to a Sift server"
+                                            "Enter the server's HTTP or HTTPS URL, including its port"
                                         }),
                                 ),
                         )
