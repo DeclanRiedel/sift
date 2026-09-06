@@ -903,6 +903,8 @@ fn ensure_same_target(value: &[u8]) -> anyhow::Result<()> {
 fn load_signing_key(path: &Path) -> anyhow::Result<SigningKey> {
     let metadata = std::fs::metadata(path)
         .with_context(|| format!("reading Sift signing key metadata: {}", path.display()))?;
+    #[cfg(not(unix))]
+    let _ = metadata;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -958,6 +960,8 @@ fn write_secret_json(value: &RemoteReady) -> anyhow::Result<()> {
 }
 
 fn make_private_dir(path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

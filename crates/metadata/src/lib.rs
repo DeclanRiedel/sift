@@ -765,7 +765,10 @@ impl MetadataStore {
                 backup.run_to_completion(128, Duration::from_millis(10), None)?;
             }
             destination.close().map_err(|(_, error)| error)?;
-            std::fs::File::open(&partial)?.sync_all()?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&partial)?
+                .sync_all()?;
             std::fs::rename(&partial, &path)?;
             #[cfg(unix)]
             std::fs::File::open(&backup_dir)?.sync_all()?;
@@ -810,7 +813,10 @@ impl MetadataStore {
                 backup.run_to_completion(128, Duration::from_millis(10), None)?;
             }
             target.close().map_err(|(_, error)| error)?;
-            std::fs::File::open(destination)?.sync_all()?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(destination)?
+                .sync_all()?;
             Ok(())
         })();
         if result.is_err() {
@@ -969,7 +975,7 @@ impl MetadataStore {
                 _file: Some(lock),
                 path: Some(pool.path.clone()),
             }),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
                 Err(MetadataError::MigrationInProgress(lock_path))
             }
             Err(error) => Err(error.into()),
@@ -986,6 +992,11 @@ impl MetadataStore {
     }
 
     pub fn default_local_path() -> PathBuf {
+        #[cfg(target_os = "windows")]
+        if let Some(root) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(root).join("sift").join("metadata.sqlite");
+        }
+
         if cfg!(target_os = "macos") {
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)

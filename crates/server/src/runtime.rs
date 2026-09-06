@@ -53,7 +53,7 @@ impl RuntimeState {
             let path = state_dir.join(DAEMON_LOCK_FILE);
             let file = private_open(&path, true)?;
             if let Err(error) = FileExt::try_lock_exclusive(&file) {
-                if error.kind() == std::io::ErrorKind::WouldBlock {
+                if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
                     bail!(
                         "another sift daemon owns runtime state {}",
                         state_dir.display()
@@ -139,10 +139,12 @@ impl MaintenanceGuard {
         };
         match result {
             Ok(()) => Ok(Self { _file: file }),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => bail!(
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+                bail!(
                 "sift lifecycle is active; stop the server or other maintenance command using {}",
                 state_dir.display()
-            ),
+            )
+            }
             Err(error) => {
                 Err(error).with_context(|| format!("locking maintenance state: {}", path.display()))
             }
@@ -235,6 +237,8 @@ fn private_mode(options: &mut OpenOptions) {
 fn private_mode(_options: &mut OpenOptions) {}
 
 fn make_private_dir(path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -244,8 +248,16 @@ fn make_private_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_dir(path: &Path) -> std::io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> std::io::Result<()> {
+    // Ordinary directory handles cannot be opened/flushed this way on Windows.
+    // The files themselves are synced before publishing them.
+    Ok(())
 }
 
 #[cfg(test)]

@@ -474,16 +474,23 @@ pub enum Error {
     #[error("server error {status}: {}", error.message)]
     Server {
         status: reqwest::StatusCode,
-        error: ApiErrorResponse,
+        error: Box<ApiErrorResponse>,
     },
     #[error("websocket error: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
     #[error("{0} timed out")]
     Timeout(&'static str),
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl From<tokio_tungstenite::tungstenite::Error> for Error {
+    fn from(error: tokio_tungstenite::tungstenite::Error) -> Self {
+        // Keep SDK Results compact across platform-specific TLS backends.
+        Self::WebSocket(Box::new(error))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -4639,9 +4646,12 @@ async fn connect_websocket(
                 }
             });
             error.retry_after_secs = error.retry_after_secs.or(retry_after_secs);
-            Err(Error::Server { status, error })
+            Err(Error::Server {
+                status,
+                error: Box::new(error),
+            })
         }
-        Err(error) => Err(Error::WebSocket(error)),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -4680,7 +4690,10 @@ async fn server_error(response: reqwest::Response) -> Error {
         edit_conflict: None,
     });
     error.retry_after_secs = error.retry_after_secs.or(retry_after_secs);
-    Error::Server { status, error }
+    Error::Server {
+        status,
+        error: Box::new(error),
+    }
 }
 
 async fn next_ws<S>(ws: &mut S) -> Result<WsServerMessage>

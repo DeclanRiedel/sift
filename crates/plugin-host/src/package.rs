@@ -853,12 +853,12 @@ fn resolve_schema_reference(source: &str, reference: &str) -> Result<Option<Stri
             "schema {source} contains forbidden reference `{reference}`"
         )));
     }
-    let parent = Path::new(source).parent().unwrap_or_else(|| Path::new(""));
-    let joined = parent.join(path);
-    let joined = joined.to_str().ok_or_else(|| {
-        PackageError::InvalidManifest(format!("schema {source} has a non-UTF-8 reference"))
-    })?;
-    normalize_path(joined).map(Some)
+    // Package references use forward slashes, regardless of the host OS.
+    let joined = match source.rsplit_once('/') {
+        Some((parent, _)) => format!("{parent}/{path}"),
+        None => path.to_owned(),
+    };
+    normalize_path(&joined).map(Some)
 }
 
 fn secret_shaped_name(name: &str) -> bool {
@@ -906,6 +906,8 @@ fn extract_verified(
     lock: &PackageLock,
     manifest: &ExtensionManifest,
 ) -> Result<(), PackageError> {
+    #[cfg(not(unix))]
+    let _ = manifest; // Executable permission bits are only applied on Unix.
     let mut archive = ZipArchive::new(File::open(archive_path)?)?;
     for locked in &lock.files {
         let mut entry = archive.by_name(&locked.path)?;

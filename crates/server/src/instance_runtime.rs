@@ -977,6 +977,8 @@ fn write_atomic_private(parent: &Path, name: &str, bytes: &[u8]) -> anyhow::Resu
             return Err(error).context("replacing private generation pointer");
         }
         let _ = std::fs::remove_file(backup);
+    } else {
+        std::fs::rename(&staging, &destination)?;
     }
     #[cfg(not(windows))]
     std::fs::rename(&staging, &destination)?;
@@ -1002,6 +1004,8 @@ fn private_mode(options: &mut OpenOptions) {
 fn private_mode(_options: &mut OpenOptions) {}
 
 fn make_private_dir(path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1013,6 +1017,8 @@ fn make_private_dir(path: &Path) -> anyhow::Result<()> {
 }
 
 fn sync_dir(path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
     Ok(())

@@ -1,5 +1,7 @@
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use std::sync::LazyLock;
 
 use gpui::KeyBinding;
 use sift_workspace_ui::{

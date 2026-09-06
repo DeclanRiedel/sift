@@ -596,6 +596,8 @@ fn ensure_private_dir(path: &Path) -> anyhow::Result<()> {
 }
 
 fn make_executable(path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -646,6 +648,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 fn sync_directory(path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
+    #[cfg(unix)]
     std::fs::File::open(path)?.sync_all()?;
     Ok(())
 }

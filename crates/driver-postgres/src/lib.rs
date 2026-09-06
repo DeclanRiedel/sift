@@ -651,11 +651,8 @@ fn begin_sql(mode: &TxMode) -> String {
 
 fn pg_connect_config(spec: &ConnectionSpec) -> Result<tokio_postgres::Config, DriverError> {
     let mut cfg = tokio_postgres::Config::new();
-    if spec.host.starts_with('/') {
-        cfg.host_path(&spec.host);
-    } else {
-        cfg.host(&spec.host);
-    }
+    // tokio-postgres recognizes socket paths on Unix; host_path is Unix-only.
+    cfg.host(&spec.host);
     if let Some(port) = spec.port {
         cfg.port(port);
     }

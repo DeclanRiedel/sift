@@ -22,6 +22,7 @@
 
 ## Docs
 
+- [Development on Windows and NixOS](docs/DEVELOPMENT.md)
 - [Instance configuration](docs/INSTANCE-CONFIG.md)
 - [Keyboard reference](docs/keyboard-wiki/index.html)
 - [Shared rooms](docs/keyboard-wiki/shared-rooms.html)

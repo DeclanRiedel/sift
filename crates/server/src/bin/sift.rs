@@ -517,6 +517,8 @@ fn write_generated(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 fn sync_parent(parent: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    let _ = parent;
     #[cfg(unix)]
     {
         std::fs::File::open(parent)

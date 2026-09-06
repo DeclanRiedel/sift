@@ -9,9 +9,10 @@
 # codegen/link starves the desktop session it is supposed to be developing.
 
 [build]
-# Negative values mean "all logical cores minus N". Leaves headroom for the
-# editor, rust-analyzer, a running sift-server, and a Postgres instance.
-jobs = -6
+# Keep both the six-thread Windows PC and eight-thread NixOS laptop usable.
+# Subtracting six cores serialized the entire build on the Windows PC.
+# Override with Cargo's --jobs option when a host has more resources.
+jobs = 2
 
 [future-incompat-report]
 frequency = "never"

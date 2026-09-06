@@ -293,7 +293,9 @@ impl GitAdapter {
             local_timeout: Duration::from_secs(config.local_timeout_secs),
             network_timeout: Duration::from_secs(config.network_timeout_secs),
             network_enabled: config.network_enabled,
-            askpass_executable: find_sibling_askpass(),
+            // The current credential bridge uses a Unix socket. Its Windows
+            // binary is a stub, so do not advertise it as an available helper.
+            askpass_executable: cfg!(unix).then(find_sibling_askpass).flatten(),
             limits: VcsAdapterLimits {
                 local_timeout_secs: config.local_timeout_secs,
                 network_timeout_secs: config.network_timeout_secs,
@@ -1965,9 +1967,7 @@ fn parse_status(
         head_oid: head,
         branch,
         upstream: upstream.map(|value| {
-            let (remote, branch) = value
-                .split_once('/')
-                .map_or((value.as_str(), ""), |parts| parts);
+            let (remote, branch) = value.split_once('/').unwrap_or((value.as_str(), ""));
             VcsUpstreamStatus {
                 remote: remote.to_string(),
                 branch: branch.to_string(),
@@ -2699,10 +2699,11 @@ fn is_oid(value: &str) -> bool {
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {
+    let name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     std::env::var_os("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .map(|directory| directory.join(name))
+        .map(|directory| directory.join(&name))
         .find(|candidate| candidate.is_file())
         .and_then(|candidate| std::fs::canonicalize(candidate).ok())
 }

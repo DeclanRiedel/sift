@@ -55,6 +55,9 @@ what sift is and the five product goals; this file is the operational subset.
   (`use flake` + `dotenv_if_exists .env`). No `source .env` or manual
   export before `cargo test` / `cargo run`. If direnv isn't wired,
   `set -a; source .env; set +a` matches the same behavior.
+- On Windows, `./scripts/dev.ps1 setup` prepares the native tools and key;
+  `./scripts/dev.ps1 env` loads `.env` into PowerShell. The `check`, `server`,
+  and `desktop` actions load it automatically. See `docs/DEVELOPMENT.md`.
 - Secret-shaped values in `.env`:
   - **`SIFT_METADATA__SECRET_KEY_FILE`** — 32-byte hex keyfile for the
     file secret backend. Auto-generated at `.sift/dev-secret.key` on

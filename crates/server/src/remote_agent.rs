@@ -103,7 +103,7 @@ fn clear_stale_descriptor(runtime_dir: &Path, descriptor: &Path) -> anyhow::Resu
             fs2::FileExt::unlock(&lock)?;
             Ok(())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
             // A live owner may be between binding and publishing readiness.
             Ok(())
         }
@@ -395,6 +395,8 @@ fn ensure_private_dir(path: &Path) -> anyhow::Result<()> {
 }
 
 fn verify_private_personal_state(path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -407,6 +409,8 @@ fn verify_private_personal_state(path: &Path) -> anyhow::Result<()> {
 }
 
 fn verify_private_file(path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

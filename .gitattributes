@@ -1,0 +1,7 @@
+# Keep Unix entry points runnable when a checkout is prepared on Windows.
+*.sh text eol=lf
+*.nix text eol=lf
+# Embedded migration checksums must match on every host.
+*.sql text eol=lf
+.envrc text eol=lf
+*.ps1 text eol=crlf

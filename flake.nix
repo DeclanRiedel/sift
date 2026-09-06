@@ -73,7 +73,6 @@
         # Rust + adjacent dev tooling.
         rustDeps = with pkgs; [
           rustToolchain
-          rust-analyzer
           mold                  # linker: far less RAM + wall time than bfd/gold
           sccache               # shared compile cache across checkouts / machines
           cargo-nextest         # faster, better test runner

@@ -2131,6 +2131,11 @@ prevent_destroy = true
 
     #[test]
     fn workspace_and_vcs_configuration_is_validated_and_locked() {
+        let workspace_path = if cfg!(windows) {
+            "C:/tmp/sift-demo"
+        } else {
+            "/tmp/sift-demo"
+        };
         let input = VALID.replace(
             "[automation]",
             r#"[server.workspaces]
@@ -2147,9 +2152,10 @@ network_enabled = false
 
 [automation]"#,
         );
+        let input = input.replace("/tmp/sift-demo", workspace_path);
         let manifest = Manifest::parse(&input).unwrap();
         assert_eq!(manifest.server.workspaces.roots[0].handle, "demo");
-        assert_eq!(manifest.server.workspaces.roots[0].path, "/tmp/sift-demo");
+        assert_eq!(manifest.server.workspaces.roots[0].path, workspace_path);
         assert!(manifest.server.vcs.enabled);
 
         let lock = LockFile::generate(&manifest, "0.1.0", 1).unwrap();

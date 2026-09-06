@@ -931,6 +931,8 @@ fn private_create_new(path: &Path) -> std::io::Result<File> {
 }
 
 fn make_private_dir(path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -948,6 +950,8 @@ fn remove_if_exists(path: &Path) -> std::io::Result<()> {
 }
 
 fn sync_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
     Ok(())
