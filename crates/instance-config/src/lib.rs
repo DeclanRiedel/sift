@@ -2074,6 +2074,19 @@ prevent_destroy = true
 "#;
 
     #[test]
+    fn shipped_instance_example_has_a_current_lock() {
+        let manifest = Manifest::parse(include_str!(
+            "../../../examples/reproducible-instance/sift.toml"
+        ))
+        .unwrap();
+        let lock = LockFile::parse(include_str!(
+            "../../../examples/reproducible-instance/sift.lock"
+        ))
+        .unwrap();
+        lock.verify(&manifest).unwrap();
+    }
+
+    #[test]
     fn parses_normalizes_and_locks_manifest() {
         let manifest = Manifest::parse(VALID).unwrap();
         assert_eq!(manifest.connections[0].tags, ["production", "warehouse"]);

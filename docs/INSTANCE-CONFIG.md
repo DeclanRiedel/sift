@@ -28,10 +28,21 @@ sift.toml + sift.lock  ── copy ──>   validate + plan + apply
 
 ## Quick start
 
-Create a root or use `examples/reproducible-instance`:
+Create a root with the intended operator's immutable numeric GitHub user ID
+(replace `12345678`; a username is not an ID):
 
 ```sh
 sift instance new my-server --github-subject 12345678
+```
+
+Edit `my-server/sift.toml` before applying: the starter PostgreSQL endpoint is
+an example, not an automatically provisioned database. Alternatively, copy
+`examples/reproducible-instance` to a new folder, replace its `manifest_id`
+with a fresh UUID and its operator identity with yours, and adjust its endpoint.
+Regenerate the lock after edits. Do not reuse the demo identity for independent
+instances: private state is keyed by manifest ID.
+
+```sh
 sift instance validate my-server
 sift instance lock my-server
 sift instance plan my-server
@@ -41,8 +52,8 @@ sift instance status my-server
 sift instance credentials status my-server
 ```
 
-Import a PostgreSQL or SQL Server password without placing it in shell
-arguments, logs, TOML, the lock, or SQLite:
+For the CLI-generated `default/postgres` connection, import its password
+without placing it in shell arguments, logs, TOML, the lock, or SQLite:
 
 ```sh
 sift instance credentials import my-server \
@@ -54,6 +65,9 @@ The command reads an exact JSON object from standard input:
 ```json
 {"password":"replace interactively"}
 ```
+
+The copied demo instead names its slot `credential:demo/postgres/shared`.
+Use the exact slot from `credentials status` for your edited manifest.
 
 Hosted GitHub OAuth slots accept exactly `{"client_secret":"..."}`. Stop the
 instance before apply or credential import. A destructive plan needs

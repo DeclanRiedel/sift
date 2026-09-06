@@ -1056,7 +1056,7 @@ pub fn manifest_completions(
             ),
             (
                 "identity.github_principals",
-                "[[identity.github_principals]]\nname = \"operator\"\nsubject = \"github-id\"\nlogin_hint = \"operator\"\ninstance_admin = false\nbootstrap = false",
+                "[[identity.github_principals]]\nname = \"collaborator\"\n# Replace with the collaborator's immutable numeric GitHub user ID.\nsubject = \"12345679\"\nlogin_hint = \"replace-me\"\ninstance_admin = false\nbootstrap = false",
                 "New immutable GitHub principal",
             ),
             (
@@ -1337,6 +1337,22 @@ mod tests {
         assert_eq!(candidates[0].label, "[[connections]]");
         assert!(candidates[0].insertion.contains("[connections.policy]"));
         assert!(candidates[0].insertion.contains("credential_mode"));
+    }
+
+    #[test]
+    fn identity_template_can_be_added_to_the_starter_manifest() {
+        let prefix = "[[identity.github_principals";
+        let (_, candidates) = manifest_completions(prefix, prefix.len());
+        assert_eq!(candidates.len(), 1);
+        let source = format!(
+            "{}\n{}\n",
+            include_str!("../../../examples/reproducible-instance/sift.toml"),
+            candidates[0].insertion
+        );
+        let manifest = crate::Manifest::parse(&source).unwrap();
+        let collaborator = manifest.identity.github_principals.last().unwrap();
+        assert!(!collaborator.instance_admin);
+        assert!(!collaborator.bootstrap);
     }
 
     #[test]
