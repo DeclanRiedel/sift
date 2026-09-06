@@ -392,8 +392,7 @@ fn instance_new(arguments: &[String]) -> anyhow::Result<()> {
     reject_if_exists(&root.join(MANIFEST_FILE))?;
     reject_if_exists(&root.join(LOCK_FILE))?;
     let manifest_id = uuid::Uuid::new_v4();
-    let source = new_manifest_source(manifest_id, &name, &github_subject);
-    let manifest = Manifest::parse(&source)?;
+    let manifest = sift_instance_config::personal_starter(manifest_id, &name, &github_subject)?;
     let lock = LockFile::generate(
         &manifest,
         sift_server::VERSION,
@@ -413,68 +412,6 @@ fn instance_new(arguments: &[String]) -> anyhow::Result<()> {
         root.display()
     );
     Ok(())
-}
-
-fn new_manifest_source(manifest_id: uuid::Uuid, name: &str, github_subject: &str) -> String {
-    format!(
-        r#"kind = "sift-instance"
-format_version = 1
-manifest_id = "{manifest_id}"
-name = "{name}"
-
-[compatibility]
-sift = ">=0.1,<0.2"
-
-[server]
-deployment = "personal"
-transport = "loopback"
-mode = "daemon"
-bind = "auto-loopback"
-
-[server.metadata]
-secret_backend = "file"
-store_sql = false
-
-[automation]
-unattended_apply = "disabled"
-
-[auth.github]
-flow = "local-device"
-
-[auth.admission]
-mode = "allowlist"
-
-[[identity.github_principals]]
-name = "operator"
-subject = "{github_subject}"
-instance_admin = true
-bootstrap = true
-
-[[tenants]]
-name = "default"
-
-[[tenants.memberships]]
-principal = "operator"
-role = "owner"
-
-[[connections]]
-name = "default/postgres"
-tenant = "default"
-provider = "postgres"
-connection_string = "postgresql://sift@127.0.0.1:5432/postgres?sslmode=prefer"
-credential_mode = "shared"
-credential = "credential:default/postgres/shared"
-enabled = true
-
-[connections.policy]
-allow_sql = true
-allow_schema_read = true
-allow_export = false
-
-[connections.lifecycle]
-prevent_destroy = true
-"#
-    )
 }
 
 fn exactly_one_root(arguments: &[String], command: &str) -> anyhow::Result<PathBuf> {

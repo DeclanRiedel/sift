@@ -16,6 +16,9 @@ use url::Url;
 use uuid::Uuid;
 
 mod editor;
+mod starter;
+
+pub use starter::personal_starter;
 
 pub use editor::{
     manifest_completions, manifest_diagnostics, manifest_hover, manifest_outline,

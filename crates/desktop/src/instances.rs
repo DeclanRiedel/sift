@@ -750,17 +750,16 @@ fn prepare_root_configuration(
             ));
         }
     }
-    let source = include_str!("../../../examples/reproducible-instance/sift.toml")
-        .replace(
-            "b654b918-b1f1-4d70-924d-e4c1014f482f",
-            &uuid::Uuid::new_v4().to_string(),
-        )
-        .replace("name = \"demo-sift\"", "name = \"new-sift\"");
+    let manifest =
+        sift_instance_config::personal_starter(uuid::Uuid::new_v4(), "new-sift", "12345678")
+            .map_err(|error| format!("validating template failed: {error}"))?;
+    let source = manifest
+        .to_toml_pretty()
+        .map_err(|error| format!("formatting template failed: {error}"))?;
     Ok(InstanceConfigurationPresentation {
         root: Some(root.to_path_buf()),
         lock: sift_instance_config::LockFile::generate(
-            &sift_instance_config::Manifest::parse(&source)
-                .map_err(|error| format!("validating template failed: {error}"))?,
+            &manifest,
             sift_server::VERSION,
             sift_protocol::PROTOCOL_VERSION_NUMBER,
         )

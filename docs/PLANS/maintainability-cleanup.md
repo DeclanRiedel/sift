@@ -11,7 +11,7 @@ Modal geometry belongs to one host; feature views own their content.
 
 ## Milestones
 
-- [ ] Unify CLI/desktop starter manifests through a validated typed generator.
+- [x] Unify CLI/desktop starter manifests through a validated typed generator.
 - [ ] Split HTTP handlers into domain modules without changing router middleware.
 - [ ] Extract feature-owned workspace-shell actions and views.
 - [ ] Bound desktop event queues with explicit overload and lossless delivery semantics.
