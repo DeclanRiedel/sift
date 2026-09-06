@@ -133,3 +133,23 @@ allocation and also bound reads if the file grows. Preview is available through
 a button and Vim `p`; late worker completion cannot overwrite cancellation.
 Durable resume, a dedicated type-mapping editor, and quarantine report retrieval
 remain open.
+
+## Design: transfer feature ownership
+
+Group recipe editor state, request generation, progress, and results in one
+transfer state owner. Move recipe commands and transfer event handling beside
+that state, preserving the existing executor interface and modal rendering.
+Keep cancellation generation checks with completion handling. Existing editor
+and cancellation tests validate the move; no new scaffolding tests are needed.
+
+Transfer ownership milestone: 19 state fields and recipe command/event handling
+now live in `shell/transfers.rs`. Formatting, workspace Clippy, and full workspace
+tests passed after extraction.
+
+## Design: import type grammar
+
+Validate each explicit CSV mapping as exactly one data type using the existing
+SQL parser and the connection's dialect. Reject trailing column definitions,
+defaults, constraints, and statements before executing any DDL. Retain length,
+comment, and column-name checks. This is syntactic validation; whether a type
+exists on the target server remains an engine check.

@@ -7286,9 +7286,9 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::TransferRecipes => {
-                    let rows = self.transfer_recipes.iter().cloned().enumerate().map(
+                    let rows = self.transfer.recipes.iter().cloned().enumerate().map(
                         |(index, recipe)| {
-                            let selected = index == self.transfer_recipe_selected;
+                            let selected = index == self.transfer.recipe_selected;
                             div()
                                 .id(("transfer-recipe", index))
                                 .debug_selector(move || format!("transfer-recipe-{index}"))
@@ -7306,7 +7306,7 @@ impl WorkspaceShell {
                                     MouseButton::Left,
                                     cx.listener(move |shell, _, window, cx| {
                                         shell.edit_transfer_recipe(index, cx);
-                                        shell.transfer_recipe_focus_handle.focus(window, cx);
+                                        shell.transfer.recipe_focus_handle.focus(window, cx);
                                     }),
                                 )
                                 .child(
@@ -7336,9 +7336,9 @@ impl WorkspaceShell {
                                 )
                         },
                     );
-                    let direction = format!("{:?}", self.transfer_recipe_direction);
-                    let editing = self.transfer_recipe_edit.is_some();
-                    let result = self.transfer_execution_result.as_ref().map(|result| match result {
+                    let direction = format!("{:?}", self.transfer.recipe_direction);
+                    let editing = self.transfer.recipe_edit.is_some();
+                    let result = self.transfer.execution_result.as_ref().map(|result| match result {
                         sift_protocol::TransferExecutionResult::Artifact { artifact } => format!(
                             "Artifact {} · {} · {} bytes · SHA-256 {}",
                             artifact.id.0,
@@ -7372,7 +7372,7 @@ impl WorkspaceShell {
                             .child(input)
                     };
                     div()
-                        .track_focus(&self.transfer_recipe_focus_handle)
+                        .track_focus(&self.transfer.recipe_focus_handle)
                         .key_context("SiftTransferRecipes")
                         .on_key_down(cx.listener(Self::handle_transfer_recipe_key))
                         .h(px(560.))
@@ -7417,7 +7417,7 @@ impl WorkspaceShell {
                                         .child(
                                             Button::new("refresh-transfer-recipes", "Refresh")
                                                 .tone(ButtonTone::Ghost)
-                                                .loading(self.transfer_recipes_loading)
+                                                .loading(self.transfer.recipes_loading)
                                                 .on_click(cx.listener(|shell, _, _, cx| {
                                                     shell.request_transfer_recipes(cx)
                                                 })),
@@ -7425,7 +7425,7 @@ impl WorkspaceShell {
                                 ),
                         )
                         .children(
-                            self.transfer_recipes_error
+                            self.transfer.recipes_error
                                 .clone()
                                 .map(ErrorBanner::new),
                         )
@@ -7442,7 +7442,7 @@ impl WorkspaceShell {
                                         .w(px(230.))
                                         .flex_none()
                                         .overflow_y_scroll()
-                                        .when(self.transfer_recipes.is_empty(), |list| {
+                                        .when(self.transfer.recipes.is_empty(), |list| {
                                             list.child(
                                                 div()
                                                     .p_3()
@@ -7471,7 +7471,7 @@ impl WorkspaceShell {
                                                         .flex_1()
                                                         .child(field(
                                                             "NAME",
-                                                            self.transfer_recipe_name_input.clone(),
+                                                            self.transfer.recipe_name_input.clone(),
                                                         )),
                                                 )
                                                 .child(
@@ -7501,7 +7501,7 @@ impl WorkspaceShell {
                                                         .flex_1()
                                                         .child(field(
                                                             "FORMAT",
-                                                            self.transfer_recipe_format_input.clone(),
+                                                            self.transfer.recipe_format_input.clone(),
                                                         )),
                                                 )
                                                 .child(
@@ -7509,22 +7509,22 @@ impl WorkspaceShell {
                                                         .w(px(120.))
                                                         .child(field(
                                                             "VERSION",
-                                                            self.transfer_recipe_version_input.clone(),
+                                                            self.transfer.recipe_version_input.clone(),
                                                         )),
                                                 ),
                                         )
                                         .child(field(
                                             "OPTIONS JSON",
-                                            self.transfer_recipe_options_input.clone(),
+                                            self.transfer.recipe_options_input.clone(),
                                         ))
                                         .when(
-                                            self.transfer_recipe_direction
+                                            self.transfer.recipe_direction
                                                 == sift_protocol::TransferDirection::Import,
                                             |editor| {
                                                 editor
                                                     .child(field(
                                                         "DESTINATION TABLE",
-                                                        self.transfer_recipe_table_input.clone(),
+                                                        self.transfer.recipe_table_input.clone(),
                                                     ))
                                                     .child(
                                                         div()
@@ -7536,13 +7536,13 @@ impl WorkspaceShell {
                                                                     .w(px(180.))
                                                                     .child(field(
                                                                         "XLSX SHEET",
-                                                                        self.transfer_recipe_sheet_input.clone(),
+                                                                        self.transfer.recipe_sheet_input.clone(),
                                                                     )),
                                                             )
                                                             .child(
                                                                 Button::new(
                                                                     "transfer-create-table",
-                                                                    if self.transfer_import_create_table {
+                                                                    if self.transfer.import_create_table {
                                                                         "Create table: yes"
                                                                     } else {
                                                                         "Create table: no"
@@ -7560,7 +7560,7 @@ impl WorkspaceShell {
                                                                     "transfer-conflict-policy",
                                                                     format!(
                                                                         "Duplicates: {:?}",
-                                                                        self.transfer_import_conflict_policy
+                                                                        self.transfer.import_conflict_policy
                                                                     ),
                                                                 )
                                                                 .tone(ButtonTone::Ghost)
@@ -7598,7 +7598,7 @@ impl WorkspaceShell {
                                                     )
                                                     .debug_selector("save-transfer-recipe")
                                                     .tone(ButtonTone::Accent)
-                                                    .loading(self.transfer_recipes_loading)
+                                                    .loading(self.transfer.recipes_loading)
                                                     .on_click(cx.listener(|shell, _, _, cx| {
                                                         shell.save_transfer_recipe(cx)
                                                     })),
@@ -7609,7 +7609,7 @@ impl WorkspaceShell {
                                                         "Validate",
                                                     )
                                                     .tone(ButtonTone::Neutral)
-                                                    .disabled(self.transfer_recipe_edit.is_none())
+                                                    .disabled(self.transfer.recipe_edit.is_none())
                                                     .on_click(cx.listener(|shell, _, _, cx| {
                                                         shell.validate_transfer_recipe(cx)
                                                     })),
@@ -7617,9 +7617,9 @@ impl WorkspaceShell {
                                                 .child(
                                                     Button::new(
                                                         "delete-transfer-recipe",
-                                                        if self.transfer_recipe_edit.is_some()
-                                                            && self.transfer_recipe_delete_confirmation
-                                                                == self.transfer_recipe_edit
+                                                        if self.transfer.recipe_edit.is_some()
+                                                            && self.transfer.recipe_delete_confirmation
+                                                                == self.transfer.recipe_edit
                                                         {
                                                             "Confirm delete"
                                                         } else {
@@ -7627,13 +7627,13 @@ impl WorkspaceShell {
                                                         },
                                                     )
                                                     .tone(ButtonTone::DangerGhost)
-                                                    .disabled(self.transfer_recipe_edit.is_none())
+                                                    .disabled(self.transfer.recipe_edit.is_none())
                                                     .on_click(cx.listener(|shell, _, _, cx| {
                                                         shell.delete_transfer_recipe(cx)
                                                     })),
                                                 )
                                                 .child(div().flex_1())
-                                                .when(self.transfer_execution_pending, |actions| {
+                                                .when(self.transfer.execution_pending, |actions| {
                                                     actions.child(
                                                         Button::new(
                                                             "cancel-transfer-recipe",
@@ -7651,7 +7651,7 @@ impl WorkspaceShell {
                                                     Button::new("preview-transfer-recipe", "Preview")
                                                         .debug_selector("preview-transfer-recipe")
                                                         .tone(ButtonTone::Neutral)
-                                                        .disabled(self.transfer_recipe_edit.is_none() || self.transfer_execution_pending)
+                                                        .disabled(self.transfer.recipe_edit.is_none() || self.transfer.execution_pending)
                                                         .on_click(cx.listener(|shell, _, _, cx| {
                                                             shell.execute_selected_transfer_recipe(true, cx)
                                                         })),
@@ -7659,7 +7659,7 @@ impl WorkspaceShell {
                                                 .child(
                                                     Button::new(
                                                         "execute-transfer-recipe",
-                                                        if self.transfer_execution_pending {
+                                                        if self.transfer.execution_pending {
                                                             "Executing…"
                                                         } else {
                                                             "Execute"
@@ -7667,10 +7667,10 @@ impl WorkspaceShell {
                                                     )
                                                     .debug_selector("execute-transfer-recipe")
                                                     .tone(ButtonTone::Accent)
-                                                    .loading(self.transfer_execution_pending)
+                                                    .loading(self.transfer.execution_pending)
                                                     .disabled(
-                                                        self.transfer_recipe_edit.is_none()
-                                                            || self.transfer_execution_pending,
+                                                        self.transfer.recipe_edit.is_none()
+                                                            || self.transfer.execution_pending,
                                                     )
                                                     .on_click(cx.listener(|shell, _, _, cx| {
                                                         shell.execute_selected_transfer_recipe(false, cx)
