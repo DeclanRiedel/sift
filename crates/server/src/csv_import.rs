@@ -39,7 +39,7 @@ pub async fn import(
     let engine = entry.driver.engine();
     let table = qualified_table(&request.table, engine)?;
 
-    validate_type_mappings(&request, &prepared)?;
+    validate_type_mappings(&request, &prepared, engine)?;
     if request.resume_from_row > 0 && request.conflict_policy == CsvConflictPolicy::Abort {
         return Err(ApiError::BadRequest(
             "resumed imports require conflict_policy=skip for row-safe replay".into(),
@@ -122,7 +122,19 @@ pub async fn import(
     })
 }
 
-fn validate_type_mappings(request: &CsvImportRequest, prepared: &PreparedCsv) -> ApiResult<()> {
+fn validate_type_mappings(
+    request: &CsvImportRequest,
+    prepared: &PreparedCsv,
+    engine: Engine,
+) -> ApiResult<()> {
+    use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect};
+    use sqlparser::parser::Parser;
+    use sqlparser::tokenizer::Token;
+
+    let dialect: &dyn Dialect = match engine {
+        Engine::Postgres => &PostgreSqlDialect {},
+        Engine::SqlServer => &MsSqlDialect {},
+    };
     for (column, sql_type) in &request.type_mappings {
         if !prepared
             .columns
@@ -138,6 +150,11 @@ fn validate_type_mappings(request: &CsvImportRequest, prepared: &PreparedCsv) ->
             || sql_type.contains(';')
             || sql_type.contains("--")
             || sql_type.contains("/*")
+            || !Parser::new(dialect)
+                .try_with_sql(sql_type)
+                .is_ok_and(|mut parser| {
+                    parser.parse_data_type().is_ok() && parser.peek_token().token == Token::EOF
+                })
         {
             return Err(ApiError::BadRequest(format!(
                 "type mapping for `{column}` is not a safe SQL type"
@@ -707,7 +724,7 @@ mod tests {
         request
             .type_mappings
             .insert("id".into(), "numeric(20,0)".into());
-        validate_type_mappings(&request, &prepared).unwrap();
+        validate_type_mappings(&request, &prepared, Engine::Postgres).unwrap();
         let ddl = create_table_sql(
             "public.people",
             &prepared.columns,
@@ -716,14 +733,45 @@ mod tests {
         );
         assert!(ddl.contains("\"id\" numeric(20,0)"));
 
+        for (engine, sql_type) in [
+            (Engine::Postgres, "double precision"),
+            (Engine::Postgres, "timestamp(6) with time zone"),
+            (Engine::Postgres, "\"app\".\"Status\"[]"),
+            (Engine::SqlServer, "nvarchar(max)"),
+            (Engine::SqlServer, "decimal(38,10)"),
+            (Engine::SqlServer, "[dbo].[Status]"),
+        ] {
+            request.type_mappings.insert("id".into(), sql_type.into());
+            assert!(
+                validate_type_mappings(&request, &prepared, engine).is_ok(),
+                "{engine:?}: {sql_type}"
+            );
+        }
+        for sql_type in [
+            "int DEFAULT 1",
+            "int, extra int",
+            "int CHECK (id > 0)",
+            "int NULL",
+            "int) SELECT 1",
+        ] {
+            request.type_mappings.insert("id".into(), sql_type.into());
+            for engine in [Engine::Postgres, Engine::SqlServer] {
+                assert!(
+                    validate_type_mappings(&request, &prepared, engine).is_err(),
+                    "{engine:?}: {sql_type}"
+                );
+            }
+        }
+        request.type_mappings.clear();
+
         request
             .type_mappings
             .insert("name".into(), "text; DROP TABLE people".into());
-        assert!(validate_type_mappings(&request, &prepared).is_err());
+        assert!(validate_type_mappings(&request, &prepared, Engine::Postgres).is_err());
         request.type_mappings.clear();
         request
             .type_mappings
             .insert("missing".into(), "text".into());
-        assert!(validate_type_mappings(&request, &prepared).is_err());
+        assert!(validate_type_mappings(&request, &prepared, Engine::Postgres).is_err());
     }
 }

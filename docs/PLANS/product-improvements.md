@@ -153,3 +153,9 @@ SQL parser and the connection's dialect. Reject trailing column definitions,
 defaults, constraints, and statements before executing any DDL. Retain length,
 comment, and column-name checks. This is syntactic validation; whether a type
 exists on the target server remains an engine check.
+
+Import type grammar milestone: mappings are parsed in the connected engine's
+dialect and must consume the complete input. The expanded existing regression
+accepts parameterized types, PostgreSQL arrays/timestamps, and qualified custom
+types; rejects extra columns, defaults, nullability, constraints, and statements.
+Focused regression, formatting, workspace Clippy, and full workspace tests passed.
