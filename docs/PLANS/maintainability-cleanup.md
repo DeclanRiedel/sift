@@ -17,8 +17,17 @@ Modal geometry belongs to one host; feature views own their content.
 - [ ] Bound desktop event queues with explicit overload and lossless delivery semantics.
 - [ ] Remove provider-specific SQL construction from shell orchestration; use the server's existing DDL boundary where applicable.
 - [ ] Standardize modal frame geometry, content scrolling and action visibility.
-- [ ] Remove superseded Markdown work logs, repair references, and retain ADRs/current operator guidance.
+- [x] Remove superseded Markdown work logs, repair references, and retain ADRs/current operator guidance.
 - [ ] Run formatting, workspace Clippy and tests; review and commit milestones.
 
 Performance claims require measurements. Local tests do not establish live
 database/SSH behavior or pixel-level visual correctness.
+
+## Documentation retirement
+
+Removed three completed implementation logs: `backend-frontend-cleanup.md`,
+`template-refresh.md`, and `shared-room-infrastructure.md`. Implementation and
+validation history remains in Git. Current configuration guidance lives in
+`docs/INSTANCE-CONFIG.md`; collaboration guidance lives in the Shared Rooms wiki.
+The larger audit, canonical feature inventory, active plans, and ADRs remain.
+The historical audit's reference to the removed cleanup log was repaired.

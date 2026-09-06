@@ -1,7 +1,7 @@
 # Project-wide architecture and performance audit
 
-This is the broad follow-up to `backend-frontend-cleanup.md`, not a completion
-claim based on that initial three-change pass. Audit every area below, follow
+This records the broad follow-up to the initial backend/frontend cleanup, not
+a completion claim based on that initial three-change pass. Audit every area below, follow
 cross-layer findings, implement concrete improvements, and commit verified
 milestones. Runtime-only tracking lives in temporary JSON outside the repository.
 
