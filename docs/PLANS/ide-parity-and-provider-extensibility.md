@@ -12,7 +12,8 @@ architecture and validation work.
 
 For the bounded PostgreSQL/SQL Server support milestone and next-provider
 sequence, use the [driver graduation checklist](postgres-sqlserver-graduation.md).
-Core Driver contract is already locked; engine graduation evidence remains open.
+Core Driver contract remains locked; scoped PostgreSQL/SQL Server graduation
+is recorded in ADR-055 and the linked acceptance evidence.
 
 ## SQL IDE
 
@@ -273,16 +274,17 @@ The checked Sift recovery features are implemented operator CLI workflows
 
 ### Engine-specific depth
 
-Partial rows below have existing implementations. Close their declared scope
-and live evidence through the graduation checklist; do not rebuild them from
-scratch or require the administration features below for graduation.
+The backend daily-driver scope below passed ADR-055 acceptance. Partial markers
+retain broader UI/administration depth; they no longer imply missing native
+provider implementations. The evidence matrix names tested versions and explicit
+exclusions. Broader engine administration remains separate work.
 
-- [~] PostgreSQL schema introspection
+- [x] PostgreSQL scoped shallow/deep/graph introspection and native object DDL
 - [~] PostgreSQL plans
 - [~] PostgreSQL process control
 - [~] PostgreSQL bulk import
 - [~] PostgreSQL notifications
-- [~] SQL Server schema introspection
+- [x] SQL Server scoped shallow/deep/graph introspection and native object DDL
 - [~] SQL Server plans
 - [~] SQL Server process control
 - [~] SQL Server bulk import

@@ -1,6 +1,6 @@
 # Database provider overnight handoff
 
-Status: **implementation authorized and started, 2026-09-06.**
+Status: **tasks 1–3 complete; SQLite implementation in progress, 2026-09-06.**
 SQLite design is complete as a planning artifact, not implementation evidence.
 
 The user additionally requested advanced SQLite graduation, a seeded SQLite

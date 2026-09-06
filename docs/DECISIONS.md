@@ -2139,3 +2139,48 @@ proof that every preceding side effect was rolled back. This bounds active
 SQLite resources independently of Tokio's blocking-thread ceiling. The initial
 limit matches the former idle retention cap; throughput tuning requires measured
 workloads. Pool exhaustion does not change operation auditing or secret storage.
+
+## ADR-055 — Scoped PostgreSQL And SQL Server Provider Graduation
+
+Status: Accepted, 2026-09-06.
+
+The native PostgreSQL and SQL Server adapters graduate for the bounded support
+matrix in [database-provider-acceptance.md](PLANS/database-provider-acceptance.md).
+This is a tested daily-driver decision, not whole-engine DBA parity or a blanket
+cross-platform/TLS/migration guarantee. PostgreSQL 17.10 and SQL Server 2022
+16.0.4250.1 were exercised on Linux with the documented local trust settings.
+
+Native object DDL is generated from engine catalogs, not reconstructed from the
+lossy explorer projection. Table exports preserve supported column, identity,
+generated/computed, collation, constraint, index and trigger properties. Explicit
+unsupported states fence advanced shapes. Rich native column shapes that the
+structural migration model cannot preserve are marked and rejected there.
+Standalone index addressing, rich index migrations, extension/synonym DDL and
+whole-database grants/storage/backup semantics remain outside this decision.
+
+SQL Server estimated-plan capture exclusively owns its physical connection
+through SHOWPLAN enable/capture/restore. Restoration failure discards that
+connection. Parameterized estimates declare types without interpolating values
+and disclose the lack of runtime parameter sniffing; actual SQL Server plans
+remain unsupported. PostgreSQL ANALYZE rolls back all statements, including
+SELECT INTO, and closes on rollback failure. Nontransactional/external effects
+are not made reversible by this wrapper.
+
+PostgreSQL cancellation serializes backend cancellation against connection
+reuse, releases stalled output and acknowledges completion after restoring the
+slot. SQL Server retains abort-and-discard cancellation. PostgreSQL interval
+binds preserve exact microseconds and reject unrepresentable values. Native
+batch/value/financial precision limits are documented in the matrix.
+
+Evidence: 19 PostgreSQL live driver tests, 8 SQL Server live driver tests,
+2 native DDL round trips with permissions/migration fences, 5 existing PostgreSQL
+DDL fixtures, and 2 server execution acceptance tests. Required workspace
+formatting, Clippy and tests pass. Local 100,000-row/page/timeout and small native
+schema resource measurements are recorded with their limits; enterprise catalog
+scale and production certificate verification remain unverified.
+
+The locked core Driver signatures and public protocol shapes do not change in
+this milestone. The default-unsupported MssqlExt estimated-plan operation is
+server-internal. SQLite can now proceed with its separately designed public
+protocol/configuration changes. Broader PostgreSQL/SQL Server DBA features stay
+on the canonical product backlog rather than blocking the next provider.

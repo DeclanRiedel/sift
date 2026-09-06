@@ -309,3 +309,28 @@ Run cargo fmt, workspace Clippy with warnings denied, and cargo test --workspace
 Record bundled SQLite version, platform, representative large-result memory,
 cancellation latency, and unresolved platform checks. Keep performance evidence
 distinct from correctness and never claim unrun cross-platform validation.
+
+## Authorized follow-on design: advanced scope and local inspection
+
+After S1–S5, add managed savepoints using a server-internal `SqliteExt` (the
+locked core Driver signatures stay unchanged). Names are quoted identifiers;
+create, rollback-to and release retain existing Operation/audit paths. Capture
+estimated plans with `EXPLAIN QUERY PLAN`, preserving SQLite's detail text and
+parent IDs; costs and actual runtime remain absent, and ANALYZE is explicitly
+unsupported. CSV import uses bounded parameterized INSERT batches inside an
+explicit transaction with rollback on failure; retain the published affinity
+conversion limits. Neither feature implies graph/migration support.
+
+Demo setup creates a separate seeded SQLite file under an explicitly configured
+demo root, alongside PostgreSQL. Repeated setup is idempotent and never replaces
+an existing file containing user edits. Both desktop-demo variants expose the
+saved SQLite profile. The file belongs to the server instance, with a documented
+root/path configuration that also works without the desktop launcher.
+
+The metadata convenience command is local-owner-only and creates an inspection
+snapshot in a dedicated root, never a writable connection to Sift's live state.
+Build a fresh SQLite database from an explicit allowlist of metadata tables and
+columns; omit authentication sessions, tokens, secret handles and credential
+configuration. Deny generic access to the live metadata database and its aliases.
+The command opens that snapshot through the normal audited connection path and
+labels it as a snapshot with its creation time. It must not imply live refresh.
