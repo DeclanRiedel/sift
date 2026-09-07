@@ -3,7 +3,7 @@
 Status: **historical API wiring checklist; superseded for feature selection.**
 
 Use [the canonical product inventory](ide-parity-and-provider-extensibility.md)
-for current feature status and [Phase M](phase-m-gpui-desktop.md) for desktop
+for current feature status and [the desktop plan](gpui-desktop.md) for desktop
 validation work. The unchecked rows below are historical implementation notes,
 not evidence that a current product workflow is missing. In particular,
 transactions, process monitoring, imports, workspace/Git operations, migrations,
@@ -214,7 +214,7 @@ and forwarded health/readiness probes.
 
 - [ ] `ddl_sources` (+create/get/update/delete/refresh) — DDL source panel (M5)
 
-### Extensions (Phase I)
+### Extensions
 
 - [ ] `extensions`, `extension`, `extension_diagnostics` — extension list/detail (M5)
 - [ ] `validate_extension`, `install_extension`, `uninstall_extension`, `purge_extension` — install lifecycle (M5)

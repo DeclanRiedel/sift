@@ -1054,7 +1054,7 @@ mod tests {
             )
             .unwrap();
         }
-        store.sanitize_phase_l_backup_snapshot().unwrap();
+        store.sanitize_workspace_backup_snapshot().unwrap();
         assert_eq!(
             store
                 .run_execution_for_principal(run.id, actor, false)

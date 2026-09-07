@@ -48,8 +48,8 @@ state: built-ins are immediately available, while a lazy external provider
 becomes available after its first successful supervised handshake.
 
 The bundled `sift/postgres` and `sift/sql-server` providers are
-`sift_certified`. Phase I's external `acme/conformance` executable is a test
-fixture, not a supported production database provider.
+`sift_certified`. The external `acme/conformance` executable is a test fixture,
+not a supported production database provider.
 
 ## Security and data handling
 

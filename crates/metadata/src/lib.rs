@@ -841,7 +841,7 @@ impl MetadataStore {
     /// Definitions and completed history remain durable, while restoring the
     /// archive cannot resume a checkout, credential, lease, artifact, or
     /// in-flight database operation.
-    pub fn sanitize_phase_l_backup_snapshot(&self) -> Result<()> {
+    pub fn sanitize_workspace_backup_snapshot(&self) -> Result<()> {
         let now = now_text();
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

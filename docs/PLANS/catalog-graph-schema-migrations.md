@@ -1,10 +1,10 @@
 # Catalog Graph, Schema Diff, and Migration Safety
 
-Status: **implemented and graduated on 2026-08-10 (ADR-033).** This is the normative
-Phase K contract for catalog identity, dependency discovery, durable schema
+Status: **implemented and graduated on 2026-08-10 (ADR-033).** This is the
+normative contract for catalog identity, dependency discovery, durable schema
 snapshots, normalized diffs, and migration preview/apply. It extends the
-existing progressive `SchemaSnapshot` API; it does not replace it or change
-the locked `Driver` trait signature.
+existing progressive `SchemaSnapshot` API; it does not replace it or change the
+locked `Driver` trait signature.
 
 ## Goals and boundaries
 
@@ -139,7 +139,7 @@ recorded and propagated into every diff.
 
 Snapshots are immutable. Create/list/get/delete use optimistic metadata
 revisions and tenant limits for count and retained bytes. The state-backup
-archive includes them as ordinary non-secret metadata. A future Phase L DDL
+archive includes them as ordinary non-secret metadata. A future workspace DDL
 source may implement the same `CatalogSource` interface without changing diff
 semantics.
 

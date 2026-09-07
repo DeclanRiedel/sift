@@ -257,7 +257,7 @@ fn create_locked(
     {
         let snapshot_store =
             MetadataStore::open(&raw_snapshot, Arc::new(MemorySecretStore::new()))?;
-        snapshot_store.sanitize_phase_l_backup_snapshot()?;
+        snapshot_store.sanitize_workspace_backup_snapshot()?;
         snapshot_store.integrity_check()?;
         snapshot_store.backup_database_to(&snapshot)?;
     }

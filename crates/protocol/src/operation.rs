@@ -1410,7 +1410,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_l_operations_are_typed_and_audit_safe() {
+    fn workspace_operations_are_typed_and_audit_safe() {
         let operation = Operation::Vcs {
             action: VcsAction::Commit,
             workspace_id: crate::WorkspaceId(7),

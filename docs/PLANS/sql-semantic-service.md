@@ -1,9 +1,8 @@
 # Shared Dialect-Aware SQL Semantic Service
 
-Status: **implemented and graduated on 2026-08-10 (ADR-032).** This document is the
-normative Phase K contract for SQL parsing and semantic features. It does not
-select a particular parser library or reopen the Phase I extension trust
-model.
+Status: **implemented and graduated on 2026-08-10 (ADR-032).** This document is
+the normative contract for SQL parsing and semantic features. It does not select
+a particular parser library or reopen the extension trust model.
 
 ## Goals
 
@@ -28,9 +27,8 @@ The service must:
   `sift/postgresql` and `sift/tsql` packs.
 
 Plan capture consumes the statement identity and normalized semantic context
-defined here, but its database execution and retention lifecycle are a
-separate Phase K design slice. Catalog identity and schema diff remain
-ADR-033.
+defined here, but its database execution and retention lifecycle are a separate
+design slice. Catalog identity and schema diff remain ADR-033.
 
 ## Ownership and crate boundary
 
@@ -81,14 +79,14 @@ an opaque handle scoped to its supervised process generation. Handles never
 cross the public protocol and are invalid after a pack restart. Core reparses
 from retained source when a handle is lost.
 
-Phase I's `dialect_pack` manifest contribution remains only an identity until
-this contract is implemented. Activation additionally requires
+The `dialect_pack` extension manifest contribution remains only an identity
+until this contract is implemented. Activation additionally requires
 `sql.semantic@1`, an exact supported semantic contract range, declared
-capabilities and hard limits, and the normal signed-package, grant,
-supervision, and tenant-allowlist checks. External packs run out of process;
-only bundled first-party packs may run in process. There is exactly one active
-pack per `DialectId`; conflicting ownership or ambiguous priority fails
-activation rather than producing nondeterministic parsing.
+capabilities and hard limits, and the normal signed-package, grant, supervision,
+and tenant-allowlist checks. External packs run out of process; only bundled
+first-party packs may run in process. There is exactly one active pack per
+`DialectId`; conflicting ownership or ambiguous priority fails activation rather
+than producing nondeterministic parsing.
 
 ## Parsed-document identity and revisions
 
@@ -298,7 +296,7 @@ not raw SHA-256 values suitable for guessing short statements.
 The current `Operation::Complete { request }` must be changed before migration:
 the sanitized operation retains a fingerprint, cursor, and limit but no SQL.
 Redaction tests cover every new Operation variant and both success/failure
-paths. Pack stderr/stdout and structured logs pass through Phase I rate limits
+paths. Pack stderr/stdout and structured logs pass through extension rate limits
 and redaction; untrusted diagnostic text is response data, not a log field.
 
 Catalog views are filtered by the central authorization evaluator and profile
@@ -310,9 +308,9 @@ or catalog results are never shared across those boundaries.
 
 Parsing is CPU work. In-process packs run on a bounded blocking pool behind a
 dedicated semaphore, never on an Axum/Tokio executor thread. External packs use
-the Phase I supervisor with bounded frames, deadlines, cancellation, crash
-recovery, and process resource limits. Queue admission happens before source
-is cloned into work.
+the extension supervisor with bounded frames, deadlines, cancellation, crash
+recovery, and process resource limits. Queue admission happens before source is
+cloned into work.
 
 Defaults (operator-configurable only downward for hosted tenants) are:
 

@@ -6,7 +6,7 @@
 > supported platform set, release candidate, or release date. Placeholder
 > origins and signing material remain intentionally unconfigured.
 
-Phase H supports three lifecycle modes and a direct OpenSSH remote topology.
+Sift supports three lifecycle modes and a direct OpenSSH remote topology.
 Runtime mode does not change deployment or authorization policy:
 
 | Use | Mode | Transport | Update ownership |

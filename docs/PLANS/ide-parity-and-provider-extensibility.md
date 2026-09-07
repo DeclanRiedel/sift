@@ -7,8 +7,8 @@ readiness. A checked feature may still need hardening, accessibility,
 performance, documentation, and cross-platform work.
 
 Legend: `[x]` usable feature slice exists · `[~]` partial or server-only · `[ ]`
-missing. Choose new feature work from `[~]` and `[ ]`; use Phase M for desktop
-architecture and validation work.
+missing. Choose new feature work from `[~]` and `[ ]`; use the [desktop
+plan](gpui-desktop.md) for desktop architecture and validation work.
 
 For the bounded PostgreSQL/SQL Server support milestone and next-provider
 sequence, use the [driver graduation checklist](postgres-sqlserver-graduation.md).

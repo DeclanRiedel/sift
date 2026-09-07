@@ -296,7 +296,7 @@ async fn schema_deep_and_transactions() {
     let driver = MssqlDriver::new();
     let conn = driver.open(&spec()).await.expect("open succeeds");
     let table = format!(
-        "sift_phase0_{}",
+        "sift_schema_transactions_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")

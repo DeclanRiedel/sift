@@ -225,10 +225,10 @@ unsupported client.
 
 **Decision.** The public protocol starts at version `1`. Earlier protocol
 numbers existed only during pre-user development and carried no compatibility
-promise, so Phase I replaces those draft shapes instead of shipping parallel
-codecs for consumers that do not exist. After protocol v1 is published, the
-version is a monotonically increasing integer, not semver. It bumps only on a
-*breaking* wire change; additive changes do not.
+promise, so the extension contract replaces those draft shapes instead of
+shipping parallel codecs for consumers that do not exist. After protocol v1 is
+published, the version is a monotonically increasing integer, not semver. It
+bumps only on a *breaking* wire change; additive changes do not.
 
 - Breaking (bump): removing or renaming a field or endpoint, changing a field's
   type or meaning, changing an existing enum variant's shape, or tightening
@@ -247,9 +247,9 @@ independent.
 After selection, every HTTP request and WebSocket upgrade carries the exact
 `x-sift-protocol-version`. Every response, including an upgrade and an error,
 echoes it; the reference SDK rejects a missing or different value before
-decoding the body. A connection never changes protocol in place. Once Phase H
-ships, only handshake and health/readiness probes accept an absent version
-header. Supporting N and N-1 means advertising that explicit range, not
+decoding the body. A connection never changes protocol in place. Once remote
+hosting ships, only handshake and health/readiness probes accept an absent
+version header. Supporting N and N-1 means advertising that explicit range, not
 silently treating an unpinned client as compatible.
 
 **Consequences.** Incompatible clients fail before authentication or product
@@ -275,23 +275,23 @@ provider-specific correctness gaps. ODBC and JDBC offer breadth but also add
 driver-manager/JVM packaging, discovery, blocking, type, schema, cancellation,
 and fidelity problems that are unrelated to proving Sift's extension boundary.
 
-**Decision.** Phase I introduces immutable validated `ProviderId` and
-`DialectId` values, versioned provider descriptors, JSON Schemas for provider
-configuration and credential fields, and explicit capability families. Built-in
-PostgreSQL and SQL Server map to `sift/postgres` + `sift/postgresql` and
-`sift/sql-server` + `sift/tsql`. Public protocol v1 uses provider identity as
-the external dispatch key. The pre-release `Engine` dispatch shape is replaced,
-not retained as a compatibility codec. Missing capabilities fail explicitly
-and are never inferred from a provider name.
+**Decision.** The extension model introduces immutable validated `ProviderId`
+and `DialectId` values, versioned provider descriptors, JSON Schemas for
+provider configuration and credential fields, and explicit capability families.
+Built-in PostgreSQL and SQL Server map to `sift/postgres` + `sift/postgresql`
+and `sift/sql-server` + `sift/tsql`. Public protocol v1 uses provider identity
+as the external dispatch key. The pre-release `Engine` dispatch shape is
+replaced, not retained as a compatibility codec. Missing capabilities fail
+explicitly and are never inferred from a provider name.
 
-First-party PostgreSQL and SQL Server remain native in-process drivers during
-Phase I but register through the provider-neutral registry. Third-party drivers
-run as supervised local child processes. Driver RPC v1 uses bounded
-length-prefixed UTF-8 JSON over dedicated stdin/stdout, a mandatory compatible
-range and manifest-identity handshake, generation-scoped opaque handles,
-structured errors, absolute deadlines, and host-granted byte credit for result
-pages. Stdio is the only v1 transport; plugins cannot open a control listener
-or choose an alternate socket. JSON is the only v1 encoding.
+First-party PostgreSQL and SQL Server remain native in-process drivers and
+register through the provider-neutral registry. Third-party drivers run as
+supervised local child processes. Driver RPC v1 uses bounded length-prefixed
+UTF-8 JSON over dedicated stdin/stdout, a mandatory compatible range and
+manifest-identity handshake, generation-scoped opaque handles, structured
+errors, absolute deadlines, and host-granted byte credit for result pages. Stdio
+is the only v1 transport; plugins cannot open a control listener or choose an
+alternate socket. JSON is the only v1 encoding.
 
 Opaque 128-bit handles and request/stream ids are fixed-width lowercase hex
 strings rather than JSON numbers. The host alone enforces deadlines. Result
@@ -377,7 +377,7 @@ Plugins cannot access metadata SQLite, arbitrary secret handles, raw routes,
 another plugin's storage, trusted-local identity, or untracked product
 resources. User-visible plugin work enters core through a namespaced extension
 operation with a manifest-locked read/execute-read/write/destructive/
-administrative classification and an audit-safe schema projection. Phase F
+administrative classification and an audit-safe schema projection. Central
 authorization, connection policy, rate/quota admission, approval, deadline,
 cancellation, and audit run before dispatch. Plugins cannot mint approvals or
 weaken their classification.
@@ -404,8 +404,8 @@ actions require narrowly bound approval by default. Declarative client panels
 may reference registered operations and typed data but cannot ship arbitrary
 JavaScript or bypass server dispatch.
 
-Phase I reserves contribution identities for later SQL semantic and workspace
-contracts without invoking them before Phase K/L. A marketplace service,
+The extension model reserves contribution identities for later SQL semantic and
+workspace contracts until those services are implemented. A marketplace service,
 mandatory OS sandbox, Wasmtime tooling host, ODBC/JDBC bridges, and arbitrary
 client UI code remain reversible future work.
 
@@ -423,25 +423,25 @@ ADR-022 and ADR-031.
 ## ADR-017 — Driver Trait Lock After Two Real Implementations
 
 **Context.** The server now has real PostgreSQL and SQL Server drivers behind
-the same `Driver` trait. Phase A's purpose was to prove the trait shape before
-the public protocol is treated as stable enough for GUI and third-party
-clients. The remaining Phase A ambiguity was not about more verbs; it was about
-which engine-specific capabilities belong in extension traits, how portable
-values are represented, and which backend limitations are explicit
+the same `Driver` trait. The driver contract work aimed to prove the trait shape
+before the public protocol is treated as stable enough for GUI and third-party
+clients. The remaining driver contract ambiguity was not about more verbs; it
+was about which engine-specific capabilities belong in extension traits, how
+portable values are represented, and which backend limitations are explicit
 unsupported states.
 
-**Decision.** The Phase A driver contract is locked around the core eight
-verbs: `open`, `ping`, `schema`, `begin`, `commit`, `rollback`, `execute`,
-`cancel`, and `close`. The trait remains object-safe: `&self` receivers,
-boxed async futures via `async_trait`, concrete protocol-crate request/response
-types, and handle structs rather than associated connection types. Engine-only
-features stay in extension traits selected through `as_pg()` and `as_mssql()`;
-wrong-engine calls produce `UnsupportedForEngine` at the server boundary.
+**Decision.** The driver contract is locked around the core eight verbs: `open`,
+`ping`, `schema`, `begin`, `commit`, `rollback`, `execute`, `cancel`, and
+`close`. The trait remains object-safe: `&self` receivers, boxed async futures
+via `async_trait`, concrete protocol-crate request/response types, and handle
+structs rather than associated connection types. Engine-only features stay in
+extension traits selected through `as_pg()` and `as_mssql()`; wrong-engine calls
+produce `UnsupportedForEngine` at the server boundary.
 
-`ConnHandle` remains an opaque id plus engine tag and does not carry a
-`Weak<dyn Driver>` back-reference. The server's connection registry is the
-ownership boundary for routing cancel/close/transaction work. A future backref
-would be a new design item, not part of the Phase A lock.
+`ConnHandle` remains an opaque id plus engine tag and does not carry a `Weak<dyn
+Driver>` back-reference. The server's connection registry is the ownership
+boundary for routing cancel/close/transaction work. A future backref would be a
+new design item, not part of the driver contract lock.
 
 The portable value union is intentionally not a lowest-common-denominator
 schema. Decimal values are represented as canonical strings in
@@ -462,12 +462,12 @@ driver TLS.
 
 SQL Server parity is locked to what tiberius and the current protocol can
 support cleanly: core verbs, schema including shallow objects/triggers/index
-kinds, CSV bulk import, `USE`, and savepoint/rollback-to-savepoint. Runtime
-MARS toggling is not in `MssqlExt`; MARS is a connection-time setting and is
-currently rejected because the driver/session model allows one active stream
-per connection. SQL Server native bulk-load is not represented by the Phase A
-`BulkOp`, which carries CSV bytes; native TDS bulk needs typed rows and column
-metadata and must use a future request shape if it graduates.
+kinds, CSV bulk import, `USE`, and savepoint/rollback-to-savepoint. Runtime MARS
+toggling is not in `MssqlExt`; MARS is a connection-time setting and is
+currently rejected because the driver/session model allows one active stream per
+connection. SQL Server native bulk-load is not represented by the driver
+contract `BulkOp`, which carries CSV bytes; native TDS bulk needs typed rows and
+column metadata and must use a future request shape if it graduates.
 
 PostgreSQL cancellation uses the backend cancel token. SQL Server cancellation
 is implemented as task abort plus connection discard because tiberius does not
@@ -477,8 +477,8 @@ connection after cancel so the orphaned backend session cannot be reused.
 
 Driver pooling is not part of the trait signature. PostgreSQL may satisfy
 `open()` from a cached pool; SQL Server currently dials one backend session per
-handle. Pool warmth and preconnect policy are Phase C performance work and do
-not change the Phase A trait shape.
+handle. Pool warmth and preconnect policy are performance work and do not change
+the locked trait shape.
 
 Any future change to a locked core driver signature, handle semantics, portable
 value representation, or public operation/request shape requires an explicit
@@ -551,11 +551,11 @@ protocol shape changes.
 ## ADR-011 — Server-Side Cursor Registry
 
 **Context.** Cursors live inside each driver today (PG `cursors: DashMap`, SQL
-Server `cursors: DashMap` of `JoinHandle`). There is no server-side registry,
-no per-session cap, no eviction, and no coordination point between the WS ack
-loop and future work like predictive prefetch or large-result spill. The
-Phase C follow-ups (bounded memory for a 1M-row result, page-N+1 prefetch,
-spill to disk) all need a shared place to stand.
+Server `cursors: DashMap` of `JoinHandle`). There is no server-side registry, no
+per-session cap, no eviction, and no coordination point between the WS ack loop
+and future work like predictive prefetch or large-result spill. The performance
+follow-ups (bounded memory for a 1M-row result, page-N+1 prefetch, spill to
+disk) all need a shared place to stand.
 
 **Decision.** A `CursorRegistry` sits in `SessionStore` above the drivers,
 proxying every `execute_stream`. The driver still produces a raw
@@ -599,23 +599,22 @@ per-session cap.
    Adding a trait method would put the eviction/spill policy in every
    driver — the exact spread we're trying to avoid.
 
-**Consequences.** Bounded memory per session becomes a real invariant, not
-a hope; a client that leaks cursors caps itself at 32. Spill gives an
-evicted-but-still-live cursor a resume path so an idle browser tab does not
-lose its results. Backpressure gets a first-class knob that the WS ack loop
-already knows about; the mpsc bound remains as a defense against a
-misbehaving pump. Drivers stay simple and the ADR-013 driver isolation
-boundary is undisturbed. The remaining gap — a global cap for the hosted
-tenant story — is documented and left for a hosted-topology ADR (Phase H).
+**Consequences.** Bounded memory per session becomes a real invariant, not a
+hope; a client that leaks cursors caps itself at 32. Spill gives an
+evicted-but-still-live cursor a resume path so an idle browser tab does not lose
+its results. Backpressure gets a first-class knob that the WS ack loop already
+knows about; the mpsc bound remains as a defense against a misbehaving pump.
+Drivers stay simple and the ADR-013 driver isolation boundary is undisturbed.
+The remaining gap — a global cap for the hosted tenant story — is documented and
+left for a hosted-topology ADR.
 
 **Scope note — adaptive prefetch depth.** The pump ships with fixed-depth
-prefetch (`prefetch_pages`, default 2), which delivers the "page N+1
-buffered when the client asks for it" behavior the Phase C plan
-originally sketched. **Scaling that depth adaptively based on measured
-ack velocity is explicitly out of scope** for this ADR. A future ADR
-will introduce it if telemetry shows the fixed depth is a real
-bottleneck; until then, operators tune `prefetch_pages` via server
-config. This is a deliberate choice not to build a self-tuning knob
+prefetch (`prefetch_pages`, default 2), which delivers the "page N+1 buffered
+when the client asks for it" behavior the performance plan originally sketched.
+**Scaling that depth adaptively based on measured ack velocity is explicitly out
+of scope** for this ADR. A future ADR will introduce it if telemetry shows the
+fixed depth is a real bottleneck; until then, operators tune `prefetch_pages`
+via server config. This is a deliberate choice not to build a self-tuning knob
 before there is measured evidence it moves the needle.
 
 ## ADR-012 — Schema Cache with TTL Ceiling and Engine-Specific Invalidators
@@ -667,14 +666,13 @@ most 60s of staleness. A future ADR may introduce a coarser
 "schema-changed" hint from the client (e.g. after an executed DDL
 statement) to invalidate immediately without the trigger dependency.
 
-## ADR-lite — Server-side composition for Phase D headless features
+## ADR-lite — Server-side composition for headless features
 
-**Context.** Phase D adds three headless features (DDL generation,
-autocomplete, and — later — inline-edit DML) that could each be
-expressed either as a new `Driver` trait method or composed on the
-server over the existing eight verbs. ADR-017 locked the trait around
-those eight; every trait addition breaks the lock and forces a protocol
-bump.
+**Context.** Headless tooling adds three features (DDL generation, autocomplete,
+and — later — inline-edit DML) that could each be expressed either as a new
+`Driver` trait method or composed on the server over the existing eight verbs.
+ADR-017 locked the trait around those eight; every trait addition breaks the
+lock and forces a protocol bump.
 
 **Decision.** Compose them server-side. DDL generation
 (`crates/server/src/ddl.rs`) established the pattern: fetch what's
@@ -686,10 +684,10 @@ share it without pulling in the server. `sift-completion` depends only
 on `sift-protocol` (for wire types + `SchemaSnapshot`) and
 `sqlparser-rs` (for tokenization); no I/O, no tokio.
 
-The engine-specific keyword and builtin-function tables originally
-called out for `sift-protocol` in the Phase D plan instead live in
-`sift-completion::keywords`. Protocol stays pure serde (ADR-004); the
-tables aren't wire types, they're data the ranker consumes.
+The engine-specific keyword and builtin-function tables originally called out
+for `sift-protocol` in the headless features plan instead live in
+`sift-completion::keywords`. Protocol stays pure serde (ADR-004); the tables
+aren't wire types, they're data the ranker consumes.
 
 The desktop's Full DDL view waits for this audited server operation; it must
 not present a synthesized subset of the catalog as a complete definition.
@@ -870,13 +868,13 @@ metadata, durable secret backend, external URL, or authentication configuration
 is unavailable.
 
 A `principal` is provider-neutral and may own multiple authentication
-identities. Phase E implements instance-owned username/password and a
+identities. Authentication supports instance-owned username/password and a
 per-instance GitHub OAuth App. Admins create password identities and allowlist
 GitHub logins, optionally linking either credential to an existing principal.
 GitHub's immutable numeric user id becomes the durable provider subject after
 first login. Email never links accounts implicitly. New principals receive a
-personal tenant and join team tenants only through explicit invitations. OIDC
-is deferred, but identities retain issuer + subject keys so it is additive.
+personal tenant and join team tenants only through explicit invitations. OIDC is
+deferred, but identities retain issuer + subject keys so it is additive.
 
 Passwords are salted and hashed with Argon2id on bounded blocking workers; the
 verifier is stored behind `SecretStore` and SQLite contains only its opaque
@@ -897,38 +895,38 @@ Stream errors and graceful drain cancel and release their active cursor.
 API tokens remain separate automation credentials; existing Ed25519
 key/challenge schema is adopted for challenge login and future SSH bootstrap.
 
-Phase E also establishes the minimum authorization floor: one middleware
+Authentication also establishes the minimum authorization floor: one middleware
 produces the authoritative auth context, protected routes are fail-closed,
 sessions are principal- or room-owned, and every session-derived resource
-inherits that ownership. Phase F retains richer tenant and connection policy,
-general rate limits, quotas, and accounting. Initial collaboration is direct:
-all collaborators connect to the same network-hosted Sift instance. A central
-relay or identity broker is not part of Phase E.
+inherits that ownership. Resource governance covers richer tenant and connection
+policy, general rate limits, quotas, and accounting. Initial collaboration is
+direct: all collaborators connect to the same network-hosted Sift instance. A
+central relay or identity broker is not part of identity and authentication.
 
 **Consequences.** Password and GitHub users are functionally identical after
 authentication, and an admin can attach both methods to one stable account.
-Self-hosted operators own their GitHub registration and secrets, avoiding a
-Sift cloud dependency at the cost of per-instance OAuth setup. Opaque sessions
-make revocation and membership changes immediate; a bounded cache prevents a
-SQLite lookup from becoming request-path latency. The first hosted release is
+Self-hosted operators own their GitHub registration and secrets, avoiding a Sift
+cloud dependency at the cost of per-instance OAuth setup. Opaque sessions make
+revocation and membership changes immediate; a bounded cache prevents a SQLite
+lookup from becoming request-path latency. The first hosted release is
 single-process per metadata store, with persistence behind an auth-session
-boundary for later replacement. Phase E grows to include ownership enforcement
-and auth-specific throttling because exposing identity without those controls
-would not create a safely hostable server. Detailed contracts and sequencing
-are recorded by ADR-030.
+boundary for later replacement. The authentication scope includes ownership
+enforcement and auth-specific throttling because exposing identity without those
+controls would not create a safely hostable server. Detailed contracts and
+sequencing are recorded by ADR-030.
 
 ---
 
 ## ADR-020 — Authorization Intersects Tenant, Room, And Connection Policy
 
-**Context.** Phase E established authenticated principals and ownership for
-session-derived resources, but ownership alone is not sufficient for a hosted
-database IDE. A tenant member may be allowed into a room without being allowed
-to use every connection, and observing a collaborative query is different from
-executing it. The current raw-spec connection route would also bypass any
-profile policy if it remained reachable on a shared instance. At the same time,
-requiring a login or a saved profile for a personal server bound to loopback
-would violate Sift's zero-friction local-first goal.
+**Context.** Authentication established authenticated principals and ownership
+for session-derived resources, but ownership alone is not sufficient for a
+hosted database IDE. A tenant member may be allowed into a room without being
+allowed to use every connection, and observing a collaborative query is
+different from executing it. The current raw-spec connection route would also
+bypass any profile policy if it remained reachable on a shared instance. At the
+same time, requiring a login or a saved profile for a personal server bound to
+loopback would violate Sift's zero-friction local-first goal.
 
 **Decision.** Authorization and transport remain separate concerns. The trust
 boundary is:
@@ -980,10 +978,10 @@ Ordinary policy edits take effect before the next operation while an already
 authorized in-flight operation may finish.
 
 General API rate limiting uses hierarchical token buckets. After authentication
-and tenant resolution, each admitted action must obtain its configured cost
-from both a principal bucket and a tenant bucket for its route class. Routes
-without tenant context consume only the principal bucket; public login and
-refresh routes retain Phase E's separate abuse limiter. The route classes are
+and tenant resolution, each admitted action must obtain its configured cost from
+both a principal bucket and a tenant bucket for its route class. Routes without
+tenant context consume only the principal bucket; public login and refresh
+routes retain the authentication-specific abuse limiter. The route classes are
 control/metadata, interactive reads, query admission, heavy transfer, and
 streamed bytes. HTTP admission failure returns 429 with `Code::RateLimited` and
 a ceiling-rounded `Retry-After`; WebSocket operations return the same stable
@@ -1001,13 +999,12 @@ configuration switch available for testing or unusually constrained local
 hosts. Rate-limited attempts still produce sanitized failed-operation audit
 entries through the existing bounded audit path.
 
-Phase F resource enforcement is single-process. Durable policy and optional
-per-tenant overrides live in SQLite, while token buckets and live-resource
-counters live in memory. Rate admission intersects principal and tenant token
-buckets by route class. Tenant accounting covers managed connections,
-concurrent queries, cursors, and retained result bytes. A later distributed
-coordination backend may replace these in-memory mechanisms without changing
-the public policy model.
+Resource enforcement is single-process. Durable policy and optional per-tenant
+overrides live in SQLite, while token buckets and live-resource counters live in
+memory. Rate admission intersects principal and tenant token buckets by route
+class. Tenant accounting covers managed connections, concurrent queries,
+cursors, and retained result bytes. A later distributed coordination backend may
+replace these in-memory mechanisms without changing the public policy model.
 
 Tenant limits cover durable connection profiles and the live counts of open
 sessions, managed connections, concurrent driver queries, open cursors, and
@@ -1038,20 +1035,21 @@ counts from SQLite.
 Rate exhaustion uses `Code::RateLimited`. Live tenant-capacity exhaustion uses
 `Code::TenantResourceExhausted` with HTTP 429 and `Retry-After` only when the
 server can calculate one; durable object-count exhaustion uses the same stable
-code with HTTP 409 and no misleading retry time. Phase F exposes an authorized
-tenant-usage snapshot and internal metric hooks. Phase J owns the Prometheus
-and OpenTelemetry exporters, so tenant/principal identifiers and high-cardinality
-labels are not accidentally frozen into the Phase F wire contract.
+code with HTTP 409 and no misleading retry time. Resource governance exposes an
+authorized tenant-usage snapshot and internal metric hooks. Observability owns
+the Prometheus and OpenTelemetry exporters, so tenant/principal identifiers and
+high-cardinality labels are not accidentally frozen into the resource-governance
+wire contract.
 
 **Consequences.** Local use remains login-free and supports direct connection
 specs without creating a remote policy bypass. Hosted and collaborative paths
 gain one explainable deny-wins model, and `ListAvailableOperations` can report
 the same decision the dispatcher will enforce. Sessions and connection entries
 need richer provenance, and restricted SQL incurs parser/classifier work;
-unrestricted profiles avoid that cost. Phase G shared connections must use this
-evaluator, Phase H proxy bootstrap must establish its principal context, Phase
-I MCP governance must consume rather than duplicate this policy, and Phase J
-metrics export must read the Phase F resource counters.
+unrestricted profiles avoid that cost. Shared connections must use this
+evaluator, remote proxy bootstrap must establish its principal context,
+extension MCP governance must consume rather than duplicate this policy, and
+observability metrics export must read the resource counters.
 
 ---
 
@@ -1060,8 +1058,8 @@ metrics export must read the Phase F resource counters.
 **Context.** Room documents held an opaque byte buffer edited through positional
 `insert`/`delete`/`replace` operations applied server-side. That model cannot
 converge concurrent edits, survive offline divergence, or preserve intent, and
-it carried a speculative `CrdtKind::{Loro, Automerge}` selector with no real CRDT
-behind either label. Collaboration depth (Phase G) needs genuine convergence,
+it carried a speculative `CrdtKind::{Loro, Automerge}` selector with no real
+CRDT behind either label. Collaboration needs genuine convergence,
 reconnect/offline merge, exact-version execution, and stable presence anchors.
 
 **Decision.** Every client and the server hold a [Loro](https://loro.dev) replica
@@ -1076,15 +1074,16 @@ frontiers, cursors) cross the wire as standard padded RFC 4648 base64 inside
 JSON, each behind its own typed newtype in `sift-protocol`. All Loro CPU work
 runs off the Tokio request workers through a per-document blocking actor.
 
-**Consequences.** `sift-doc` depends on `loro`, which lifts the crate's effective
-Rust floor above the nominal MSRV 1.80; this is accepted because Loro is the
-product's collaboration substrate. Audit attribution is always the authenticated
-submitter, never client-controlled CRDT metadata. Full Loro history is retained
-inside each snapshot (bounded by a hard per-document history cap) so arbitrarily
-old replicas still synchronize. Phase G initially retained protocol version
-`"1"`; the typed-null and invalidated-connection contract introduced during
-the Phase I readiness pass advances it to `"2"`. Automerge, shared rich-text
-marks, and CRDT state outside the SQL text are explicitly out of scope.
+**Consequences.** `sift-doc` depends on `loro`, which lifts the crate's
+effective Rust floor above the nominal MSRV 1.80; this is accepted because Loro
+is the product's collaboration substrate. Audit attribution is always the
+authenticated submitter, never client-controlled CRDT metadata. Full Loro
+history is retained inside each snapshot (bounded by a hard per-document history
+cap) so arbitrarily old replicas still synchronize. Collaboration initially
+retained protocol version `"1"`; the typed-null and invalidated-connection
+contract introduced during the extension readiness pass advances it to `"2"`.
+Automerge, shared rich-text marks, and CRDT state outside the SQL text are
+explicitly out of scope.
 
 ---
 
@@ -1183,22 +1182,23 @@ redaction behavior.
 ## ADR-032 — One Server-Owned SQL Semantic Document, Dialect Packs Behind It
 
 **Context.** Completion currently tokenizes SQL and caches prefixes inside its
-own crate. Phase K adds parsing, diagnostics, formatting, statement selection,
-usages, refactoring, and quick fixes; implementing each with private syntax and
-revision state would produce inconsistent byte ranges and duplicate CPU work.
-Phase I reserves dialect-pack identity but intentionally does not let an
-extension own routes, policy, caches, or product lifecycle.
+own crate. The SQL semantic service adds parsing, diagnostics, formatting,
+statement selection, usages, refactoring, and quick fixes; implementing each
+with private syntax and revision state would produce inconsistent byte ranges
+and duplicate CPU work. The extension model reserves dialect-pack identity but
+intentionally does not let an extension own routes, policy, caches, or product
+lifecycle.
 
 **Decision.** Add a UI-free, server-orchestrated semantic service with opaque
-process-local document ids, optimistic server-issued revisions, immutable
-UTF-8 source per revision, and half-open byte ranges. One error-recovering,
-lossless parse artifact per `(document, revision, dialect, pack version)` feeds
-all semantic features. The connection's declared `DialectId` selects exactly
-one capability-negotiated pack. Core owns document/cache/resource lifecycle,
+process-local document ids, optimistic server-issued revisions, immutable UTF-8
+source per revision, and half-open byte ranges. One error-recovering, lossless
+parse artifact per `(document, revision, dialect, pack version)` feeds all
+semantic features. The connection's declared `DialectId` selects exactly one
+capability-negotiated pack. Core owns document/cache/resource lifecycle,
 portable contracts, catalog filtering, validation, cancellation, routes,
 OpenAPI/SDK, and redacted Operations; packs own dialect grammar and rules.
 Bundled PostgreSQL and T-SQL packs may run on a bounded blocking pool, while
-external packs use Phase I supervision. Semantic features return diagnostics,
+external packs use extension supervision. Semantic features return diagnostics,
 selections, candidates, or preconditioned text edits; they never mutate CRDT or
 future workspace text directly.
 
@@ -1313,13 +1313,13 @@ ADR-021.
 
 ## ADR-034 — Canonical Virtual Workspaces With Optional Filesystem And VCS Projections
 
-**Context.** Phase L adds durable SQL files, local history, offline DDL sources,
-Git, run configurations, schedules, and transfer recipes. Making the client
-filesystem authoritative would break thin clients and make those features
-disappear over SSH or on a hosted instance. Making a checkout authoritative
-would also race collaborative Loro edits with filesystem and Git operations.
-The old V003 principal-owned workspace/session/tab schema predates ADR-007 and
-has no valid shared-room semantics.
+**Context.** Workspace and automation support adds durable SQL files, local
+history, offline DDL sources, Git, run configurations, schedules, and transfer
+recipes. Making the client filesystem authoritative would break thin clients and
+make those features disappear over SSH or on a hosted instance. Making a
+checkout authoritative would also race collaborative Loro edits with filesystem
+and Git operations. The old V003 principal-owned workspace/session/tab schema
+predates ADR-007 and has no valid shared-room semantics.
 
 Zed's Git architecture provides useful implementation patterns: repository
 operations sit behind a trait, porcelain output becomes typed state, remote
@@ -1371,11 +1371,12 @@ untyped textual substitution is forbidden. Schedules are owned by a normal
 principal and re-evaluate current authorization at every occurrence. Revoked
 authority disables work. Interrupted writes with uncertain outcomes are marked
 `outcome_unknown` and never replayed automatically. Pre-tasks are bounded core
-operations or Phase I tools declared schedulable, never shell strings.
+operations or extension tools declared schedulable, never shell strings.
 
 Core owns transfer admission, canonical row streaming, artifacts, limits, and
-stage-and-commit. Untrusted formatters run through Phase I supervision. The
-Phase L public additions are additive under ADR-016 and retain protocol v1.
+stage-and-commit. Untrusted formatters run through extension supervision. The
+workspace and automation public additions are additive under ADR-016 and retain
+protocol v1.
 
 **Consequences.** Virtual workspaces work identically in personal, SSH-remote,
 network-hosted, and container deployments even when filesystem/Git capability
@@ -1490,22 +1491,22 @@ into shared crates. Zed is the interaction and GPUI architecture reference,
 but its application crates encode a local worktree/editor product and are not
 an appropriate dependency for a server-authoritative database IDE.
 
-**Decision.** Phase M builds a native desktop client directly on an exactly
-pinned GPUI revision. Linux is the primary development platform; Linux,
-macOS, and Windows are architectural and graduation targets. Sift owns its
-component library, themes, icons, workspace entities, panes, items, actions,
-focus contexts, state restoration, and virtualized database views. It adopts
-Zed's entity ownership, emitted-event, action, pane, restore-before-I/O, and
-background-task patterns without importing Zed's `ui`, `editor`, `workspace`,
-or `project` crates.
+**Decision.** Sift builds a native desktop client directly on an exactly pinned
+GPUI revision. Linux is the primary development platform; Linux, macOS, and
+Windows are architectural and graduation targets. Sift owns its component
+library, themes, icons, workspace entities, panes, items, actions, focus
+contexts, state restoration, and virtualized database views. It adopts Zed's
+entity ownership, emitted-event, action, pane, restore-before-I/O, and
+background-task patterns without importing Zed's `ui`, `editor`, `workspace`, or
+`project` crates.
 
 Desktop composition is host-owned and closed to extensions. Stable typed
 registries centralize built-in command, dock, and pane-item identity and
 metadata, but they are Rust registries rather than runtime plugin registries.
 Adding or replacing application chrome, panels, pane renderers, styling, or
-layout requires a reviewed first-party client change. Extensions may add
-server providers and governed operations through Phase I contracts; they do
-not register GPUI renderers or mutate the desktop entity tree. Existing public
+layout requires a reviewed first-party client change. Extensions may add server
+providers and governed operations through extension contracts; they do not
+register GPUI renderers or mutate the desktop entity tree. Existing public
 client-contribution descriptors remain wire-compatible for independent thin
 clients, but the first-party desktop does not use them to alter its UI.
 
@@ -1529,15 +1530,15 @@ Footer panel selection follows the same rule: the active left panel and bottom
 tool are client-local presentation state. The host owns the fixed SQL-oriented
 set; extensions cannot insert controls or mutate the desktop entity tree.
 
-**Consequences.** ADR-010's deferral condition is satisfied and product UI
-work may begin. GPUI remains isolated to desktop/UI crates and may be upgraded
-only deliberately because it is pre-1.0. M0 must first remove the public SDK's
+**Consequences.** ADR-010's deferral condition is satisfied and product UI work
+may begin. GPUI remains isolated to desktop/UI crates and may be upgraded only
+deliberately because it is pre-1.0. M0 must first remove the public SDK's
 server-internal metadata dependency and prove GPUI text input, accessibility,
 focus, async cancellation, virtualization, and testability. Platform-specific
 window, input, dialog, credential, and packaging behavior lives behind one
-narrow native boundary. The complete milestone order, visual language,
-ownership model, performance rules, recovery requirements, and graduation
-gates are in `docs/PLANS/phase-m-gpui-desktop.md`.
+narrow native boundary. The complete milestone order, visual language, ownership
+model, performance rules, recovery requirements, and graduation gates are in
+`docs/PLANS/gpui-desktop.md`.
 
 Host ownership trades third-party UI customization for predictable upgrades,
 accessibility, focus routing, theme coverage, restoration, and failure
@@ -1549,12 +1550,12 @@ display labels are never dispatch keys.
 
 ## ADR-042 — Recursive Client-Local Pane Layout
 
-**Context.** Phase M initially represented panes as one flat horizontal vector
-plus one parallel vector of flex values. That model can only append columns. It
-cannot express an editor split above or below another pane, mixed horizontal
-and vertical groups, local resize ownership, or deterministic collapse after a
-pane is removed. Tab dragging then has to mutate pane order and sizing as
-unrelated arrays, which makes previews and focus transfer fragile.
+**Context.** The desktop initially represented panes as one flat horizontal
+vector plus one parallel vector of flex values. That model can only append
+columns. It cannot express an editor split above or below another pane, mixed
+horizontal and vertical groups, local resize ownership, or deterministic
+collapse after a pane is removed. Tab dragging then has to mutate pane order and
+sizing as unrelated arrays, which makes previews and focus transfer fragile.
 
 Zed's pane group is the interaction reference: a member is either a pane or an
 axis containing members; splitting along the current axis inserts a sibling,

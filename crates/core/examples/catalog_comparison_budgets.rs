@@ -1,7 +1,7 @@
 //! Repeatable synthetic CPU/retained-byte budget harness.
 //!
 //! Run with:
-//! `cargo run -p sift-core --release --example phase_k_budgets`
+//! `cargo run -p sift-core --release --example catalog_comparison_budgets`
 
 use std::time::Instant;
 

@@ -42,7 +42,7 @@ what sift is and the five product goals; this file is the operational subset.
 - Design precedes Implement for tightly-coupled pairs; graduate stable
   decisions into `docs/DECISIONS.md` as ADRs.
 - Both real drivers (Postgres, SQL Server) pass through the `Driver` trait.
-  The trait lock is formalized via ADR-017 graduation (build-list Phase A);
+  The trait lock is formalized via ADR-017 graduation;
   after that, a signature change gates a protocol bump.
 - Never commit secrets. Never guess URLs.
 

@@ -1,4 +1,4 @@
-# Phase M — GPUI Desktop Client
+# GPUI Desktop Client
 
 Status: **active implementation inventory, not a release roadmap.** M0–M2 and
 M4 checklist scopes are complete; M3 still misses measured performance targets,
@@ -14,7 +14,7 @@ M6 hardening and validation.
 
 ## Outcome
 
-Phase M delivers the first-party Sift desktop client as a thin, native GPUI
+The desktop plan delivers the first-party Sift desktop client as a thin, native GPUI
 application. The interaction standard is Zed: fast first paint, dense but
 quiet chrome, keyboard-first actions, contextual focus, panes and docks,
 restore-before-I/O, and background work that cannot stall rendering. The
@@ -49,7 +49,7 @@ streamed result without blocking the UI.
 
 ## Existing foundations
 
-Phase M renders existing server-owned behavior rather than reimplementing it:
+The desktop renders existing server-owned behavior rather than reimplementing it:
 
 - ADR-001/002/003: server authority, UI-free shared crates, and pure-serde
   protocol remain non-negotiable.
@@ -62,7 +62,7 @@ Phase M renders existing server-owned behavior rather than reimplementing it:
 - ADR-032/033: SQL semantics and database models are shared server services.
 - ADR-034: room-owned virtual workspaces, optional projections, Git, runs,
   schedules, and transfer recipes are public API surfaces.
-- Phase I client contributions are declarative commands, actions, forms,
+- Extension client contributions are declarative commands, actions, forms,
   tables, and read-only panels. They do not load arbitrary UI code.
 
 The current `sift-client-sdk` publicly re-exports some HTTP DTOs from
@@ -98,7 +98,7 @@ its own small application-specific component system.
 
 ## Dependency and crate boundary
 
-Phase M starts with three crates and splits only under measured pressure:
+The desktop starts with three crates and splits only under measured pressure:
 
 ```text
 sift-desktop (binary and composition root)
@@ -146,7 +146,7 @@ these typed registries and exhaustive dispatch.
 
 Extensions cannot register GPUI entities, commands, panels, item factories,
 styles, or layout slots. They continue to contribute server-side providers and
-governed operations through typed, audited Phase I contracts. Public
+governed operations through typed, audited extension contracts. Public
 declarative client-contribution descriptors remain compatible for independent
 thin clients; the first-party desktop does not consume them as UI mutation.
 This boundary keeps theme, accessibility, focus, restoration, and crash
@@ -307,7 +307,7 @@ missing/unauthorized states rather than being silently discarded.
 
 ## Platform policy
 
-GPUI abstracts rendering and most window/input behavior, but Phase M treats
+GPUI abstracts rendering and most window/input behavior, but the desktop treats
 cross-platform support as a tested boundary rather than an assumption:
 
 - the `sift-desktop` platform module owns native menus, window decoration
@@ -517,7 +517,7 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       and bounded previews.
 - [x] Implement transfer-recipe creation, validation, execution, progress, and
       cancellation in the desktop client.
-- [ ] Render Phase I declarative contributions through trusted actions, forms,
+- [ ] Render extension declarative contributions through trusted actions, forms,
       tables, and read-only panels.
 
 ### M6 — hardening and validation
@@ -535,20 +535,20 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       dialogs, window chrome, packaging, and updates on Linux/macOS/Windows.
 - [ ] Design, build, and validate signed desktop artifacts through the existing
       update lifecycle without weakening server verification.
-- [ ] Publish the Phase M validation matrix and update product status docs.
+- [ ] Publish the desktop validation matrix and update product status docs.
 
 ### Next feature order
 
 The remaining work should proceed in this order. This is engineering priority,
 not a countdown to a release.
 
-1. Phase I declarative contribution rendering through the trusted host UI.
+1. Extension declarative contribution rendering through the trusted host UI.
 2. Numerical performance and memory validation on the existing large fixtures.
 3. Crash, restart, offline, authentication-expiry, and outcome-unknown recovery
    matrices.
 4. Keyboard/accessibility and Linux/macOS/Windows platform validation.
 5. Distribution design, signed-artifact testing, update validation, and the
-   final Phase M evidence matrix.
+   final desktop evidence matrix.
 
 ## Commit and quality policy
 
@@ -579,16 +579,15 @@ covered at the level specified above.
 - Persisting result data, secret values, or authoritative database state in the
   client state store.
 - Full Vim emulation, forge/code-review workflows, or a mobile/tablet client in
-  Phase M.
+  the desktop scope.
 
-## Phase closure definition
+## Graduation criteria
 
-Phase M closes only when the first-party desktop can reach every selected
+Desktop graduation requires that the first-party desktop can reach every selected
 v1 server capability through the public SDK, while a third-party client could
 still do the same without GPUI or private server access. Linux, macOS, and
 Windows artifacts must share the same workspace/action model and public API;
-platform differences are confined to the declared native boundary. Closing
-Phase M still does not declare a public release. The final
-evidence matrix records feature reachability, protocol/SDK parity, focus and
+platform differences are confined to the declared native boundary. Desktop
+graduation still does not declare a public release. The final evidence matrix records feature reachability, protocol/SDK parity, focus and
 accessibility behavior, recovery scenarios, dependency boundaries, native
 platform checks, and measured performance budgets.
