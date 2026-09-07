@@ -3785,6 +3785,11 @@ impl WorkspaceShell {
                             "Microsoft SQL Server",
                             "databases/sql-server.svg",
                         ),
+                        (
+                            "sift/sqlite",
+                            "SQLite",
+                            "databases/sqlite.svg",
+                        ),
                     ]
                     .into_iter()
                     .enumerate()
@@ -3811,7 +3816,7 @@ impl WorkspaceShell {
                                 .aria_label(format!("Select {display_name}"))
                                 .relative()
                                 .flex_1()
-                                .min_w(px(280.))
+                                .min_w(px(220.))
                                 .min_h(px(190.))
                                 .p_4()
                                 .rounded_lg()
@@ -4002,6 +4007,7 @@ impl WorkspaceShell {
                         .map(|provider| match provider {
                             "sift/postgres" => "PostgreSQL",
                             "sift/sql-server" => "Microsoft SQL Server",
+                            "sift/sqlite" => "SQLite",
                             _ => provider,
                         })
                         .unwrap_or("Not selected");
@@ -7991,7 +7997,7 @@ impl WorkspaceShell {
                                 }
                                 cx.stop_propagation();
                             }))
-                            .child(div().w(px(32.)).h(px(3.)).rounded_full().bg(colors.muted_text))))
+                            .child(div().w(px(24.)).h(px(2.)).rounded_full().bg(colors.subtle_border))))
                         .child(content),
                 )
         })
