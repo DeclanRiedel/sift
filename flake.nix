@@ -707,7 +707,9 @@ EOF
         website = pkgs.writeShellApplication {
           name = "sift-website";
           runtimeInputs = [ pkgs.nix ];
-          text = devCommand ''cargo run -p sift-website --'';
+          text = ''
+            echo "Wiki URL: http://''${1:-127.0.0.1:8787}/index.html"
+          '' + devCommand ''cargo run -p sift-website --'';
         };
 
         desktopDemoWiki = pkgs.writeShellApplication {
@@ -737,6 +739,7 @@ EOF
 
             bind="''${SIFT_DESKTOP_DEMO_WIKI_BIND:-127.0.0.1}"
             port="''${SIFT_DESKTOP_DEMO_WIKI_PORT:-8787}"
+            echo "Wiki URL: http://$bind:$port/index.html"
             lock_file="''${TMPDIR:-/tmp}/sift-desktop-demo-$(id -u).lock"
             exec 9>>"$lock_file"
             if ! flock -n 9; then
@@ -794,7 +797,8 @@ EOF
               exit 1
             fi
 
-            echo "Sift website and wiki: http://$bind:$port"
+            echo "Website: http://$bind:$port"
+            echo "Wiki: http://$bind:$port/index.html"
             echo "Starting seeded Sift desktop demo..."
             phase_name="running seeded desktop demo"
             SIFT_DESKTOP_DEMO_LOCK_HELD=1 "${desktopDemo}/bin/sift-desktop-demo" "$@"
