@@ -704,9 +704,15 @@ EOF
           '';
         };
 
+        website = pkgs.writeShellApplication {
+          name = "sift-website";
+          runtimeInputs = [ pkgs.nix ];
+          text = devCommand ''cargo run -p sift-website --'';
+        };
+
         desktopDemoWiki = pkgs.writeShellApplication {
           name = "sift-desktop-demo-wiki";
-          runtimeInputs = with pkgs; [ coreutils curl python3 util-linux ];
+          runtimeInputs = with pkgs; [ coreutils curl python3 util-linux nix jq ];
           text = ''
             set -Eeuo pipefail
 
@@ -753,9 +759,16 @@ EOF
               exit 1
             fi
 
-            phase_name="starting keyboard wiki"
+            phase_name="building Sift website"
+            cd "$repo"
+            wiki_binary="$(nix develop "$repo" --command cargo build -p sift-website --message-format=json | jq -r 'select(.reason == "compiler-artifact" and .target.name == "sift-website" and .executable != null) | .executable')"
+            if [ ! -x "$wiki_binary" ]; then
+              echo "Website build did not produce an executable." >&2
+              exit 1
+            fi
+            phase_name="starting Sift website and wiki"
             wiki_log="''${TMPDIR:-/tmp}/sift-desktop-demo-wiki-$(id -u).log"
-            python3 -m http.server "$port" --bind "$bind" --directory "$wiki" >"$wiki_log" 2>&1 &
+            "$wiki_binary" "$bind:$port" >"$wiki_log" 2>&1 &
             wiki_pid=$!
             cleanup() {
               kill "$wiki_pid" >/dev/null 2>&1 || true
@@ -781,7 +794,7 @@ EOF
               exit 1
             fi
 
-            echo "Sift keyboard wiki: http://$bind:$port"
+            echo "Sift website and wiki: http://$bind:$port"
             echo "Starting seeded Sift desktop demo..."
             phase_name="running seeded desktop demo"
             SIFT_DESKTOP_DEMO_LOCK_HELD=1 "${desktopDemo}/bin/sift-desktop-demo" "$@"
@@ -825,7 +838,8 @@ EOF
               sift-check                Run cargo check for the whole workspace.
               sift-desktop              Run the native GPUI desktop client.
               sift-desktop-demo         Seeded Postgres + SQL Server + SQLite + real backend + desktop.
-              sift-desktop-demo-wiki    Run desktop demo + keyboard-language wiki together.
+              sift-desktop-demo-wiki    Run desktop demo + product page and wiki together.
+              sift-website              Preview the Topcoat product page and wiki.
               sift-demo-sqlite          Create the SQLite fixture once, preserving existing files.
               sift-desktop-metadata    Open a read-only inspection snapshot of Sift's metadata.
               sift-dev-secret-key       Generate the ignored local metadata secret key file.
@@ -873,6 +887,7 @@ EOF
             desktop
             desktopDemo
             desktopDemoWiki
+            website
             demoSqlite
             desktopMetadata
             devSecretKey
@@ -952,6 +967,10 @@ EOF
           sift-desktop-metadata = {
             type = "app";
             program = "${desktopMetadata}/bin/sift-desktop-metadata";
+          };
+          website = {
+            type = "app";
+            program = "${website}/bin/sift-website";
           };
           sift-desktop-demo-wiki = {
             type = "app";

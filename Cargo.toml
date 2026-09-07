@@ -22,6 +22,7 @@ members = [
     "crates/ui",
     "crates/workspace-ui",
     "crates/desktop",
+    "crates/website",
 ]
 
 [workspace.package]

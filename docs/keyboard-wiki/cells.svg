@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="320" viewBox="0 0 240 320">
+  <path fill="#121516" d="M0 0h40v40H0zM120 40h40v40h-40zM40 120h40v40H40zM200 160h40v40h-40zM80 240h40v40H80z"/>
+  <path fill="#191c1d" d="M160 0h40v40h-40zM0 200h40v40H0zM160 280h40v40h-40z"/>
+  <path fill="#0e1011" d="M80 80h40v40H80zM160 120h40v40h-40zM120 200h40v40h-40zM40 280h40v40H40z"/>
+  <path stroke="#25292a" stroke-width="1" fill="none" d="M.5 0v320M40.5 0v320M80.5 0v320M120.5 0v320M160.5 0v320M200.5 0v320M0 .5h240M0 40.5h240M0 80.5h240M0 120.5h240M0 160.5h240M0 200.5h240M0 240.5h240M0 280.5h240"/>
+</svg>

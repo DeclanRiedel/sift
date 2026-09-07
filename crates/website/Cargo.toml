@@ -1,0 +1,11 @@
+[package]
+name = "sift-website"
+version.workspace = true
+edition = "2024"
+rust-version = "1.95"
+license.workspace = true
+publish = false
+
+[dependencies]
+tokio.workspace = true
+topcoat = { version = "=0.6.2", default-features = false, features = ["router", "serve", "view", "discover"] }

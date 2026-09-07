@@ -22,6 +22,9 @@
 
 ## Docs
 
+Preview the product page and wiki with `nix run .#website` at
+`http://127.0.0.1:8787`. See [website development](crates/website/README.md).
+
 - [Development on Windows and NixOS](docs/DEVELOPMENT.md)
 - [Instance configuration](docs/INSTANCE-CONFIG.md)
 - [SQLite, seeded demos and metadata inspection](docs/SQLITE.md)
