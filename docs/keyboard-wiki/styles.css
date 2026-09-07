@@ -20,7 +20,8 @@ body {
 }
 
 main {
-  width: min(960px, 100%);
+  position: relative;
+  width: min(1200px, 100%);
   min-height: 100vh;
   margin: 0 auto;
   padding: 40px 30px 20px;
@@ -28,6 +29,32 @@ main {
   border-inline: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+}
+
+/* Outside the divider line, a compact diagonal-stripe rail fills the
+   gutter so wide viewports do not show bare cell pattern. */
+@media (min-width: 1360px) {
+  main::before,
+  main::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 80px;
+    background: repeating-linear-gradient(
+      135deg,
+      #16191a 0 5px,
+      #0a0c0d 5px 10px
+    );
+  }
+
+  main::before {
+    right: 100%;
+  }
+
+  main::after {
+    left: 100%;
+  }
 }
 
 main > * {
@@ -42,10 +69,10 @@ footer {
 
 .doc-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   margin-bottom: 28px;
   border-bottom: 1px solid var(--border);
-  overflow-x: auto;
 }
 
 .doc-tabs a {
