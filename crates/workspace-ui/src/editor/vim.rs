@@ -86,6 +86,34 @@ impl VimEngine {
             .set_leader(self.cursor_group, cursor_from_byte(text, cursor));
     }
 
+    pub fn select_range(
+        &mut self,
+        text: &str,
+        range: std::ops::Range<usize>,
+        reversed: bool,
+    ) -> VimSnapshot {
+        if range.is_empty() {
+            self.set_cursor(text, range.start);
+        } else {
+            self.input_key(KeyCode::Esc);
+            let last = text[..range.end]
+                .char_indices()
+                .last()
+                .map_or(range.start, |(index, _)| index);
+            let (anchor, focus) = if reversed {
+                (last, range.start)
+            } else {
+                (range.start, last)
+            };
+            self.set_cursor(text, anchor);
+            let linewise = (range.start == 0 || text.as_bytes()[range.start - 1] == b'\n')
+                && text.as_bytes().get(range.end.saturating_sub(1)) == Some(&b'\n');
+            self.input_text(if linewise { "V" } else { "v" });
+            self.set_cursor(text, focus);
+        }
+        self.snapshot(false, false, false)
+    }
+
     /// Make platform clipboard text the unnamed Vim register. A trailing
     /// newline is the portable representation of a linewise yank.
     pub fn set_clipboard(&mut self, text: &str) {
@@ -360,6 +388,18 @@ fn cursor_from_byte(text: &str, byte: usize) -> Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_selection_yanks_the_exact_range_in_both_directions() {
+        for reversed in [false, true] {
+            let text = "select 東京, name from people";
+            let mut vim = VimEngine::new(text, 0);
+            let end = "select 東京".len();
+            vim.select_range(text, 7..end, reversed);
+            let snapshot = vim.input_text("y");
+            assert_eq!(snapshot.clipboard.as_deref(), Some("東京"));
+        }
+    }
 
     #[test]
     fn package_handles_counts_operators_and_insert_mode() {

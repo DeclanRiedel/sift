@@ -1081,6 +1081,7 @@ pub struct QueryEditor {
     cursor_blink: Entity<CursorBlink>,
     cursor_event_pending: bool,
     revision: u64,
+    mouse_anchor: Option<usize>,
     line_cache: RefCell<LineLayoutCache>,
     wraps: RefCell<WrapCache>,
     marked_range: Option<Range<usize>>,
@@ -1138,6 +1139,7 @@ impl QueryEditor {
             cursor_blink,
             cursor_event_pending: false,
             revision: 1,
+            mouse_anchor: None,
             line_cache: RefCell::new(LineLayoutCache::default()),
             wraps: RefCell::new(WrapCache::default()),
             marked_range: None,
@@ -2167,9 +2169,18 @@ impl QueryEditor {
         self.folded_lines.clear();
         self.revision = self.revision.wrapping_add(1);
         let mut cache = self.line_cache.borrow_mut();
-        if let Some(change) = self.document.last_change.filter(|change| !change.structural) {
+        if let Some(change) = self
+            .document
+            .last_change
+            .filter(|change| !change.structural)
+        {
             let wraps = self.wraps.borrow();
-            cache.lines.retain(|row, _| wraps.rows.get(*row).is_some_and(|row| row.source < change.line));
+            cache.lines.retain(|row, _| {
+                wraps
+                    .rows
+                    .get(*row)
+                    .is_some_and(|row| row.source < change.line)
+            });
         } else {
             cache.lines.clear();
         }
@@ -2784,6 +2795,20 @@ impl QueryEditor {
         if !sql.is_empty() {
             cx.emit(EditorEvent::Execute { sql });
         }
+    }
+
+    fn finish_mouse_selection(&mut self, cx: &mut Context<Self>) {
+        if self.mouse_anchor.take().is_none() {
+            return;
+        }
+        let range = self.document.selection();
+        let reversed = self.document.reversed;
+        if let Some(vim) = self.vim.as_mut() {
+            let snapshot = vim.select_range(self.document.text(), range.clone(), reversed);
+            self.apply_vim_snapshot(snapshot, cx);
+            self.document.set_selection(range, reversed);
+        }
+        cx.notify();
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
@@ -3657,7 +3682,31 @@ impl gpui::Render for QueryEditor {
             }))
             .on_mouse_move(
                 cx.listener(|editor, event: &gpui::MouseMoveEvent, window, cx| {
-                    if !event.dragging() {
+                    if event.dragging() {
+                        if let Some(anchor) = editor.mouse_anchor {
+                            let viewport = editor.scroll_handle.bounds();
+                            let position = point(
+                                event.position.x.clamp(
+                                    viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET,
+                                    viewport.right() - px(1.),
+                                ),
+                                event.position.y.clamp(
+                                    viewport.top() + EDITOR_VERTICAL_INSET,
+                                    viewport.bottom() - px(1.),
+                                ),
+                            );
+                            if let Some(cursor) =
+                                editor.byte_index_for_point(position, cx.theme(), window)
+                            {
+                                editor.document.set_selection(
+                                    anchor.min(cursor)..anchor.max(cursor),
+                                    cursor < anchor,
+                                );
+                                editor.selection_changed(cx);
+                            }
+                        }
+                    } else {
+                        editor.mouse_anchor = None;
                         editor.request_hover_at(event.position, window, cx);
                     }
                 }),
@@ -3669,6 +3718,7 @@ impl gpui::Render for QueryEditor {
                 cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {
                     editor.focus_handle.clone().focus(window, cx);
                     if let Some(range) = editor.line_range_for_gutter_point(event.position) {
+                        editor.mouse_anchor = Some(range.start);
                         editor.document.set_selection(range, false);
                         editor.selection_changed(cx);
                         return;
@@ -3678,12 +3728,28 @@ impl gpui::Render for QueryEditor {
                     else {
                         return;
                     };
-                    editor.document.set_selection(cursor..cursor, false);
+                    let anchor = if event.modifiers.shift {
+                        editor.document.cursor()
+                    } else {
+                        cursor
+                    };
+                    editor.mouse_anchor = Some(anchor);
+                    editor
+                        .document
+                        .set_selection(anchor.min(cursor)..anchor.max(cursor), cursor < anchor);
                     if let Some(vim) = editor.vim.as_mut() {
                         vim.set_cursor(editor.document.text(), cursor);
                     }
                     editor.selection_changed(cx);
                 }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|editor, _, _, cx| editor.finish_mouse_selection(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|editor, _, _, cx| editor.finish_mouse_selection(cx)),
             )
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete_forward))
@@ -3907,7 +3973,11 @@ impl Element for QueryEditorElement {
         let line_starts = editor.document.line_starts();
         let wraps_changed = editor.update_wraps(bounds.size.width, theme, window);
         let displayed_lines = editor.visual_rows();
-        if wraps_changed && bounds.size.height != EDITOR_VERTICAL_INSET * 2. + EDITOR_LINE_HEIGHT * displayed_lines.len().max(1) as f32 {
+        if wraps_changed
+            && bounds.size.height
+                != EDITOR_VERTICAL_INSET * 2.
+                    + EDITOR_LINE_HEIGHT * displayed_lines.len().max(1) as f32
+        {
             let entity = self.editor.clone();
             window.on_next_frame(move |_, cx| {
                 entity.update(cx, |editor, cx| {
@@ -5102,14 +5172,22 @@ mod tests {
     #[gpui::test]
     fn wrapping_preserves_unicode_text_and_maps_continuation_carets(cx: &mut TestAppContext) {
         let text = "select '東京 résumé' as very_long_column_name, ".repeat(12);
-        let window = cx.update(|cx| cx.open_window(Default::default(), |_, cx| cx.new(|cx| QueryEditor::new(doc(&text), cx))).unwrap());
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| QueryEditor::new(doc(&text), cx))
+            })
+            .unwrap()
+        });
         let mut visual = VisualTestContext::from_window(window.into(), cx);
         let editor = window.root(&mut visual).unwrap();
         editor.update_in(&mut visual, |editor, window, cx| {
             editor.update_wraps(px(220.), cx.theme(), window);
             let narrow = editor.visual_rows();
             assert!(narrow.len() > 2);
-            let reconstructed = narrow.iter().map(|row| &editor.document.text()[row.range.clone()]).collect::<String>();
+            let reconstructed = narrow
+                .iter()
+                .map(|row| &editor.document.text()[row.range.clone()])
+                .collect::<String>();
             assert_eq!(reconstructed, text);
             let boundary = narrow[1].range.start;
             assert_eq!(editor.visual_position(boundary), (1, boundary));

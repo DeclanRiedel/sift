@@ -33,6 +33,7 @@ pub struct TextInput {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    mouse_anchor: Option<usize>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
 }
@@ -66,6 +67,7 @@ impl TextInput {
             selected_range: cursor..cursor,
             selection_reversed: false,
             marked_range: None,
+            mouse_anchor: None,
             last_layout: None,
             last_bounds: None,
         }
@@ -114,6 +116,26 @@ impl TextInput {
         self.marked_range = None;
         cx.emit(TextInputEvent::Changed);
         cx.notify();
+    }
+
+    fn index_at_x(&self, x: Pixels) -> usize {
+        let Some(bounds) = self.last_bounds else {
+            return self.content.len();
+        };
+        let Some(layout) = self.last_layout.as_ref() else {
+            return self.content.len();
+        };
+        let mut index = if x <= bounds.left() {
+            0
+        } else {
+            layout
+                .closest_index_for_x(x - bounds.left())
+                .min(self.content.len())
+        };
+        while !self.content.is_char_boundary(index) {
+            index = index.saturating_sub(1);
+        }
+        index
     }
 
     fn cursor_offset(&self) -> usize {
@@ -416,9 +438,40 @@ impl gpui::Render for TextInput {
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(|input, _, window, cx| {
+                cx.listener(|input, event: &gpui::MouseDownEvent, window, cx| {
                     input.focus_handle.focus(window, cx);
+                    let cursor = input.index_at_x(event.position.x);
+                    let anchor = if event.modifiers.shift {
+                        input.cursor_offset()
+                    } else {
+                        cursor
+                    };
+                    input.mouse_anchor = Some(anchor);
+                    input.selected_range = anchor.min(cursor)..anchor.max(cursor);
+                    input.selection_reversed = cursor < anchor;
+                    cx.stop_propagation();
+                    cx.notify();
                 }),
+            )
+            .on_mouse_move(cx.listener(|input, event: &gpui::MouseMoveEvent, _, cx| {
+                if event.dragging() {
+                    if let Some(anchor) = input.mouse_anchor {
+                        let cursor = input.index_at_x(event.position.x);
+                        input.selected_range = anchor.min(cursor)..anchor.max(cursor);
+                        input.selection_reversed = cursor < anchor;
+                        cx.notify();
+                    }
+                } else {
+                    input.mouse_anchor = None;
+                }
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|input, _, _, _| input.mouse_anchor = None),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(|input, _, _, _| input.mouse_anchor = None),
             )
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
