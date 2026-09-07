@@ -51,6 +51,7 @@ mod app_bar;
 mod bottom_tools;
 mod catalog_diagram;
 mod commands;
+mod data_window;
 mod dispatch;
 pub use dispatch::ExecutorSender;
 mod database_monitor;
@@ -9649,6 +9650,7 @@ pub struct WorkspaceShell {
     running_queries: HashMap<u64, u64>,
     pending_result_focus: Option<u64>,
     modal_offset: gpui::Point<Pixels>,
+    data_window: Option<gpui::WindowHandle<data_window::DataWindow>>,
     modal_drag: Option<(gpui::Point<Pixels>, gpui::Point<Pixels>, Bounds<Pixels>)>,
     modal_position_kind: Option<Modal>,
     modal_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
@@ -10894,6 +10896,7 @@ impl WorkspaceShell {
             running_queries: HashMap::new(),
             pending_result_focus: None,
             modal_offset: gpui::point(px(0.), px(0.)),
+            data_window: None,
             modal_drag: None,
             modal_position_kind: None,
             modal_bounds: Default::default(),
@@ -29386,25 +29389,93 @@ impl WorkspaceShell {
         let Some(results) = pane.read(cx).results.get(&item_id).cloned() else {
             return;
         };
+        if let Some(previous) = self.data_window.take() {
+            let _ = previous.update(cx, |_, window, _| window.remove_window());
+        }
         for candidate in &self.panes {
             candidate.update(cx, |candidate, cx| {
-                if let Some(previous) = candidate.expanded_result_item {
+                if let Some(previous) = candidate.expanded_result_item.take() {
                     if let Some(results) = candidate.results.get(&previous) {
                         results.update(cx, |results, cx| results.set_large_view(false, cx));
                     }
                 }
-                candidate.expanded_result_item = None;
                 cx.notify();
             });
         }
+        let title = pane
+            .read(cx)
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .map(|item| format!("Data · {}", item.title))
+            .unwrap_or_else(|| "Data".into());
+        let parent = cx.entity().downgrade();
+        let parent_window = window.window_handle();
+        let bounds = Bounds::centered(None, gpui::size(px(1100.), px(750.)), cx);
+        let native = cx.open_window(
+            gpui::WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some(title.clone().into()),
+                    appears_transparent: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            |window, cx| {
+                results.focus_handle(cx).focus(window, cx);
+                cx.new(|_| data_window::DataWindow {
+                    title,
+                    results: results.clone(),
+                })
+            },
+        );
+        let native = match native {
+            Ok(native) => native,
+            Err(error) => {
+                self.show_toast(format!("Opening large Data view failed: {error}"), cx);
+                return;
+            }
+        };
+        self.data_window = Some(native);
+        gpui::App::observe_release(cx, &cx.entity(), move |_, cx| {
+            let _ = native.update(cx, |_, window, _| window.remove_window());
+        })
+        .detach();
         pane.update(cx, |pane, cx| {
             pane.expanded_result_item = Some(item_id);
             cx.notify();
         });
         results.update(cx, |results, cx| results.set_large_view(true, cx));
         self.focused_surface = WorkspaceSurface::Results;
-        self.modal = Some(Modal::DataResults(item_id));
-        results.focus_handle(cx).focus(window, cx);
+        if let Ok(view) = native.entity(cx) {
+            gpui::App::observe_release(cx, &view, move |_, cx| {
+                let _ = parent.update(cx, |shell, cx| {
+                    if shell.data_window != Some(native) {
+                        return;
+                    }
+                    shell.data_window = None;
+                    for pane in &shell.panes {
+                        pane.update(cx, |pane, cx| {
+                            if pane.expanded_result_item == Some(item_id) {
+                                pane.expanded_result_item = None;
+                                if let Some(results) = pane.results.get(&item_id) {
+                                    results.update(cx, |results, cx| {
+                                        results.set_large_view(false, cx)
+                                    });
+                                }
+                                cx.notify();
+                            }
+                        });
+                    }
+                    cx.notify();
+                });
+                let _ = parent_window.update(cx, |_, window, cx| {
+                    let _ = parent.update(cx, |shell, cx| shell.focus_results(window, cx));
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -42369,32 +42440,23 @@ mod tests {
         cx.simulate_click(expand.center(), Modifiers::default());
         cx.run_until_parked();
 
-        workspace.read_with(&cx, |shell, cx| {
-            assert_eq!(shell.modal, Some(Modal::DataResults(1)));
+        let native = workspace.read_with(&cx, |shell, cx| {
+            assert!(shell.modal.is_none());
             assert_eq!(shell.panes[0].read(cx).expanded_result_item, Some(1));
+            let native = shell.data_window.expect("native Data window");
+            assert_eq!(
+                native.read(cx).unwrap().results,
+                shell.panes[0].read(cx).results[&1]
+            );
+            native
         });
-        let layer = cx.debug_bounds("modal-layer").expect("modal layer");
-        let card = cx.debug_bounds("modal-card").expect("modal card");
-        assert!((f32::from(card.size.width) / f32::from(layer.size.width) - 0.985).abs() < 0.01);
-        assert!((f32::from(card.size.height) / f32::from(layer.size.height) - 0.985).abs() < 0.01);
-        assert!(cx.debug_bounds("close-data-results-modal").is_some());
-        let body = cx
-            .debug_bounds("data-results-modal-body")
-            .expect("large Data body");
-        let row = cx
-            .debug_bounds("result-row-fields-0")
-            .expect("live grid fields");
-        assert!(body.contains(&row.center()));
-        assert!(
-            row.right() < body.right(),
-            "unused Data viewport width should remain blank"
-        );
-        assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
-
-        let close = cx
-            .debug_bounds("close-data-results-modal")
-            .expect("large Data close button");
-        cx.simulate_click(close.center(), Modifiers::default());
+        assert!(cx.debug_bounds("modal-layer").is_none());
+        let mut detached = VisualTestContext::from_window(native.into(), &cx);
+        detached.run_until_parked();
+        assert!(detached.debug_bounds("data-results-window-body").is_some());
+        assert!(detached.debug_bounds("result-row-fields-0").is_some());
+        detached.simulate_keystrokes("escape");
+        detached.run_until_parked();
         cx.run_until_parked();
         workspace.read_with(&cx, |shell, cx| {
             assert!(shell.modal.is_none());
@@ -42946,11 +43008,8 @@ mod tests {
         let expand = cx.debug_bounds("open-result-data-modal").unwrap();
         cx.simulate_click(expand.center(), Modifiers::default());
         cx.run_until_parked();
-        assert_eq!(
-            workspace.read_with(&cx, |shell, _| shell.modal.clone()),
-            Some(Modal::DataResults(item_id))
-        );
-        assert!(cx.debug_bounds("data-results-modal-body").is_some());
+        assert!(workspace.read_with(&cx, |shell, _| shell.data_window.is_some()));
+        assert!(cx.debug_bounds("modal-layer").is_none());
     }
 
     #[gpui::test]
