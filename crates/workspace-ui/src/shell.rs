@@ -7493,6 +7493,7 @@ impl gpui::Render for Pane {
                 || (item.kind == ItemKind::RunConfiguration
                     && self.run_configuration_editors.contains_key(&item.id))
                 || (item.kind == ItemKind::Configuration && item.title == "sift.toml")
+                || matches!(item.kind, ItemKind::Problems | ItemKind::Notifications)
         }) {
             colors.toolbar
         } else {
