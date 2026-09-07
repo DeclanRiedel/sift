@@ -577,16 +577,6 @@ pub(crate) fn completion_candidate_metadata(candidate: &CompletionCandidate) -> 
     }
 }
 
-pub(crate) const fn usage_kind_label(kind: SqlUsageKind) -> &'static str {
-    match kind {
-        SqlUsageKind::Definition => "definition",
-        SqlUsageKind::Read => "read",
-        SqlUsageKind::Write => "write",
-        SqlUsageKind::Call => "call",
-        SqlUsageKind::TypeReference => "type",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

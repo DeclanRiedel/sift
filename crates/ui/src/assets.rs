@@ -3,6 +3,7 @@ use std::sync::{Arc, OnceLock};
 
 use gpui::{AssetSource, RenderImage, Result, SharedString, SvgRenderer};
 
+static SQLITE_LOGO: OnceLock<Arc<RenderImage>> = OnceLock::new();
 static POSTGRES_LOGO: OnceLock<Arc<RenderImage>> = OnceLock::new();
 static SQL_SERVER_LOGO: OnceLock<Arc<RenderImage>> = OnceLock::new();
 
@@ -14,6 +15,10 @@ pub struct SiftAssets;
 /// monochrome icon mask, which is not suitable for vendor artwork.
 pub fn database_logo(path: &str) -> Arc<RenderImage> {
     let (cache, bytes) = match path {
+        "databases/sqlite.svg" => (
+            &SQLITE_LOGO,
+            include_bytes!("../assets/databases/sqlite.svg").as_slice(),
+        ),
         "databases/postgres.svg" => (
             &POSTGRES_LOGO,
             include_bytes!("../assets/databases/postgres.svg").as_slice(),
@@ -36,6 +41,7 @@ pub fn database_logo(path: &str) -> Arc<RenderImage> {
 impl AssetSource for SiftAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let bytes: Option<&'static [u8]> = match path {
+            "databases/sqlite.svg" => Some(include_bytes!("../assets/databases/sqlite.svg")),
             "databases/postgres.svg" => Some(include_bytes!("../assets/databases/postgres.svg")),
             "databases/sql-server.svg" => {
                 Some(include_bytes!("../assets/databases/sql-server.svg"))
@@ -139,7 +145,11 @@ mod tests {
     #[test]
     fn visual_assets_are_embedded_in_the_desktop_binary() {
         let assets = SiftAssets;
-        for path in ["databases/postgres.svg", "databases/sql-server.svg"] {
+        for path in [
+            "databases/postgres.svg",
+            "databases/sql-server.svg",
+            "databases/sqlite.svg",
+        ] {
             let bytes = assets.load(path).unwrap().expect("database asset");
             assert!(bytes.starts_with(b"<svg"));
             let _rendered = database_logo(path);

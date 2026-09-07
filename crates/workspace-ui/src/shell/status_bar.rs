@@ -106,17 +106,13 @@ pub(super) fn render_status_bar(
             .mx_1()
             .bg(colors.border)
     };
-    let (error_count, warning_count) =
-        shell
-            .global_problems
-            .iter()
-            .fold(
-                (0usize, 0usize),
-                |(errors, warnings), problem| match problem.severity {
-                    ProblemSeverity::Error => (errors.saturating_add(1), warnings),
-                    ProblemSeverity::Warning => (errors, warnings.saturating_add(1)),
-                },
-            );
+    let (error_count, warning_count) = shell.all_global_problems(cx).iter().fold(
+        (0usize, 0usize),
+        |(errors, warnings), problem| match problem.severity {
+            ProblemSeverity::Error => (errors.saturating_add(1), warnings),
+            ProblemSeverity::Warning => (errors, warnings.saturating_add(1)),
+        },
+    );
     let problem_count = error_count.saturating_add(warning_count);
     let problem_icon_color = if error_count > 0 {
         colors.danger
@@ -372,23 +368,7 @@ pub(super) fn render_status_bar(
                         .on_click(cx.listener(|shell, _, window, cx| {
                             shell.show_global_problems(window, cx)
                         }))
-                        .child(icon(IconName::Warning, problem_icon_color, 14.))
-                        .children((error_count > 0).then(|| {
-                            div()
-                                .id("footer-error-count")
-                                .debug_selector(|| "footer-error-count".into())
-                                .font_family("monospace")
-                                .text_color(colors.danger)
-                                .child(error_count.to_string())
-                        }))
-                        .children((warning_count > 0).then(|| {
-                            div()
-                                .id("footer-warning-count")
-                                .debug_selector(|| "footer-warning-count".into())
-                                .font_family("monospace")
-                                .text_color(colors.warning)
-                                .child(warning_count.to_string())
-                        })),
+                        .child(icon(IconName::Warning, problem_icon_color, 14.)),
                 )
                 .children((problem_count > 0).then(|| {
                     button(

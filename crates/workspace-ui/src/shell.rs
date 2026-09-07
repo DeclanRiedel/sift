@@ -1166,6 +1166,7 @@ fn provider_logo_asset(provider_id: &sift_protocol::ProviderId) -> Option<&'stat
     match provider_id.as_str() {
         "sift/postgres" => Some("databases/postgres.svg"),
         "sift/sql-server" => Some("databases/sql-server.svg"),
+        "sift/sqlite" => Some("databases/sqlite.svg"),
         _ => None,
     }
 }
@@ -2087,6 +2088,7 @@ pub enum InstanceCommand {
         root: std::path::PathBuf,
     },
     OpenCurrentConfiguration,
+    ViewMetadata,
     SaveConfiguration {
         root: Option<std::path::PathBuf>,
         manifest: String,
@@ -4513,12 +4515,12 @@ impl Pane {
                     update: update.clone(),
                 });
             }
-            EditorEvent::CursorChanged | EditorEvent::VimStateChanged => {
-                cx.emit(PaneEvent::EditorStateChanged {
-                    item_id,
-                    dirty: None,
-                })
-            }
+            EditorEvent::CursorChanged
+            | EditorEvent::VimStateChanged
+            | EditorEvent::DiagnosticsChanged => cx.emit(PaneEvent::EditorStateChanged {
+                item_id,
+                dirty: None,
+            }),
             EditorEvent::OpenCommandPalette => cx.emit(PaneEvent::OpenCommandPaletteRequested),
             EditorEvent::Execute { sql } => {
                 // Show the pending state immediately, then ask the workspace to
@@ -10944,6 +10946,15 @@ impl WorkspaceShell {
 
     fn feature_unavailable_reason(&self, command: CommandId) -> Option<&'static str> {
         use sift_protocol::handshake::*;
+        if command == CommandId::ViewMetadata
+            && self
+                .lifecycle
+                .selected_instance
+                .as_ref()
+                .is_none_or(|instance| instance.kind != crate::InstanceKind::Local)
+        {
+            return Some("Metadata inspection requires a local applied Sift instance");
+        }
         if command.as_str().starts_with("repository.")
             && !self.lifecycle.supports(CAPABILITY_WORKSPACE_GIT)
         {
@@ -11870,6 +11881,7 @@ impl WorkspaceShell {
                 }
                 self.instance_configuration_item = Some(item_id);
                 self.instance_configuration = Some(*configuration);
+                self.sync_global_problems_editor(cx);
                 self.modal = None;
             }
             InstanceManagerEvent::InstanceOperationPending { message } => {
@@ -16038,6 +16050,7 @@ impl WorkspaceShell {
         editor.update(cx, |editor, cx| {
             editor.apply_semantic_outcome(text_revision, outcome, cx);
         });
+        self.sync_global_problems_editor(cx);
         cx.notify();
     }
 
@@ -20800,11 +20813,40 @@ impl WorkspaceShell {
         self.record_runtime_error(None, operation, message, cx);
     }
 
-    fn global_problems_text(&self) -> String {
-        if self.global_problems.is_empty() {
+    fn all_global_problems(&self, cx: &App) -> Vec<GlobalProblem> {
+        let mut problems = self.global_problems.clone();
+        for pane in &self.panes {
+            let pane = pane.read(cx);
+            for item in &pane.items {
+                let Some(editor) = pane.editors.get(&item.id) else {
+                    continue;
+                };
+                let editor = editor.read(cx);
+                for diagnostic in editor.semantic().diagnostics() {
+                    let severity = match diagnostic.severity {
+                        sift_protocol::DiagnosticSeverity::Error => ProblemSeverity::Error,
+                        sift_protocol::DiagnosticSeverity::Warning => ProblemSeverity::Warning,
+                        _ => continue,
+                    };
+                    problems.push(GlobalProblem {
+                        item_id: item.id,
+                        title: item.title.clone(),
+                        severity,
+                        message: editor.format_problem(diagnostic),
+                        transient: true,
+                    });
+                }
+            }
+        }
+        problems
+    }
+
+    fn global_problems_text(&self, cx: &App) -> String {
+        let problems = self.all_global_problems(cx);
+        if problems.is_empty() {
             return "No problems.".into();
         }
-        self.global_problems
+        problems
             .iter()
             .map(|problem| {
                 let severity = match problem.severity {
@@ -20818,7 +20860,7 @@ impl WorkspaceShell {
     }
 
     fn sync_global_problems_editor(&mut self, cx: &mut Context<Self>) {
-        let text = self.global_problems_text();
+        let text = self.global_problems_text(cx);
         for pane in &self.panes {
             pane.update(cx, |pane, cx| {
                 let Some(item) = pane
@@ -20868,7 +20910,7 @@ impl WorkspaceShell {
         }
         let item_id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        let text = self.global_problems_text();
+        let text = self.global_problems_text(cx);
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&text), cx)
                 .with_language(EditorLanguage::PlainText)
@@ -20897,10 +20939,12 @@ impl WorkspaceShell {
     }
 
     fn copy_all_global_problems(&mut self, cx: &mut Context<Self>) {
-        if self.global_problems.is_empty() {
+        if self.all_global_problems(cx).is_empty() {
             return;
         }
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.global_problems_text()));
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+            self.global_problems_text(cx),
+        ));
         self.show_toast("Copied problems".into(), cx);
     }
 
@@ -26639,6 +26683,7 @@ impl WorkspaceShell {
                         }
                     });
                 }
+                self.sync_global_problems_editor(cx);
                 cx.notify();
             }
             PaneEvent::RoomUpdateRequested { item_id, update } => {
@@ -32402,6 +32447,9 @@ impl WorkspaceShell {
             }
             CommandId::OpenKeymaps => {
                 self.open_keymaps_modal(cx);
+            }
+            CommandId::ViewMetadata => {
+                self.send_instance_command(InstanceCommand::ViewMetadata, cx)
             }
             CommandId::OpenServerConfiguration => self.open_current_configuration(cx),
             CommandId::ToggleTheme => self.toggle_theme(cx),
@@ -44388,7 +44436,8 @@ mod tests {
                 "Settings",
                 "Keymaps",
                 "Toggle Light/Dark Theme",
-                "Edit Current sift.toml…"
+                "Edit Current sift.toml…",
+                "View Sift Metadata (Read-only Snapshot)"
             ]
         );
         assert_eq!(profile[0].command, Some(CommandId::OpenSettings));
@@ -46252,6 +46301,57 @@ mod tests {
                 capabilities: capabilities.iter().map(|value| (*value).into()).collect(),
             },
         ));
+    }
+
+    #[gpui::test]
+    fn manifest_errors_are_visible_in_problems_and_clear_after_correction(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let valid = include_str!("../../../examples/reproducible-instance/sift.toml");
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.on_instance_manager_event(
+                InstanceManagerEvent::InstanceConfiguration(Box::new(
+                    InstanceConfigurationPresentation {
+                        root: None,
+                        manifest: valid.replace(
+                            "[connections.sqlite]",
+                            "[connections.sqlite]\nbusy_timeout_ms = 6000",
+                        ),
+                        lock: String::new(),
+                        source_revision: None,
+                        name: "desktop-demo".into(),
+                        is_new: false,
+                    },
+                )),
+                cx,
+            );
+            assert!(shell.global_problems_text(cx).contains("busy timeout"));
+            shell.show_global_problems(window, cx);
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let problems = pane.editors.get(&pane.active_item().unwrap().id).unwrap();
+            assert!(problems.read(cx).document().text().contains("busy timeout"));
+        });
+        let editor =
+            workspace.read_with(&cx, |shell, _| shell.instance_configuration_editor.clone());
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.replace_text_in_range(
+                Some(0..editor.document().text().encode_utf16().count()),
+                valid,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.global_problems_text(cx), "No problems.");
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let problems = pane.editors.get(&pane.active_item().unwrap().id).unwrap();
+            assert_eq!(problems.read(cx).document().text(), "No problems.");
+        });
     }
 
     #[gpui::test]
@@ -50478,7 +50578,7 @@ mod tests {
             );
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("footer-error-count").is_some());
+        assert!(cx.debug_bounds("footer-error-count").is_none());
         assert!(cx.debug_bounds("footer-warning-count").is_none());
 
         let problems_editor = workspace.read_with(&cx, |shell, cx| {
@@ -50552,7 +50652,7 @@ mod tests {
             assert_eq!(shell.global_problems.len(), 1);
             assert!(!shell.global_problems[0].transient);
             assert_eq!(
-                shell.global_problems_text(),
+                shell.global_problems_text(cx),
                 "[ERROR] Edit apply · query.sql\n\
                  driver internal error: error serializing parameter 0"
             );

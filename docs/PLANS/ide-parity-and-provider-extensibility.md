@@ -299,6 +299,8 @@ exclusions. Broader engine administration remains separate work.
 - [x] SQLite scoped provider graduation (ADR-056; explicit platform/DBA exclusions)
 - [x] SQLite managed savepoints, estimated plans and atomic CSV import
 - [x] SQLite seeded desktop demos and read-only Sift metadata inspection command
+- [x] SQLite manifest completion/validation, provider artwork, and desktop metadata inspection menu
+- [x] Editor diagnostics in Problems, usable copy controls, and a diagnostic-only footer
 
 SQLite is implemented with explicit server roots, bounded workers, dynamic
 values, native DDL, keyed edits and a partial IDE navigation catalog. Full

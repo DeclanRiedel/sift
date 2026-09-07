@@ -114,7 +114,16 @@ and edits. Ordinary `sift instance new` instances do not inherit demo databases.
 ## Inspect Sift's own metadata
 
 Sift stores users, connection-profile metadata, rooms, workspaces and other app
-state in SQLite. Runtime credentials use the separate secret store. To inspect
+state in SQLite. Runtime credentials use the separate secret store.
+
+For a local applied instance, use the profile menu or command palette:
+**View Sift Metadata (Read-only Snapshot)**. Sift creates a fresh inspection
+instance, remembers it in the instance picker, and opens it. Expand its
+`sift/metadata-inspection` connection to browse or query the snapshot. Return to
+the original instance through the instance picker. Each invocation creates a new
+snapshot; it does not refresh older inspection instances.
+
+To inspect
 the desktop demo's metadata while it is running:
 
 ```sh

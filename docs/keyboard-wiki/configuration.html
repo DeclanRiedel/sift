@@ -174,15 +174,36 @@
         </tbody></table>
       </section>
 
+      <section id="sqlite">
+        <h2>SQLite and Sift metadata</h2>
+        <p><code>[server.drivers.sqlite]</code> sets <code>max_connections</code>,
+          the SQLite worker cap (default 8, range 1–128).</p>
+        <p>SQLite files belong to the server. Configure named directories under
+          <code>[server.drivers.sqlite.roots.&lt;root-id&gt;]</code> with
+          <code>path</code>, <code>allowed_tenants</code> (numeric tenant IDs), and
+          <code>read_only</code>. A SQLite connection uses
+          <code>[connections.sqlite]</code> with <code>root_id</code>, a relative
+          <code>path</code>, <code>mode</code> (<code>read_only</code> or
+          <code>read_write</code>), and optional <code>busy_timeout_ms</code> (default 1000, range 0–5000).
+          Opening a connection requires an existing file.</p>
+        <p>For a local applied instance, choose <strong>View Sift Metadata
+          (Read-only Snapshot)</strong> from the profile menu or command palette.
+          Sift opens a separate inspection instance with a
+          <code>sift/metadata-inspection</code> connection. It contains selected
+          app metadata; credentials, tokens, SQL history and document contents
+          are excluded. Return through the instance picker. Run the command again
+          for a fresh snapshot.</p>
+      </section>
+
       <section id="connections-config">
         <h2>Connections</h2>
         <table class="compact"><thead><tr><th><code>[[connections]]</code></th><th>Meaning</th></tr></thead><tbody>
           <tr><td><code>name</code></td><td>Stable profile name.</td></tr>
           <tr><td><code>tenant</code></td><td>Owning tenant name.</td></tr>
-          <tr><td><code>provider</code></td><td><code>postgres</code> or <code>sql-server</code>.</td></tr>
+          <tr><td><code>provider</code></td><td><code>postgres</code>, <code>sql-server</code>, or <code>sqlite</code>.</td></tr>
           <tr><td><code>connection_string</code></td><td>Endpoint, database, and username only; inline secrets are rejected.</td></tr>
           <tr><td><code>credential_mode</code></td><td><code>shared</code> or <code>per-user</code>.</td></tr>
-          <tr><td><code>credential</code></td><td>Required logical slot for shared mode.</td></tr>
+          <tr><td><code>credential</code></td><td>Required logical slot for shared mode, except credential-free SQLite profiles.</td></tr>
           <tr><td><code>enabled</code></td><td>Must be true in format 1; remove the resource to disable it.</td></tr>
           <tr><td><code>tags</code></td><td>Search and organization tags.</td></tr>
         </tbody></table>

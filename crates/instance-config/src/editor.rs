@@ -429,6 +429,14 @@ const FIELDS: &[Field] = &[
         "Register the extra synthetic driver.",
         BOOL
     ),
+    field!("server.drivers.sqlite", "max_connections", "integer", "Maximum admitted SQLite workers (1–128)."),
+    field!("server.drivers.sqlite.roots.*", "path", "string", "Server-owned directory; relative paths resolve against the instance root."),
+    field!("server.drivers.sqlite.roots.*", "allowed_tenants", "integer array", "Tenant IDs allowed to open files under this root. Empty denies all tenants."),
+    field!("server.drivers.sqlite.roots.*", "read_only", "boolean", "Force every connection under this root to be read-only.", BOOL),
+    field!("connections.sqlite", "root_id", "string", "Configured SQLite root ID."),
+    field!("connections.sqlite", "path", "string", "Existing database file relative to the configured root."),
+    field!("connections.sqlite", "mode", "string", "Requested file access; root restrictions still apply.", &["read_only", "read_write"]),
+    field!("connections.sqlite", "busy_timeout_ms", "integer", "Bounded lock wait in milliseconds (0–5000)."),
     field!(
         "server.extension_policy",
         "development_overrides",
@@ -781,7 +789,7 @@ const FIELDS: &[Field] = &[
         "provider",
         "enum",
         "Database driver provider.",
-        &["postgres", "sql-server"]
+        &["postgres", "sql-server", "sqlite"]
     ),
     field!(
         "connections",
@@ -979,7 +987,7 @@ fn collect_schema_diagnostics(
         }
         let field = FIELDS
             .iter()
-            .find(|field| field.table == schema_table && field.key == key);
+            .find(|field| schema_table_matches(field.table, schema_table) && field.key == key);
         let Some(field) = field else {
             let known_table = FIELDS.iter().any(|field| {
                 field.table == child_schema || field.table.starts_with(&format!("{child_schema}."))
@@ -993,18 +1001,21 @@ fn collect_schema_diagnostics(
             }
             continue;
         };
-        let type_valid =
-            if field.value_type.contains("integer") || field.value_type.contains("bytes") {
-                value.is_integer()
-            } else if field.value_type == "number" {
-                value.is_float() || value.is_integer()
-            } else if field.value_type == "boolean" {
-                value.is_bool()
-            } else if field.value_type.contains("array") {
-                value.is_array()
-            } else {
-                value.is_str()
-            };
+        let type_valid = if field.value_type == "integer array" {
+            value
+                .as_array()
+                .is_some_and(|items| items.iter().all(toml::Value::is_integer))
+        } else if field.value_type.contains("integer") || field.value_type.contains("bytes") {
+            value.is_integer()
+        } else if field.value_type == "number" {
+            value.is_float() || value.is_integer()
+        } else if field.value_type == "boolean" {
+            value.is_bool()
+        } else if field.value_type.contains("array") {
+            value.is_array()
+        } else {
+            value.is_str()
+        };
         let message = if !type_valid {
             Some(format!("expected {}", field.value_type))
         } else if !field.choices.is_empty()
@@ -1024,6 +1035,15 @@ fn collect_schema_diagnostics(
             });
         }
     }
+}
+
+fn schema_table_matches(pattern: &str, table: &str) -> bool {
+    let mut parts = table.split('.');
+    pattern.split('.').all(|part| {
+        parts
+            .next()
+            .is_some_and(|actual| part == "*" || part == actual)
+    }) && parts.next().is_none()
 }
 
 fn join_path(parent: &str, child: &str) -> String {
@@ -1095,7 +1115,7 @@ pub fn manifest_completions(
         };
         let candidates = FIELDS
             .iter()
-            .find(|field| field.table == table && field.key == key)
+            .find(|field| schema_table_matches(field.table, table) && field.key == key)
             .into_iter()
             .flat_map(|field| {
                 field
@@ -1125,7 +1145,7 @@ pub fn manifest_completions(
     let prefix = &source[key_start..cursor];
     let candidates = FIELDS
         .iter()
-        .filter(|field| field.table == table && field.key.starts_with(prefix))
+        .filter(|field| schema_table_matches(field.table, table) && field.key.starts_with(prefix))
         .map(|field| ManifestCompletion {
             label: field.key.into(),
             insertion: format!("{} = ", field.key),
@@ -1153,7 +1173,7 @@ pub fn manifest_hover(source: &str, offset: usize) -> Option<ManifestHover> {
     let table = active_table(source, line_start);
     let field = FIELDS
         .iter()
-        .find(|field| field.table == table && field.key == key)?;
+        .find(|field| schema_table_matches(field.table, table) && field.key == key)?;
     Some(ManifestHover {
         range,
         path: if table.is_empty() {
@@ -1312,6 +1332,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sqlite_demo_schema_completion_and_hover_match_runtime_configuration() {
+        let source = include_str!("../../../examples/reproducible-instance/sift.toml");
+        assert!(
+            manifest_diagnostics(source).is_empty(),
+            "{:?}",
+            manifest_diagnostics(source)
+        );
+        let source = "[server.drivers.sqlite.roots.analysis]\nrea";
+        assert_eq!(
+            manifest_completions(source, source.len()).1[0].label,
+            "read_only"
+        );
+        let source = "[server.drivers.sqlite.roots.analysis]\nread_only = true";
+        assert_eq!(
+            manifest_hover(source, source.find("read_only").unwrap())
+                .unwrap()
+                .value_type,
+            "boolean"
+        );
+        let source = "[[connections]]\nprovider = \"sql\"";
+        assert!(manifest_completions(source, source.len())
+            .1
+            .iter()
+            .any(|candidate| candidate.label == "sqlite"));
+        let invalid = include_str!("../../../examples/reproducible-instance/sift.toml").replace(
+            "[connections.sqlite]",
+            "[connections.sqlite]\nbusy_timeout_ms = 6000",
+        );
+        assert!(!manifest_diagnostics(&invalid).is_empty());
+    }
+
+    #[test]
     fn completion_is_scoped_to_the_active_table_and_enum() {
         let source = "[server]\ndep";
         let (range, candidates) = manifest_completions(source, source.len());
@@ -1404,7 +1456,7 @@ mod tests {
             );
             if !field.table.is_empty() {
                 assert!(
-                    wiki.contains(field.table),
+                    wiki.contains(field.table.trim_end_matches(".*")),
                     "configuration wiki is missing table {}",
                     field.table
                 );

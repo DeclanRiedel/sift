@@ -529,6 +529,40 @@ pub async fn run_instance_manager(
                 });
                 (false, result)
             }
+            InstanceCommand::ViewMetadata => {
+                let _ = channels
+                    .events
+                    .send(InstanceManagerEvent::InstanceOperationPending {
+                        message: "Preparing read-only metadata snapshot…".into(),
+                    });
+                let result = async {
+                    let target = channels.targets.borrow().clone();
+                    let source = target.configured_root().ok_or_else(||
+                        "Metadata inspection requires a local applied instance. For a remote instance, run sift metadata inspect on its server.".to_string())?;
+                    let parent = crate::platform::instance_state_path().with_file_name("metadata-inspections");
+                    std::fs::create_dir_all(&parent)
+                        .map_err(|error| format!("creating inspection directory: {error}"))?;
+                    let root = parent.join(uuid::Uuid::new_v4().to_string());
+                    let helper = std::env::current_exe()
+                        .map_err(|error| format!("locating desktop executable: {error}"))?
+                        .with_file_name(if cfg!(windows) { "sift.exe" } else { "sift" });
+                    let output = tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        tokio::process::Command::new(helper)
+                            .arg("metadata").arg("inspect").arg(source).arg(&root)
+                            .kill_on_drop(true).output(),
+                    ).await.map_err(|_| "Metadata inspection exceeded its startup deadline".to_string())?
+                        .map_err(|error| format!("running metadata inspection: {error}"))?;
+                    if !output.status.success() {
+                        return Err(format!("Metadata inspection failed: {}", String::from_utf8_lossy(&output.stderr)));
+                    }
+                    let plan = inspect_root(&root, None).await?;
+                    remember_root(&store, &profiles, &mut roots, &plan)?;
+                    let _ = channels.events.send(InstanceManagerEvent::Roots(roots.clone()));
+                    connect_root(&channels.targets, &mut configured_targets, &root).await
+                }.await;
+                (false, result)
+            }
             InstanceCommand::OpenCurrentConfiguration => {
                 let result = open_current_configuration(&channels.targets)
                     .await

@@ -26,9 +26,7 @@ use sift_ui::{
 
 mod semantic;
 mod vim;
-use self::semantic::{
-    completion_candidate_metadata, completion_kind_badge, ordered_edits, usage_kind_label,
-};
+use self::semantic::{completion_candidate_metadata, completion_kind_badge, ordered_edits};
 pub use self::semantic::{
     CompletionMenu, EditorDiagnostic, SemanticOutcome, SemanticRequestKind, SemanticState,
 };
@@ -875,6 +873,8 @@ pub enum EditorEvent {
     DocumentChanged { update: Vec<u8> },
     /// Cursor or modal state changed; parent chrome may refresh lazily.
     CursorChanged,
+    /// Local diagnostics finished updating; refresh the Problems projection.
+    DiagnosticsChanged,
     /// Pending Vim keys or mode changed; status chrome should refresh now.
     VimStateChanged,
     /// Vim's command prefix requested the workspace command palette.
@@ -2100,6 +2100,7 @@ impl QueryEditor {
             let _ = this.update(cx, |editor, cx| {
                 if editor.manifest_schema && editor.manifest_analysis_epoch == epoch {
                     editor.refresh_manifest_diagnostics();
+                    cx.emit(EditorEvent::DiagnosticsChanged);
                     cx.notify();
                 }
             });
@@ -3189,9 +3190,7 @@ impl QueryEditor {
         )
     }
 
-    /// One-line semantic status: the diagnostic under the caret if there is
-    /// one, else the last notice, else the aggregate counts. Never blocks
-    /// editing and never claims freshness it does not have.
+    /// Show actionable diagnostics, without passive service notices or usage counts.
     fn semantic_status(&self) -> Option<(String, bool)> {
         let errors = self.semantic.error_count();
         let warnings = self.semantic.warning_count();
@@ -3210,26 +3209,6 @@ impl QueryEditor {
                 diagnostic.severity == sift_protocol::DiagnosticSeverity::Error,
             ));
         }
-        if let Some(notice) = self.semantic.notice() {
-            return Some((notice.to_owned(), false));
-        }
-        if !self.semantic.usages().is_empty() {
-            let cursor = self.document.cursor();
-            let here = self
-                .semantic
-                .usages()
-                .iter()
-                .find(|(range, _)| range.contains(&cursor))
-                .map(|(_, kind)| usage_kind_label(*kind));
-            let total = self.semantic.usages().len();
-            return Some((
-                match here {
-                    Some(kind) => format!("{total} usage(s) · caret is a {kind}"),
-                    None => format!("{total} usage(s) highlighted"),
-                },
-                false,
-            ));
-        }
         if errors == 0 && warnings == 0 {
             return None;
         }
@@ -3241,7 +3220,7 @@ impl QueryEditor {
         Some((format!("{counts}{incomplete}"), errors > 0))
     }
 
-    fn format_problem(&self, diagnostic: &EditorDiagnostic) -> String {
+    pub(crate) fn format_problem(&self, diagnostic: &EditorDiagnostic) -> String {
         let line = self.document.line_of_offset(diagnostic.range.start) + 1;
         let severity = match diagnostic.severity {
             sift_protocol::DiagnosticSeverity::Error => "error",
@@ -3258,9 +3237,7 @@ impl QueryEditor {
     fn current_problem_text(&self) -> Option<String> {
         self.semantic
             .diagnostic_at(self.document.cursor())
-            .or_else(|| {
-                (self.semantic.diagnostics().len() == 1).then(|| &self.semantic.diagnostics()[0])
-            })
+            .or_else(|| self.semantic.diagnostics().first())
             .map(|diagnostic| self.format_problem(diagnostic))
     }
 
@@ -3592,6 +3569,7 @@ impl gpui::Render for QueryEditor {
             .children(status.map(|(message, error)| {
                 div()
                     .id("editor-status-line")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .debug_selector(|| "editor-status-line".to_string())
                     .flex_none()
                     .h(px(24.))
@@ -3621,6 +3599,7 @@ impl gpui::Render for QueryEditor {
                                     IconName::Document,
                                     "Copy current problem",
                                 )
+                                .debug_selector("editor-copy-current-problem")
                                 .square(px(20.))
                                 .disabled(!has_current_problem)
                                 .tooltip("Copy current problem with line number")
@@ -3632,8 +3611,8 @@ impl gpui::Render for QueryEditor {
                                     IconName::Copy,
                                     "Copy all problems",
                                 )
+                                .debug_selector("editor-copy-all-problems")
                                 .square(px(20.))
-                                .badge(problem_count)
                                 .disabled(problem_count == 0)
                                 .tooltip("Copy all problems with line numbers")
                                 .on_click(cx.listener(Self::copy_all_problems))
@@ -5055,6 +5034,14 @@ mod tests {
     fn diagnostic_status_line_is_hidden_until_needed(cx: &mut TestAppContext) {
         let (mut cx, editor, _) = editor_with_spy("select from", cx);
         cx.run_until_parked();
+        editor.update(&mut cx, |editor, cx| {
+            editor.apply_semantic_outcome(
+                editor.text_revision(),
+                SemanticOutcome::Failed("Semantic service is unavailable".into()),
+                cx,
+            );
+            assert!(editor.semantic_status().is_none());
+        });
         let before = cx.debug_bounds("editor-scroll").expect("editor viewport");
         assert!(cx.debug_bounds("editor-status-line").is_none());
 
@@ -5106,7 +5093,32 @@ mod tests {
                      Line 2 [warning] SQL002: unqualified object"
                 )
             );
+            // Copy remains available even when the caret is outside every diagnostic.
+            editor.document.set_selection(10..10, false);
+            cx.notify();
         });
+        cx.run_until_parked();
+        let copy = cx
+            .debug_bounds("editor-copy-current-problem")
+            .expect("current problem button");
+        cx.simulate_click(copy.center(), gpui::Modifiers::default());
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("Line 1 [error] SQL001: unknown table".into())
+        );
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.document.cursor()),
+            10
+        );
+        let copy = cx
+            .debug_bounds("editor-copy-all-problems")
+            .expect("all problems button");
+        cx.simulate_click(copy.center(), gpui::Modifiers::default());
+        assert!(cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap()
+            .contains("Line 2 [warning] SQL002"));
     }
 
     #[gpui::test]

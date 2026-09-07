@@ -424,7 +424,7 @@
           name = "sift-desktop-runner";
           runtimeInputs = [ pkgs.nix ];
           text = devCommand ''
-            cargo build --profile release-dev -p sift-server --bin sift-launcher
+            cargo build --profile release-dev -p sift-server --bins
             cargo run --profile release-dev -p sift-desktop -- "$@"
           '';
         };
