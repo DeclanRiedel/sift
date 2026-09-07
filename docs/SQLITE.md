@@ -166,3 +166,8 @@ The desktop reuses one read-only inspection instance per source manifest ID.
 Invoking View Metadata inside that inspection keeps the current instance open;
 it does not create another inspection of the inspection. Existing snapshots stay
 fixed at their creation time. The CLI can create a fresh snapshot when needed.
+
+The desktop demo also seeds `siftdemo` in the local SQL Server Docker container
+and imports its `.env`-managed credential through stdin. The connection is
+`demo/sql-server`; try `SELECT * FROM lab.order_summary`. Docker must be running.
+`nix run .#dev-mssql seed` seeds this database independently and preserves rows.

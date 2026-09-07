@@ -543,8 +543,9 @@
             }
             trap cleanup EXIT
 
-            phase 2 "Seed demo Postgres"
+            phase 2 "Seed demo Postgres and SQL Server"
             pgport="$(SIFT_DEMO_RESET=1 sh "$repo/examples/reproducible-instance/scripts/dev-seed-postgres.sh")"
+            mssqlport="$(cd "$repo" && sh examples/reproducible-instance/scripts/dev-mssql.sh seed)"
 
             cd "$repo"
             # Build first, in the foreground: a cold GPUI build takes minutes,
@@ -566,6 +567,23 @@
             printf '%s\n' 'SELECT * FROM lab.order_summary ORDER BY placed_at DESC;' >"$workspace_root/queries/order-summary.sql"
             workspace_path_literal="$(jq -Rn --arg value "$workspace_root" '$value')"
             cat >>"$instance_root/sift.toml" <<EOF
+
+[[connections]]
+name = "demo/sql-server"
+tenant = "demo"
+provider = "sql-server"
+connection_string = "Server=127.0.0.1,$mssqlport;Database=siftdemo;User Id=sa;Encrypt=true;TrustServerCertificate=true"
+credential_mode = "shared"
+credential = "credential:demo/sql-server/shared"
+tags = ["demo", "local", "sql-server"]
+
+[connections.policy]
+allow_sql = true
+allow_schema_read = true
+allow_export = true
+
+[connections.lifecycle]
+prevent_destroy = true
 
 [server.workspaces]
 enabled = true
@@ -596,9 +614,14 @@ EOF
                   --slot credential:demo/postgres/shared --stdin
             fi
 
+            sh "$repo/examples/reproducible-instance/scripts/dev-mssql.sh" password | jq -cnR '{password: input}' | \
+              run_in_dev cargo run -q --profile release-dev -p sift-server --bin sift -- \
+                instance credentials import "$instance_root" \
+                --slot credential:demo/sql-server/shared --stdin
+
             echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift credential=<destination-local> ssl=prefer"
             echo "Sift instance root: $instance_root"
-            echo "Sift connections: demo/postgres and demo/sqlite (managed by sift.toml)"
+            echo "Sift connections: demo/postgres, demo/sql-server and demo/sqlite (managed by sift.toml)"
             echo "SQLite query: SELECT * FROM main.order_summary ORDER BY placed_at DESC;"
             echo "Seeded query: SELECT * FROM lab.order_summary ORDER BY placed_at DESC;"
             echo "Large result query: SELECT * FROM lab.large ORDER BY id;"
@@ -801,7 +824,7 @@ EOF
               sift-test                 Run cargo nextest for the whole workspace.
               sift-check                Run cargo check for the whole workspace.
               sift-desktop              Run the native GPUI desktop client.
-              sift-desktop-demo         Seeded Postgres + SQLite + real backend + desktop.
+              sift-desktop-demo         Seeded Postgres + SQL Server + SQLite + real backend + desktop.
               sift-desktop-demo-wiki    Run desktop demo + keyboard-language wiki together.
               sift-demo-sqlite          Create the SQLite fixture once, preserving existing files.
               sift-desktop-metadata    Open a read-only inspection snapshot of Sift's metadata.
