@@ -8518,7 +8518,7 @@ impl gpui::Render for Pane {
                                     .when(placement == ResultPlacement::Right, |handle| {
                                         handle
                                             .self_stretch()
-                                            .mt(crate::editor::EDITOR_VERTICAL_INSET - px(1.0))
+                                            .mt(crate::editor::EDITOR_VERTICAL_INSET - px(4.0))
                                             .w(px(1.0))
                                     })
                                     .child(resize_hitbox);
@@ -8571,7 +8571,7 @@ impl gpui::Render for Pane {
                                                     .flex_none()
                                                     .flex()
                                                     .min_w_0()
-                                                    .pt(crate::editor::EDITOR_VERTICAL_INSET - px(1.0))
+                                                    .pt(crate::editor::EDITOR_VERTICAL_INSET - px(4.0))
                                                     .child(
                                                         div()
                                                             .flex()
