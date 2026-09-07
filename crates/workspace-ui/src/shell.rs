@@ -34203,6 +34203,47 @@ impl WorkspaceShell {
             .and_then(|pane| pane.read(cx).active_results())
     }
 
+    fn sync_result_plan_support(&self, cx: &mut Context<Self>) {
+        let profile = match self.connection_status {
+            ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
+            _ => None,
+        };
+        let sqlite = self
+            .lifecycle
+            .tenants
+            .iter()
+            .flat_map(|tenant| &tenant.connections)
+            .any(|connection| {
+                Some(connection.id) == profile && connection.provider_id.as_str() == "sift/sqlite"
+            });
+        for pane in &self.panes {
+            let views = {
+                let pane = pane.read(cx);
+                pane.results
+                    .iter()
+                    .map(|(id, view)| {
+                        let sqlite = pane
+                            .items
+                            .iter()
+                            .find(|item| item.id == *id)
+                            .and_then(|item| item.source.as_ref())
+                            .and_then(|source| match source {
+                                ItemSource::DatabaseObject(source) => {
+                                    Some(source.provider_id.as_str() == "sift/sqlite")
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(sqlite);
+                        (view.clone(), !sqlite)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for (view, supported) in views {
+                view.update(cx, |view, cx| view.set_analyze_supported(supported, cx));
+            }
+        }
+    }
+
     fn new_results_view(&self, cx: &mut Context<Self>) -> Entity<ResultsView> {
         let view = cx.new(ResultsView::new);
         view.update(cx, |view, cx| {
@@ -38871,6 +38912,7 @@ impl gpui::Render for PaneLayoutView {
 
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_result_plan_support(cx);
         if let Some(item_id) = self.pending_result_focus.take() {
             if self.modal.is_none()
                 && self

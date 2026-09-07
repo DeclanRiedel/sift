@@ -1128,6 +1128,7 @@ pub struct ResultsView {
     /// A page is being held because the window is full.
     window_held: bool,
     explain: ExplainState,
+    analyze_supported: bool,
     rendered_plan_nodes: Vec<RenderedPlanNode>,
     plan_scroll_handle: UniformListScrollHandle,
     large_view: bool,
@@ -1234,6 +1235,7 @@ impl ResultsView {
             window_start: 0,
             window_held: false,
             explain: ExplainState::Empty,
+            analyze_supported: true,
             rendered_plan_nodes: Vec::new(),
             plan_scroll_handle: UniformListScrollHandle::new(),
             large_view: false,
@@ -2570,8 +2572,17 @@ impl ResultsView {
         }
     }
 
+    pub(crate) fn set_analyze_supported(&mut self, supported: bool, cx: &mut Context<Self>) {
+        if self.analyze_supported != supported {
+            self.analyze_supported = supported;
+            cx.notify();
+        }
+    }
+
     fn request_explain(&mut self, analyze: bool, cx: &mut Context<Self>) {
-        if matches!(self.explain, ExplainState::Pending { .. }) {
+        if matches!(self.explain, ExplainState::Pending { .. })
+            || (analyze && !self.analyze_supported)
+        {
             return;
         }
         self.explain = ExplainState::Pending { analyze };
@@ -5501,9 +5512,15 @@ impl ResultsView {
                 Button::new("explain-analyzed-plan", "Analyze query")
                     .tone(ButtonTone::Ghost)
                     .start_icon(IconName::Activity)
-                    .disabled(pending)
+                    .disabled(pending || !self.analyze_supported)
                     .on_click(cx.listener(|view, _, _, cx| view.request_explain(true, cx))),
             )
+            .children((!self.analyze_supported).then(|| {
+                div()
+                    .text_xs()
+                    .text_color(colors.muted_text)
+                    .child("SQLite: estimated plans only")
+            }))
             .children(pending.then(|| {
                 div()
                     .ml_2()
@@ -5563,7 +5580,7 @@ impl ResultsView {
                         .max_w(px(460.))
                         .text_sm()
                         .text_color(colors.muted_text)
-                        .child("Estimated plan does not run the query. Analyze query runs it and adds real row counts and timing."),
+                        .child(if self.analyze_supported { "Estimated plan does not run the query. Analyze query runs it and adds real row counts and timing." } else { "SQLite supports estimated EXPLAIN QUERY PLAN. Actual row counts and timing are not available." }),
                 )
                 .into_any_element(),
             ExplainState::Pending { analyze } => div()
@@ -6523,6 +6540,21 @@ mod tests {
                     value: Value::Text(r#"{"event":"open","tags":["demo"]}"#.into()),
                 })
             );
+        });
+    }
+
+    #[gpui::test]
+    fn sqlite_plan_controls_keep_estimated_plans_available(cx: &mut TestAppContext) {
+        let view = cx.update(|cx| cx.new(ResultsView::new));
+        view.update(cx, |view, cx| {
+            view.set_analyze_supported(false, cx);
+            view.request_explain(true, cx);
+            assert!(matches!(view.explain, ExplainState::Empty));
+            view.request_explain(false, cx);
+            assert!(matches!(
+                view.explain,
+                ExplainState::Pending { analyze: false }
+            ));
         });
     }
 
