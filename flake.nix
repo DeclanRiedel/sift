@@ -712,6 +712,14 @@ EOF
           '' + devCommand ''cargo run -p sift-website --'';
         };
 
+        wiki = pkgs.writeShellApplication {
+          name = "sift-wiki";
+          runtimeInputs = [ pkgs.nix ];
+          text = ''
+            echo "Wiki URL: http://''${1:-127.0.0.1:8787}/index.html"
+          '' + devCommand ''cargo run -p sift-website --'';
+        };
+
         desktopDemoWiki = pkgs.writeShellApplication {
           name = "sift-desktop-demo-wiki";
           runtimeInputs = with pkgs; [ coreutils curl python3 util-linux nix jq ];
@@ -844,6 +852,7 @@ EOF
               sift-desktop-demo         Seeded Postgres + SQL Server + SQLite + real backend + desktop.
               sift-desktop-demo-wiki    Run desktop demo + product page and wiki together.
               sift-website              Preview the Topcoat product page and wiki.
+              sift-wiki                 Serve only the wiki, without the desktop demo.
               sift-demo-sqlite          Create the SQLite fixture once, preserving existing files.
               sift-desktop-metadata    Open a read-only inspection snapshot of Sift's metadata.
               sift-dev-secret-key       Generate the ignored local metadata secret key file.
@@ -892,6 +901,7 @@ EOF
             desktopDemo
             desktopDemoWiki
             website
+            wiki
             demoSqlite
             desktopMetadata
             devSecretKey
@@ -975,6 +985,10 @@ EOF
           website = {
             type = "app";
             program = "${website}/bin/sift-website";
+          };
+          wiki = {
+            type = "app";
+            program = "${wiki}/bin/sift-wiki";
           };
           sift-desktop-demo-wiki = {
             type = "app";
