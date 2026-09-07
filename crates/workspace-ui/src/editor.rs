@@ -2476,9 +2476,7 @@ impl QueryEditor {
             self.document
                 .set_selection(start..start + replacement.len(), false);
         }
-        if let Some(vim) = self.vim.as_mut() {
-            vim.set_cursor(self.document.text(), self.document.cursor());
-        }
+        self.resync_keymap_after_external_change(cx);
         self.edited_with_auto_completion(false, cx);
     }
 
@@ -5871,6 +5869,44 @@ mod tests {
             editor.replace_text_from_owner("second", cx);
             assert_eq!(editor.document().text(), "second");
         });
+    }
+
+    #[gpui::test]
+    fn commenting_then_inserting_preserves_comment_and_undo(cx: &mut TestAppContext) {
+        for (language, source, expected) in [
+            (
+                EditorLanguage::Sql,
+                "CREATE VIEW broken",
+                "-- CREATE VIEW broken\nx",
+            ),
+            (
+                EditorLanguage::Toml,
+                "store_sql = true",
+                "# store_sql = true\nx",
+            ),
+        ] {
+            let window = cx
+                .update(|cx| {
+                    cx.open_window(Default::default(), |_, cx| {
+                        cx.new(|cx| QueryEditor::new(doc(source), cx).with_language(language))
+                    })
+                })
+                .unwrap();
+            let mut visual = VisualTestContext::from_window(window.into(), cx);
+            let editor = window.root(&mut visual).unwrap();
+            editor.update_in(&mut visual, |editor, window, cx| {
+                editor.apply_keymap(EditorKeymap::Vim);
+                editor.document.set_selection(0..0, false);
+                editor.toggle_comment(&ToggleComment, window, cx);
+                editor.replace_text_in_range(None, "i", window, cx);
+                editor.replace_text_in_range(None, "x", window, cx);
+                assert_eq!(editor.document.text(), expected);
+                editor.vim_undo(&VimUndo, window, cx);
+                assert_eq!(editor.document.text(), expected.trim_end_matches('x'));
+                editor.vim_undo(&VimUndo, window, cx);
+                assert_eq!(editor.document.text(), source);
+            });
+        }
     }
 
     #[gpui::test]
