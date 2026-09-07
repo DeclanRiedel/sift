@@ -26,13 +26,13 @@ main {
   margin: 0 auto;
   padding: 40px 30px 20px;
   background: var(--black);
-  border-inline: 1px solid var(--border);
+  border-inline: 1px dashed var(--border);
   display: flex;
   flex-direction: column;
 }
 
-/* Outside the divider line, a compact diagonal-stripe rail fills the
-   gutter so wide viewports do not show bare cell pattern. */
+/* Outside the dashed divider lines, compact vertical pinstripes fill the
+   gutter rails; each rail's far edge carries its own dashed line. */
 @media (min-width: 1360px) {
   main::before,
   main::after {
@@ -41,19 +41,17 @@ main {
     top: 0;
     bottom: 0;
     width: 80px;
-    background: repeating-linear-gradient(
-      135deg,
-      #16191a 0 5px,
-      #0a0c0d 5px 10px
-    );
+    background: repeating-linear-gradient(90deg, #16191a 0 3px, #0a0c0d 3px 6px);
   }
 
   main::before {
     right: 100%;
+    border-left: 1px dashed var(--border);
   }
 
   main::after {
     left: 100%;
+    border-right: 1px dashed var(--border);
   }
 }
 
@@ -88,7 +86,6 @@ footer {
   margin-bottom: -1px;
   color: var(--white);
   background: var(--black);
-  border-color: var(--border);
   border-top: 2px solid var(--accent);
 }
 
