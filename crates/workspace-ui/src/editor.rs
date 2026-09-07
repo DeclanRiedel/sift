@@ -2437,7 +2437,7 @@ impl QueryEditor {
             .filter(|line| !line.trim().is_empty())
             .all(|line| line.trim_start().starts_with(prefix))
             && lines.iter().any(|line| !line.trim().is_empty());
-        let replacement = lines
+        let mut replacement = lines
             .into_iter()
             .map(|line| {
                 let body = line.trim_start();
@@ -2454,9 +2454,13 @@ impl QueryEditor {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let append_line = selection.is_empty() && end == text.len();
+        if append_line {
+            replacement.push('\n');
+        }
         self.document.replace_range(start..end, &replacement);
         if selection.is_empty() {
-            let cursor = start + replacement.find('\n').unwrap_or(replacement.len());
+            let cursor = start + replacement.len() + usize::from(!append_line);
             self.document.set_selection(cursor..cursor, false);
         } else {
             self.document
@@ -5708,6 +5712,29 @@ mod tests {
             editor.read_with(&cx, |editor, _| editor.document.selection()),
             expected
         );
+    }
+
+    #[gpui::test]
+    fn commenting_current_line_advances_to_next_line(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_, cx| {
+                    cx.new(|cx| QueryEditor::new(doc("select 1;\nselect 2;"), cx))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.document.set_selection(0..0, false);
+            editor.toggle_comment(&ToggleComment, window, cx);
+            assert_eq!(editor.document.cursor(), 13);
+            editor.toggle_comment(&ToggleComment, window, cx);
+            assert_eq!(editor.document.text(), "-- select 1;\n-- select 2;\n");
+            assert_eq!(editor.document.cursor(), editor.document.text().len());
+            editor.document.undo();
+            assert_eq!(editor.document.text(), "-- select 1;\nselect 2;");
+        });
     }
 
     #[gpui::test]
