@@ -4524,6 +4524,7 @@ impl Pane {
                 dirty: None,
             }),
             EditorEvent::OpenCommandPalette => cx.emit(PaneEvent::OpenCommandPaletteRequested),
+            EditorEvent::SaveRequested => cx.emit(PaneEvent::SaveItemRequested { item_id }),
             EditorEvent::Execute { sql } => {
                 // Show the pending state immediately, then ask the workspace to
                 // dispatch the run. The workspace owns the executor channel.
@@ -8106,14 +8107,7 @@ impl gpui::Render for Pane {
                                     Vec::new()
                                 };
                                 let outline_editor = editor.clone();
-                                let item_id = item.id;
-                                body.children((item.title == "sift.toml").then(|| {
-                                    div().h(px(32.)).flex_none().flex().items_center().gap_2().px_2().bg(colors.toolbar)
-                                        .child(Button::new("save-review-instance-config", "Save & review changes")
-                                            .tone(ButtonTone::Accent)
-                                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(PaneEvent::SaveItemRequested { item_id }))))
-                                        .child(div().text_xs().text_color(colors.muted_text).child("Review the plan, then choose Apply."))
-                                })).child(
+                                body.child(
                                     div()
                                         .flex_1()
                                         .min_h_0()

@@ -879,6 +879,7 @@ pub enum EditorEvent {
     VimStateChanged,
     /// Vim's command prefix requested the workspace command palette.
     OpenCommandPalette,
+    SaveRequested,
     /// Run this SQL (the statement under the caret, or the whole document).
     Execute { sql: String },
     /// Ask the workspace to drive the server semantic document. `revision` is
@@ -3094,6 +3095,15 @@ impl QueryEditor {
                                 lifecycle.missing_credentials
                             ))
                     }),
+                )
+                .child(div().flex_1())
+                .child(
+                    div().id("save-review-instance-config").debug_selector(|| "save-review-instance-config".into())
+                        .flex_none().px_2().py_1().text_xs().cursor_pointer()
+                        .text_color(colors.muted_text)
+                        .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
+                        .child("Save & review · :w")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(EditorEvent::SaveRequested))),
                 )
                 .into_any_element(),
         )
