@@ -49,7 +49,7 @@ const EDITOR_LINE_HEIGHT: Pixels = px(20.);
 const BLOCK_CURSOR_FALLBACK_WIDTH: Pixels = px(7.);
 pub(crate) const EDITOR_GUTTER_WIDTH: Pixels = px(48.);
 const EDITOR_TEXT_INSET: Pixels = px(12.);
-const EDITOR_VERTICAL_INSET: Pixels = px(8.);
+pub(crate) const EDITOR_VERTICAL_INSET: Pixels = px(8.);
 const DIAGNOSTIC_UNDERLINE_HEIGHT: Pixels = px(2.);
 /// Zero-width server ranges (end-of-statement errors) still need a visible
 /// mark, so they paint as a narrow stub rather than nothing.

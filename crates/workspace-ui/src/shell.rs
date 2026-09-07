@@ -8437,6 +8437,7 @@ impl gpui::Render for Pane {
                                                     .flex_none()
                                                     .flex()
                                                     .min_h_0()
+                                                    .pt(crate::editor::EDITOR_VERTICAL_INSET)
                                                     .child(result.clone()),
                                             )
                                             .into_any_element(),
@@ -8457,6 +8458,7 @@ impl gpui::Render for Pane {
                                                     .flex_none()
                                                     .flex()
                                                     .min_w_0()
+                                                    .pt(crate::editor::EDITOR_VERTICAL_INSET)
                                                     .child(result.clone()),
                                             )
                                             .into_any_element(),
