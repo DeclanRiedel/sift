@@ -33552,7 +33552,11 @@ impl WorkspaceShell {
                 .flex()
                 .items_center()
                 .gap_2()
-                .window_control_area(WindowControlArea::Drag)
+                // Interactive breadcrumbs must not become native window drag targets.
+                .occlude()
+                .when(database_breadcrumb.is_none(), |title| {
+                    title.window_control_area(WindowControlArea::Drag)
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|shell, event: &gpui::MouseDownEvent, window, cx| {
@@ -33606,15 +33610,6 @@ impl WorkspaceShell {
             .gap_2()
             .bg(colors.toolbar)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(center_content),
-            )
             .child(
                 div()
                     .flex()
@@ -33735,6 +33730,15 @@ impl WorkspaceShell {
                                 }),
                             ),
                     ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(center_content),
             )
             .child(
                 div()
@@ -41657,6 +41661,45 @@ mod tests {
         let app_bar = cx.debug_bounds("integrated-titlebar").expect("app bar");
         assert!(breadcrumb.top() >= app_bar.top());
         assert!(breadcrumb.bottom() <= app_bar.bottom());
+        for (index, selector) in [
+            "breadcrumb-connection",
+            "breadcrumb-catalog",
+            "breadcrumb-schema",
+            "breadcrumb-object",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            workspace.update_in(&mut cx, |shell, _, cx| {
+                shell.left_dock.presentation.open = false;
+                shell.expanded_catalogs.clear();
+                shell.expanded_schemas.clear();
+                shell.expanded_object_groups.clear();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let segment = cx
+                .debug_bounds(selector)
+                .expect("clickable breadcrumb segment");
+            cx.simulate_click(segment.center(), Modifiers::default());
+            workspace.read_with(&cx, |shell, _| {
+                assert!(shell.left_dock.presentation.open);
+                assert_eq!(shell.focused_surface, WorkspaceSurface::Connections);
+                assert!(shell.expanded_connections.contains(&2));
+                assert_eq!(
+                    shell.expanded_catalogs.contains(&(2, "sifttest".into())),
+                    index >= 1
+                );
+                assert_eq!(
+                    shell
+                        .expanded_schemas
+                        .contains(&(2, "sifttest".into(), "lab".into())),
+                    index >= 2
+                );
+                assert_eq!(shell.expanded_object_groups.is_empty(), index < 3);
+            });
+        }
+
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             assert_eq!(pane.active_item().map(|item| item.id), Some(item_id));

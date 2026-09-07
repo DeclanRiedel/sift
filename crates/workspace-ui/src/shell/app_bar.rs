@@ -166,6 +166,15 @@ pub(super) fn render_database_breadcrumb(
         breadcrumb = breadcrumb.child(
             div()
                 .id(format!("database-breadcrumb-segment-{item_id}-{index}"))
+                .debug_selector(move || {
+                    match level {
+                        DatabaseBreadcrumbLevel::Connection => "breadcrumb-connection",
+                        DatabaseBreadcrumbLevel::Catalog => "breadcrumb-catalog",
+                        DatabaseBreadcrumbLevel::Schema => "breadcrumb-schema",
+                        DatabaseBreadcrumbLevel::Object => "breadcrumb-object",
+                    }
+                    .into()
+                })
                 .min_w_0()
                 .max_w(px(130.))
                 .px_1()
