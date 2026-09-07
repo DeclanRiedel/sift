@@ -478,6 +478,10 @@
             }
             demo_error() {
               status=$?
+              # A failing command substitution is reported by its parent.
+              if [ "$BASH_SUBSHELL" -gt 0 ]; then
+                exit "$status"
+              fi
               echo "Desktop demo failed during: $phase_name (exit $status)." >&2
               echo "Resolve the error above, then rerun the launcher." >&2
               exit "$status"

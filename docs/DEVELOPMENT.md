@@ -7,6 +7,16 @@ Build and run Sift natively on each host. The desktop can connect to either
 server over the same API. Windows does not need WSL or a local database for
 the regular workspace tests.
 
+## Demo PostgreSQL recovery
+
+The desktop demo checks PostgreSQL catalogs before resetting `sifttest` and
+stops on seed SQL errors. If catalog files are missing from the default
+`/tmp/sift-demo-pg` cluster during a requested demo reset, it stops the server,
+preserves the entire cluster under `/tmp/sift-demo-pg.damaged.*/cluster`, and
+initializes and seeds a replacement. Recovery is attempted once. Custom
+`SIFT_DEMO_PGDATA` directories are never automatically rebuilt; their catalog
+errors are reported with the original directory preserved.
+
 ## Windows 11
 
 Install Git, Rustup, CMake, and Visual Studio Build Tools with **Desktop

@@ -63,7 +63,6 @@ elif [ "$pgport_explicit" = 0 ]; then
 fi
 
 if [ ! -f "$pgdata/PG_VERSION" ]; then
-  rm -rf "$pgdata"
   initdb -D "$pgdata" -U sift --auth=trust --no-locale --encoding=UTF8 >&2
   {
     echo "listen_addresses = '127.0.0.1'"
@@ -99,11 +98,36 @@ if ! pg_ctl -D "$pgdata" status >/dev/null 2>&1; then
   fi
 fi
 
+# Opening a socket does not prove the cluster's shared catalogs are intact.
+# In particular DROP DATABASE reads pg_subscription even when no subscriptions
+# exist. Preserve damaged state before rebuilding only the default disposable
+# cluster, and only when the launcher already requested a demo reset.
+if ! catalog_error="$(psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$pgport" -U sift -d postgres -Atc \
+  'SELECT count(*) FROM pg_catalog.pg_database; SELECT count(*) FROM pg_catalog.pg_subscription;' 2>&1)"; then
+  case "$catalog_error" in
+    *'could not open file "global/'*'No such file or directory'* | *'could not open file "base/'*'No such file or directory'*)
+      if [ "$pgdata" = /tmp/sift-demo-pg ] && [ "${SIFT_DEMO_RESET:-0}" = 1 ] && [ "${1:-}" != --catalog-recovery ]; then
+        pg_ctl -D "$pgdata" -m fast -w stop >&2
+        archive="$(mktemp -d "${pgdata}.damaged.XXXXXXXX")"
+        mv "$pgdata" "$archive/cluster"
+        echo "Preserved damaged demo PostgreSQL cluster at $archive/cluster; rebuilding the demo." >&2
+        exec sh "$0" --catalog-recovery
+      fi
+      ;;
+  esac
+  echo "Demo PostgreSQL catalog check failed; cluster preserved at $pgdata:" >&2
+  printf '%s\n' "$catalog_error" >&2
+  exit 1
+fi
+
 if [ "${SIFT_DEMO_RESET:-0}" = "1" ]; then
   dropdb -h 127.0.0.1 -p "$pgport" -U sift --if-exists --force sifttest >&2
 fi
-createdb -h 127.0.0.1 -p "$pgport" -U sift sifttest 2>/dev/null || true
-psql -q -h 127.0.0.1 -p "$pgport" -U sift -d sifttest >&2 <<'SQL'
+database_exists="$(psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$pgport" -U sift -d postgres -Atc "SELECT 1 FROM pg_database WHERE datname = 'sifttest'")"
+if [ "$database_exists" != 1 ]; then
+  createdb -h 127.0.0.1 -p "$pgport" -U sift sifttest >&2
+fi
+psql -X -v ON_ERROR_STOP=1 -q -h 127.0.0.1 -p "$pgport" -U sift -d sifttest >&2 <<'SQL'
 SET client_min_messages = warning;
 CREATE SCHEMA IF NOT EXISTS lab;
 
