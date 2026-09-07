@@ -38085,7 +38085,7 @@ impl WorkspaceShell {
                                                     .debug_selector(move || {
                                                         format!("saved-query-panel-rename-{index}")
                                                     })
-                                                    .h(px(58.))
+                                                    .h(px(80.))
                                                     .mx_2()
                                                     .px_2()
                                                     .flex()
@@ -38121,7 +38121,7 @@ impl WorkspaceShell {
                                                     .debug_selector(move || {
                                                         format!("saved-query-panel-tags-{index}")
                                                     })
-                                                    .h(px(58.))
+                                                    .h(px(80.))
                                                     .mx_2()
                                                     .px_2()
                                                     .flex()
@@ -38159,7 +38159,7 @@ impl WorkspaceShell {
                                                     .debug_selector(move || {
                                                         format!("saved-query-panel-delete-{index}")
                                                     })
-                                                    .h(px(58.))
+                                                    .h(px(80.))
                                                     .mx_2()
                                                     .px_2()
                                                     .flex()
@@ -38204,7 +38204,7 @@ impl WorkspaceShell {
                                                 .debug_selector(move || {
                                                     format!("saved-query-panel-row-{index}")
                                                 })
-                                                .h(px(58.))
+                                                .h(px(80.))
                                                 .mx_2()
                                                 .px_2()
                                                 .py_1()
