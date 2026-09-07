@@ -4106,6 +4106,12 @@ impl WorkspaceShell {
                                 .p_3()
                                 .when(step == DatabaseWizardStep::Provider, |form| {
                                     form.child(
+                                        Button::new("database-connection-via-url", "Add via URL")
+                                            .debug_selector("database-connection-via-url")
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_connection_url(window, cx);
+                                            })),
+                                    ).child(
                                         div()
                                             .flex()
                                             .flex_col()

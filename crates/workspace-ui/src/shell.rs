@@ -20132,7 +20132,12 @@ impl WorkspaceShell {
     }
 
     fn open_connection_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_database_connection(window, cx);
+        self.selected_database_tenant = self
+            .selected_database_tenant
+            .or_else(|| self.lifecycle.tenants.first().map(|tenant| tenant.id.0));
+        self.modal = Some(Modal::ConnectionUrl);
+        self.connection_url_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 
     fn submit_connection_url(&mut self, cx: &mut Context<Self>) {
@@ -36219,7 +36224,7 @@ impl WorkspaceShell {
                                         .tone(ButtonTone::Ghost)
                                         .start_icon(IconName::Add)
                                         .on_click(cx.listener(|shell, _, window, cx| {
-                                            shell.open_connection_url(window, cx)
+                                            shell.open_database_connection(window, cx)
                                         })),
                                 ),
                         )
@@ -46454,6 +46459,22 @@ mod tests {
     }
 
     #[gpui::test]
+    fn url_connection_entry_opens_url_input(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut visual).unwrap();
+        workspace.update_in(&mut visual, |shell, window, cx| {
+            shell.modal = Some(Modal::CommandPalette);
+            shell.run_command(CommandId::AddConnectionByUrl, window, cx);
+            assert_eq!(shell.modal, Some(Modal::ConnectionUrl));
+            assert!(shell
+                .connection_url_input
+                .focus_handle(cx)
+                .is_focused(window));
+        });
+    }
+
+    #[gpui::test]
     fn connection_url_creates_profile_and_keeps_password_out_of_configuration(
         cx: &mut TestAppContext,
     ) {
@@ -46818,6 +46839,14 @@ mod tests {
         workspace.read_with(&cx, |shell, _| {
             assert_eq!(shell.modal, Some(Modal::DatabaseConnection));
             assert!(shell.pending_manifest_path.is_none());
+        });
+        cx.run_until_parked();
+        let url = cx
+            .debug_bounds("database-connection-via-url")
+            .expect("URL entry above provider choices");
+        cx.simulate_click(url.center(), Modifiers::default());
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.modal, Some(Modal::ConnectionUrl));
         });
     }
 
