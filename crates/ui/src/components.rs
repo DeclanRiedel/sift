@@ -34,6 +34,7 @@ pub struct PaneTab {
     div: Stateful<Div>,
     selected: bool,
     selected_background: Option<gpui::Hsla>,
+    compact: bool,
     dirty: bool,
     staged: bool,
     children: Vec<AnyElement>,
@@ -45,6 +46,7 @@ impl PaneTab {
             div: div().id(id),
             selected: false,
             selected_background: None,
+            compact: false,
             dirty: false,
             staged: false,
             children: Vec::new(),
@@ -53,6 +55,11 @@ impl PaneTab {
 
     pub fn debug_selector(mut self, selector: impl Fn() -> String + 'static) -> Self {
         self.div = self.div.debug_selector(selector);
+        self
+    }
+
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
         self
     }
 
@@ -100,7 +107,7 @@ impl RenderOnce for PaneTab {
             .flex()
             .items_center()
             .h(cx.theme().metrics.tab_height)
-            .min_w(px(110.))
+            .min_w(px(if self.compact { 0. } else { 110. }))
             .max_w(px(240.))
             .border_r_1()
             .when(!self.selected, |tab| tab.border_b_1())

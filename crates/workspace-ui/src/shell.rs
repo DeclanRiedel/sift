@@ -1435,6 +1435,9 @@ struct ObjectBrowserRow {
 
 #[derive(Debug, Clone)]
 struct ObjectBrowserState {
+    search: String,
+    search_open: bool,
+    search_input: Entity<TextInput>,
     profile_id: i64,
     context: DatabaseObjectSource,
     rows: Vec<ObjectBrowserRow>,
@@ -1455,9 +1458,11 @@ struct ObjectBrowserState {
 impl ObjectBrowserState {
     fn visible_rows(&self) -> impl Iterator<Item = &ObjectBrowserRow> {
         self.rows.iter().filter(|row| {
-            self.catalog
-                .as_ref()
-                .is_none_or(|catalog| row.source.catalog.as_ref() == Some(catalog))
+            row.source.object.to_lowercase().contains(&self.search)
+                && self
+                    .catalog
+                    .as_ref()
+                    .is_none_or(|catalog| row.source.catalog.as_ref() == Some(catalog))
                 && self
                     .schema
                     .as_ref()
@@ -5507,8 +5512,24 @@ impl Pane {
             self.active_item = 0;
             self.object_browsers.insert(item_id, state);
         }
+        self.subscribe_object_browser_search(self.items[0].id, cx);
         self.pending_close_item = None;
         cx.notify();
+    }
+
+    fn subscribe_object_browser_search(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let input = self.object_browsers[&item_id].search_input.clone();
+        let subscription = cx.subscribe(&input, move |pane, input, event: &TextInputEvent, cx| {
+            if *event != TextInputEvent::Changed {
+                return;
+            }
+            if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
+                browser.search = input.read(cx).text().to_lowercase();
+                browser.selected = 0;
+                cx.notify();
+            }
+        });
+        self.editor_subscriptions.insert(item_id, subscription);
     }
 
     fn object_browser_action(&mut self, action: char, cx: &mut Context<Self>) {
@@ -5537,7 +5558,7 @@ impl Pane {
     fn handle_object_browser_key(
         &mut self,
         event: &gpui::KeyDownEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if event.keystroke.modifiers.modified() {
@@ -5549,6 +5570,28 @@ impl Pane {
         let Some(browser) = self.object_browsers.get_mut(&item_id) else {
             return;
         };
+        if browser.search_input.focus_handle(cx).is_focused(window) {
+            if matches!(event.keystroke.key.as_str(), "escape" | "enter") {
+                if event.keystroke.key == "escape" {
+                    browser.search_open = false;
+                    browser.search.clear();
+                    browser
+                        .search_input
+                        .update(cx, |input, cx| input.set_text("", cx));
+                }
+                self.focus_handle.focus(window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        if event.keystroke.key == "/" {
+            browser.search_open = true;
+            browser.search_input.focus_handle(cx).focus(window, cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         let visible_row_count = browser.visible_row_count();
         match event.keystroke.key.as_str() {
             "j" | "down" => {
@@ -5858,6 +5901,7 @@ impl Pane {
                             .justify_start()
                             .overflow_x_scroll()
                             .gap_1()
+                            .children(browser.search_open.then(|| div().w(px(220.)).flex_none().child(browser.search_input.clone())))
                             .child(SectionLabel::new("CONNECTION"))
                             .child(
                                 div()
@@ -6632,6 +6676,7 @@ impl Pane {
         }
         if let Some(browser) = transfer.object_browser {
             self.object_browsers.insert(item_id, browser);
+            self.subscribe_object_browser_search(item_id, cx);
         }
         if let Some(results) = transfer.results {
             self.attach_results(item_id, results, cx);
@@ -7703,6 +7748,7 @@ impl gpui::Render for Pane {
                                             .filter(|(rename_id, _)| *rename_id == item_id)
                                             .map(|(_, input)| input.clone());
                                         PaneTab::new(("tab", item.id as usize))
+                                            .compact(self.object_browsers.contains_key(&item.id))
                                             .selected_background(active_tab_background)
                                             .debug_selector(move || tab_debug.clone())
                                             .selected(selected)
@@ -19281,6 +19327,9 @@ impl WorkspaceShell {
                         last_result: None,
                     },
                     ObjectBrowserState {
+                        search: String::new(),
+                        search_open: false,
+                        search_input: cx.new(|cx| TextInput::new("", "Search objects…", cx)),
                         profile_id,
                         context,
                         rows,
@@ -48688,6 +48737,24 @@ mod tests {
             assert_eq!(jobs.estimated_rows, Some(42));
             assert_eq!(jobs.comment.as_deref(), Some("Queued work"));
         });
+        cx.simulate_keystrokes("/");
+        cx.run_until_parked();
+        cx.simulate_input("JoBs");
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let browser = &pane.object_browsers[&pane.active_item().unwrap().id];
+            assert!(browser.search_open);
+            assert_eq!(browser.visible_row_count(), 1);
+            assert_eq!(browser.selected_row().unwrap().source.object, "jobs");
+        });
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(&cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let browser = &pane.object_browsers[&pane.active_item().unwrap().id];
+            assert!(!browser.search_open);
+            assert_eq!(browser.visible_row_count(), 2);
+        });
+        cx.run_until_parked();
         assert!(
             cx.debug_bounds("object-browser-row-0").is_some(),
             "visible object rows must receive layout space"
