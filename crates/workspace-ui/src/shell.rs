@@ -9476,6 +9476,11 @@ pub struct WorkspaceShell {
     room_document_generations: HashMap<i64, u64>,
     running_queries: HashMap<u64, u64>,
     pending_result_focus: Option<u64>,
+    modal_offset: gpui::Point<Pixels>,
+    modal_drag: Option<(gpui::Point<Pixels>, gpui::Point<Pixels>, Bounds<Pixels>)>,
+    modal_position_kind: Option<Modal>,
+    modal_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+
     database_monitor: DatabaseMonitorState,
     transaction_state: TransactionUiState,
     savepoints: Vec<String>,
@@ -10712,6 +10717,11 @@ impl WorkspaceShell {
             room_document_generations: HashMap::new(),
             running_queries: HashMap::new(),
             pending_result_focus: None,
+            modal_offset: gpui::point(px(0.), px(0.)),
+            modal_drag: None,
+            modal_position_kind: None,
+            modal_bounds: Default::default(),
+
             database_monitor: DatabaseMonitorState::default(),
             transaction_state: TransactionUiState::Idle,
             savepoints: Vec::new(),
@@ -25366,6 +25376,64 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn drag_modal(
+        &mut self,
+        event: &gpui::MouseMoveEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.dragging() {
+            self.modal_drag = None;
+            return;
+        }
+        if let Some((pointer, offset, bounds)) = self.modal_drag {
+            let viewport = window.viewport_size();
+            let base = bounds.origin - offset;
+            let desired = offset + (event.position - pointer);
+            let x = desired.x.clamp(
+                px(4.) - base.x,
+                (viewport.width - bounds.size.width - px(4.) - base.x).max(px(4.) - base.x),
+            );
+            let y = desired.y.clamp(
+                px(4.) - base.y,
+                (viewport.height - bounds.size.height - px(4.) - base.y).max(px(4.) - base.y),
+            );
+            self.modal_offset = gpui::point(x, y);
+            cx.notify();
+        }
+    }
+
+    fn toggle_unpin_modals(&mut self, cx: &mut Context<Self>) {
+        let settings_is_open = self.settings_item.is_some_and(|item_id| {
+            self.panes
+                .iter()
+                .any(|pane| pane.read(cx).contains_item(item_id))
+        });
+        if settings_is_open {
+            self.show_toast(
+                "Save or close settings.toml before changing this preference here".into(),
+                cx,
+            );
+            return;
+        }
+        let enabled = !self.settings.ui.unpin_modals;
+        let mut settings = self.settings.clone();
+        settings.ui.unpin_modals = enabled;
+        if let Some(store) = &self.settings_store {
+            settings = match store.save_unpin_modals(enabled) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    self.show_toast(error, cx);
+                    return;
+                }
+            };
+        }
+        self.settings = settings;
+        self.modal_offset = gpui::point(px(0.), px(0.));
+        self.modal_drag = None;
+        cx.notify();
+    }
+
     fn navigation_hints_visible(&self) -> bool {
         match self.settings.ui.navigation_hints {
             NavigationHints::Always => true,
@@ -38927,6 +38995,12 @@ impl gpui::Render for PaneLayoutView {
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_result_plan_support(cx);
+        if self.modal_position_kind != self.modal || !self.settings.ui.unpin_modals {
+            self.modal_position_kind = self.modal.clone();
+            self.modal_offset = gpui::point(px(0.), px(0.));
+            self.modal_drag = None;
+        }
+
         if let Some(item_id) = self.pending_result_focus.take() {
             if self.modal.is_none()
                 && self
@@ -42059,6 +42133,33 @@ mod tests {
                 "actions overflow horizontally"
             );
         }
+    }
+
+    #[gpui::test]
+    fn unpinned_modals_move_by_handle_and_can_be_pinned(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            assert!(shell.settings.ui.unpin_modals);
+            shell.modal = Some(Modal::Settings);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let before = cx.debug_bounds("modal-card").unwrap();
+        let handle = cx.debug_bounds("modal-drag-handle").unwrap();
+        let start = handle.center();
+        let end = start + gpui::point(px(40.), px(0.));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let after = cx.debug_bounds("modal-card").unwrap();
+        assert!(after.left() > before.left());
+        workspace.update(&mut cx, |shell, cx| shell.toggle_unpin_modals(cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("modal-drag-handle").is_none());
+        assert_eq!(cx.debug_bounds("modal-card").unwrap().left(), before.left());
     }
 
     #[gpui::test]

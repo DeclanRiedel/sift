@@ -29,7 +29,9 @@ impl WorkspaceShell {
             let viewport = window.viewport_size();
             let layer_height = viewport.height - if app_bar_modal { toolbar_height } else { px(0.) };
             let popover = server_picker || account || command_palette;
-            let max_card_height = (layer_height - px(if popover { 12.0 } else { 32.0 })).max(px(1.));
+            let movable = self.settings.ui.unpin_modals;
+            let grip_height = if movable { px(16.) } else { px(0.) };
+            let max_card_height = (layer_height - px(if popover { 12.0 } else { 32.0 }) - grip_height).max(px(1.));
             let content = match modal {
                 Modal::CommandPalette => {
                     let input = self.query_input.read(cx).text();
@@ -2800,6 +2802,13 @@ impl WorkspaceShell {
                                     shell.toggle_selection_aggregates(cx)
                                 },
                             )) as sift_ui::ClickHandler,
+                        ))
+                        .child(toggle_row(
+                            "settings-unpin-modals",
+                            "Unpin modals",
+                            "Drag modal handles to move dialogs around the window.",
+                            self.settings.ui.unpin_modals,
+                            Box::new(cx.listener(|shell: &mut WorkspaceShell, _, _, cx| shell.toggle_unpin_modals(cx))) as sift_ui::ClickHandler,
                         ))
                         .child(toggle_row(
                             "settings-recent-objects",
@@ -7948,7 +7957,41 @@ impl WorkspaceShell {
                     layer.items_center().justify_center().bg(colors.scrim)
                 })
                 .child(
-                    modal_layout::card(data_results, padded, card_width, max_card_height, colors, cx.theme().metrics)
+                    modal_layout::card(data_results, padded, card_width, max_card_height + grip_height, colors, cx.theme().metrics)
+                        .relative()
+                        .left(self.modal_offset.x)
+                        .top(self.modal_offset.y)
+                        .child(gpui::canvas({
+                            let bounds_cell = self.modal_bounds.clone();
+                            move |bounds, _, _| bounds_cell.set(Some(bounds))
+                        }, {
+                            let target = cx.entity().downgrade();
+                            move |_, _, window, _| {
+                                let target_move = target.clone();
+                                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                                    if phase == gpui::DispatchPhase::Capture {
+                                        let _ = target_move.update(cx, |shell, cx| shell.drag_modal(event, window, cx));
+                                    }
+                                });
+                                window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, cx| {
+                                    if phase == gpui::DispatchPhase::Capture {
+                                        let _ = target.update(cx, |shell, _| shell.modal_drag = None);
+                                    }
+                                });
+                            }
+                        }).absolute().size_full())
+                        .children(movable.then(|| div()
+                            .id("modal-drag-handle")
+                            .debug_selector(|| "modal-drag-handle".into())
+                            .h(grip_height).w_full().flex_none().cursor(CursorStyle::ClosedHand)
+                            .flex().items_center().justify_center()
+                            .on_mouse_down(MouseButton::Left, cx.listener(|shell, event: &gpui::MouseDownEvent, _, cx| {
+                                if let Some(bounds) = shell.modal_bounds.get() {
+                                    shell.modal_drag = Some((event.position, shell.modal_offset, bounds));
+                                }
+                                cx.stop_propagation();
+                            }))
+                            .child(div().w(px(32.)).h(px(3.)).rounded_full().bg(colors.muted_text))))
                         .child(content),
                 )
         })

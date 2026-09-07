@@ -62,6 +62,7 @@ pub struct DataSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiSettings {
+    pub unpin_modals: bool,
     pub recent_objects: bool,
     pub navigation_hints: NavigationHints,
 }
@@ -69,6 +70,7 @@ pub struct UiSettings {
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
+            unpin_modals: true,
             recent_objects: true,
             navigation_hints: NavigationHints::Always,
         }
@@ -730,6 +732,38 @@ impl SettingsStore {
         Ok(settings)
     }
 
+    pub fn save_unpin_modals(&self, enabled: bool) -> Result<UserSettings, String> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "settings write lock poisoned".to_string())?;
+        let source = std::fs::read_to_string(&self.path)
+            .map_err(|error| format!("reading {} failed: {error}", self.path.display()))?;
+        let mut document = source
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("settings.toml is invalid: {error}"))?;
+        if document.get("ui").is_none() {
+            document["ui"] = Item::Table(toml_edit::Table::new());
+        }
+        let ui = document
+            .get_mut("ui")
+            .and_then(Item::as_table_mut)
+            .ok_or_else(|| "settings.toml [ui] must be a table".to_owned())?;
+        let decor = ui
+            .get("unpin_modals")
+            .and_then(Item::as_value)
+            .map(|value| value.decor().clone());
+        let mut enabled_value = Value::from(enabled);
+        if let Some(decor) = decor {
+            *enabled_value.decor_mut() = decor;
+        }
+        ui.insert("unpin_modals", Item::Value(enabled_value));
+        let updated = document.to_string();
+        let settings = UserSettings::decode(&updated)?;
+        self.write_source(&updated)?;
+        Ok(settings)
+    }
+
     /// Update navigation-hint visibility while preserving hand-written settings.
     pub fn save_navigation_hints(&self, mode: NavigationHints) -> Result<UserSettings, String> {
         let _guard = self
@@ -865,6 +899,17 @@ fn write_atomic(path: &Path, source: &str, extension: &str) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modal_pin_preference_defaults_on_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().join("settings.toml"));
+        let defaults = UserSettings::decode("").unwrap();
+        assert!(defaults.ui.unpin_modals);
+        store.save(&defaults).unwrap();
+        store.save_unpin_modals(false).unwrap();
+        assert!(!store.load().unwrap().ui.unpin_modals);
+    }
 
     #[test]
     fn settings_round_trip_uses_readable_toml() {
