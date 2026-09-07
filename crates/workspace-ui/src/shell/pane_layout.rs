@@ -79,14 +79,12 @@ fn validate_node(layout: &PaneLayoutPresentation, leaves: &mut Vec<u64>) -> bool
     }
 }
 
-#[cfg(test)]
 pub fn pane_ids(layout: &PaneLayoutPresentation) -> Vec<u64> {
     let mut ids = Vec::new();
     collect_pane_ids(layout, &mut ids);
     ids
 }
 
-#[cfg(test)]
 fn collect_pane_ids(layout: &PaneLayoutPresentation, ids: &mut Vec<u64>) {
     match layout {
         PaneLayoutPresentation::Pane { pane_id } => ids.push(*pane_id),
@@ -317,6 +315,52 @@ pub fn remove(layout: &mut PaneLayoutPresentation, pane_id: u64) -> bool {
     false
 }
 
+/// Return the squeezed subtree and its surviving neighbor when a divider is
+/// dragged within the collapse distance of either edge of its adjacent pair.
+pub fn collapse_target(
+    layout: &PaneLayoutPresentation,
+    path: &[usize],
+    boundary: usize,
+    pointer: f32,
+    available: f32,
+    threshold: f32,
+) -> Option<(Vec<u64>, u64)> {
+    let mut node = layout;
+    for index in path {
+        let PaneLayoutPresentation::Split { children, .. } = node else {
+            return None;
+        };
+        node = children.get(*index)?;
+    }
+    let PaneLayoutPresentation::Split {
+        children, flexes, ..
+    } = node
+    else {
+        return None;
+    };
+    if boundary + 1 >= children.len() || available <= 0.0 {
+        return None;
+    }
+    let total = flexes.iter().sum::<f32>();
+    let start = flexes[..boundary].iter().sum::<f32>() / total * available;
+    let end = start + (flexes[boundary] + flexes[boundary + 1]) / total * available;
+    // Tiny viewports should not turn ordinary resizing into accidental closure.
+    if end - start <= threshold * 2.0 {
+        return None;
+    }
+    let (source, target) = if pointer - start <= threshold {
+        (boundary, boundary + 1)
+    } else if end - pointer <= threshold {
+        (boundary + 1, boundary)
+    } else {
+        return None;
+    };
+    Some((
+        pane_ids(&children[source]),
+        *pane_ids(&children[target]).first()?,
+    ))
+}
+
 pub fn resize(
     layout: &mut PaneLayoutPresentation,
     path: &[usize],
@@ -406,6 +450,26 @@ mod tests {
         };
         assert_eq!(axis, PaneAxis::Horizontal);
         assert_eq!(flexes, vec![2.0, 1.0]);
+    }
+
+    #[test]
+    fn collapse_thresholds_follow_adjacent_pairs_and_nested_subtrees() {
+        let mut layout = from_legacy(&[1, 2, 3], vec![1.0, 1.0, 1.0]);
+        split(&mut layout, 2, 4, SplitDirection::Down);
+        assert_eq!(
+            collapse_target(&layout, &[], 1, 320.0, 900.0, 48.0),
+            Some((vec![2, 4], 3))
+        );
+        assert_eq!(
+            collapse_target(&layout, &[], 1, 860.0, 900.0, 48.0),
+            Some((vec![3], 2))
+        );
+        assert_eq!(collapse_target(&layout, &[], 1, 600.0, 900.0, 48.0), None);
+        assert_eq!(
+            collapse_target(&layout, &[1], 0, 460.0, 500.0, 48.0),
+            Some((vec![4], 2))
+        );
+        assert_eq!(collapse_target(&layout, &[1], 0, 20.0, 80.0, 48.0), None);
     }
 
     #[test]

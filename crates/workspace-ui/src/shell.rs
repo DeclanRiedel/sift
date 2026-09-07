@@ -93,6 +93,7 @@ const PANE_DROP_TARGET_FRACTION: f32 = 0.2;
 const ROOT_PANE_DROP_TARGET_SIZE: f32 = 48.0;
 const RESULT_RESIZE_HANDLE_SIZE: f32 = 7.0;
 const RESULT_MIN_EXTENT: f32 = 140.0;
+const DRAG_COLLAPSE_EXTENT: f32 = 48.0;
 const EDITOR_MIN_EXTENT: f32 = 160.0;
 
 const fn result_placement(setting: QueryResultsPlacement) -> ResultPlacement {
@@ -6330,6 +6331,22 @@ impl Pane {
         let height: f32 = event.bounds.size.height.into();
         let pointer_x: f32 = (event.event.position.x - event.bounds.left()).into();
         let pointer_y: f32 = (event.event.position.y - event.bounds.top()).into();
+        let requested = match drag.placement {
+            ResultPlacement::Bottom => height - pointer_y,
+            ResultPlacement::Right => width - pointer_x,
+        };
+        if requested <= DRAG_COLLAPSE_EXTENT {
+            self.live_result_extents.remove(&drag.item_id);
+            self.results[&drag.item_id].update(cx, |result, cx| {
+                result.collapsed = true;
+                cx.notify();
+            });
+            if let Some(editor) = self.editors.get(&drag.item_id) {
+                editor.focus_handle(cx).focus(window, cx);
+            }
+            cx.notify();
+            return;
+        }
         let extent = match drag.placement {
             ResultPlacement::Bottom => (height - pointer_y)
                 .max(RESULT_MIN_EXTENT)
@@ -6543,10 +6560,6 @@ impl Pane {
         let editor = self.editors.remove(&item_id);
         let run_configuration = self.run_configuration_editors.remove(&item_id);
         let object_browser = self.object_browsers.remove(&item_id);
-        if editor.is_none() && run_configuration.is_none() && object_browser.is_none() {
-            self.items.insert(index, item);
-            return None;
-        }
         self.result_subscriptions.remove(&item_id);
         let results = self.results.remove(&item_id);
         let clean_text = self.clean_documents.remove(&item_id).unwrap_or_default();
@@ -7858,6 +7871,19 @@ impl gpui::Render for Pane {
                             .border_r_1()
                             .border_color(colors.subtle_border)
                             .bg(active_tab_background)
+                            .children(active.as_ref().and_then(|item| self.results.get(&item.id)).filter(|result| result.read(cx).collapsed).map(|result| {
+                                let result = result.clone();
+                                IconButton::new(("restore-results", pane_id as usize), IconName::Table, "Show results")
+                                    .debug_selector("restore-results")
+                                    .square(px(24.))
+                                    .icon_size(12.)
+                                    .tooltip("Show results (<leader> g r)")
+                                    .on_click(cx.listener(move |_, _, window, cx| {
+                                        result.update(cx, ResultsView::focus_data);
+                                        result.focus_handle(cx).focus(window, cx);
+                                        cx.notify();
+                                    }))
+                            }))
                             .child(
                                 div()
                                     .relative()
@@ -8413,7 +8439,9 @@ impl gpui::Render for Pane {
                                             .w(px(1.0))
                                     })
                                     .child(resize_hitbox);
-                                let split = if self.expanded_result_item == Some(item_id) {
+                                let split = if self.expanded_result_item == Some(item_id)
+                                    || result.read(cx).collapsed
+                                {
                                     div()
                                         .size_full()
                                         .min_h_0()
@@ -9359,6 +9387,7 @@ pub struct WorkspaceShell {
     pane_layout_view: Entity<PaneLayoutView>,
     maximized_pane_id: Option<u64>,
     workspace_resize_frame_pending: bool,
+    pending_pane_collapse: Option<(Vec<u64>, u64)>,
     presentation_persist_pending: bool,
     active_pane: usize,
     selected_workspace_id: Option<i64>,
@@ -10585,6 +10614,7 @@ impl WorkspaceShell {
             pane_layout_view,
             maximized_pane_id: None,
             workspace_resize_frame_pending: false,
+            pending_pane_collapse: None,
             presentation_persist_pending: false,
             active_pane,
             selected_workspace_id,
@@ -25930,6 +25960,27 @@ impl WorkspaceShell {
         let height: f32 = event.bounds.size.height.into();
         let pointer_x: f32 = (event.event.position.x - event.bounds.left()).into();
         let pointer_y: f32 = (event.event.position.y - event.bounds.top()).into();
+        let requested = match dock {
+            DockId::Left => pointer_x,
+            DockId::Inspector => width - pointer_x,
+            DockId::Bottom => height - pointer_y,
+        };
+        if requested <= DRAG_COLLAPSE_EXTENT {
+            match dock {
+                DockId::Left if self.left_dock.presentation.open => {
+                    self.toggle_left_dock(&ToggleLeftDock, window, cx);
+                }
+                DockId::Inspector if self.right_dock.presentation.open => {
+                    self.toggle_right_dock(&ToggleRightDock, window, cx);
+                }
+                DockId::Bottom if self.bottom_dock.presentation.open => {
+                    self.toggle_bottom_dock(&ToggleBottomDock, window, cx);
+                }
+                _ => {}
+            }
+            self.focus_active_pane(window, cx);
+            return;
+        }
         let previous_sizes = (
             self.left_dock.presentation.size,
             self.right_dock.presentation.size,
@@ -25995,6 +26046,14 @@ impl WorkspaceShell {
                 PANE_MIN_HEIGHT,
             ),
         };
+        self.pending_pane_collapse = pane_layout::collapse_target(
+            &self.pane_layout,
+            &drag.path,
+            drag.boundary,
+            pointer,
+            available,
+            DRAG_COLLAPSE_EXTENT,
+        );
         let previous = self.pane_layout.clone();
         pane_layout::resize(
             &mut self.pane_layout,
@@ -26020,8 +26079,83 @@ impl WorkspaceShell {
         });
     }
 
-    fn finish_pane_resize(&mut self, _: &PaneResizeDrag, _: &mut Window, cx: &mut Context<Self>) {
+    fn finish_pane_resize(
+        &mut self,
+        _: &PaneResizeDrag,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((sources, target)) = self.pending_pane_collapse.take() {
+            // The layout view owns the drop handler. Defer changes until its
+            // entity borrow is released, as with moving tabs between panes.
+            cx.defer_in(window, move |shell, window, cx| {
+                shell.collapse_panes_into(sources, target, window, cx);
+            });
+        } else {
+            self.persist(cx);
+        }
+    }
+
+    fn collapse_panes_into(
+        &mut self,
+        sources: Vec<u64>,
+        target_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self
+            .panes
+            .iter()
+            .find(|pane| pane.read(cx).id == target_id)
+            .cloned()
+        else {
+            return;
+        };
+        let active_item = target.read(cx).active_item().map(|item| item.id);
+        for source_id in sources {
+            if source_id == target_id {
+                continue;
+            }
+            let Some(source) = self
+                .panes
+                .iter()
+                .find(|pane| pane.read(cx).id == source_id)
+                .cloned()
+            else {
+                continue;
+            };
+            let items = source
+                .read(cx)
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>();
+            for item_id in items {
+                if let Some(transfer) = source.update(cx, |pane, _| pane.take_item(item_id)) {
+                    target.update(cx, |pane, cx| pane.receive_item(transfer, None, cx));
+                }
+            }
+            self.remove_empty_source_pane(&source, cx);
+        }
+        target.update(cx, |pane, cx| {
+            if let Some(index) = pane
+                .items
+                .iter()
+                .position(|item| Some(item.id) == active_item)
+            {
+                pane.activate_item(index, false);
+            }
+            cx.notify();
+        });
+        self.active_pane = self
+            .panes
+            .iter()
+            .position(|pane| pane == &target)
+            .unwrap_or(0);
+        self.sync_pane_layout_view(cx);
+        self.focus_active_pane(window, cx);
         self.persist(cx);
+        cx.notify();
     }
 
     fn capture_window_bounds(&mut self, window_bounds: WindowBounds) {
@@ -26579,6 +26713,9 @@ impl WorkspaceShell {
             return;
         };
         self.focused_surface = WorkspaceSurface::Results;
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            pane.update(cx, |_, cx| cx.notify());
+        }
         results.update(cx, ResultsView::focus_data);
         results.focus_handle(cx).focus(window, cx);
         cx.notify();
@@ -50778,6 +50915,117 @@ mod tests {
 
         let after = cx.debug_bounds("pane-slot-0").unwrap().size.width;
         assert!(after > before + px(40.0));
+    }
+
+    #[gpui::test]
+    fn dragging_split_to_edge_merges_dirty_tabs_without_replacing_editors(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let source = workspace.read_with(&cx, |shell, _| shell.panes[0].clone());
+        let editor = source.update(&mut cx, |pane, _| {
+            pane.items[0].dirty = true;
+            pane.editors[&1].clone()
+        });
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.split_pane_in_direction(SplitDirection::Right, window, cx);
+        });
+        cx.run_until_parked();
+        let handle = cx.debug_bounds("resize-pane-0").unwrap();
+        let slot = cx.debug_bounds("pane-slot-0").unwrap();
+        let start = handle.center();
+        let end = point(slot.left() + px(20.), start.y);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(start.x - px(10.), start.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.panes.len(), 1);
+            let pane = shell.panes[0].read(cx);
+            assert!(pane.items.iter().any(|item| item.id == 1 && item.dirty));
+            assert_eq!(pane.editors[&1], editor);
+            assert_eq!(pane.items.len(), 2);
+        });
+        assert!(cx.debug_bounds("resize-pane-0").is_none());
+    }
+
+    #[gpui::test]
+    fn dragging_docks_to_edge_hides_them_and_allows_reopening(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.bottom_dock.presentation.open = true;
+            cx.notify();
+        });
+        for (dock, selector, handle) in [
+            (DockId::Left, "left-dock", "resize-left-dock"),
+            (DockId::Inspector, "right-dock", "resize-right-dock"),
+            (DockId::Bottom, "bottom-dock", "resize-bottom-dock"),
+        ] {
+            cx.run_until_parked();
+            let bounds = cx.debug_bounds(selector).unwrap();
+            let start = cx.debug_bounds(handle).unwrap().center();
+            let end = match dock {
+                DockId::Left => point(bounds.left(), start.y),
+                DockId::Inspector => point(bounds.right(), start.y),
+                DockId::Bottom => point(start.x, bounds.bottom()),
+            };
+            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move((start + end) / 2., MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds(selector).is_none(),
+                "{selector} should be hidden"
+            );
+            workspace.update_in(&mut cx, |shell, window, cx| match dock {
+                DockId::Left => shell.toggle_left_dock(&ToggleLeftDock, window, cx),
+                DockId::Inspector => shell.toggle_right_dock(&ToggleRightDock, window, cx),
+                DockId::Bottom => shell.toggle_bottom_dock(&ToggleBottomDock, window, cx),
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds(selector).is_some());
+        }
+    }
+
+    #[gpui::test]
+    fn collapsed_results_can_be_restored_without_losing_the_result_entity(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let pane = workspace.read_with(&cx, |shell, _| shell.panes[0].clone());
+        let result = pane.read_with(&cx, |pane, _| pane.results[&1].clone());
+        cx.run_until_parked();
+        let start = cx.debug_bounds("resize-query-results-1").unwrap().center();
+        let body = cx.debug_bounds("pane-body-1").unwrap();
+        let end = point(body.right() - px(10.), start.y);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(start.x + px(10.), start.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert!(result.read_with(&cx, |result, _| result.collapsed));
+        assert!(cx.debug_bounds("resize-query-results-1").is_none());
+        let restore = cx.debug_bounds("restore-results").unwrap();
+        cx.simulate_click(restore.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(!result.read_with(&cx, |result, _| result.collapsed));
+        assert!(cx.debug_bounds("resize-query-results-1").is_some());
+        assert_eq!(
+            pane.read_with(&cx, |pane, _| pane.results[&1].clone()),
+            result
+        );
     }
 
     #[gpui::test]

@@ -1115,6 +1115,7 @@ pub struct ResultsView {
     placement: ResultPlacement,
     bottom_height: f32,
     right_width: f32,
+    pub(crate) collapsed: bool,
     bottom_extent_custom: bool,
     right_extent_custom: bool,
     stream_result_seen: bool,
@@ -1227,6 +1228,7 @@ impl ResultsView {
             placement: ResultPlacement::Bottom,
             bottom_height: 240.0,
             right_width: 420.0,
+            collapsed: false,
             bottom_extent_custom: false,
             right_extent_custom: false,
             stream_result_seen: false,
@@ -1324,6 +1326,7 @@ impl ResultsView {
     }
 
     pub(crate) fn focus_data(&mut self, cx: &mut Context<Self>) {
+        self.collapsed = false;
         self.select_tab(ResultTab::Data, cx);
     }
 
