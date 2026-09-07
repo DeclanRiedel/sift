@@ -161,3 +161,8 @@ records the operation in its audit log. Existing destinations are never replaced
 
 Metadata inspection deliberately cannot query or modify the live Sift metadata
 database. Generic SQLite profiles remain unable to open Sift's state directory.
+
+The desktop reuses one read-only inspection instance per source manifest ID.
+Invoking View Metadata inside that inspection keeps the current instance open;
+it does not create another inspection of the inspection. Existing snapshots stay
+fixed at their creation time. The CLI can create a fresh snapshot when needed.

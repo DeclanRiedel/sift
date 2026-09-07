@@ -539,10 +539,24 @@ pub async fn run_instance_manager(
                     let target = channels.targets.borrow().clone();
                     let source = target.configured_root().ok_or_else(||
                         "Metadata inspection requires a local applied instance. For a remote instance, run sift metadata inspect on its server.".to_string())?;
+                    let instance = sift_server::instance_runtime::InstanceRoot::open(source)
+                        .map_err(|error| format!("reading metadata source: {error:#}"))?;
+                    // Inspecting an inspection must not create an endless chain of instances.
+                    if instance.manifest.name == "sift-metadata-inspection"
+                        && instance.manifest.connections.iter().any(|connection| connection.name == "sift/metadata-inspection")
+                    {
+                        return Ok(ManagerOutcome::Connected(instance.manifest.name.clone()));
+                    }
                     let parent = crate::platform::instance_state_path().with_file_name("metadata-inspections");
                     std::fs::create_dir_all(&parent)
                         .map_err(|error| format!("creating inspection directory: {error}"))?;
-                    let root = parent.join(uuid::Uuid::new_v4().to_string());
+                    let root = parent.join(instance.manifest.manifest_id.to_string());
+                    if root.join("sift.toml").is_file() {
+                        let plan = inspect_root(&root, None).await?;
+                        remember_root(&store, &profiles, &mut roots, &plan)?;
+                        let _ = channels.events.send(InstanceManagerEvent::Roots(roots.clone()));
+                        return connect_root(&channels.targets, &mut configured_targets, &root).await;
+                    }
                     let helper = std::env::current_exe()
                         .map_err(|error| format!("locating desktop executable: {error}"))?
                         .with_file_name(if cfg!(windows) { "sift.exe" } else { "sift" });
