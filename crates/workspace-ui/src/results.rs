@@ -1911,6 +1911,8 @@ impl ResultsView {
             return;
         }
         self.editing_cell = None;
+        self.selected = None;
+        self.visual_selection = false;
         self.focus_handle.focus(window, cx);
         cx.emit(ResultsEvent::CancelCellEdit);
         cx.notify();
@@ -3618,9 +3620,14 @@ impl ResultsView {
     fn exit_visual_selection(
         &mut self,
         _: &ExitVisualSelection,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.inline_cell_edit.is_some() {
+            self.cancel_inline_cell_edit(window, cx);
+            return;
+        }
+        self.editing_cell = None;
         self.visual_selection = false;
         if let Some(GridSelection::Range {
             focus_row,
@@ -3635,6 +3642,8 @@ impl ResultsView {
                 },
                 cx,
             );
+        } else {
+            self.selected = None;
         }
         cx.notify();
     }
@@ -5511,13 +5520,13 @@ impl ResultsView {
                             ),
                     ),
             )
-            .children(self.analyze_supported.then(||
+            .children(self.analyze_supported.then(|| {
                 Button::new("explain-analyzed-plan", "Analyze query")
                     .tone(ButtonTone::Ghost)
                     .start_icon(IconName::Activity)
                     .disabled(pending || !self.analyze_supported)
                     .on_click(cx.listener(|view, _, _, cx| view.request_explain(true, cx)))
-            ))
+            }))
             .children((!self.analyze_supported).then(|| {
                 div()
                     .text_xs()
