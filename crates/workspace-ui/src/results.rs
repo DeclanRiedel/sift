@@ -5513,7 +5513,7 @@ impl ResultsView {
                     .debug_selector(|| "explain-estimated-plan".into())
                     .child(
                         Button::new("explain-estimated-plan", "Estimated plan")
-                            .tone(ButtonTone::Accent)
+                            .tone(ButtonTone::Ghost)
                             .disabled(pending)
                             .on_click(
                                 cx.listener(|view, _, _, cx| view.request_explain(false, cx)),
@@ -5547,7 +5547,7 @@ impl ResultsView {
                     .gap_1()
                     .child(
                         Button::new("save-plan-capture", "Save capture")
-                            .tone(ButtonTone::Accent)
+                            .tone(ButtonTone::Ghost)
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(ResultsEvent::CapturePlanRequested)
                             })),
@@ -5584,7 +5584,7 @@ impl ResultsView {
                 .child(
                     div()
                         .text_color(colors.text)
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui::FontWeight::NORMAL)
                         .child("Inspect query execution"),
                 )
                 .child(
@@ -5607,7 +5607,7 @@ impl ResultsView {
                 )
                 .child(
                     div()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui::FontWeight::NORMAL)
                         .child(if *analyze {
                             "Running query"
                         } else {
@@ -5665,17 +5665,6 @@ impl ResultsView {
                                     .when(index % 2 == 1, |row| row.bg(colors.grid_stripe))
                                     .child(
                                         div()
-                                            .w(px(3.))
-                                            .h(px(30.))
-                                            .rounded(cx.theme().metrics.radius)
-                                            .bg(if node.actual.is_some() {
-                                                colors.accent
-                                            } else {
-                                                colors.strong_border
-                                            }),
-                                    )
-                                    .child(
-                                        div()
                                             .min_w_0()
                                             .flex_1()
                                             .flex()
@@ -5686,9 +5675,9 @@ impl ResultsView {
                                                     .flex()
                                                     .items_center()
                                                     .gap_2()
-                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .font_weight(gpui::FontWeight::NORMAL)
                                                     .child(node.op)
-                                                    .children(node.relation.map(Badge::new)),
+                                                    .children(node.relation.map(|relation| div().text_xs().text_color(colors.muted_text).child(relation))),
                                             )
                                             .children((!node.estimated.is_empty()).then(|| {
                                                 div()
@@ -5703,9 +5692,9 @@ impl ResultsView {
                                             .px_2()
                                             .py_1()
                                             .rounded(cx.theme().metrics.radius)
-                                            .bg(colors.accent_muted)
+                                            .bg(colors.background)
                                             .text_xs()
-                                            .text_color(colors.accent_hover)
+                                            .text_color(colors.muted_text)
                                             .child(actual)
                                     }))
                             })
@@ -5726,12 +5715,12 @@ impl ResultsView {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .bg(colors.toolbar)
+                            .bg(colors.panel)
                             .border_b_1()
                             .border_color(colors.subtle_border)
                             .child(icon(IconName::Database, colors.muted_text, 14.))
                             .child(div().text_sm().child(engine))
-                            .child(Badge::new(if analyzed { "Analyzed" } else { "Estimated" }))
+                            .child(div().text_xs().text_color(colors.muted_text).child(if analyzed { "Analyzed" } else { "Estimated" }))
                             .child(div().flex_1())
                             .child(
                                 div()
