@@ -5511,18 +5511,18 @@ impl ResultsView {
                             ),
                     ),
             )
-            .child(
+            .children(self.analyze_supported.then(||
                 Button::new("explain-analyzed-plan", "Analyze query")
                     .tone(ButtonTone::Ghost)
                     .start_icon(IconName::Activity)
                     .disabled(pending || !self.analyze_supported)
-                    .on_click(cx.listener(|view, _, _, cx| view.request_explain(true, cx))),
-            )
+                    .on_click(cx.listener(|view, _, _, cx| view.request_explain(true, cx)))
+            ))
             .children((!self.analyze_supported).then(|| {
                 div()
                     .text_xs()
                     .text_color(colors.muted_text)
-                    .child("SQLite: estimated plans only")
+                    .child("Estimated plans only")
             }))
             .children(pending.then(|| {
                 div()
@@ -5583,7 +5583,7 @@ impl ResultsView {
                         .max_w(px(460.))
                         .text_sm()
                         .text_color(colors.muted_text)
-                        .child(if self.analyze_supported { "Estimated plan does not run the query. Analyze query runs it and adds real row counts and timing." } else { "SQLite supports estimated EXPLAIN QUERY PLAN. Actual row counts and timing are not available." }),
+                        .child(if self.analyze_supported { "Estimated plan does not run the query. Analyze query runs it and adds real row counts and timing." } else { "This provider supports estimated plans. Actual row counts and timing are not available." }),
                 )
                 .into_any_element(),
             ExplainState::Pending { analyze } => div()

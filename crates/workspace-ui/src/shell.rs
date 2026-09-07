@@ -34455,13 +34455,13 @@ impl WorkspaceShell {
             ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
             _ => None,
         };
-        let sqlite = self
+        let analyze_supported = self
             .lifecycle
             .tenants
             .iter()
             .flat_map(|tenant| &tenant.connections)
             .any(|connection| {
-                Some(connection.id) == profile && connection.provider_id.as_str() == "sift/sqlite"
+                Some(connection.id) == profile && connection.provider_id.as_str() == "sift/postgres"
             });
         for pane in &self.panes {
             let views = {
@@ -34469,19 +34469,19 @@ impl WorkspaceShell {
                 pane.results
                     .iter()
                     .map(|(id, view)| {
-                        let sqlite = pane
+                        let analyze_supported = pane
                             .items
                             .iter()
                             .find(|item| item.id == *id)
                             .and_then(|item| item.source.as_ref())
                             .and_then(|source| match source {
                                 ItemSource::DatabaseObject(source) => {
-                                    Some(source.provider_id.as_str() == "sift/sqlite")
+                                    Some(source.provider_id.as_str() == "sift/postgres")
                                 }
                                 _ => None,
                             })
-                            .unwrap_or(sqlite);
-                        (view.clone(), !sqlite)
+                            .unwrap_or(analyze_supported);
+                        (view.clone(), analyze_supported)
                     })
                     .collect::<Vec<_>>()
             };
