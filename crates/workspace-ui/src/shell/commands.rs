@@ -1546,7 +1546,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "View Sift Metadata (Read-only Snapshot)",
         "",
         "",
-        false,
+        true,
         AvailabilityRule::EditableInstance,
     ),
     command(

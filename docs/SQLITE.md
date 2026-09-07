@@ -105,7 +105,8 @@ nix run .#desktop-demo
 nix run .#sift-demo-sqlite -- /path/to/demo.db
 ```
 
-Both desktop demos include `demo/postgres` and `demo/sqlite`. SQLite lives at
+Both desktop demos include `demo/postgres` and `demo/sqlite`. The desktop demo
+preserves Sift metadata, including saved queries and workspaces, across launches. SQLite lives at
 `demo-data/demo.db` below the demo instance root. The fixture includes customers,
 orders, products, a summary view, a change trigger, generated columns, a partial
 index and a 100,000-row `large` table. Repeated seeding preserves existing files

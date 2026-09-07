@@ -4055,7 +4055,8 @@ pub enum ExecutorEvent {
     },
     SavedQueryLoaded {
         item_id: u64,
-        result: Result<sift_api_types::SavedQuery, String>,
+        id: sift_api_types::SavedQueryId,
+        result: Result<Option<sift_api_types::SavedQuery>, String>,
     },
     SavedQuerySaved {
         item_id: Option<u64>,
@@ -11737,6 +11738,9 @@ impl WorkspaceShell {
                 let Some(ItemSource::SavedQuery(source)) = item.source.as_ref() else {
                     continue;
                 };
+                if source.instance_id != self.selected_instance_id.as_deref().unwrap_or("local") {
+                    continue;
+                }
                 let _ = sender.send(ExecutorCommand::LoadSavedQuery {
                     item_id: item.id,
                     id: sift_api_types::SavedQueryId(source.saved_query_id),
@@ -14481,10 +14485,39 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
-            ExecutorEvent::SavedQueryLoaded { item_id, result } => {
+            ExecutorEvent::SavedQueryLoaded {
+                item_id,
+                id,
+                result,
+            } => {
+                // Ignore a response after the tab has been repurposed or closed.
+                let instance_id = self.selected_instance_id.as_deref().unwrap_or("local");
+                let matches_source = self.panes.iter().any(|pane| {
+                    pane.read(cx).items.iter().any(|item| {
+                        item.id == item_id
+                            && matches!(&item.source, Some(ItemSource::SavedQuery(source))
+                                if source.saved_query_id == id.0 && source.instance_id == instance_id)
+                    })
+                });
+                if !matches_source {
+                    return;
+                }
                 match result {
-                    Ok(saved) => {
+                    Ok(Some(saved)) => {
                         self.apply_saved_query_to_item(item_id, &saved, true, cx);
+                    }
+                    Ok(None) => {
+                        for pane in &self.panes {
+                            pane.update(cx, |pane, cx| {
+                                if let Some(item) =
+                                    pane.items.iter_mut().find(|item| item.id == item_id)
+                                {
+                                    item.source = None;
+                                    cx.notify();
+                                }
+                            });
+                        }
+                        self.show_toast("Saved query no longer exists on this instance. Its tab is now an unsaved query; any local text is preserved.".into(), cx);
                     }
                     Err(message) => {
                         self.record_runtime_error(
@@ -40200,6 +40233,110 @@ mod tests {
     }
 
     #[gpui::test]
+    fn sqlite_table_preview_dispatches_a_bounded_query(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "SQLite".into(),
+            };
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "SQLite".into(),
+                        provider_id: sift_protocol::Engine::Sqlite.provider_id(),
+                        tags: Vec::new(),
+                    },
+                    catalog: "main".into(),
+                    schema: "main".into(),
+                    object: "order_items".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                window,
+                cx,
+            );
+        });
+        assert!(
+            matches!(receiver.try_recv().unwrap(), ExecutorCommand::Execute { sql, .. } if sql == "SELECT * FROM \"main\".\"order_items\" LIMIT 100;")
+        );
+    }
+
+    #[gpui::test]
+    fn missing_saved_query_detaches_reference_and_preserves_local_text(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0].items[0].source = Some(ItemSource::SavedQuery(SavedQuerySource {
+            instance_id: "local".into(),
+            tenant_id: 1,
+            saved_query_id: 9,
+            revision: 1,
+            connection_profile_id: None,
+        }));
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            let item_id = shell.panes[0].read(cx).items[0].id;
+            let editor = shell.panes[0].read(cx).editor(item_id).unwrap();
+            editor.update(cx, |editor, cx| {
+                editor.replace_text_from_owner("select 42;", cx)
+            });
+            shell.on_executor_event(
+                ExecutorEvent::SavedQueryLoaded {
+                    item_id,
+                    id: sift_api_types::SavedQueryId(9),
+                    result: Ok(None),
+                },
+                cx,
+            );
+            assert!(shell.panes[0].read(cx).items[0].source.is_none());
+            assert_eq!(editor.read(cx).document().text(), "select 42;");
+            assert!(shell.global_problems.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn metadata_is_searchable_and_dispatches_from_the_palette(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.instance_sender = Some(sender);
+            negotiate_features(
+                shell,
+                &[sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION],
+            );
+            shell.lifecycle.selected_instance = Some(crate::InstanceSpec {
+                id: "config:demo".into(),
+                name: "Demo".into(),
+                base_url: "auto-loopback".into(),
+                kind: crate::InstanceKind::Local,
+            });
+            shell
+                .query_input
+                .update(cx, |input, cx| input.set_text("metadata", cx));
+            let command = shell
+                .filtered_commands(cx)
+                .iter()
+                .find(|command| command.id == CommandId::ViewMetadata)
+                .cloned()
+                .expect("metadata must be searchable");
+            assert!(command.enabled());
+            shell.run_command(command.id, window, cx);
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(InstanceCommand::ViewMetadata)
+        ));
+    }
+
+    #[gpui::test]
     fn loaded_schema_expands_the_demo_catalog_and_lab_schema(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -49600,7 +49737,8 @@ mod tests {
             shell.on_executor_event(
                 ExecutorEvent::SavedQueryLoaded {
                     item_id,
-                    result: Ok(sift_api_types::SavedQuery {
+                    id: sift_api_types::SavedQueryId(9),
+                    result: Ok(Some(sift_api_types::SavedQuery {
                         id: sift_api_types::SavedQueryId(9),
                         tenant_id: sift_api_types::TenantId(1),
                         owner_principal_id: Some(sift_api_types::PrincipalId(7)),
@@ -49611,7 +49749,7 @@ mod tests {
                         created_at: "2026-08-28T10:00:00Z".parse().unwrap(),
                         updated_at: "2026-08-28T10:00:00Z".parse().unwrap(),
                         revision: 4,
-                    }),
+                    })),
                 },
                 cx,
             );

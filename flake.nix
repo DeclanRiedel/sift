@@ -539,7 +539,7 @@
               if [ "''${SIFT_DEMO_KEEP_POSTGRES:-0}" != "1" ]; then
                 pg_ctl -D "$pgdata" -m fast -w stop >/dev/null 2>&1 || true
               fi
-              rm -rf -- "$instance_state"
+              # Keep saved queries, workspaces, and credentials across demo launches.
             }
             trap cleanup EXIT
 

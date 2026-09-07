@@ -57,7 +57,7 @@ pub fn table_preview_sql(
         ddl_quote_identifier(provider_id, object)
     );
     match provider_id.as_str() {
-        "sift/postgres" => Some(format!("SELECT * FROM {qualified} LIMIT 100;")),
+        "sift/postgres" | "sift/sqlite" => Some(format!("SELECT * FROM {qualified} LIMIT 100;")),
         "sift/sql-server" => Some(format!("SELECT TOP (100) * FROM {qualified};")),
         _ => None,
     }
@@ -77,6 +77,10 @@ mod tests {
         assert_eq!(
             table_preview_sql(&Engine::SqlServer.provider_id(), "dbo", "odd]table").unwrap(),
             "SELECT TOP (100) * FROM [dbo].[odd]]table];"
+        );
+        assert_eq!(
+            table_preview_sql(&Engine::Sqlite.provider_id(), "main", "odd\"table").unwrap(),
+            "SELECT * FROM \"main\".\"odd\"\"table\" LIMIT 100;"
         );
         let unknown = ProviderId::new("thirdparty/postgres-like").unwrap();
         assert!(table_preview_sql(&unknown, "public", "table").is_none());

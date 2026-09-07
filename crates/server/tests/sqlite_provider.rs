@@ -98,9 +98,12 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         .commit_transaction(session, connection, tx.tx_id)
         .await
         .unwrap();
+    let preview_sql =
+        sift_snippets::table_preview_sql(&Engine::Sqlite.provider_id(), "main", "items")
+            .expect("SQLite table previews are supported");
     assert_eq!(
         client
-            .execute(session, connection, "SELECT * FROM items")
+            .execute(session, connection, &preview_sql)
             .await
             .unwrap()
             .rows

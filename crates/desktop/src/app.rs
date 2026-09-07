@@ -5376,16 +5376,23 @@ async fn run_query_executor(
             ExecutorCommand::LoadSavedQuery { item_id, id } => {
                 let server = targets.borrow().clone();
                 let result = async {
-                    server
-                        .client()
-                        .await?
-                        .saved_query(id)
-                        .await
-                        .map_err(|error| format!("loading saved query failed: {error}"))
+                    match server.client().await?.saved_query(id).await {
+                        Ok(saved) => Ok(Some(saved)),
+                        Err(sift_client_sdk::Error::Server { status, .. })
+                            if status == reqwest::StatusCode::NOT_FOUND =>
+                        {
+                            Ok(None)
+                        }
+                        Err(error) => Err(format!("loading saved query failed: {error}")),
+                    }
                 }
                 .await;
                 if events
-                    .send(ExecutorEvent::SavedQueryLoaded { item_id, result })
+                    .send(ExecutorEvent::SavedQueryLoaded {
+                        item_id,
+                        id,
+                        result,
+                    })
                     .is_err()
                 {
                     return;
