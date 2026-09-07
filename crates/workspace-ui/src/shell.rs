@@ -33456,10 +33456,20 @@ impl WorkspaceShell {
     }
 
     /// Global application context: commands, Sift instance, workspace, updates,
-    /// and identity. Database profiles deliberately stay in the workspace dock.
+    /// identity, and the active database object breadcrumb.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
         let workspace_label = self.workspace_context_label();
+        let active_database_source = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            let item = pane.active_item()?;
+            pane.database_source(item.id)
+                .map(|source| (item.id, source))
+        });
+        let database_breadcrumb = active_database_source.map(|(item_id, source)| {
+            app_bar::render_database_breadcrumb(item_id, source, colors, cx)
+        });
+
         let git_context_label = self.workspace_git_context_label();
         let server_name = self.active_server_name();
         let status_label = self.lifecycle.status_label();
@@ -33536,7 +33546,7 @@ impl WorkspaceShell {
                 .id("toolbar-title-drag-region")
                 .debug_selector(|| "toolbar-title-drag-region".into())
                 .h_full()
-                .max_w(px(380.))
+                .max_w(px(680.))
                 .min_w_0()
                 .px_3()
                 .flex()
@@ -33558,7 +33568,13 @@ impl WorkspaceShell {
                 .text_center()
                 .text_sm()
                 .text_color(colors.muted_text)
-                .child(div().min_w_0().truncate().child(workspace_label))
+                .child(database_breadcrumb.unwrap_or_else(|| {
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(workspace_label)
+                        .into_any_element()
+                }))
                 .children(git_context_label.map(|label| {
                     div()
                         .id("toolbar-git-context")
@@ -41637,10 +41653,10 @@ mod tests {
         cx.run_until_parked();
         let breadcrumb = cx
             .debug_bounds("database-breadcrumb")
-            .expect("footer database breadcrumb");
-        let status_bar = cx.debug_bounds("status-bar").expect("status bar");
-        assert!(breadcrumb.top() >= status_bar.top());
-        assert!(breadcrumb.bottom() <= status_bar.bottom());
+            .expect("app-bar database breadcrumb");
+        let app_bar = cx.debug_bounds("integrated-titlebar").expect("app bar");
+        assert!(breadcrumb.top() >= app_bar.top());
+        assert!(breadcrumb.bottom() <= app_bar.bottom());
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             assert_eq!(pane.active_item().map(|item| item.id), Some(item_id));

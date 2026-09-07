@@ -1,6 +1,6 @@
 //! Host-owned app-bar menu model.
 
-use super::{CommandId, CommandRegistry};
+use super::*;
 
 pub(super) const DEV_WIKI_URL: &str = "http://127.0.0.1:8787";
 
@@ -130,4 +130,61 @@ pub(super) fn menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
             Item::available(CommandId::ViewMetadata),
         ],
     }
+}
+
+pub(super) fn render_database_breadcrumb(
+    item_id: u64,
+    source: DatabaseObjectSource,
+    colors: sift_ui::ThemeColors,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let segments = [
+        (
+            DatabaseBreadcrumbLevel::Connection,
+            source.profile_name.clone(),
+        ),
+        (
+            DatabaseBreadcrumbLevel::Catalog,
+            source.catalog.clone().unwrap_or_else(|| "default".into()),
+        ),
+        (DatabaseBreadcrumbLevel::Schema, source.schema.clone()),
+        (DatabaseBreadcrumbLevel::Object, source.object.clone()),
+    ];
+    let mut breadcrumb = div()
+        .id(("database-breadcrumb", item_id as usize))
+        .debug_selector(|| "database-breadcrumb".into())
+        .min_w_0()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .text_xs();
+    for (index, (level, label)) in segments.into_iter().enumerate() {
+        if index > 0 {
+            breadcrumb = breadcrumb.child(icon(IconName::ChevronRight, colors.disabled_text, 9.));
+        }
+        let source = source.clone();
+        breadcrumb = breadcrumb.child(
+            div()
+                .id(format!("database-breadcrumb-segment-{item_id}-{index}"))
+                .min_w_0()
+                .max_w(px(130.))
+                .px_1()
+                .truncate()
+                .rounded_sm()
+                .text_color(if level == DatabaseBreadcrumbLevel::Object {
+                    colors.text
+                } else {
+                    colors.muted_text
+                })
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .role(Role::Button)
+                .aria_label(format!("Reveal {label} in connections"))
+                .hover(|segment| segment.bg(colors.hovered_surface).text_color(colors.text))
+                .on_click(cx.listener(move |shell, _, window, cx| {
+                    shell.reveal_database_object(&source, level, window, cx);
+                }))
+                .child(label),
+        );
+    }
+    breadcrumb.into_any_element()
 }
