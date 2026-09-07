@@ -36363,6 +36363,10 @@ impl WorkspaceShell {
                 dock_view.child(
                     div()
                         .debug_selector(|| "connections-toolbar".into())
+                        .on_mouse_down(MouseButton::Right, cx.listener(|shell, _, _, cx| {
+                            shell.explorer_view_menu_open = !shell.explorer_view_menu_open;
+                            cx.notify();
+                        }))
                         .mx_2()
                         .h(cx.theme().metrics.row_height)
                         .flex_none()
@@ -36420,23 +36424,6 @@ impl WorkspaceShell {
                                                 .id("explorer-view-trigger")
                                                 .relative()
                                                 .flex_none()
-                                                .child(
-                                                    IconButton::new(
-                                                        "explorer-view-menu-button",
-                                                        IconName::Menu,
-                                                        "Filter objects and manage explorer views",
-                                                    )
-                                                    .square(px(26.))
-                                                    .icon_size(13.)
-                                                    .tooltip("Explorer views")
-                                                    .on_click(cx.listener(
-                                                        |shell, _, _, cx| {
-                                                            shell.explorer_view_menu_open =
-                                                                !shell.explorer_view_menu_open;
-                                                            cx.notify();
-                                                        },
-                                                    )),
-                                                )
                                                 .when(self.explorer_view_menu_open, |trigger| {
                                                     trigger.child(
                                                         div()
@@ -36455,23 +36442,6 @@ impl WorkspaceShell {
                                                     )
                                                 }),
                                         )
-                                        .child(
-                                        div()
-                                            .debug_selector(|| "refresh-connection-schema".into())
-                                            .child(
-                                                IconButton::new(
-                                                    "refresh-connection-schema",
-                                                    IconName::Refresh,
-                                                    "Refresh database schema",
-                                                )
-                                                .square(px(26.))
-                                                .icon_size(13.)
-                                                .tooltip("Refresh database schema")
-                                                .on_click(cx.listener(|shell, _, _, cx| {
-                                                    shell.refresh_connection_schema(cx)
-                                                })),
-                                            ),
-                                        ),
                                 )
                             },
                         ),
@@ -50661,16 +50631,9 @@ mod tests {
         let search = cx
             .debug_bounds("open-schema-search")
             .expect("schema search button");
-        let refresh = cx
-            .debug_bounds("refresh-connection-schema")
-            .expect("schema refresh button");
-        let toolbar = cx
-            .debug_bounds("connections-toolbar")
-            .expect("connections toolbar");
-        assert_eq!(search.size, refresh.size);
-        assert!(search.left() < refresh.left());
-        assert!(refresh.right() <= toolbar.right());
-        assert!(toolbar.right() - refresh.right() <= px(4.));
+        let toolbar = cx.debug_bounds("connections-toolbar").unwrap();
+        assert!(search.right() <= toolbar.right());
+        assert!(cx.debug_bounds("refresh-connection-schema").is_none());
         assert!(cx.debug_bounds("connections-reconnect").is_some());
         assert!(cx.debug_bounds("connections-check-connection").is_some());
         assert!(cx.debug_bounds("connections-disconnect").is_some());
@@ -50729,16 +50692,8 @@ mod tests {
         let search = cx
             .debug_bounds("open-schema-search")
             .expect("schema search button");
-        let refresh = cx
-            .debug_bounds("refresh-connection-schema")
-            .expect("schema refresh button");
-        let add = cx
-            .debug_bounds("add-database-connection")
-            .expect("add connection button");
-        assert!(add.left() - toolbar.left() <= px(1.));
-        assert!(search.left() >= toolbar.left());
-        assert!(search.left() < refresh.left());
-        assert!(refresh.right() <= toolbar.right());
+        assert!(search.right() <= toolbar.right());
+        assert!(cx.debug_bounds("refresh-connection-schema").is_none());
     }
 
     #[gpui::test]
