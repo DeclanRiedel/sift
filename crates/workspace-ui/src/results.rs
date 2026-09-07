@@ -167,6 +167,8 @@ pub(crate) struct ResultFieldInspectorRow {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SelectedCellEdit {
+    pub row_index: usize,
+    pub column_index: usize,
     pub column: String,
     pub original: Value,
     pub original_row: Vec<(String, Value)>,
@@ -992,7 +994,55 @@ enum ExplainState {
     Failed(String),
 }
 
+/// Apply an insertion/deletion/replacement to another cell at the same
+/// character distance from its end. Byte boundaries remain valid for UTF-8.
+fn mirror_cell_edit(previous: &str, next: &str, target: &mut String) -> usize {
+    let prefix = previous
+        .chars()
+        .zip(next.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old: Vec<char> = previous.chars().collect();
+    let new: Vec<char> = next.chars().collect();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let replacement = new[prefix..new.len() - suffix].iter().collect::<String>();
+    let start = if prefix == 0 && suffix == 0 && !previous.is_empty() {
+        target.chars().count()
+    } else {
+        old.len() - prefix
+    };
+    apply_cell_edit(target, start, suffix, &replacement)
+}
+
+fn apply_cell_edit(
+    target: &mut String,
+    start_from_end: usize,
+    end_from_end: usize,
+    replacement: &str,
+) -> usize {
+    let count = target.chars().count();
+    let start_char = count.saturating_sub(start_from_end);
+    let end_char = count.saturating_sub(end_from_end).max(start_char);
+    let start = target
+        .char_indices()
+        .nth(start_char)
+        .map_or(target.len(), |(index, _)| index);
+    let end = target
+        .char_indices()
+        .nth(end_char)
+        .map_or(target.len(), |(index, _)| index);
+    target.replace_range(start..end, replacement);
+    start + replacement.len()
+}
+
 struct InlineCellEdit {
+    buffers: HashMap<(usize, usize), (String, usize)>,
+    previous_text: String,
     row: usize,
     column: usize,
     input: Entity<TextInput>,
@@ -1439,6 +1489,8 @@ impl ResultsView {
             .map(|(column, value)| (column.name.clone(), value.clone()))
             .collect();
         Some(SelectedCellEdit {
+            row_index: row,
+            column_index: column,
             column: column_name,
             original: selected,
             original_row,
@@ -1575,6 +1627,8 @@ impl ResultsView {
                     })?;
                 edits.push(PastedCellEdit {
                     selected: SelectedCellEdit {
+                        row_index: target_row,
+                        column_index: target_column,
                         column: metadata.name.clone(),
                         original,
                         original_row: original_row.clone(),
@@ -1804,6 +1858,45 @@ impl ResultsView {
         cx.notify();
     }
 
+    fn update_inline_buffers(&mut self, input: &Entity<TextInput>, cx: &mut Context<Self>) {
+        let Some(edit) = self.inline_cell_edit.as_mut() else {
+            return;
+        };
+        let input = input.read(cx);
+        let next = input.text().to_owned();
+        for ((row, column), (text, caret)) in &mut edit.buffers {
+            if (*row, *column) == (edit.row, edit.column) {
+                *text = next.clone();
+                *caret = input.cursor_byte_offset();
+            } else if let Some((start, end, replacement)) = input.last_edit() {
+                let start = if start == edit.previous_text.chars().count()
+                    && end == 0
+                    && !edit.previous_text.is_empty()
+                {
+                    text.chars().count()
+                } else {
+                    start
+                };
+                *caret = apply_cell_edit(text, start, end, replacement);
+            } else {
+                *caret = mirror_cell_edit(&edit.previous_text, &next, text);
+            }
+        }
+        edit.previous_text = next;
+        cx.notify();
+    }
+
+    pub(crate) fn inline_cell_values(&self) -> Option<HashMap<(usize, usize), String>> {
+        Some(
+            self.inline_cell_edit
+                .as_ref()?
+                .buffers
+                .iter()
+                .map(|(key, (text, _))| (*key, text.clone()))
+                .collect(),
+        )
+    }
+
     pub(crate) fn begin_selected_cell_edit(
         &mut self,
         text: String,
@@ -1818,16 +1911,37 @@ impl ResultsView {
             } => (focus_row, focus_column),
             GridSelection::Row(_) | GridSelection::Column(_) | GridSelection::All => return None,
         };
+        let buffers = self
+            .selected_cell_edits()
+            .into_iter()
+            .map(|cell| {
+                let coordinate = (cell.row_index, cell.column_index);
+                let value = self.staged_cells.get(&coordinate).unwrap_or(&cell.original);
+                let buffer = if coordinate == (row, column) {
+                    text.clone()
+                } else {
+                    render_value(value).text
+                };
+                let caret = buffer.len();
+                (coordinate, (buffer, caret))
+            })
+            .collect();
+        let previous_text = text.clone();
         let input = cx.new(|cx| {
-            TextInput::new(text, "New cell value", cx).aria_label("Edit selected result cell")
+            TextInput::new(text, "New cell value", cx).aria_label("Edit selected result cells")
         });
         let focus = input.focus_handle(cx);
-        let subscription = cx.subscribe(&input, |view, _, event: &TextInputEvent, cx| {
-            if *event == TextInputEvent::Submitted {
-                view.submit_inline_cell_edit(cx);
-            }
-        });
+        let subscription =
+            cx.subscribe(
+                &input,
+                |view, input, event: &TextInputEvent, cx| match event {
+                    TextInputEvent::Submitted => view.submit_inline_cell_edit(cx),
+                    TextInputEvent::Changed => view.update_inline_buffers(&input, cx),
+                },
+            );
         self.inline_cell_edit = Some(InlineCellEdit {
+            buffers,
+            previous_text,
             row,
             column,
             input,
@@ -3402,6 +3516,19 @@ impl ResultsView {
         click_count: usize,
         cx: &mut Context<Self>,
     ) -> bool {
+        let inside_range = if let Some(GridSelection::Range {
+            anchor_row,
+            anchor_column,
+            focus_row,
+            focus_column,
+        }) = self.selected
+        {
+            let (rows, columns) =
+                self.range_coordinates(anchor_row, anchor_column, focus_row, focus_column);
+            rows.contains(&row) && columns.contains(&column)
+        } else {
+            false
+        };
         let drag_anchor = if shift {
             match self.selected {
                 Some(GridSelection::Cell { row, column }) => (row, column),
@@ -3417,7 +3544,9 @@ impl ResultsView {
         };
         self.cell_drag_anchor = (click_count == 1).then_some(drag_anchor);
         if click_count >= 2 {
-            self.set_selection(GridSelection::Cell { row, column }, cx);
+            if !inside_range {
+                self.set_selection(GridSelection::Cell { row, column }, cx);
+            }
             let inline_editor_open = self
                 .inline_cell_edit
                 .as_ref()
@@ -3431,7 +3560,9 @@ impl ResultsView {
         } else {
             // Pointer selection is idempotent. Toggling the current cell off
             // made a subsequent double-click lose its edit target.
-            self.set_selection(GridSelection::Cell { row, column }, cx);
+            if !inside_range {
+                self.set_selection(GridSelection::Cell { row, column }, cx);
+            }
         }
         false
     }
@@ -5148,8 +5279,15 @@ impl ResultsView {
                                     Some(GridSelection::All) => true,
                                     None => false,
                                 };
-                                let is_editing =
-                                    view.editing_cell == Some((row_index, source_column));
+                                let mirror = view.inline_cell_edit.as_ref().and_then(|edit| {
+                                    ((edit.row, edit.column) != (row_index, source_column))
+                                        .then(|| {
+                                            edit.buffers.get(&(row_index, source_column)).cloned()
+                                        })
+                                        .flatten()
+                                });
+                                let is_editing = mirror.is_some()
+                                    || view.editing_cell == Some((row_index, source_column));
                                 let is_staged =
                                     view.staged_cells.contains_key(&(row_index, source_column));
                                 let rendered = view
@@ -5281,6 +5419,27 @@ impl ResultsView {
                                             },
                                         ))
                                         .child(input)
+                                } else if let Some((text, caret)) = mirror {
+                                    let before = text[..caret].to_owned();
+                                    let after = text[caret..].to_owned();
+                                    cell.px_2()
+                                        .font_family("monospace")
+                                        .text_color(colors.text)
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .whitespace_nowrap()
+                                                .child(before)
+                                                .child(
+                                                    div()
+                                                        .w(px(1.))
+                                                        .h(px(18.))
+                                                        .flex_none()
+                                                        .bg(colors.accent),
+                                                )
+                                                .child(after),
+                                        )
                                 } else {
                                     cell.px_2().children(shaped.map(|line| {
                                         canvas(
@@ -6261,6 +6420,71 @@ mod tests {
             assert_eq!(view.history.rows[1].sql_text, "select 2");
             assert_eq!(view.history.next_cursor, None);
             assert!(!view.history.load_state.is_loading());
+        });
+    }
+
+    #[test]
+    fn parallel_cell_edits_preserve_distinct_values_and_utf8_boundaries() {
+        let mut other = "東京".to_owned();
+        assert_eq!(apply_cell_edit(&mut other, 0, 0, "!"), "東京!".len());
+        assert_eq!(other, "東京!");
+        apply_cell_edit(&mut other, 2, 1, "都");
+        assert_eq!(other, "東都!");
+        let mut short = "x".to_owned();
+        apply_cell_edit(&mut short, 12, 0, "replacement");
+        assert_eq!(short, "replacement");
+        let mut longer = "longer original value".to_owned();
+        mirror_cell_edit("old", "new", &mut longer);
+        assert_eq!(longer, "new");
+        let mut distinct = "bbb".to_owned();
+        apply_cell_edit(&mut distinct, 3, 3, "a");
+        assert_eq!(
+            distinct, "abbb",
+            "an ambiguous insertion in aaa must retain its actual location"
+        );
+    }
+
+    #[gpui::test]
+    fn range_edit_updates_each_buffer_and_escape_discards_them(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| cx.new(ResultsView::new))
+                .unwrap()
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let view = window.root(&mut visual).unwrap();
+        let input = view.update(&mut visual, |view, cx| {
+            view.set_state(
+                ResultState::from_execute(execute_response(
+                    vec![
+                        Row::new(vec![Value::Text("cat".into())]),
+                        Row::new(vec![Value::Text("dog".into())]),
+                    ],
+                    false,
+                )),
+                cx,
+            );
+            view.selected = Some(GridSelection::Range {
+                anchor_row: 0,
+                anchor_column: 0,
+                focus_row: 1,
+                focus_column: 0,
+            });
+            view.begin_selected_cell_edit("dog".into(), cx);
+            view.inline_cell_edit.as_ref().unwrap().input.clone()
+        });
+        input.update_in(&mut visual, |input, window, cx| {
+            input.replace_text_in_range(None, "!", window, cx)
+        });
+        visual.run_until_parked();
+        view.update_in(&mut visual, |view, window, cx| {
+            let values = view.inline_cell_values().unwrap();
+            assert_eq!(values[&(0, 0)], "cat!");
+            assert_eq!(values[&(1, 0)], "dog!");
+            view.exit_visual_selection(&ExitVisualSelection, window, cx);
+            assert!(view.inline_cell_edit.is_none());
+            assert!(view.selected.is_none());
+            assert!(view.staged_cells.is_empty());
         });
     }
 

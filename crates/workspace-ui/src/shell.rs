@@ -29622,7 +29622,8 @@ impl WorkspaceShell {
             })
             .map(|edit| edit.value.clone())
             .unwrap_or_else(|| selected.original.clone());
-        let json_cell = matches!(&selected.original, sift_protocol::Value::Json(_));
+        let json_cell = selected_cells.len() == 1
+            && matches!(&selected.original, sift_protocol::Value::Json(_));
         self.result_cell_edit_target = Some(ResultCellEditTarget {
             item_id,
             cells: selected_cells,
@@ -30055,11 +30056,21 @@ impl WorkspaceShell {
             return self.staged_result_change_count() > 0;
         };
         let text = self.result_cell_edit_input.read(cx).text().to_string();
+        let inline_values = self.panes.iter().find_map(|pane| {
+            pane.read(cx)
+                .results
+                .get(&target.item_id)
+                .and_then(|results| results.read(cx).inline_cell_values())
+        });
         let values = match target
             .cells
             .iter()
             .map(|cell| {
-                Self::parse_result_cell_value(&cell.original, &text)
+                let value_text = inline_values
+                    .as_ref()
+                    .and_then(|values| values.get(&(cell.row_index, cell.column_index)))
+                    .map_or(text.as_str(), String::as_str);
+                Self::parse_result_cell_value(&cell.original, value_text)
                     .map(|value| (cell.clone(), value))
             })
             .collect::<Result<Vec<_>, _>>()
@@ -39987,11 +39998,15 @@ mod tests {
                 item_id: 7,
                 cells: vec![
                     crate::results::SelectedCellEdit {
+                        row_index: 0,
+                        column_index: 1,
                         column: "state".into(),
                         original: sift_protocol::Value::Text("open".into()),
                         original_row: first_row,
                     },
                     crate::results::SelectedCellEdit {
+                        row_index: 1,
+                        column_index: 1,
                         column: "state".into(),
                         original: sift_protocol::Value::Text("closed".into()),
                         original_row: second_row,

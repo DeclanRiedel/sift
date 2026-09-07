@@ -34,6 +34,7 @@ pub struct TextInput {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     mouse_anchor: Option<usize>,
+    last_edit: Option<(usize, usize, String)>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
 }
@@ -68,6 +69,7 @@ impl TextInput {
             selection_reversed: false,
             marked_range: None,
             mouse_anchor: None,
+            last_edit: None,
             last_layout: None,
             last_bounds: None,
         }
@@ -109,6 +111,7 @@ impl TextInput {
     }
 
     pub fn set_text(&mut self, content: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.last_edit = None;
         self.content = content.into();
         let cursor = self.content.len();
         self.selected_range = cursor..cursor;
@@ -116,6 +119,18 @@ impl TextInput {
         self.marked_range = None;
         cx.emit(TextInputEvent::Changed);
         cx.notify();
+    }
+
+    /// Last platform edit, expressed as character distances from the old end.
+    /// Synchronized cell editors use this to preserve each buffer's own text.
+    pub fn last_edit(&self) -> Option<(usize, usize, &str)> {
+        self.last_edit
+            .as_ref()
+            .map(|(start, end, text)| (*start, *end, text.as_str()))
+    }
+
+    pub fn cursor_byte_offset(&self) -> usize {
+        self.cursor_offset()
     }
 
     fn index_at_x(&self, x: Pixels) -> usize {
@@ -347,6 +362,11 @@ impl EntityInputHandler for TextInput {
             .map(|range| self.range_from_utf16(range))
             .or_else(|| self.marked_range.clone())
             .unwrap_or_else(|| self.selected_range.clone());
+        self.last_edit = Some((
+            self.content[range.start..].chars().count(),
+            self.content[range.end..].chars().count(),
+            new_text.to_owned(),
+        ));
         let content =
             self.content[..range.start].to_owned() + new_text + &self.content[range.end..];
         let cursor = range.start + new_text.len();
@@ -371,6 +391,11 @@ impl EntityInputHandler for TextInput {
             .map(|range| self.range_from_utf16(range))
             .or_else(|| self.marked_range.clone())
             .unwrap_or_else(|| self.selected_range.clone());
+        self.last_edit = Some((
+            self.content[range.start..].chars().count(),
+            self.content[range.end..].chars().count(),
+            new_text.to_owned(),
+        ));
         let content =
             self.content[..range.start].to_owned() + new_text + &self.content[range.end..];
         self.content = content.into();
