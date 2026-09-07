@@ -47,6 +47,7 @@ impl AssetSource for SiftAssets {
                 Some(include_bytes!("../assets/databases/sql-server.svg"))
             }
             "icons/add.svg" => Some(include_bytes!("../assets/icons/add.svg")),
+            "icons/query-history.svg" => Some(include_bytes!("../assets/icons/query-history.svg")),
             "icons/activity.svg" => Some(include_bytes!("../assets/icons/activity.svg")),
             "icons/automations.svg" => Some(include_bytes!("../assets/icons/automations.svg")),
             "icons/check.svg" => Some(include_bytes!("../assets/icons/check.svg")),
@@ -99,6 +100,7 @@ impl AssetSource for SiftAssets {
             "databases" => vec!["postgres.svg".into(), "sql-server.svg".into()],
             "icons" => vec![
                 "activity.svg".into(),
+                "query-history.svg".into(),
                 "add.svg".into(),
                 "automations.svg".into(),
                 "check.svg".into(),

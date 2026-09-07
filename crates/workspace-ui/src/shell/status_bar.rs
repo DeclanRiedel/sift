@@ -324,7 +324,7 @@ pub(super) fn render_status_bar(
                         .child(
                             button(
                                 "footer-query-history",
-                                IconName::Activity,
+                                IconName::QueryHistory,
                                 "Query history".into(),
                                 shell.left_dock.presentation.open
                                     && shell.active_left_panel == LeftPanel::QueryHistory,

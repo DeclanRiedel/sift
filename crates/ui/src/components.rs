@@ -164,6 +164,7 @@ pub enum ButtonTone {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconName {
     Activity,
+    QueryHistory,
     Add,
     Automations,
     Check,
@@ -202,8 +203,9 @@ pub enum IconName {
 }
 
 impl IconName {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 37] = [
         Self::Activity,
+        Self::QueryHistory,
         Self::Add,
         Self::Automations,
         Self::Check,
@@ -244,6 +246,7 @@ impl IconName {
     pub const fn path(self) -> &'static str {
         match self {
             Self::Activity => "icons/activity.svg",
+            Self::QueryHistory => "icons/query-history.svg",
             Self::Add => "icons/add.svg",
             Self::Automations => "icons/automations.svg",
             Self::Check => "icons/check.svg",
