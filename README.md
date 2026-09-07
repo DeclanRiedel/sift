@@ -20,18 +20,6 @@
 4. Stay responsive through cursors, caching, prefetching, and pooling.
 5. Keep the protocol versioned and usable by third-party clients.
 
-## Docs
-
-Preview the product page and wiki with `nix run .#website` at
-`http://127.0.0.1:8787`. See [website development](crates/website/README.md).
-
-- [Development on Windows and NixOS](docs/DEVELOPMENT.md)
-- [Instance configuration](docs/INSTANCE-CONFIG.md)
-- [SQLite, seeded demos and metadata inspection](docs/SQLITE.md)
-- [Keyboard reference](docs/keyboard-wiki/index.html)
-- [Shared rooms](docs/keyboard-wiki/shared-rooms.html)
-- [Extensions](docs/EXTENSIONS.md)
-
 ## License
 
 Copyright © 2026 Declan Riedel. Licensed under
