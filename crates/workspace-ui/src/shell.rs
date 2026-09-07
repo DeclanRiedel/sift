@@ -47606,7 +47606,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn app_bar_popovers_dismiss_on_mouse_down_outside(cx: &mut TestAppContext) {
+    fn app_bar_dialogs_ignore_mouse_down_outside(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -47619,7 +47619,7 @@ mod tests {
             MouseButton::Left,
             Modifiers::default(),
         );
-        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_some()));
 
         workspace.update(&mut cx, |shell, cx| {
             shell.open_app_bar_modal(Modal::Account, cx)
@@ -47629,7 +47629,7 @@ mod tests {
             MouseButton::Left,
             Modifiers::default(),
         );
-        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_some()));
     }
 
     #[test]
@@ -49553,7 +49553,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn workspace_reconcile_is_roomy_and_dismisses_with_escape_or_scrim(cx: &mut TestAppContext) {
+    fn workspace_reconcile_dismisses_with_escape_and_ignores_scrim(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -49579,7 +49579,7 @@ mod tests {
             MouseButton::Left,
             Modifiers::default(),
         );
-        assert!(workspace.read_with(&cx, |shell, _| shell.modal.is_none()));
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal.is_some()));
     }
 
     #[gpui::test]

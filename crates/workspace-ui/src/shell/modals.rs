@@ -7887,44 +7887,6 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
             };
-            // Scrim-clicking dismisses transient surfaces. Long-form dialogs
-            // with typed-but-unsaved input keep their explicit cancel control.
-            let dismiss_on_scrim = matches!(
-                modal,
-                Modal::ServerPicker
-                    | Modal::Settings
-                    | Modal::ApiTokens
-                    | Modal::ConnectionPolicy
-                    | Modal::TenantUsage
-                    | Modal::VcsDiagnostics
-                    | Modal::Administration
-                    | Modal::Themes
-                    | Modal::Keymaps
-                    | Modal::Account
-                    | Modal::CommandPalette
-                    | Modal::DataSearch
-                    | Modal::DataResults(_)
-                    | Modal::QueryParameters
-                    | Modal::EditResultCell
-                    | Modal::PlanCaptures
-                    | Modal::ConnectionUrl
-                    | Modal::DatabaseConnection
-                    | Modal::ConfirmTransactionDisconnect
-                    | Modal::ConfirmProductionExecution
-                    | Modal::ConfirmOutcomeUnknownRerun(_, _)
-                    | Modal::ConfirmDeleteConnection(_)
-                    | Modal::ConfirmTerminateProcess(_)
-                    | Modal::SemanticRename
-                    | Modal::CatalogDiagram
-                    | Modal::CatalogMigration
-                    | Modal::DdlSources
-                    | Modal::RoomAdministration
-                    | Modal::CatalogSnapshots
-                    | Modal::CsvImport
-                    | Modal::WorkspaceReconcile
-                    | Modal::ObjectPeek
-                    | Modal::ConfirmDeleteDatabaseObject
-            );
             div()
                 .id("modal-layer")
                 .debug_selector(|| "modal-layer".into())
@@ -7939,17 +7901,7 @@ impl WorkspaceShell {
                 .bottom_0()
                 .left_0()
                 .occlude()
-                .when(dismiss_on_scrim, |layer| {
-                    layer.on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|shell, _, window, cx| {
-                            shell.dismiss_modal(&DismissModal, window, cx)
-                        }),
-                    )
-                })
-                .when(!dismiss_on_scrim, |layer| {
-                    layer.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                })
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .flex()
                 .items_start()
                 .when(server_picker, |layer| {
