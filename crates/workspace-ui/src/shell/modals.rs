@@ -30,8 +30,7 @@ impl WorkspaceShell {
             let layer_height = viewport.height - if app_bar_modal { toolbar_height } else { px(0.) };
             let popover = server_picker || account || command_palette;
             let movable = self.settings.ui.unpin_modals;
-            let grip_height = if movable { px(16.) } else { px(0.) };
-            let max_card_height = (layer_height - px(if popover { 12.0 } else { 32.0 }) - grip_height).max(px(1.));
+            let max_card_height = (layer_height - px(if popover { 12.0 } else { 32.0 })).max(px(1.));
             let content = match modal {
                 Modal::CommandPalette => {
                     let input = self.query_input.read(cx).text();
@@ -7913,7 +7912,7 @@ impl WorkspaceShell {
                     layer.items_center().justify_center().bg(colors.scrim)
                 })
                 .child(
-                    modal_layout::card(data_results, padded, card_width, max_card_height + grip_height, colors, cx.theme().metrics)
+                    modal_layout::card(data_results, padded, card_width, max_card_height, colors, cx.theme().metrics)
                         .relative()
                         .left(self.modal_offset.x)
                         .top(self.modal_offset.y)
@@ -7936,18 +7935,17 @@ impl WorkspaceShell {
                                 });
                             }
                         }).absolute().size_full())
-                        .children(movable.then(|| div()
-                            .id("modal-drag-handle")
-                            .debug_selector(|| "modal-drag-handle".into())
-                            .h(grip_height).w_full().flex_none().cursor(CursorStyle::ClosedHand)
-                            .flex().items_center().justify_center()
-                            .on_mouse_down(MouseButton::Left, cx.listener(|shell, event: &gpui::MouseDownEvent, _, cx| {
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |shell, event: &gpui::MouseDownEvent, _, cx| {
+                            if movable {
                                 if let Some(bounds) = shell.modal_bounds.get() {
-                                    shell.modal_drag = Some((event.position, shell.modal_offset, bounds));
+                                    // Reuse the existing heading; reserve no extra drag strip.
+                                    if event.position.y < bounds.top() + px(if padded { 44. } else { 36. }) {
+                                        shell.modal_drag = Some((event.position, shell.modal_offset, bounds));
+                                    }
                                 }
-                                cx.stop_propagation();
-                            }))
-                            .child(div().w(px(24.)).h(px(2.)).rounded_full().bg(colors.subtle_border))))
+                            }
+                            cx.stop_propagation();
+                        }))
                         .child(content),
                 )
         })

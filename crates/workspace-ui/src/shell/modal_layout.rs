@@ -1,7 +1,7 @@
 //! Preferred content widths. Viewport constraints belong to the modal host.
 
 use super::{DatabaseWizardStep, Modal};
-use gpui::{div, prelude::*, px, Div, IntoElement, MouseButton, Pixels, Stateful};
+use gpui::{div, prelude::*, px, Div, IntoElement, Pixels, Stateful};
 use sift_ui::{ThemeColors, ThemeMetrics};
 
 /// Shared frame for every modal, including the viewport-relative results view.
@@ -18,7 +18,6 @@ pub(super) fn card(
         .id("modal-card")
         .debug_selector(|| "modal-card".into())
         .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .when(!data_results, |card| card.w_full().max_w(px(width)))
         .when(data_results, |card| {
             card.w(gpui::relative(0.985)).h(gpui::relative(0.985))

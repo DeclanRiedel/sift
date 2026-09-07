@@ -42564,7 +42564,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn unpinned_modals_move_by_handle_and_can_be_pinned(cx: &mut TestAppContext) {
+    fn unpinned_modals_move_by_heading_and_can_be_pinned(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -42575,8 +42575,8 @@ mod tests {
         });
         cx.run_until_parked();
         let before = cx.debug_bounds("modal-card").unwrap();
-        let handle = cx.debug_bounds("modal-drag-handle").unwrap();
-        let start = handle.center();
+        assert!(cx.debug_bounds("modal-drag-handle").is_none());
+        let start = gpui::point(before.center().x, before.top() + px(22.));
         let end = start + gpui::point(px(40.), px(0.));
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
