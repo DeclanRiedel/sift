@@ -6669,9 +6669,9 @@ fn pane_border_color(theme: &Theme, is_focused: bool) -> gpui::Hsla {
 }
 
 fn pane_drop_preview_colors(theme: &Theme) -> (gpui::Hsla, gpui::Hsla) {
-    let mut tint = theme.colors.muted_text;
+    let mut tint = theme.colors.accent;
     tint.a = 0.14;
-    let mut border = theme.colors.muted_text;
+    let mut border = theme.colors.accent;
     border.a = 0.62;
     (tint, border)
 }
@@ -7748,9 +7748,9 @@ impl gpui::Render for Pane {
                                             )
                                             .drag_over::<TabDrag>(move |tab, dragged, _, cx| {
                                                 let mut tab = tab
-                                                    .bg(cx.theme().colors.drop_target_background)
+                                                    .bg(pane_drop_preview_colors(&cx.theme()).0)
                                                     .border_color(
-                                                        cx.theme().colors.drop_target_border,
+                                                        cx.theme().colors.accent,
                                                     )
                                                     .border_0();
                                                 if dragged.pane_id != pane_id
@@ -7921,7 +7921,7 @@ impl gpui::Render for Pane {
                                             .flex_1()
                                             .child("")
                                             .drag_over::<TabDrag>(|target, _, _, cx| {
-                                                target.bg(cx.theme().colors.drop_target_background)
+                                                target.bg(pane_drop_preview_colors(&cx.theme()).0)
                                             })
                                             .on_drop::<TabDrag>(cx.listener(
                                                 move |pane, drag, window, cx| {
