@@ -81,15 +81,19 @@ impl LocalServerManager {
             });
         let instance = sift_server::instance_runtime::InstanceRoot::open(&root)
             .map_err(|error| format!("validating instance root failed: {error:#}"))?;
+        let runtime_state_dir = instance.default_state_dir();
+        let config = instance
+            .runtime_config(&runtime_state_dir)
+            .map_err(|error| {
+                format!("resolving instance runtime configuration failed: {error:#}")
+            })?;
         Ok(Self {
             state: Arc::new(Mutex::new(LocalServerState::default())),
             launcher: server,
-            runtime_state_dir: instance.default_state_dir(),
+            runtime_state_dir,
             base_url: "auto-loopback".into(),
             configured_bind: Some(
-                instance
-                    .manifest
-                    .server
+                config
                     .bind
                     .parse()
                     .map_err(|_| "invalid configured bind address")?,
@@ -269,6 +273,25 @@ impl Drop for LocalServerLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_demo_resolves_auto_loopback_and_discovers_assigned_port() {
+        let directory = tempfile::tempdir().unwrap();
+        let demo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/reproducible-instance");
+        for name in ["sift.toml", "sift.lock"] {
+            std::fs::copy(demo.join(name), directory.path().join(name)).unwrap();
+        }
+
+        let manager = LocalServerManager::configured(directory.path().to_path_buf()).unwrap();
+        let bind = manager.configured_bind.unwrap();
+        assert_eq!(bind, "127.0.0.1:0".parse().unwrap());
+        assert_eq!(
+            local_connect_endpoint(bind, "127.0.0.1:7474".parse().unwrap()).unwrap(),
+            "127.0.0.1:7474".parse().unwrap()
+        );
+        assert!(local_connect_endpoint(bind, "192.0.2.1:7474".parse().unwrap()).is_err());
+    }
 
     #[test]
     fn local_network_binds_use_validated_descriptor_endpoints() {
