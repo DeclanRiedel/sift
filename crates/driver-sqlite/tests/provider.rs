@@ -197,6 +197,8 @@ async fn sql_authority_and_readonly_are_enforced_by_sqlite() {
         .await
         .unwrap();
     assert_eq!(snapshot.trees[0].schemas[0].objects[0].columns.len(), 2);
+    assert_eq!(snapshot.trees[0].schemas[0].objects[0].estimated_rows, Some(0));
+    assert_eq!(snapshot.trees[0].schemas[0].objects[0].modified_at, None);
     f.driver.close(c).await.unwrap();
     let c = f.open(SqliteOpenMode::ReadWrite).await;
     for sql in [

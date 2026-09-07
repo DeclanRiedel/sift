@@ -57,6 +57,7 @@ fn load_once(
 ) -> Result<SchemaSnapshot, DriverError> {
     let navigation = matches!(scope.depth, SchemaDepth::Graph { .. });
     let mut node_budget = 10_000usize;
+    let mut count_budget = 100_000u64;
     let mut result = SchemaSnapshot::empty(scope.clone());
     let mut catalog = CatalogTree {
         name: name.into(),
@@ -127,6 +128,17 @@ fn load_once(
                 continue;
             }
             let mut object = ObjectInfo::new(name, kind);
+            if kind == ObjectKind::Table
+                && !sql
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim_start()
+                    .to_ascii_uppercase()
+                    .starts_with("CREATE VIRTUAL TABLE")
+            {
+                object.estimated_rows = table_rows(conn, schema, &object.name, &mut count_budget)?;
+            }
+
             if (target.is_some() || navigation)
                 && matches!(kind, ObjectKind::Table | ObjectKind::View)
             {
@@ -159,7 +171,17 @@ fn load_once(
             schema: None,
             code: "sqlite_navigation_only".into(),
         });
-        let mut graph = sift_core::catalog::graph_from_trees(&result.trees, coverage, identity);
+        // Counts describe current data, not schema identity. Keep them in the
+        // navigation trees without invalidating catalog revisions after DML.
+        let mut schema_trees = result.trees.clone();
+        for object in schema_trees
+            .iter_mut()
+            .flat_map(|catalog| &mut catalog.schemas)
+            .flat_map(|schema| &mut schema.objects)
+        {
+            object.estimated_rows = None;
+        }
+        let mut graph = sift_core::catalog::graph_from_trees(&schema_trees, coverage, identity);
         if let Some(kinds) = &options.kinds {
             graph.nodes.retain(|node| kinds.contains(&node.kind));
         }
@@ -183,6 +205,56 @@ fn load_once(
     }
     Ok(result)
 }
+// Prefer persistent statistics. Count small, unanalyzed tables within a shared
+// catalog budget so inspection snapshots have useful counts without unbounded scans.
+fn table_rows(
+    conn: &Connection,
+    schema: &str,
+    name: &str,
+    budget: &mut u64,
+) -> Result<Option<u64>, DriverError> {
+    let has_stats: bool = conn
+        .query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM {schema}.sqlite_schema WHERE name='sqlite_stat1')"
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if has_stats {
+        let estimate: Option<u64> = conn
+            .query_row(
+                &format!(
+                    "SELECT max(CAST(stat AS INTEGER)) FROM {schema}.sqlite_stat1 WHERE tbl=?1"
+                ),
+                [name],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if estimate.is_some() {
+            return Ok(estimate);
+        }
+    }
+    if *budget == 0 {
+        return Ok(None);
+    }
+    let limit = (*budget).min(10_000);
+    let count: u64 = conn
+        .query_row(
+            &format!(
+                "SELECT count(*) FROM (SELECT 1 FROM {schema}.{} LIMIT {})",
+                quote(name),
+                limit + 1
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    *budget = budget.saturating_sub(count);
+    Ok((count <= limit).then_some(count))
+}
+
 fn deepen(
     conn: &Connection,
     schema: &str,

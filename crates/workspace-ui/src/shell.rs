@@ -6288,7 +6288,7 @@ impl Pane {
                                                 .w(px(155.))
                                                 .truncate()
                                                 .child(
-                                                    row.modified_at.unwrap_or_else(|| "—".into()),
+                                                    row.modified_at.unwrap_or_else(|| if row.source.provider_id.as_str() == "sift/sqlite" { "Not tracked".into() } else { "—".into() }),
                                                 ),
                                         )
                                         .child(
