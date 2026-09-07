@@ -29,14 +29,14 @@ async fn home() -> Result {
             </head>
             <body>
                 <main>
+                    <div class="doc-tabs" aria-label="Sift documentation">
+                        <a class="active" href="/">"Overview"</a>
+                        <a href="/index.html">"Keyboard"</a>
+                        <a href="/configuration.html">"Sift configuration"</a>
+                        <a href="/hosting.html">"Hosting"</a>
+                        <a href="/shared-rooms.html">"Shared rooms"</a>
+                    </div>
                     <header>
-                        <div class="doc-tabs" aria-label="Sift documentation">
-                            <a class="active" href="/">"Overview"</a>
-                            <a href="/index.html">"Keyboard"</a>
-                            <a href="/configuration.html">"Sift configuration"</a>
-                            <a href="/hosting.html">"Hosting"</a>
-                            <a href="/shared-rooms.html">"Shared rooms"</a>
-                        </div>
                         <h1>"Sift"</h1>
                         <p>"A fast, Vim-like SQL workspace for PostgreSQL, SQL Server, and SQLite."</p>
                     </header>

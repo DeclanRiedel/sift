@@ -29,7 +29,7 @@
 
 body {
   margin: 0;
-  background: #0a0c0d;
+  background: var(--black) url("cells.svg") repeat center top;
   color: var(--white);
   line-height: 1.5;
 }
@@ -45,24 +45,29 @@ main {
   flex-direction: column;
 }
 
-/* Diagonal-striped gutters fill the viewport on both sides of the page;
-   the right rail's dark/light order is shifted by one stripe. */
+/* Compact diagonal stripes run along the viewport edges — sized as three
+   parts left, two parts right of the gutter (capped at 240px and 160px on
+   very wide screens) — behind a dashed divider, while the cell pattern
+   fills the rest of the gutter up to the page. */
 main::before,
 main::after {
   content: "";
   position: fixed;
   top: 0;
   bottom: 0;
-  width: calc((100% - var(--page-width)) / 2);
+  width: min(240px, calc((100% - var(--page-width)) / 2 * 0.6));
   background: repeating-linear-gradient(135deg, #16191a 0 3px, #0a0c0d 3px 6px);
 }
 
 main::before {
   left: 0;
+  border-right: 1px dashed var(--border);
 }
 
 main::after {
   right: 0;
+  width: min(160px, calc((100% - var(--page-width)) / 2 * 0.4));
+  border-left: 1px dashed var(--border);
   background: repeating-linear-gradient(135deg, #0a0c0d 0 3px, #16191a 3px 6px);
 }
 
@@ -77,11 +82,15 @@ footer {
 }
 
 .doc-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   margin-bottom: 28px;
   border-bottom: 1px solid var(--border);
+  background: var(--black);
 }
 
 .doc-tabs a {
@@ -97,6 +106,7 @@ footer {
   margin-bottom: -1px;
   color: var(--white);
   background: var(--black);
+  border-color: var(--border);
   border-top: 2px solid var(--accent);
 }
 
