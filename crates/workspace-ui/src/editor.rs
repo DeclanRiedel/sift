@@ -2108,7 +2108,7 @@ impl QueryEditor {
         let epoch = self.manifest_analysis_epoch;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(250))
+                .timer(Duration::from_millis(1200))
                 .await;
             let _ = this.update(cx, |editor, cx| {
                 if editor.manifest_schema && editor.manifest_analysis_epoch == epoch {
@@ -5804,6 +5804,11 @@ mod tests {
         });
         visual.run_until_parked();
         visual.executor().advance_clock(Duration::from_millis(300));
+        visual.run_until_parked();
+        editor.read_with(&visual, |editor, _| {
+            assert!(editor.semantic.diagnostics().is_empty());
+        });
+        visual.executor().advance_clock(Duration::from_millis(1000));
         visual.run_until_parked();
         editor.read_with(&visual, |editor, _| {
             assert!(editor

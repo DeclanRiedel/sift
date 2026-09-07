@@ -9025,7 +9025,7 @@ fn staged_result_row_index(edits: &[StagedResultEdit], edit_index: usize) -> usi
 /// invalid while a clause is being entered, so analysis waits for a deliberate
 /// pause instead of competing with normal typing. Execute and explicit
 /// semantic commands remain immediate.
-const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(650);
+const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1200);
 /// Automatic completion is responsive but still coalesces a burst into one
 /// cached server lookup. Manual Ctrl+Space bypasses this delay.
 const SEMANTIC_COMPLETION_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
@@ -46716,7 +46716,7 @@ mod tests {
         });
         cx.run_until_parked();
         cx.executor()
-            .advance_clock(std::time::Duration::from_millis(300));
+            .advance_clock(std::time::Duration::from_millis(1300));
         cx.run_until_parked();
         workspace.read_with(&cx, |shell, cx| {
             assert_eq!(shell.global_problems_text(cx), "No problems.");

@@ -1029,6 +1029,11 @@ fn parse(
         if canceled.load(Ordering::Relaxed) {
             return Err(Error::Canceled);
         }
+        let diagnostic_start =
+            skip_leading_comments(&source, executable.start as usize, executable.end as usize);
+        if diagnostic_start == executable.end as usize {
+            continue;
+        }
         let sql = &source[executable.start as usize..executable.end as usize];
         if flavor == Flavor::Tsql && sql.eq_ignore_ascii_case("go") {
             continue;
@@ -1045,7 +1050,10 @@ fn parse(
                         severity: DiagnosticSeverity::Error,
                         code: "syntax_error".into(),
                         message: error.to_string(),
-                        range: executable,
+                        range: TextRange {
+                            start: diagnostic_start as u32,
+                            end: executable.end,
+                        },
                         related_ranges: Vec::new(),
                         source: "parser".into(),
                         quick_fix_ids: Vec::new(),
@@ -2297,6 +2305,42 @@ fn dollar_quote_tag(input: &[u8]) -> Option<Vec<u8>> {
         .iter()
         .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
         .then(|| input[..=end].to_vec())
+}
+
+// Keep leading comments in executable SQL (including provider hints), but
+// anchor diagnostics to the first SQL token rather than a commented-out line.
+fn skip_leading_comments(source: &str, start: usize, end: usize) -> usize {
+    let mut start = start;
+    loop {
+        let remaining = &source[start..end];
+        start += remaining.len() - remaining.trim_start().len();
+        let remaining = &source[start..end];
+        if remaining.starts_with("--") {
+            start += remaining.find('\n').unwrap_or(remaining.len());
+        } else if remaining.starts_with("/*") {
+            let bytes = remaining.as_bytes();
+            let mut depth = 1;
+            let mut offset = 2;
+            while offset < bytes.len() && depth > 0 {
+                if bytes[offset..].starts_with(b"/*") {
+                    depth += 1;
+                    offset += 2;
+                } else if bytes[offset..].starts_with(b"*/") {
+                    depth -= 1;
+                    offset += 2;
+                } else {
+                    offset += 1;
+                }
+            }
+            if depth != 0 {
+                break;
+            }
+            start += offset;
+        } else {
+            break;
+        }
+    }
+    start
 }
 
 fn trim_statement(source: &str, start: usize, mut end: usize) -> TextRange {
@@ -3922,6 +3966,28 @@ mod tests {
             });
         }
         CatalogBindingView::new(base.revision, true, objects)
+    }
+
+    #[test]
+    fn comments_do_not_own_sql_errors_or_become_statements() {
+        for dialect_id in ["sift/postgresql", "sift/tsql", "sift/sqlite"] {
+            let commented = "-- CREATE VIEW broken;\n/* outer /* nested */ comment */\n";
+            let parsed =
+                parse(&dialect(dialect_id), 1, commented, &AtomicBool::new(false)).unwrap();
+            assert!(parsed.diagnostics.is_empty());
+            assert!(parsed.statements.is_empty());
+            let source = format!("{commented}CREATE VIEW broken");
+            let parsed = parse(&dialect(dialect_id), 1, &source, &AtomicBool::new(false)).unwrap();
+            assert_eq!(parsed.statements[0].executable_range.start, 0);
+            assert!(parsed
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "syntax_error"));
+            assert!(parsed
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.range.start as usize >= commented.len()));
+        }
     }
 
     #[test]
