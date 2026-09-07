@@ -7400,6 +7400,16 @@ impl gpui::Render for Pane {
         let is_focused = self.active_focus_handle(cx).is_focused(window)
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
+        let active_tab_background = if active.as_ref().is_some_and(|item| {
+            self.database_ddl_texts.contains_key(&item.id)
+                || self.database_json_texts.contains_key(&item.id)
+                || (item.kind == ItemKind::Configuration && item.title == "sift.toml")
+        }) {
+            colors.toolbar
+        } else {
+            colors.background
+        };
+
         let has_tab_drag_preview =
             self.tab_drag_preview_bounds.is_some() && !self.suppress_tab_drag_preview;
         let database_notice = active.as_ref().and_then(|item| {
@@ -7457,7 +7467,7 @@ impl gpui::Render for Pane {
                     .flex()
                     .items_stretch()
                     .relative()
-                    .bg(colors.toolbar)
+                    .bg(active_tab_background)
                     .child(
                         div()
                             .debug_selector(|| "pane-history-actions".into())
@@ -7603,6 +7613,7 @@ impl gpui::Render for Pane {
                                             .filter(|(rename_id, _)| *rename_id == item_id)
                                             .map(|(_, input)| input.clone());
                                         PaneTab::new(("tab", item.id as usize))
+                                            .selected_background(active_tab_background)
                                             .debug_selector(move || tab_debug.clone())
                                             .selected(selected)
                                             .dirty(item.dirty)
@@ -7845,7 +7856,7 @@ impl gpui::Render for Pane {
                             .border_l_1()
                             .border_r_1()
                             .border_color(colors.subtle_border)
-                            .bg(colors.toolbar)
+                            .bg(active_tab_background)
                             .child(
                                 div()
                                     .relative()

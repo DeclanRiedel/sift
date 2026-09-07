@@ -33,6 +33,7 @@ pub trait Disableable: Sized {
 pub struct PaneTab {
     div: Stateful<Div>,
     selected: bool,
+    selected_background: Option<gpui::Hsla>,
     dirty: bool,
     staged: bool,
     children: Vec<AnyElement>,
@@ -43,6 +44,7 @@ impl PaneTab {
         Self {
             div: div().id(id),
             selected: false,
+            selected_background: None,
             dirty: false,
             staged: false,
             children: Vec::new(),
@@ -56,6 +58,11 @@ impl PaneTab {
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    pub fn selected_background(mut self, color: gpui::Hsla) -> Self {
+        self.selected_background = Some(color);
         self
     }
 
@@ -96,9 +103,10 @@ impl RenderOnce for PaneTab {
             .min_w(px(110.))
             .max_w(px(240.))
             .border_r_1()
+            .when(!self.selected, |tab| tab.border_b_1())
             .border_color(colors.subtle_border)
             .bg(if self.selected {
-                colors.background
+                self.selected_background.unwrap_or(colors.background)
             } else {
                 colors.toolbar
             })
