@@ -7414,9 +7414,20 @@ impl gpui::Render for Pane {
         let is_focused = self.active_focus_handle(cx).is_focused(window)
             || self.focus_handle.contains_focused(window, cx);
         let active = self.active_item().cloned();
-        let active_tab_background = if active.as_ref().is_some_and(|item| {
+        // Join the selected tab and actions to the first surface below them.
+        // Objects and run configurations have their own toolbar, like DDL/JSON
+        // and the instance configuration editor; plain SQL starts at the editor.
+        let active_tab_background = if active
+            .as_ref()
+            .is_some_and(|item| self.pending_close_item == Some(item.id))
+        {
+            colors.warning_muted
+        } else if active.as_ref().is_some_and(|item| {
             self.database_ddl_texts.contains_key(&item.id)
                 || self.database_json_texts.contains_key(&item.id)
+                || (item.kind == ItemKind::Schema && self.object_browsers.contains_key(&item.id))
+                || (item.kind == ItemKind::RunConfiguration
+                    && self.run_configuration_editors.contains_key(&item.id))
                 || (item.kind == ItemKind::Configuration && item.title == "sift.toml")
         }) {
             colors.toolbar
