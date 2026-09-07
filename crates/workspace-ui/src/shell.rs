@@ -8057,7 +8057,14 @@ impl gpui::Render for Pane {
                                     Vec::new()
                                 };
                                 let outline_editor = editor.clone();
-                                body.child(
+                                let item_id = item.id;
+                                body.children((item.title == "sift.toml").then(|| {
+                                    div().h(px(32.)).flex_none().flex().items_center().gap_2().px_2().bg(colors.toolbar)
+                                        .child(Button::new("save-review-instance-config", "Save & review changes")
+                                            .tone(ButtonTone::Accent)
+                                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(PaneEvent::SaveItemRequested { item_id }))))
+                                        .child(div().text_xs().text_color(colors.muted_text).child("Review the plan, then choose Apply."))
+                                })).child(
                                     div()
                                         .flex_1()
                                         .min_h_0()
@@ -20155,14 +20162,7 @@ impl WorkspaceShell {
     }
 
     fn open_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .lifecycle
-            .supports(sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION)
-        {
-            self.edit_manifest_section("connections", cx);
-        } else {
-            self.open_legacy_database_connection(window, cx);
-        }
+        self.open_legacy_database_connection(window, cx);
     }
 
     fn open_legacy_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -46627,12 +46627,15 @@ mod tests {
     }
 
     #[gpui::test]
-    fn standalone_server_add_connection_opens_wizard(cx: &mut TestAppContext) {
+    fn managed_server_add_connection_opens_wizard(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
         workspace.update(&mut cx, |shell, cx| {
-            negotiate_features(shell, &[]);
+            negotiate_features(
+                shell,
+                &[sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION],
+            );
             shell.left_dock.presentation.open = true;
             shell.active_left_panel = LeftPanel::Connections;
             cx.notify();
@@ -46640,7 +46643,7 @@ mod tests {
         cx.run_until_parked();
         let add = cx
             .debug_bounds("add-database-connection")
-            .expect("Add connection is visible without a manifest");
+            .expect("Add connection remains available with a manifest");
         cx.simulate_click(add.center(), Modifiers::default());
         workspace.read_with(&cx, |shell, _| {
             assert_eq!(shell.modal, Some(Modal::DatabaseConnection));
@@ -46690,7 +46693,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn database_wizard_entry_routes_to_sift_toml(cx: &mut TestAppContext) {
+    fn database_wizard_does_not_open_configuration(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -46703,12 +46706,10 @@ mod tests {
                 &[sift_protocol::handshake::CAPABILITY_INSTANCE_CONFIGURATION],
             );
             shell.open_database_connection(window, cx);
-            assert_eq!(shell.pending_manifest_path.as_deref(), Some("connections"));
+            assert!(shell.pending_manifest_path.is_none());
+            assert_eq!(shell.modal, Some(Modal::DatabaseConnection));
         });
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(InstanceCommand::OpenCurrentConfiguration)
-        ));
+        assert!(receiver.try_recv().is_err());
     }
 
     #[gpui::test]
