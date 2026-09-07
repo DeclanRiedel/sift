@@ -533,3 +533,18 @@ async fn bounded_large_stream_late_cancel_and_auto_rollback() {
     );
     f.driver.close(reopened).await.unwrap();
 }
+
+#[tokio::test]
+async fn concurrent_catalog_work_and_first_query_share_worker() {
+    let f = Fixture::new(1);
+    let c = f.open(SqliteOpenMode::ReadOnly).await;
+    for _ in 0..20 {
+        let (ping, query) = tokio::join!(
+            f.driver.ping(c.clone()),
+            execute(&f.driver, &c, "SELECT 42", vec![])
+        );
+        ping.unwrap();
+        assert_eq!(query.unwrap().0.len(), 1);
+    }
+    f.driver.close(c).await.unwrap();
+}

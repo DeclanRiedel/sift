@@ -89,7 +89,10 @@ numbers, intervals and opaque native parameters fail explicitly. Parameters must
 use all anonymous `?` slots or contiguous `?1.. ?N`, in one statement.
 
 Each connection owns one admitted worker, one active operation and bounded page
-buffers. The default worker cap is 8 (hard ceiling 128), a page holds at most
+buffers. Overlapping catalog, semantic and query requests wait asynchronously
+for that worker, with a five-second admission deadline; startup catalog loading
+does not reject the first query as busy. Admission stays held until the worker
+finishes, even if its caller disconnects. The default worker cap is 8 (hard ceiling 128), a page holds at most
 128 rows or approximately 1 MiB, and SQLite limits a value/record to 8 MiB.
 Sift also rejects result rows whose combined cell payload exceeds 8 MiB.
 Busy waits are bounded to 0–5000 ms and observe cancellation. OS I/O that cannot

@@ -4238,6 +4238,7 @@ impl Client {
                 request_id: got,
                 cursor_id,
             } if got == request_id => cursor_id,
+            WsServerMessage::Error { message, .. } => return Err(Error::Protocol(message)),
             other => {
                 return Err(Error::Protocol(format!(
                     "expected started message, got {other:?}"
@@ -4304,6 +4305,7 @@ impl Client {
                 request_id: got,
                 cursor_id,
             } if got == request_id => cursor_id,
+            WsServerMessage::Error { message, .. } => return Err(Error::Protocol(message)),
             other => {
                 return Err(Error::Protocol(format!(
                     "expected started message, got {other:?}"

@@ -30,6 +30,7 @@ struct State {
 struct Entry {
     jobs: mpsc::Sender<Job>,
     state: Mutex<State>,
+    admission: Arc<Semaphore>,
     closing: Arc<AtomicBool>,
     interrupt: rusqlite::InterruptHandle,
     exited: watch::Receiver<bool>,
@@ -120,6 +121,27 @@ impl SqliteDriver {
         }
         Ok(entry)
     }
+    // Catalog, semantic and query work share the same connection. Queue them
+    // asynchronously, retaining admission until the worker (or stream) finishes.
+    // A dropped caller must not let the next job overlap its still-running work.
+    async fn wait_for_worker(
+        entry: &Entry,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, DriverError> {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            entry.admission.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| {
+            error(
+                Code::Other {
+                    message: "SQLite operation timed out".into(),
+                },
+                "timed out waiting for the SQLite connection",
+            )
+        })?
+        .map_err(|_| error(Code::ConnectionInvalidated, "SQLite worker unavailable"))
+    }
     fn admit(entry: &Entry, cursor: Option<CursorId>) -> Result<(), DriverError> {
         let mut state = entry.state.lock().unwrap();
         if entry.closing.load(Ordering::Acquire) {
@@ -146,9 +168,11 @@ impl SqliteDriver {
         work: impl FnOnce(&mut Worker) -> Result<T, DriverError> + Send + 'static,
     ) -> Result<T, DriverError> {
         let entry = self.entry(&c)?;
+        let permit = Self::wait_for_worker(&entry).await?;
         Self::admit(&entry, None)?;
         let (tx, rx) = oneshot::channel();
         let job: Job = Box::new(move |worker| {
+            let _permit = permit;
             let result = work(worker);
             worker.finish();
             let _ = tx.send(result);
@@ -434,6 +458,7 @@ impl Driver for SqliteDriver {
                     .map_err(db_error)?;
                     let entry = Arc::new(Entry {
                         jobs,
+                        admission: Arc::new(Semaphore::new(1)),
                         state: Mutex::new(State {
                             busy: false,
                             cursor: None,
@@ -518,9 +543,11 @@ impl Driver for SqliteDriver {
     ) -> Result<ResultSetStream, DriverError> {
         let entry = self.entry(&c)?;
         let cursor = CursorId::new(self.id());
+        let permit = Self::wait_for_worker(&entry).await?;
         Self::admit(&entry, Some(cursor))?;
         let (tx, rx) = mpsc::channel(1);
         let job: Job = Box::new(move |w| {
+            let _permit = permit;
             let closing = w.entry.closing.clone();
             let output = tx.clone();
             w.conn.progress_handler(
