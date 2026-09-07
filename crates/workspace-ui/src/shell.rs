@@ -4799,6 +4799,7 @@ impl Pane {
         .cloned()
         .unwrap_or_default();
         editor.update(cx, |editor, cx| {
+            editor.set_read_only(view == DatabaseItemView::Ddl, cx);
             editor.set_language(
                 if view == DatabaseItemView::Json {
                     EditorLanguage::Json
@@ -10895,20 +10896,33 @@ impl WorkspaceShell {
     pub fn command_specs(&self, cx: &App) -> Vec<CommandSpec> {
         CommandRegistry::palette_with(self.command_context(cx), &self.keymaps.bindings)
             .into_iter()
-            .map(|spec| self.apply_operation_capability(spec))
+            .map(|spec| self.apply_operation_capability(spec, cx))
             .collect()
     }
 
     fn command_spec(&self, id: CommandId, cx: &App) -> CommandSpec {
-        self.apply_operation_capability(CommandRegistry::spec(id, self.command_context(cx)))
+        self.apply_operation_capability(CommandRegistry::spec(id, self.command_context(cx)), cx)
     }
 
-    fn apply_operation_capability(&self, mut spec: CommandSpec) -> CommandSpec {
+    fn apply_operation_capability(&self, mut spec: CommandSpec, cx: &App) -> CommandSpec {
         if let Some(reason) = self.feature_unavailable_reason(spec.id) {
             spec.disabled_reason = Some(reason.into());
             return spec;
         }
         if spec.disabled_reason.is_some() {
+            return spec;
+        }
+        if matches!(
+            spec.id,
+            CommandId::ExecuteStatement | CommandId::ExecuteDocument
+        ) && self.panes.get(self.active_pane).is_some_and(|pane| {
+            let pane = pane.read(cx);
+            pane.active_item().is_some_and(|item| {
+                pane.database_item_views.get(&item.id) == Some(&DatabaseItemView::Ddl)
+            })
+        }) {
+            spec.disabled_reason =
+                Some("Canonical DDL is read-only; switch to Query to run SQL".into());
             return spec;
         }
         let operation = match spec.id {

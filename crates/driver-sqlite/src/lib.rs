@@ -688,6 +688,14 @@ fn error(code: Code, message: impl Into<String>) -> DriverError {
     DriverError::new(code, message).with_engine(Engine::Sqlite)
 }
 fn db_error(e: rusqlite::Error) -> DriverError {
+    if let rusqlite::Error::SqliteFailure(_, Some(message)) = &e {
+        if message.ends_with("already exists") {
+            return error(
+                Code::DuplicateObject,
+                "SQLite object already exists; open its definition instead of recreating it",
+            );
+        }
+    }
     let code = match e.sqlite_error_code() {
         Some(rusqlite::ErrorCode::OperationInterrupted) => Code::QueryCanceled,
         Some(

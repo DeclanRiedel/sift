@@ -1195,6 +1195,16 @@ impl QueryEditor {
         self
     }
 
+    pub(crate) fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
+        if self.read_only != read_only {
+            self.read_only = read_only;
+            self.revision = self.revision.wrapping_add(1);
+            self.semantic.invalidate();
+            cx.emit(EditorEvent::DiagnosticsChanged);
+            cx.notify();
+        }
+    }
+
     /// Replace the complete document from its owning surface without emitting
     /// a collaborative edit. Used for read-only feeds and generated SQL views.
     pub fn replace_text_from_owner(&mut self, text: &str, cx: &mut Context<Self>) {

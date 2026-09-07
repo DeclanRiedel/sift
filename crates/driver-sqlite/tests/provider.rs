@@ -197,7 +197,10 @@ async fn sql_authority_and_readonly_are_enforced_by_sqlite() {
         .await
         .unwrap();
     assert_eq!(snapshot.trees[0].schemas[0].objects[0].columns.len(), 2);
-    assert_eq!(snapshot.trees[0].schemas[0].objects[0].estimated_rows, Some(0));
+    assert_eq!(
+        snapshot.trees[0].schemas[0].objects[0].estimated_rows,
+        Some(0)
+    );
     assert_eq!(snapshot.trees[0].schemas[0].objects[0].modified_at, None);
     f.driver.close(c).await.unwrap();
     let c = f.open(SqliteOpenMode::ReadWrite).await;
@@ -548,5 +551,34 @@ async fn concurrent_catalog_work_and_first_query_share_worker() {
         ping.unwrap();
         assert_eq!(query.unwrap().0.len(), 1);
     }
+    f.driver.close(c).await.unwrap();
+}
+
+#[tokio::test]
+async fn seeded_trigger_ddl_is_readable_without_executing_it() {
+    let f = Fixture::new(1);
+    rusqlite::Connection::open(f.root.path().join("data.db"))
+        .unwrap()
+        .execute_batch(include_str!(
+            "../../../examples/reproducible-instance/sql/sqlite-demo.sql"
+        ))
+        .unwrap();
+    let c = f.open(SqliteOpenMode::ReadOnly).await;
+    let object = ObjectPath {
+        catalog: None,
+        schema: Some("main".into()),
+        name: "record_order_status".into(),
+        kind: Some(ObjectKind::Trigger),
+        routine_args: None,
+    };
+    let ddl = f.driver.object_ddl(c.clone(), object).await.unwrap();
+    assert!(ddl.contains("CREATE TRIGGER record_order_status"));
+    assert!(ddl.contains("INSERT INTO order_changes"));
+    // Opening a stored CREATE statement is inspection, not another execution.
+
+    let (rows, _, _) = execute(&f.driver, &c, "SELECT count(*) FROM order_changes", vec![])
+        .await
+        .unwrap();
+    assert_eq!(rows[0].values, vec![Value::Int64(0)]);
     f.driver.close(c).await.unwrap();
 }

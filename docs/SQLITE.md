@@ -171,3 +171,7 @@ The desktop demo also seeds `siftdemo` in the local SQL Server Docker container
 and imports its `.env`-managed credential through stdin. The connection is
 `demo/sql-server`; try `SELECT * FROM lab.order_summary`. Docker must be running.
 `nix run .#dev-mssql seed` seeds this database independently and preserves rows.
+
+Canonical DDL tabs are read-only inspection views, including triggers such as
+`record_order_status`. Switch to Query to write executable SQL. Opening a stored
+CREATE statement does not recreate the object.
