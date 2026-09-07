@@ -1082,6 +1082,7 @@ pub struct QueryEditor {
     cursor_event_pending: bool,
     revision: u64,
     mouse_anchor: Option<usize>,
+    pub(crate) message_copy_buttons: bool,
     line_cache: RefCell<LineLayoutCache>,
     wraps: RefCell<WrapCache>,
     marked_range: Option<Range<usize>>,
@@ -1140,6 +1141,7 @@ impl QueryEditor {
             cursor_event_pending: false,
             revision: 1,
             mouse_anchor: None,
+            message_copy_buttons: false,
             line_cache: RefCell::new(LineLayoutCache::default()),
             wraps: RefCell::new(WrapCache::default()),
             marked_range: None,
@@ -3165,6 +3167,70 @@ impl QueryEditor {
         )
     }
 
+    fn render_message_copy_buttons(&self, _: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        if !self.message_copy_buttons {
+            return Vec::new();
+        }
+        let text = self.document.text();
+        let mut starts = text
+            .match_indices('[')
+            .filter_map(|(offset, _)| {
+                if offset > 0 && text.as_bytes()[offset - 1] != b'\n' {
+                    return None;
+                }
+                let line = text[offset..].lines().next().unwrap_or_default();
+                (line.starts_with("[ERROR]")
+                    || line.starts_with("[WARNING]")
+                    || line.contains("Z] ["))
+                .then_some(offset)
+            })
+            .collect::<Vec<_>>();
+        starts.push(text.len());
+        let top = -self.scroll_handle.offset().y;
+        let bottom = top + self.scroll_handle.bounds().size.height;
+        starts
+            .windows(2)
+            .enumerate()
+            .filter_map(|(index, offsets)| {
+                let message = text[offsets[0]..offsets[1]].trim_end().to_owned();
+                let position = if message.starts_with("[ERROR]") || message.starts_with("[WARNING]")
+                {
+                    offsets[0] + message.find('\n').map_or(0, |newline| newline + 1)
+                } else {
+                    offsets[0]
+                };
+                let (row, _) = self.visual_position(position);
+                let y = EDITOR_VERTICAL_INSET + EDITOR_LINE_HEIGHT * row as f32;
+                if self.scroll_handle.bounds().size.height > px(0.)
+                    && (y + EDITOR_LINE_HEIGHT < top || y > bottom)
+                {
+                    return None;
+                }
+                Some(
+                    div()
+                        .absolute()
+                        .right(px(2.))
+                        .top(y)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            IconButton::new(
+                                ("copy-message", index),
+                                IconName::Copy,
+                                "Copy message",
+                            )
+                            .debug_selector(format!("copy-message-{index}"))
+                            .square(EDITOR_LINE_HEIGHT)
+                            .icon_size(12.)
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(message.clone()))
+                            }),
+                        )
+                        .into_any_element(),
+                )
+            })
+            .collect()
+    }
+
     fn render_manifest_lifecycle(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let lifecycle = self.manifest_lifecycle?;
         let colors = cx.theme().colors;
@@ -3810,6 +3876,7 @@ impl gpui::Render for QueryEditor {
                             .child(QueryEditorElement {
                                 editor: cx.entity(),
                             })
+                            .children(self.render_message_copy_buttons(cx))
                             .children(self.render_completion_menu(cx))
                             .children(self.render_hover_card(cx))
                             .children(self.render_manifest_hover_card(cx))

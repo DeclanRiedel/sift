@@ -2150,6 +2150,7 @@ pub enum PaneEvent {
         tone: Option<ToastTone>,
     },
     ClearNotifications,
+    ClearProblems,
     /// This pane owns the currently visible drop ghost. The workspace tracks
     /// one owner so pointer-leave cleanup stays O(1) with many splits.
     DragPreviewActivated,
@@ -8181,9 +8182,22 @@ impl gpui::Render for Pane {
                     {
                         match self.editors.get(&item.id) {
                             Some(editor) => {
+                                let messages = matches!(item.kind, ItemKind::Notifications | ItemKind::Problems);
+                                editor.update(cx, |editor, cx| {
+                                    if editor.message_copy_buttons != messages { editor.message_copy_buttons = messages; cx.notify(); }
+                                });
+                                let problems = item.kind == ItemKind::Problems;
+                                let copy_editor = editor.clone();
+                                let message_controls = problems.then(|| div().h(px(28.)).flex_none().px_2().flex().items_center().gap_1().bg(colors.toolbar)
+                                    .child(div().flex_1())
+                                    .child(Button::new("copy-all-messages", "Copy all").debug_selector("copy-all-messages").tone(ButtonTone::Ghost).start_icon(IconName::Copy)
+                                        .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_editor.read(cx).document().text().to_owned()))))
+                                    .children(problems.then(|| Button::new("clear-problems", "Clear").debug_selector("clear-problems").tone(ButtonTone::Ghost)
+                                        .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::ClearProblems))))));
                                 let notification_controls = (item.kind == ItemKind::Notifications)
                                     .then(|| {
                                         let selected = self.notification_filter;
+                                        let copy_editor = editor.clone();
                                         div()
                                             .debug_selector(|| "notification-controls".into())
                                             .h(px(30.))
@@ -8228,6 +8242,8 @@ impl gpui::Render for Pane {
                                                 }),
                                             )
                                             .child(div().flex_1())
+                                            .child(Button::new("copy-all-notifications", "Copy all").tone(ButtonTone::Ghost).start_icon(IconName::Copy)
+                                                .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_editor.read(cx).document().text().to_owned()))))
                                             .child(
                                                 Button::new("clear-notifications", "Clear")
                                                     .debug_selector("clear-notifications")
@@ -8237,7 +8253,7 @@ impl gpui::Render for Pane {
                                                     })),
                                             )
                                     });
-                                body.children(notification_controls)
+                                body.children(notification_controls).children(message_controls)
                                     .child(div().flex_1().min_h_0().child(editor.clone()))
                             }
                             None => body.child(
@@ -9434,6 +9450,7 @@ pub struct WorkspaceShell {
     inline_error_notification_cursor: u64,
     status: StatusBar,
     global_problems: Vec<GlobalProblem>,
+    dismissed_problems: HashSet<(u64, String)>,
     unread_problems: usize,
     lifecycle: LifecycleProjection,
     presence: RoomPresenceProjection,
@@ -9725,6 +9742,7 @@ struct WorkspaceSession {
     active_left_panel: LeftPanel,
     active_bottom_tool: BottomTool,
     global_problems: Vec<GlobalProblem>,
+    dismissed_problems: HashSet<(u64, String)>,
     unread_problems: usize,
     expanded_tenants: HashSet<i64>,
     expanded_connections: HashSet<i64>,
@@ -10657,6 +10675,7 @@ impl WorkspaceShell {
             unread_notifications: 0,
             status: StatusBar::default(),
             global_problems: Vec::new(),
+            dismissed_problems: HashSet::new(),
             unread_problems: 0,
             lifecycle: LifecycleProjection::default(),
             presence: RoomPresenceProjection::default(),
@@ -11398,6 +11417,10 @@ impl WorkspaceShell {
                 target.active_bottom_tool,
             ),
             global_problems: std::mem::replace(&mut self.global_problems, target.global_problems),
+            dismissed_problems: std::mem::replace(
+                &mut self.dismissed_problems,
+                target.dismissed_problems,
+            ),
             unread_problems: std::mem::replace(&mut self.unread_problems, target.unread_problems),
             expanded_tenants: std::mem::replace(
                 &mut self.expanded_tenants,
@@ -11521,6 +11544,7 @@ impl WorkspaceShell {
             active_left_panel: workspace.left_panel,
             active_bottom_tool: workspace.bottom_tool,
             global_problems: Vec::new(),
+            dismissed_problems: HashSet::new(),
             unread_problems: 0,
             expanded_tenants: HashSet::new(),
             expanded_connections: HashSet::new(),
@@ -20968,6 +20992,11 @@ impl WorkspaceShell {
                 }
             }
         }
+        problems.retain(|problem| {
+            !self
+                .dismissed_problems
+                .contains(&(problem.item_id, problem.message.clone()))
+        });
         problems
     }
 
@@ -26823,6 +26852,23 @@ impl WorkspaceShell {
                 self.sync_notifications_editor(cx);
                 cx.notify();
             }
+            PaneEvent::ClearProblems => {
+                let dismissed = self
+                    .all_global_problems(cx)
+                    .into_iter()
+                    .filter(|problem| {
+                        !self.global_problems.iter().any(|runtime| {
+                            runtime.item_id == problem.item_id && runtime.message == problem.message
+                        })
+                    })
+                    .map(|problem| (problem.item_id, problem.message))
+                    .collect::<Vec<_>>();
+                self.dismissed_problems.extend(dismissed);
+                self.global_problems.clear();
+                self.unread_problems = 0;
+                self.sync_global_problems_editor(cx);
+                cx.notify();
+            }
             PaneEvent::ClearNotifications => {
                 self.notification_history.clear();
                 self.unread_notifications = 0;
@@ -26968,6 +27014,9 @@ impl WorkspaceShell {
                 });
             }
             PaneEvent::EditorStateChanged { item_id, dirty } => {
+                if dirty == &Some(true) {
+                    self.dismissed_problems.retain(|(id, _)| id != item_id);
+                }
                 if let Some(dirty) = dirty {
                     emitter.update(cx, |pane, _| {
                         if let Some(item) = pane.items.iter_mut().find(|item| item.id == *item_id) {
@@ -49514,6 +49563,33 @@ mod tests {
         });
         cx.simulate_keystrokes("escape");
         workspace.read_with(&cx, |shell, _| assert!(shell.modal.is_none()));
+    }
+
+    #[gpui::test]
+    fn problems_offer_row_copy_copy_all_and_clear(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.record_runtime_error(None, "Read table", "The table is unavailable".into(), cx);
+            shell.show_global_problems(window, cx);
+        });
+        cx.run_until_parked();
+        let copy = cx.debug_bounds("copy-message-0").expect("copy button beside the error");
+        cx.simulate_click(copy.center(), Modifiers::default());
+        assert!(cx.read_from_clipboard().unwrap().text().unwrap().contains("The table is unavailable"));
+        let clear = cx.debug_bounds("clear-problems").unwrap();
+        cx.simulate_click(clear.center(), Modifiers::default());
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.global_problems_text(cx), "No problems.")
+        });
+        workspace.update(&mut cx, |shell, cx| {
+            shell.record_runtime_error(None, "Read table", "The table is unavailable".into(), cx);
+            assert!(shell
+                .global_problems_text(cx)
+                .contains("The table is unavailable"));
+        });
     }
 
     #[gpui::test]
