@@ -1551,10 +1551,10 @@ const DEFINITIONS: &[CommandDefinition] = &[
     ),
     command(
         CommandId::OpenServerConfiguration,
-        "Edit Current sift.toml…",
+        "Open Current Instance sift.toml",
         "",
-        "",
-        false,
+        "<leader> e i",
+        true,
         AvailabilityRule::EditableInstance,
     ),
     command(

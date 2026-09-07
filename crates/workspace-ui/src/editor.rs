@@ -957,6 +957,7 @@ actions!(
         Complete,
         ExpandStar,
         ToggleFold,
+        ToggleComment,
         FormatDocument,
         ApplyQuickFix,
         FindUsages,
@@ -2055,7 +2056,9 @@ impl QueryEditor {
         // narrows a stale candidate list itself.
         let reopen_completion = self.semantic.completion().is_some();
         self.semantic.invalidate();
-        if self.language == EditorLanguage::Json {
+        if self.manifest_schema {
+            self.schedule_manifest_diagnostics(cx);
+        } else if self.language == EditorLanguage::Json {
             self.refresh_local_diagnostics();
         } else {
             self.request_semantic(SemanticRequestKind::Analyze, cx);
@@ -2410,6 +2413,61 @@ impl QueryEditor {
         self.edited(cx);
     }
 
+    fn toggle_comment(&mut self, _: &ToggleComment, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let prefix = match self.language {
+            EditorLanguage::Sql => "--",
+            EditorLanguage::Toml => "#",
+            _ => return,
+        };
+        let selection = self.document.selection();
+        let text = self.document.text();
+        let start = text[..selection.start].rfind('\n').map_or(0, |i| i + 1);
+        let last = if selection.is_empty() {
+            selection.end
+        } else {
+            selection.end - 1
+        };
+        let end = text[last..].find('\n').map_or(text.len(), |i| last + i);
+        let lines = text[start..end].split('\n').collect::<Vec<_>>();
+        let uncomment = lines
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .all(|line| line.trim_start().starts_with(prefix))
+            && lines.iter().any(|line| !line.trim().is_empty());
+        let replacement = lines
+            .into_iter()
+            .map(|line| {
+                let body = line.trim_start();
+                let indent = &line[..line.len() - body.len()];
+                if uncomment {
+                    let body = body
+                        .strip_prefix(prefix)
+                        .map(|body| body.strip_prefix(' ').unwrap_or(body))
+                        .unwrap_or(body);
+                    format!("{indent}{body}")
+                } else {
+                    format!("{indent}{prefix} {body}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.document.replace_range(start..end, &replacement);
+        if selection.is_empty() {
+            let cursor = start + replacement.find('\n').unwrap_or(replacement.len());
+            self.document.set_selection(cursor..cursor, false);
+        } else {
+            self.document
+                .set_selection(start..start + replacement.len(), false);
+        }
+        if let Some(vim) = self.vim.as_mut() {
+            vim.set_cursor(self.document.text(), self.document.cursor());
+        }
+        self.edited_with_auto_completion(false, cx);
+    }
+
     fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
         if self.read_only {
             return;
@@ -2633,12 +2691,6 @@ impl QueryEditor {
             .find('\n')
             .map_or(self.document.text().len(), |offset| line_start + offset);
         let line_text = &self.document.text()[line_start..line_end];
-        // Blank rows have no glyph target. Treating their full viewport width
-        // as a valid hit makes the caret appear to jump to an arbitrary byte
-        // boundary, especially after scrolling. Preserve the current caret.
-        if line_text.trim().is_empty() {
-            return None;
-        }
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let runs = editor_text_runs(
@@ -3506,6 +3558,7 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::delete_forward))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::indent))
+            .on_action(cx.listener(Self::toggle_comment))
             .on_action(cx.listener(Self::move_left))
             .on_action(cx.listener(Self::move_right))
             .on_action(cx.listener(Self::move_up))
@@ -5658,11 +5711,83 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clicking_a_blank_row_preserves_the_caret(cx: &mut TestAppContext) {
+    fn line_comments_round_trip_and_undo_in_sql_and_toml(cx: &mut TestAppContext) {
+        for (language, source, expected) in [
+            (
+                EditorLanguage::Sql,
+                "  select 'é';\nselect 2;\n",
+                "  -- select 'é';\n-- select 2;\n",
+            ),
+            (
+                EditorLanguage::Toml,
+                "  store_sql = true\n",
+                "  # store_sql = true\n",
+            ),
+        ] {
+            let window = cx
+                .update(|cx| {
+                    cx.open_window(Default::default(), |_, cx| {
+                        cx.new(|cx| QueryEditor::new(doc(source), cx).with_language(language))
+                    })
+                })
+                .unwrap();
+            let mut visual = VisualTestContext::from_window(window.into(), cx);
+            let editor = window.root(&mut visual).unwrap();
+            editor.update_in(&mut visual, |editor, window, cx| {
+                editor.document.set_selection(0..source.len(), false);
+                editor.toggle_comment(&ToggleComment, window, cx);
+                assert_eq!(editor.document.text(), expected);
+                editor.toggle_comment(&ToggleComment, window, cx);
+                assert_eq!(editor.document.text(), source);
+                editor.document.undo();
+                assert_eq!(editor.document.text(), expected);
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn typing_manifest_typo_refreshes_row_diagnostics(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_, cx| {
+                    cx.new(|cx| {
+                        QueryEditor::new(doc("[server.metadata]\nstore_sql = true\n"), cx)
+                            .with_language(EditorLanguage::Toml)
+                            .with_manifest_schema()
+                    })
+                })
+            })
+            .unwrap();
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut visual).unwrap();
+        editor.update(&mut visual, |editor, cx| {
+            let offset = editor.document.text().find("store_sql").unwrap() + 1;
+            editor.document.replace_range(offset..offset + 1, "");
+            editor.edited(cx);
+        });
+        visual.run_until_parked();
+        visual.executor().advance_clock(Duration::from_millis(300));
+        visual.run_until_parked();
+        editor.read_with(&visual, |editor, _| {
+            assert!(editor
+                .semantic
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("sore_sql")
+                    && diagnostic.range.start == 18));
+            assert!(editor
+                .manifest_outline()
+                .iter()
+                .any(|entry| entry.title == "sore_sql" && entry.error.is_some()));
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_an_empty_row_moves_the_caret(cx: &mut TestAppContext) {
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |_window, cx| {
-                    cx.new(|cx| QueryEditor::new(doc("select 1;\n   \nselect 3;"), cx))
+                    cx.new(|cx| QueryEditor::new(doc("select 1;\n\nselect 3;"), cx))
                 })
             })
             .unwrap();
@@ -5682,7 +5807,7 @@ mod tests {
         cx.simulate_click(position, gpui::Modifiers::default());
         assert_eq!(
             editor.read_with(&cx, |editor, _| editor.document.cursor()),
-            4
+            10
         );
     }
 

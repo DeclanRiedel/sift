@@ -8102,6 +8102,11 @@ impl gpui::Render for Pane {
                                                                     editor.go_to_offset(target, cx)
                                                                 });
                                                             })
+                                                            .when_some(entry.error, |row, message| {
+                                                                row.text_color(colors.danger)
+                                                                    .child(icon(IconName::Warning, colors.danger, 12.))
+                                                                    .tooltip(move |_, cx| cx.new(|_| Tooltip::new(message.clone())).into())
+                                                            })
                                                             .child(entry.title)
                                                     },
                                                 ))
@@ -9451,6 +9456,7 @@ pub struct WorkspaceShell {
     room_document_sender: Option<tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>>,
     room_document_generations: HashMap<i64, u64>,
     running_queries: HashMap<u64, u64>,
+    pending_result_focus: Option<u64>,
     database_monitor: DatabaseMonitorState,
     transaction_state: TransactionUiState,
     savepoints: Vec<String>,
@@ -10686,6 +10692,7 @@ impl WorkspaceShell {
             room_document_sender: None,
             room_document_generations: HashMap::new(),
             running_queries: HashMap::new(),
+            pending_result_focus: None,
             database_monitor: DatabaseMonitorState::default(),
             transaction_state: TransactionUiState::Idle,
             savepoints: Vec::new(),
@@ -12742,6 +12749,7 @@ impl WorkspaceShell {
                 self.running_queries.remove(&item_id);
                 self.held_result_pages.remove(&item_id);
                 self.route_result(item_id, state, cx);
+                self.pending_result_focus = Some(item_id);
             }
             ExecutorEvent::ExecutionStarted {
                 item_id,
@@ -12803,6 +12811,7 @@ impl WorkspaceShell {
                     return;
                 };
                 if update.progress == StreamProgress::WindowFull {
+                    self.pending_result_focus = Some(item_id);
                     self.status.execution = update.status_label;
                     // Hold the page — and with it the whole server stream —
                     // until the user chooses to move past the retained window.
@@ -12827,6 +12836,7 @@ impl WorkspaceShell {
                         .as_ref()
                         .expect("terminal stream update has completion metadata");
                     self.replace_stream_problems(item_id, completion, cx);
+                    self.pending_result_focus = Some(item_id);
                     let reference = completion.reference(cursor_id.0, epoch_millis());
                     self.record_result_reference_value(item_id, reference, cx);
                 }
@@ -27762,6 +27772,29 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.unparse();
+        // Route Objects before the workspace's Vim Enter handling consumes it.
+        if self.modal.is_none()
+            && self.ide_input.is_none()
+            && key == "enter"
+            && !event.keystroke.modifiers.modified()
+        {
+            if let Some(pane) = self.panes.get(self.active_pane) {
+                let objects_focused = {
+                    let pane = pane.read(cx);
+                    pane.focus_handle.is_focused(window)
+                        && pane.pending_close_item.is_none()
+                        && pane.tab_context_menu.is_none()
+                        && pane
+                            .active_item()
+                            .is_some_and(|item| pane.object_browsers.contains_key(&item.id))
+                };
+                if objects_focused {
+                    pane.update(cx, |pane, cx| pane.object_browser_action('o', cx));
+                    cx.stop_propagation();
+                    return;
+                }
+            }
+        }
         if self.modal == Some(Modal::CommandPalette)
             && key == "enter"
             && !event.keystroke.modifiers.modified()
@@ -38827,6 +38860,17 @@ impl gpui::Render for PaneLayoutView {
 
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(item_id) = self.pending_result_focus.take() {
+            if self.modal.is_none()
+                && self
+                    .panes
+                    .get(self.active_pane)
+                    .and_then(|pane| pane.read(cx).active_item())
+                    .is_some_and(|item| item.id == item_id)
+            {
+                self.focus_results(window, cx);
+            }
+        }
         let colors = cx.theme().colors;
         let frame_metrics = self
             .show_frame_metrics
@@ -44573,7 +44617,7 @@ mod tests {
                 "Settings",
                 "Keymaps",
                 "Toggle Light/Dark Theme",
-                "Edit Current sift.toml…",
+                "Open Current Instance sift.toml",
                 "View Sift Metadata (Read-only Snapshot)"
             ]
         );
@@ -48307,10 +48351,8 @@ mod tests {
             assert_eq!(browser.context.profile_name, "Analytics");
         });
         cx.run_until_parked();
-        let row = cx
-            .debug_bounds("object-browser-row-0")
-            .expect("loaded object row");
-        cx.simulate_click(row.center(), Modifiers::default());
+        assert!(cx.debug_bounds("object-browser-row-0").is_some());
+        // Keyboard opening must not require a preliminary row click.
         cx.simulate_keystrokes("enter");
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
@@ -50962,6 +51004,48 @@ mod tests {
             shell.discard_staged_result_edits(window, cx);
             assert!(shell.staged_result_edits.is_empty());
         });
+    }
+
+    #[gpui::test]
+    fn completed_query_focuses_data_or_error_messages(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        for (state, tab) in [
+            (
+                ResultState::Ready(crate::results::ResultData::default()),
+                crate::results::ResultTab::Data,
+            ),
+            (
+                ResultState::Failed("invalid SQL".into()),
+                crate::results::ResultTab::Messages,
+            ),
+        ] {
+            workspace.update_in(&mut cx, |shell, window, cx| {
+                shell.focus_active_pane(window, cx);
+                shell.running_queries.insert(1, 7);
+                shell.on_executor_event(
+                    ExecutorEvent::Execution {
+                        item_id: 1,
+                        execution_id: 7,
+                        state,
+                    },
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
+            workspace.read_with(&cx, |shell, cx| {
+                assert_eq!(
+                    shell
+                        .focused_pane_results(cx)
+                        .unwrap()
+                        .read(cx)
+                        .active_tab(),
+                    tab
+                );
+            });
+        }
     }
 
     #[gpui::test]

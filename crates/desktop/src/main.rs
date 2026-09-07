@@ -62,6 +62,7 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
             ed::ExecuteDocument,
             standard_ctx,
         ),
+        gpui::KeyBinding::new("ctrl-/", ed::ToggleComment, ctx),
         gpui::KeyBinding::new("ctrl-space", ed::Complete, insert_ctx),
         gpui::KeyBinding::new(&format!("{primary}-f"), ed::OpenFind, ctx),
         gpui::KeyBinding::new("f3", ed::FindNext, ctx),

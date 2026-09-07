@@ -31,6 +31,7 @@ pub struct ManifestOutlineItem {
     pub path: String,
     pub offset: usize,
     pub depth: usize,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -937,6 +938,10 @@ pub fn manifest_diagnostics(source: &str) -> Vec<ManifestDiagnostic> {
                 path: Some(path.clone()),
                 message: format!("{path}: {message}"),
             },
+            _ if !diagnostics.is_empty() => {
+                diagnostics.sort_by_key(|diagnostic| diagnostic.range.start);
+                return diagnostics;
+            }
             error => ManifestDiagnostic {
                 range: 0..source.len().min(1),
                 path: None,
@@ -1217,8 +1222,22 @@ pub fn manifest_outline(source: &str) -> Vec<ManifestOutlineItem> {
             path: path.into(),
             offset,
             depth: path.matches('.').count(),
+            error: None,
         });
     }
+    for diagnostic in manifest_diagnostics(source) {
+        let Some(path) = diagnostic.path else {
+            continue;
+        };
+        items.push(ManifestOutlineItem {
+            title: path.rsplit('.').next().unwrap_or(&path).to_owned(),
+            depth: path.matches('.').count(),
+            path,
+            offset: diagnostic.range.start,
+            error: Some(diagnostic.message),
+        });
+    }
+    items.sort_by_key(|item| item.offset);
     items
 }
 
