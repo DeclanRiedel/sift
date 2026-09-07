@@ -45,17 +45,17 @@ main {
   flex-direction: column;
 }
 
-/* Compact diagonal stripes run along the viewport edges — sized as three
-   parts left, two parts right of the gutter (capped at 240px and 160px on
-   very wide screens) — behind a dashed divider, while the cell pattern
-   fills the rest of the gutter up to the page. */
+/* Compact diagonal stripes run along the viewport edges behind a dashed
+   divider, taking about 15% of the gutter — three parts left, two parts
+   right — while the cell pattern fills the remaining majority up to the
+   page. */
 main::before,
 main::after {
   content: "";
   position: fixed;
   top: 0;
   bottom: 0;
-  width: min(240px, calc((100% - var(--page-width)) / 2 * 0.6));
+  width: calc((100% - var(--page-width)) / 2 * 0.09);
   background: repeating-linear-gradient(135deg, #16191a 0 3px, #0a0c0d 3px 6px);
 }
 
@@ -66,7 +66,7 @@ main::before {
 
 main::after {
   right: 0;
-  width: min(160px, calc((100% - var(--page-width)) / 2 * 0.4));
+  width: calc((100% - var(--page-width)) / 2 * 0.06);
   border-left: 1px dashed var(--border);
   background: repeating-linear-gradient(135deg, #0a0c0d 0 3px, #16191a 3px 6px);
 }
