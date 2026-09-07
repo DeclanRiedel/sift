@@ -2799,6 +2799,45 @@ impl QueryEditor {
         }
     }
 
+    fn multi_click_selection(&self, cursor: usize, click_count: usize) -> Range<usize> {
+        let text = self.document.text();
+        let start = self.document.line_start(cursor);
+        let end = self.document.line_end(cursor);
+        if click_count >= 3 {
+            return start..if end < text.len() { end + 1 } else { end };
+        }
+        if start == end {
+            return cursor..cursor;
+        }
+        let cursor = if cursor == end {
+            self.document.prev_boundary(cursor)
+        } else {
+            cursor
+        };
+        // Identifiers include Unicode letters and underscores; punctuation and
+        // whitespace select their own runs without crossing a source line.
+        let class = |ch: char| {
+            if ch.is_alphanumeric() || ch == '_' {
+                0
+            } else if ch.is_whitespace() {
+                1
+            } else {
+                2
+            }
+        };
+        let target = class(text[cursor..].chars().next().unwrap());
+        let left = text[start..cursor]
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| class(*ch) != target)
+            .map_or(start, |(offset, ch)| start + offset + ch.len_utf8());
+        let right = text[cursor..end]
+            .char_indices()
+            .find(|(_, ch)| class(*ch) != target)
+            .map_or(end, |(offset, _)| cursor + offset);
+        left..right
+    }
+
     fn finish_mouse_selection(&mut self, cx: &mut Context<Self>) {
         if self.mouse_anchor.take().is_none() {
             return;
@@ -3794,6 +3833,13 @@ impl gpui::Render for QueryEditor {
                     else {
                         return;
                     };
+                    if event.click_count >= 2 {
+                        let range = editor.multi_click_selection(cursor, event.click_count);
+                        editor.mouse_anchor = Some(range.start);
+                        editor.document.set_selection(range, false);
+                        editor.selection_changed(cx);
+                        return;
+                    }
                     let anchor = if event.modifiers.shift {
                         editor.document.cursor()
                     } else {
@@ -5996,6 +6042,50 @@ mod tests {
             editor.read_with(&cx, |editor, _| editor.cursor_position().0),
             expected_line
         );
+    }
+
+    #[gpui::test]
+    fn multiple_clicks_select_words_and_complete_wrapped_lines(cx: &mut TestAppContext) {
+        for language in [EditorLanguage::Sql, EditorLanguage::Toml] {
+            let source = format!("café_name {}\nnext_line", "word ".repeat(250));
+            let line_end = source.find('\n').unwrap() + 1;
+            let window = cx
+                .update(|cx| {
+                    cx.open_window(Default::default(), |_, cx| {
+                        cx.new(|cx| QueryEditor::new(doc(&source), cx).with_language(language))
+                    })
+                })
+                .unwrap();
+            let mut visual = VisualTestContext::from_window(window.into(), cx);
+            let editor = window.root(&mut visual).unwrap();
+            editor.update_in(&mut visual, |editor, _, cx| {
+                editor.set_keymap(EditorKeymap::Vim, cx);
+            });
+            visual.run_until_parked();
+            let viewport = editor.read_with(&visual, |editor, _| editor.scroll_handle.bounds());
+            let position = point(
+                viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET + px(12.),
+                viewport.top() + EDITOR_VERTICAL_INSET + EDITOR_LINE_HEIGHT / 2.,
+            );
+            for (click_count, expected) in [(2, 0.."café_name".len()), (3, 0..line_end)] {
+                visual.simulate_event(gpui::MouseDownEvent {
+                    position,
+                    button: MouseButton::Left,
+                    click_count,
+                    ..Default::default()
+                });
+                visual.simulate_event(gpui::MouseUpEvent {
+                    position,
+                    button: MouseButton::Left,
+                    click_count,
+                    ..Default::default()
+                });
+                assert_eq!(
+                    editor.read_with(&visual, |editor, _| editor.document.selection()),
+                    expected
+                );
+            }
+        }
     }
 
     #[gpui::test]
