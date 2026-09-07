@@ -7432,13 +7432,13 @@ impl WorkspaceShell {
                                         .child(
                                             div()
                                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .child("Transfer recipes"),
+                                                .child(format!("Transfer recipes · {direction}")),
                                         )
                                         .child(
                                             div()
                                                 .text_xs()
                                                 .text_color(colors.muted_text)
-                                                .child("Revisioned query exports and upload-to-table imports"),
+                                                .child("Save reusable import and export settings. Preview before running."),
                                         ),
                                 )
                                 .child(
@@ -7479,7 +7479,7 @@ impl WorkspaceShell {
                                 .child(
                                     div()
                                         .id("transfer-recipe-list")
-                                        .w(px(230.))
+                                        .w(relative(0.25)).min_w(px(130.))
                                         .flex_none()
                                         .overflow_y_scroll()
                                         .when(self.transfer.recipes.is_empty(), |list| {
@@ -7497,11 +7497,12 @@ impl WorkspaceShell {
                                     div()
                                         .flex_1()
                                         .min_w_0()
+                                        .id("transfer-recipe-form")
                                         .p_3()
                                         .flex()
                                         .flex_col()
                                         .gap_3()
-                                        .overflow_hidden()
+                                        .overflow_y_scroll()
                                         .child(
                                             div()
                                                 .flex()
@@ -7510,7 +7511,7 @@ impl WorkspaceShell {
                                                     div()
                                                         .flex_1()
                                                         .child(field(
-                                                            "NAME",
+                                                            "Name",
                                                             self.transfer.recipe_name_input.clone(),
                                                         )),
                                                 )
@@ -7518,17 +7519,14 @@ impl WorkspaceShell {
                                                     div()
                                                         .w(px(110.))
                                                         .child(
-                                                            Button::new(
-                                                                "transfer-recipe-direction",
-                                                                direction,
-                                                            )
-                                                            .tone(ButtonTone::Neutral)
-                                                            .wide(true)
-                                                            .on_click(cx.listener(
-                                                                |shell, _, _, cx| {
-                                                                    shell.toggle_transfer_recipe_direction(cx)
-                                                                },
-                                                            )),
+                                                            div().flex().flex_col().gap_1().children([
+                                                                (sift_protocol::TransferDirection::Import, "Import"),
+                                                                (sift_protocol::TransferDirection::Export, "Export"),
+                                                            ].into_iter().map(|(choice, label)| Button::new(("transfer-direction", choice as usize), label)
+                                                                .tone(if self.transfer.recipe_direction == choice { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                                                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                                                    if shell.transfer.recipe_direction != choice { shell.toggle_transfer_recipe_direction(cx); }
+                                                                })))),
                                                         ),
                                                 ),
                                         )
@@ -7540,42 +7538,36 @@ impl WorkspaceShell {
                                                     div()
                                                         .flex_1()
                                                         .child(field(
-                                                            "FORMAT",
+                                                            "Format ID",
                                                             self.transfer.recipe_format_input.clone(),
-                                                        )),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .w(px(120.))
-                                                        .child(field(
-                                                            "VERSION",
-                                                            self.transfer.recipe_version_input.clone(),
                                                         )),
                                                 ),
                                         )
-                                        .child(field(
-                                            "OPTIONS JSON",
-                                            self.transfer.recipe_options_input.clone(),
-                                        ))
+                                        .child(Button::new("transfer-advanced", if self.transfer.advanced_open { "Hide advanced options" } else { "Advanced options…" })
+                                            .tone(ButtonTone::Ghost)
+                                            .on_click(cx.listener(|shell, _, _, cx| { shell.transfer.advanced_open = !shell.transfer.advanced_open; cx.notify(); })))
+                                        .when(self.transfer.advanced_open, |form| form
+                                            .child(field("Format version", self.transfer.recipe_version_input.clone()))
+                                            .child(field("Options (JSON)", self.transfer.recipe_options_input.clone())))
                                         .when(
                                             self.transfer.recipe_direction
                                                 == sift_protocol::TransferDirection::Import,
                                             |editor| {
                                                 editor
                                                     .child(field(
-                                                        "DESTINATION TABLE",
+                                                        "Destination table",
                                                         self.transfer.recipe_table_input.clone(),
                                                     ))
                                                     .child(
                                                         div()
                                                             .flex()
-                                                            .items_end()
+                                                            .items_end().flex_wrap()
                                                             .gap_2()
                                                             .child(
                                                                 div()
                                                                     .w(px(180.))
                                                                     .child(field(
-                                                                        "XLSX SHEET",
+                                                                        "Excel sheet (optional)",
                                                                         self.transfer.recipe_sheet_input.clone(),
                                                                     )),
                                                             )
@@ -7629,7 +7621,7 @@ impl WorkspaceShell {
                                                 .border_t_1()
                                                 .border_color(colors.subtle_border)
                                                 .flex()
-                                                .items_center()
+                                                .items_center().flex_wrap()
                                                 .gap_2()
                                                 .child(
                                                     Button::new(

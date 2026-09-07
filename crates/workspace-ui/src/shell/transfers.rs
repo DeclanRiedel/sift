@@ -14,6 +14,7 @@ pub(super) struct TransferState {
     pub(super) recipe_options_input: Entity<TextInput>,
     pub(super) recipe_table_input: Entity<TextInput>,
     pub(super) recipe_sheet_input: Entity<TextInput>,
+    pub(super) advanced_open: bool,
     pub(super) recipe_direction: sift_protocol::TransferDirection,
     pub(super) import_create_table: bool,
     pub(super) import_conflict_policy: sift_protocol::CsvConflictPolicy,

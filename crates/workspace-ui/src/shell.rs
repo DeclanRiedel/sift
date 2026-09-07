@@ -1539,6 +1539,7 @@ struct RunConfigurationEditorState {
     transaction_policy: sift_protocol::RunTransactionPolicy,
     error_policy: sift_protocol::RunErrorPolicy,
     adding_script: bool,
+    advanced_open: bool,
     delete_armed: bool,
     pending: bool,
     validation: Option<Result<sift_protocol::RunManifest, String>>,
@@ -6784,14 +6785,18 @@ impl Pane {
             .id(("run-configuration-editor", item_id as usize))
             .size_full()
             .min_h_0()
-            .overflow_y_scroll()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
             .bg(colors.background)
             .child(
                 div()
-                    .h(px(42.))
-                    .px_4()
+                    .min_h(px(36.))
+                    .flex_none()
+                    .px_3()
                     .flex()
                     .items_center()
+                    .flex_wrap()
                     .gap_2()
                     .border_b_1()
                     .border_color(colors.subtle_border)
@@ -6867,7 +6872,11 @@ impl Pane {
             )
             .child(
                 div()
-                    .max_w(px(860.))
+                    .id(("run-configuration-form", item_id as usize))
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .max_w(px(760.))
                     .w_full()
                     .mx_auto()
                     .px_5()
@@ -6875,7 +6884,7 @@ impl Pane {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(section("IDENTITY"))
+                    .child(section("Run details"))
                     .child(Field::new(
                         "Name",
                         Some(state.name.focus_handle(cx)),
@@ -6886,7 +6895,7 @@ impl Pane {
                         Some(state.target_schema.focus_handle(cx)),
                         state.target_schema.clone(),
                     ))
-                    .child(section("CONNECTION"))
+                    .child(section("Connection"))
                     .when(profiles.is_empty(), |view| {
                         view.child(
                             div()
@@ -6896,20 +6905,17 @@ impl Pane {
                     })
                     .children(profiles.into_iter().map(|profile| {
                         let profile_id = profile.id;
-                        Button::new(
-                            ("run-profile", profile_id as usize),
-                            format!("{} · {}", profile.name, profile.provider_id),
-                        )
-                        .tone(if selected_profile == Some(profile_id) {
-                            ButtonTone::Accent
-                        } else {
-                            ButtonTone::Ghost
-                        })
-                        .on_click(cx.listener(move |pane, _, _, cx| {
-                            pane.select_run_profile(item_id, profile_id, cx)
-                        }))
+                        Button::new(("run-profile", profile_id as usize), profile.name.clone())
+                            .tone(if selected_profile == Some(profile_id) {
+                                ButtonTone::Accent
+                            } else {
+                                ButtonTone::Ghost
+                            })
+                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                pane.select_run_profile(item_id, profile_id, cx)
+                            }))
                     }))
-                    .child(section("SCRIPTS"))
+                    .child(section("SQL scripts · run in order"))
                     .when(scripts.is_empty(), |view| {
                         view.child(
                             div()
@@ -6924,6 +6930,7 @@ impl Pane {
                             .h(px(34.))
                             .flex()
                             .items_center()
+                            .flex_wrap()
                             .gap_2()
                             .border_b_1()
                             .border_color(colors.subtle_border)
@@ -7024,158 +7031,213 @@ impl Pane {
                                 })),
                         )
                     })
-                    .child(section("VARIABLES"))
-                    .when(variables.is_empty(), |view| {
-                        view.child(div().text_color(colors.muted_text).child("No variables."))
-                    })
-                    .children(variables.into_iter().enumerate().map(
-                        |(index, (name, kind, required, secret_handle))| {
-                            div()
-                                .id(("run-variable", index))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(div().flex_1().min_w_0().child(name))
-                                .child(
-                                    Button::new(("run-variable-kind", index), format!("{kind:?}"))
-                                        .tone(ButtonTone::Ghost)
-                                        .on_click(cx.listener(move |pane, _, _, cx| {
-                                            pane.cycle_run_variable_kind(item_id, index, cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new(
-                                        ("run-variable-required", index),
-                                        if required { "Required" } else { "Optional" },
-                                    )
-                                    .tone(if required {
-                                        ButtonTone::Neutral
-                                    } else {
-                                        ButtonTone::Ghost
-                                    })
-                                    .on_click(cx.listener(
-                                        move |pane, _, _, cx| {
-                                            pane.toggle_run_variable_required(item_id, index, cx)
-                                        },
-                                    )),
-                                )
-                                .children((kind == sift_protocol::RunVariableKind::Secret).then(
-                                    || {
-                                        div()
-                                            .text_xs()
-                                            .text_color(if secret_handle {
-                                                colors.success
-                                            } else {
-                                                colors.warning
-                                            })
-                                            .child(if secret_handle {
-                                                "Secret set"
-                                            } else {
-                                                "Secret handle missing"
-                                            })
-                                    },
-                                ))
-                                .child(
-                                    Button::new(("run-variable-remove", index), "Remove")
-                                        .tone(ButtonTone::DangerGhost)
-                                        .on_click(cx.listener(move |pane, _, _, cx| {
-                                            pane.remove_run_variable(item_id, index, cx)
-                                        })),
-                                )
-                        },
-                    ))
                     .child(
-                        Button::new(("add-run-variable", item_id as usize), "+ Add variable")
-                            .tone(ButtonTone::Neutral)
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                pane.add_run_variable(item_id, cx)
-                            })),
+                        Button::new(
+                            ("run-advanced", item_id as usize),
+                            if state.advanced_open {
+                                "Hide variables & execution settings"
+                            } else {
+                                "Variables & execution settings…"
+                            },
+                        )
+                        .tone(ButtonTone::Ghost)
+                        .on_click(cx.listener(move |pane, _, _, cx| {
+                            if let Some(state) = pane.run_configuration_editors.get_mut(&item_id) {
+                                state.advanced_open = !state.advanced_open;
+                            }
+                            cx.notify();
+                        })),
                     )
-                    .child(section("EXECUTION"))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().w(px(120.)).child("Transaction"))
-                            .children(
-                                [
-                                    (sift_protocol::RunTransactionPolicy::None, "None"),
-                                    (sift_protocol::RunTransactionPolicy::PerScript, "Per script"),
-                                    (
-                                        sift_protocol::RunTransactionPolicy::AllScripts,
-                                        "All scripts",
+                    .when(state.advanced_open, |view| {
+                        view.child(section("Variables"))
+                            .when(variables.is_empty(), |view| {
+                                view.child(
+                                    div().text_color(colors.muted_text).child("No variables."),
+                                )
+                            })
+                            .children(variables.into_iter().enumerate().map(
+                                |(index, (name, kind, required, secret_handle))| {
+                                    div()
+                                        .id(("run-variable", index))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(div().flex_1().min_w_0().child(name))
+                                        .child(
+                                            Button::new(
+                                                ("run-variable-kind", index),
+                                                format!("{kind:?}"),
+                                            )
+                                            .tone(ButtonTone::Ghost)
+                                            .on_click(
+                                                cx.listener(move |pane, _, _, cx| {
+                                                    pane.cycle_run_variable_kind(item_id, index, cx)
+                                                }),
+                                            ),
+                                        )
+                                        .child(
+                                            Button::new(
+                                                ("run-variable-required", index),
+                                                if required { "Required" } else { "Optional" },
+                                            )
+                                            .tone(if required {
+                                                ButtonTone::Neutral
+                                            } else {
+                                                ButtonTone::Ghost
+                                            })
+                                            .on_click(
+                                                cx.listener(move |pane, _, _, cx| {
+                                                    pane.toggle_run_variable_required(
+                                                        item_id, index, cx,
+                                                    )
+                                                }),
+                                            ),
+                                        )
+                                        .children(
+                                            (kind == sift_protocol::RunVariableKind::Secret).then(
+                                                || {
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(if secret_handle {
+                                                            colors.success
+                                                        } else {
+                                                            colors.warning
+                                                        })
+                                                        .child(if secret_handle {
+                                                            "Secret set"
+                                                        } else {
+                                                            "Secret handle missing"
+                                                        })
+                                                },
+                                            ),
+                                        )
+                                        .child(
+                                            Button::new(("run-variable-remove", index), "Remove")
+                                                .tone(ButtonTone::DangerGhost)
+                                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                                    pane.remove_run_variable(item_id, index, cx)
+                                                })),
+                                        )
+                                },
+                            ))
+                            .child(
+                                Button::new(
+                                    ("add-run-variable", item_id as usize),
+                                    "+ Add variable",
+                                )
+                                .tone(ButtonTone::Neutral)
+                                .on_click(cx.listener(
+                                    move |pane, _, _, cx| pane.add_run_variable(item_id, cx),
+                                )),
+                            )
+                            .child(section("Execution policy"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .child(div().w(px(120.)).child("Transaction"))
+                                    .children(
+                                        [
+                                            (sift_protocol::RunTransactionPolicy::None, "None"),
+                                            (
+                                                sift_protocol::RunTransactionPolicy::PerScript,
+                                                "Per script",
+                                            ),
+                                            (
+                                                sift_protocol::RunTransactionPolicy::AllScripts,
+                                                "All scripts",
+                                            ),
+                                        ]
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(
+                                            |(index, (policy, label))| {
+                                                Button::new(
+                                                    ("run-transaction-policy", index),
+                                                    label,
+                                                )
+                                                .tone(if transaction_policy == policy {
+                                                    ButtonTone::Accent
+                                                } else {
+                                                    ButtonTone::Ghost
+                                                })
+                                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                                    pane.set_run_transaction_policy(
+                                                        item_id, policy, cx,
+                                                    )
+                                                }))
+                                            },
+                                        ),
                                     ),
-                                ]
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, (policy, label))| {
-                                    Button::new(("run-transaction-policy", index), label)
-                                        .tone(if transaction_policy == policy {
-                                            ButtonTone::Accent
-                                        } else {
-                                            ButtonTone::Ghost
-                                        })
-                                        .on_click(cx.listener(move |pane, _, _, cx| {
-                                            pane.set_run_transaction_policy(item_id, policy, cx)
-                                        }))
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().w(px(120.)).child("On error"))
-                            .children(
-                                [
-                                    (sift_protocol::RunErrorPolicy::Stop, "Stop"),
-                                    (sift_protocol::RunErrorPolicy::Continue, "Continue"),
-                                ]
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, (policy, label))| {
-                                    Button::new(("run-error-policy", index), label)
-                                        .tone(if error_policy == policy {
-                                            ButtonTone::Accent
-                                        } else {
-                                            ButtonTone::Ghost
-                                        })
-                                        .on_click(cx.listener(move |pane, _, _, cx| {
-                                            pane.set_run_error_policy(item_id, policy, cx)
-                                        }))
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().w(px(120.)).child("Pre-tasks"))
-                            .children(
-                                [
-                                    (sift_protocol::RunPreTask::PingTarget, "Ping target"),
-                                    (sift_protocol::RunPreTask::RefreshSchema, "Refresh schema"),
-                                ]
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, (task, label))| {
-                                    let enabled = pre_tasks.contains(&task);
-                                    Button::new(("run-pre-task", index), label)
-                                        .tone(if enabled {
-                                            ButtonTone::Neutral
-                                        } else {
-                                            ButtonTone::Ghost
-                                        })
-                                        .on_click(cx.listener(move |pane, _, _, cx| {
-                                            pane.toggle_run_pre_task(item_id, task, cx)
-                                        }))
-                                }),
-                            ),
-                    )
-                    .child(section("VALIDATION"))
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .child(div().w(px(120.)).child("On error"))
+                                    .children(
+                                        [
+                                            (sift_protocol::RunErrorPolicy::Stop, "Stop"),
+                                            (sift_protocol::RunErrorPolicy::Continue, "Continue"),
+                                        ]
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(
+                                            |(index, (policy, label))| {
+                                                Button::new(("run-error-policy", index), label)
+                                                    .tone(if error_policy == policy {
+                                                        ButtonTone::Accent
+                                                    } else {
+                                                        ButtonTone::Ghost
+                                                    })
+                                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                                        pane.set_run_error_policy(
+                                                            item_id, policy, cx,
+                                                        )
+                                                    }))
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .child(div().w(px(120.)).child("Pre-tasks"))
+                                    .children(
+                                        [
+                                            (sift_protocol::RunPreTask::PingTarget, "Ping target"),
+                                            (
+                                                sift_protocol::RunPreTask::RefreshSchema,
+                                                "Refresh schema",
+                                            ),
+                                        ]
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(
+                                            |(index, (task, label))| {
+                                                let enabled = pre_tasks.contains(&task);
+                                                Button::new(("run-pre-task", index), label)
+                                                    .tone(if enabled {
+                                                        ButtonTone::Neutral
+                                                    } else {
+                                                        ButtonTone::Ghost
+                                                    })
+                                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                                        pane.toggle_run_pre_task(item_id, task, cx)
+                                                    }))
+                                            },
+                                        ),
+                                    ),
+                            )
+                    })
+                    .child(section("Validation"))
                     .child(match validation {
                         Some(Ok(manifest)) => div().text_color(colors.success).child(format!(
                             "✓ {} script(s) resolved at workspace revision {}",
@@ -10764,6 +10826,7 @@ impl WorkspaceShell {
                 recipe_options_input: transfer_recipe_options_input,
                 recipe_table_input: transfer_recipe_table_input,
                 recipe_sheet_input: transfer_recipe_sheet_input,
+                advanced_open: false,
                 recipe_direction: sift_protocol::TransferDirection::Export,
                 import_create_table: false,
                 import_conflict_policy: sift_protocol::CsvConflictPolicy::Abort,
@@ -24811,6 +24874,7 @@ impl WorkspaceShell {
                     configuration.error_policy
                 }),
             adding_script: false,
+            advanced_open: configuration.is_some(),
             delete_armed: false,
             pending: false,
             validation: None,
@@ -49575,9 +49639,16 @@ mod tests {
             shell.show_global_problems(window, cx);
         });
         cx.run_until_parked();
-        let copy = cx.debug_bounds("copy-message-0").expect("copy button beside the error");
+        let copy = cx
+            .debug_bounds("copy-message-0")
+            .expect("copy button beside the error");
         cx.simulate_click(copy.center(), Modifiers::default());
-        assert!(cx.read_from_clipboard().unwrap().text().unwrap().contains("The table is unavailable"));
+        assert!(cx
+            .read_from_clipboard()
+            .unwrap()
+            .text()
+            .unwrap()
+            .contains("The table is unavailable"));
         let clear = cx.debug_bounds("clear-problems").unwrap();
         cx.simulate_click(clear.center(), Modifiers::default());
         cx.run_until_parked();
