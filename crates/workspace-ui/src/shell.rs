@@ -8407,7 +8407,10 @@ impl gpui::Render for Pane {
                                         handle.w_full().h(px(1.0))
                                     })
                                     .when(placement == ResultPlacement::Right, |handle| {
-                                        handle.h_full().w(px(1.0))
+                                        handle
+                                            .self_stretch()
+                                            .mt(crate::editor::EDITOR_VERTICAL_INSET)
+                                            .w(px(1.0))
                                     })
                                     .child(resize_hitbox);
                                 let split = if self.expanded_result_item == Some(item_id) {
@@ -8437,7 +8440,6 @@ impl gpui::Render for Pane {
                                                     .flex_none()
                                                     .flex()
                                                     .min_h_0()
-                                                    .pt(crate::editor::EDITOR_VERTICAL_INSET)
                                                     .child(result.clone()),
                                             )
                                             .into_any_element(),
@@ -8459,7 +8461,15 @@ impl gpui::Render for Pane {
                                                     .flex()
                                                     .min_w_0()
                                                     .pt(crate::editor::EDITOR_VERTICAL_INSET)
-                                                    .child(result.clone()),
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .border_t_1()
+                                                            .border_color(colors.subtle_border)
+                                                            .child(result.clone()),
+                                                    ),
                                             )
                                             .into_any_element(),
                                     }
