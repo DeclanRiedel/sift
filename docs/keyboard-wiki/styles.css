@@ -208,6 +208,99 @@ pre {
   background: #151515;
 }
 
+kbd {
+  padding: 2px 5px;
+  border: 1px solid #39312b;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #211c18;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  line-height: 1.8;
+}
+
+.copy-block {
+  position: relative;
+  min-width: 0;
+  margin-bottom: 20px;
+}
+
+.copy-block pre {
+  margin: 0;
+  padding-top: 46px;
+}
+
+.copy-field {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 5px;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+.copy-field code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #202020;
+  color: var(--gray);
+  cursor: pointer;
+}
+
+.copy-block > .copy-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+
+.copy-button:hover,
+.copy-button[data-copied] {
+  color: var(--white);
+  border-color: var(--accent);
+}
+
+.copy-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.copy-button[data-copied]::after {
+  content: "Copied";
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  z-index: 3;
+  padding: 2px 6px;
+  background: #202020;
+  color: var(--white);
+  border: 1px solid var(--border);
+  font: 12px monospace;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 footer {
   margin-top: auto;
   margin-bottom: 0;

@@ -9,6 +9,59 @@
   let navigation = 0;
   let content;
   let tabs;
+  let copyStatus;
+
+  function copyButton(target, label) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "copy-button";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/></svg>';
+    button.copyTarget = target;
+    return button;
+  }
+
+  function enhanceContent(root, path) {
+    for (const pre of root.querySelectorAll("pre")) {
+      if (pre.parentElement?.classList.contains("copy-block")) continue;
+      const block = document.createElement("div");
+      block.className = "copy-block";
+      pre.replaceWith(block);
+      block.append(pre, copyButton(pre.querySelector("code") || pre, "Copy code block"));
+    }
+    if (path !== "/configuration") return;
+    for (const code of root.querySelectorAll("table th code, table td:first-child code")) {
+      if (code.parentElement.classList.contains("copy-field")) continue;
+      const field = document.createElement("span");
+      field.className = "copy-field";
+      code.replaceWith(field);
+      field.append(code, copyButton(code, `Copy ${code.textContent}`));
+    }
+  }
+
+  async function copyCode(event) {
+    const button = event.target.closest?.(".copy-button");
+    if (!button || button.disabled) return;
+    const target = button.copyTarget;
+    button.disabled = true;
+    try {
+      await navigator.clipboard.writeText(target.textContent);
+      copyStatus.textContent = "Copied to clipboard.";
+      button.dataset.copied = "true";
+      clearTimeout(button.copyTimer);
+      button.copyTimer = setTimeout(() => delete button.dataset.copied, 1600);
+    } catch {
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      copyStatus.textContent = "Clipboard access unavailable. Text selected; press Ctrl+C or Command+C to copy.";
+    } finally {
+      button.disabled = false;
+    }
+  }
 
   function saveScroll() {
     positions.set(active, window.scrollY);
@@ -37,6 +90,7 @@
         if (!response.ok || !response.headers.has("X-Wiki-Title")) throw new Error("Invalid wiki fragment");
         const template = document.createElement("template");
         template.innerHTML = await response.text();
+        enhanceContent(template.content, path);
         const page = { title: response.headers.get("X-Wiki-Title"), nodes: template.content };
         pages.set(path, page);
         return page;
@@ -92,6 +146,12 @@
     content.id = "wiki-content";
     while (tabs.nextSibling) content.append(tabs.nextSibling);
     main.append(content);
+    enhanceContent(content, active);
+    copyStatus = document.createElement("p");
+    copyStatus.className = "visually-hidden";
+    copyStatus.setAttribute("role", "status");
+    document.body.append(copyStatus);
+    document.addEventListener("click", copyCode);
     pages.set(active, { title: document.title, nodes: document.createDocumentFragment() });
     history.scrollRestoration = "manual";
     updateTabs();
