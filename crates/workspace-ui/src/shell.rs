@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use gpui::{
     actions, anchored, deferred, div, img, prelude::*, px, relative, uniform_list, Anchor,
-    AnyElement, App, Bounds, Context, CursorStyle, DefiniteLength, Div, Entity, EventEmitter,
-    FocusHandle, Focusable, Hsla, IntoElement, KeystrokeEvent, MouseButton, PathPromptOptions,
-    Pixels, ResizeEdge, Role, ScrollHandle, ScrollStrategy, SharedString, Subscription, Task,
-    UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
+    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, DefiniteLength, Div, Entity,
+    EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeystrokeEvent, MouseButton,
+    PathPromptOptions, Pixels, ResizeEdge, Role, ScrollHandle, ScrollStrategy, SharedString,
+    Subscription, Task, UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
 };
 use regex::{Regex, RegexBuilder};
 use sift_api_types::RoomId;
@@ -16691,12 +16691,8 @@ impl WorkspaceShell {
             );
         }
         self.fail_running_explains("Explain interrupted because the database disconnected", cx);
-        if let ConnectionStatus::Connected { profile_id, .. }
-        | ConnectionStatus::Connecting { profile_id }
-        | ConnectionStatus::Failed { profile_id, .. } = self.connection_status
-        {
-            self.connected_profiles.remove(&profile_id);
-        }
+        self.connected_profiles.clear();
+        self.expanded_connections.clear();
         self.connection_status = ConnectionStatus::Disconnected;
         self.operation_capabilities.clear();
         self.connection_schema = ConnectionSchemaState::Unavailable;
@@ -16796,6 +16792,16 @@ impl WorkspaceShell {
         }
         self.invalidate_connection_projection();
         cx.notify();
+    }
+
+    fn activate_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
+        match self.connection_status {
+            ConnectionStatus::Connected { profile_id, .. } if profile_id == entry.id => {
+                self.toggle_connection(entry.id, cx);
+            }
+            ConnectionStatus::Connecting { profile_id } if profile_id == entry.id => {}
+            _ => self.connect(entry, cx),
+        }
     }
 
     fn toggle_connection(&mut self, profile_id: i64, cx: &mut Context<Self>) {
@@ -17291,8 +17297,10 @@ impl WorkspaceShell {
             }
             let mut connections = tenant.connections.iter().collect::<Vec<_>>();
             connections.sort_by(|left, right| {
-                let left_favorite = connection_is_favorite(&left.tags);
-                let right_favorite = connection_is_favorite(&right.tags);
+                let left_favorite =
+                    self.show_favorite_database_objects && connection_is_favorite(&left.tags);
+                let right_favorite =
+                    self.show_favorite_database_objects && connection_is_favorite(&right.tags);
                 right_favorite
                     .cmp(&left_favorite)
                     .then_with(|| {
@@ -17547,7 +17555,9 @@ impl WorkspaceShell {
                     rows.push(ConnectionDockRow::Navigation { nav_index, item });
                 }
                 ConnectionTreeAction::Connection(connection) => {
-                    let section = if connection_is_favorite(&connection.tags) {
+                    let section = if self.show_favorite_database_objects
+                        && connection_is_favorite(&connection.tags)
+                    {
                         "★ FAVORITES".to_owned()
                     } else if let Some(folder) = connection_folder(&connection.tags) {
                         folder.to_uppercase()
@@ -17753,7 +17763,9 @@ impl WorkspaceShell {
                         provider_display_name(&connection.provider_id),
                     ),
                 };
-                let open = self.expanded_connections.contains(&connection_id);
+                let active = matches!(self.connection_status, ConnectionStatus::Connected { profile_id, .. } if profile_id == connection_id);
+                let open = active && self.expanded_connections.contains(&connection_id);
+                let entry_for_toggle = connection.clone();
                 let leading = if connected {
                     div()
                         .id(("toggle-connection", connection_id as usize))
@@ -17767,7 +17779,7 @@ impl WorkspaceShell {
                         .on_click(cx.listener(move |shell, _, _, cx| {
                             cx.stop_propagation();
                             shell.set_connection_selection(nav_index, cx);
-                            shell.toggle_connection(connection_id, cx)
+                            shell.activate_connection(&entry_for_toggle, cx)
                         }))
                         .child(icon(
                             if open {
@@ -17881,16 +17893,12 @@ impl WorkspaceShell {
                                 .child(label),
                         )
                     });
-                if connected {
-                    element = element.on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.set_connection_selection(nav_index, cx)
-                    }));
-                } else {
-                    element = element.on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.set_connection_selection(nav_index, cx);
-                        shell.connect(&entry_for_connect, cx)
-                    }));
-                }
+                element = element.on_click(cx.listener(move |shell, event: &ClickEvent, _, cx| {
+                    shell.set_connection_selection(nav_index, cx);
+                    if !active || event.click_count() == 2 {
+                        shell.activate_connection(&entry_for_connect, cx);
+                    }
+                }));
                 element
                     .when(selected, |row| {
                         row.child(
@@ -18288,7 +18296,8 @@ impl WorkspaceShell {
         match action {
             ConnectionTreeAction::Tenant(id) => self.expanded_tenants.contains(id),
             ConnectionTreeAction::Connection(entry) => {
-                self.expanded_connections.contains(&entry.id)
+                matches!(self.connection_status, ConnectionStatus::Connected { profile_id, .. } if profile_id == entry.id)
+                    && self.expanded_connections.contains(&entry.id)
             }
             ConnectionTreeAction::Catalog {
                 profile_id,
@@ -18337,9 +18346,7 @@ impl WorkspaceShell {
         match item.action {
             ConnectionTreeAction::Tenant(id) => self.toggle_tenant(id, cx),
             ConnectionTreeAction::Connection(entry) => {
-                if self.profile_is_connected(entry.id) {
-                    self.toggle_connection(entry.id, cx);
-                }
+                self.activate_connection(&entry, cx);
             }
             ConnectionTreeAction::Catalog {
                 profile_id,
@@ -18418,9 +18425,6 @@ impl WorkspaceShell {
             return;
         };
         match item.action {
-            ConnectionTreeAction::Connection(entry) if !matches!(self.connection_status, ConnectionStatus::Connected { profile_id, .. } if profile_id == entry.id) => {
-                self.connect(&entry, cx)
-            }
             ConnectionTreeAction::Object(target)
             | ConnectionTreeAction::FavoriteObject(target)
             | ConnectionTreeAction::RecentObject(target) => {
@@ -18429,7 +18433,7 @@ impl WorkspaceShell {
             ConnectionTreeAction::Workspace(entry) => self.open_workspace(&entry, cx),
             ConnectionTreeAction::Document(entry) => self.open_room_document(&entry, window, cx),
             ConnectionTreeAction::Tenant(id) => self.toggle_tenant(id, cx),
-            ConnectionTreeAction::Connection(entry) => self.toggle_connection(entry.id, cx),
+            ConnectionTreeAction::Connection(entry) => self.activate_connection(&entry, cx),
             ConnectionTreeAction::Catalog {
                 profile_id,
                 catalog,
@@ -36484,11 +36488,11 @@ impl WorkspaceShell {
                             IconButton::new(
                                 "connections-disconnect",
                                 IconName::Close,
-                                "Close connection",
+                                "Disconnect all connections",
                             )
                             .square(px(24.))
                             .icon_size(12.)
-                            .tooltip("Close connection")
+                            .tooltip("Disconnect all connections")
                             .on_click(cx.listener(|shell, _, _, cx| shell.disconnect(cx))),
                         )
                 }),
@@ -37046,9 +37050,7 @@ impl WorkspaceShell {
                                         })),
                                 ),
                         )
-                        .when(
-                            matches!(self.connection_status, ConnectionStatus::Connected { .. }),
-                            |toolbar| {
+                        .map(|toolbar| {
                                 toolbar.child(
                                     div()
                                         .ml_auto()
@@ -37068,6 +37070,7 @@ impl WorkspaceShell {
                                                 .square(px(26.))
                                                 .icon_size(13.)
                                                 .tooltip("Search database schema")
+                                                .disabled(!matches!(self.connection_status, ConnectionStatus::Connected { .. }))
                                                 .on_click(cx.listener(
                                                     |shell, _, window, cx| {
                                                         shell.open_schema_search(window, cx)
@@ -37080,6 +37083,21 @@ impl WorkspaceShell {
                                                 .id("explorer-view-trigger")
                                                 .relative()
                                                 .flex_none()
+                                                .child(
+                                                    IconButton::new(
+                                                        "explorer-view-settings",
+                                                        IconName::Settings,
+                                                        "Connections panel settings",
+                                                    )
+                                                    .debug_selector("explorer-view-settings")
+                                                    .square(px(26.))
+                                                    .icon_size(13.)
+                                                    .tooltip("Connections panel settings (all connections)")
+                                                    .on_click(cx.listener(|shell, _, _, cx| {
+                                                        shell.explorer_view_menu_open = !shell.explorer_view_menu_open;
+                                                        cx.notify();
+                                                    })),
+                                                )
                                                 .when(self.explorer_view_menu_open, |trigger| {
                                                     trigger.child(
                                                         div()
@@ -37099,8 +37117,7 @@ impl WorkspaceShell {
                                                 }),
                                         )
                                 )
-                            },
-                        ),
+                            }),
                 )
                 },
             )
@@ -41923,6 +41940,109 @@ mod tests {
     }
 
     #[gpui::test]
+    fn connections_reactivate_parked_profiles_toggle_and_disconnect_all(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(128);
+        let entries = ["sift/postgres", "sift/sqlserver", "sift/postgres"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, provider)| ConnectionNavEntry {
+                id: index as i64 + 1,
+                tenant_id: 1,
+                name: format!("Connection {index}"),
+                provider_id: sift_protocol::ProviderId::new(provider).unwrap(),
+                tags: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: entries.clone(),
+            }];
+            shell.expanded_tenants.insert(1);
+            shell.run_command(CommandId::FocusConnections, window, cx);
+            for entry in &entries {
+                shell.on_executor_event(
+                    ExecutorEvent::Connection(ConnectionStatus::Connected {
+                        profile_id: entry.id,
+                        name: entry.name.clone(),
+                    }),
+                    cx,
+                );
+            }
+        });
+        cx.run_until_parked();
+        let row = cx.debug_bounds("connection-nav-row-3").unwrap();
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: row.center(),
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: row.center(),
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+        });
+        workspace.read_with(&cx, |shell, _| {
+            assert!(!shell.expanded_connections.contains(&3))
+        });
+        cx.simulate_keystrokes("enter");
+        workspace.read_with(&cx, |shell, _| {
+            assert!(shell.expanded_connections.contains(&3))
+        });
+
+        for entry in [&entries[0], &entries[1], &entries[0]] {
+            cx.run_until_parked();
+            let row = cx
+                .debug_bounds(if entry.id == 1 {
+                    "connection-nav-row-1"
+                } else {
+                    "connection-nav-row-2"
+                })
+                .unwrap();
+            cx.simulate_click(row.center(), Modifiers::default());
+            let requested_profiles = std::iter::from_fn(|| commands.try_recv().ok())
+                .filter_map(|command| match command {
+                    ExecutorCommand::Connect { profile_id, .. } => Some(profile_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(requested_profiles, vec![entry.id]);
+            workspace.update(&mut cx, |shell, cx| {
+                shell.on_executor_event(
+                    ExecutorEvent::Connection(ConnectionStatus::Connected {
+                        profile_id: entry.id,
+                        name: entry.name.clone(),
+                    }),
+                    cx,
+                );
+                assert!(shell.expanded_connections.contains(&entry.id));
+            });
+        }
+        workspace.update(&mut cx, |shell, cx| {
+            assert_eq!(shell.connected_profiles.len(), 3);
+            shell.disconnect_now(cx);
+            assert!(shell.connected_profiles.is_empty());
+            assert!(shell.expanded_connections.is_empty());
+            for entry in &entries {
+                assert!(!shell.profile_is_connected(entry.id));
+            }
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::Disconnect)
+        ));
+    }
+
+    #[gpui::test]
     fn connections_object_menu_toggles_favorites_and_recents(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -41936,15 +42056,15 @@ mod tests {
             object_kind: sift_protocol::ObjectKind::Table,
         };
         workspace.update(&mut cx, |shell, cx| {
-            shell.connection_status = ConnectionStatus::Connected {
-                profile_id: 2,
-                name: "Warehouse".into(),
-            };
             shell.favorite_database_objects = vec![bookmark.clone()];
             shell.recent_database_objects = vec![bookmark];
-            shell.explorer_view_menu_open = true;
             cx.notify();
         });
+        cx.run_until_parked();
+        let settings = cx
+            .debug_bounds("explorer-view-settings")
+            .expect("settings available while disconnected");
+        cx.simulate_click(settings.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("toggle-explorer-favorites").is_some());
         assert!(cx.debug_bounds("toggle-explorer-recents").is_some());
@@ -41955,6 +42075,50 @@ mod tests {
             shell.toggle_explorer_shortcuts(true, cx);
             assert!(!shell.show_favorite_database_objects);
             assert!(shell.show_recent_database_objects);
+            shell.toggle_explorer_object_group(ObjectGroupKind::Views, cx);
+            let filters = shell.schema_search_filters.clone();
+            for (index, provider) in ["sift/postgres", "sift/sqlserver", "sift/sqlite"]
+                .into_iter()
+                .enumerate()
+            {
+                let profile_id = index as i64 + 2;
+                shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                    id: sift_api_types::TenantId(1),
+                    name: "Personal".into(),
+                    rooms: Vec::new(),
+                    connections: vec![ConnectionNavEntry {
+                        id: profile_id,
+                        tenant_id: 1,
+                        name: "Warehouse".into(),
+                        provider_id: sift_protocol::ProviderId::new(provider).unwrap(),
+                        tags: Vec::new(),
+                    }],
+                }];
+                shell.favorite_database_objects[0].profile_id = profile_id;
+                shell.recent_database_objects[0].profile_id = profile_id;
+                shell.on_executor_event(
+                    ExecutorEvent::Connection(ConnectionStatus::Connected {
+                        profile_id,
+                        name: "Warehouse".into(),
+                    }),
+                    cx,
+                );
+                assert_eq!(shell.schema_search_filters, filters);
+                assert!(shell
+                    .build_visible_connection_items()
+                    .iter()
+                    .all(|item| !matches!(item.action, ConnectionTreeAction::FavoriteObject(_))));
+                assert!(shell
+                    .build_visible_connection_items()
+                    .iter()
+                    .any(|item| matches!(item.action, ConnectionTreeAction::RecentObject(_))));
+                shell.toggle_explorer_shortcuts(true, cx);
+                assert!(shell
+                    .build_visible_connection_items()
+                    .iter()
+                    .any(|item| matches!(item.action, ConnectionTreeAction::FavoriteObject(_))));
+                shell.toggle_explorer_shortcuts(true, cx);
+            }
         });
     }
 

@@ -197,6 +197,7 @@ pub enum IconName {
     Play,
     Refresh,
     Search,
+    Settings,
     Sequence,
     Server,
     Table,
@@ -210,7 +211,7 @@ pub enum IconName {
 }
 
 impl IconName {
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 38] = [
         Self::Activity,
         Self::QueryHistory,
         Self::Add,
@@ -238,6 +239,7 @@ impl IconName {
         Self::Play,
         Self::Refresh,
         Self::Search,
+        Self::Settings,
         Self::Sequence,
         Self::Server,
         Self::Table,
@@ -279,6 +281,7 @@ impl IconName {
             Self::Play => "icons/play.svg",
             Self::Refresh => "icons/refresh.svg",
             Self::Search => "icons/search.svg",
+            Self::Settings => "icons/settings.svg",
             Self::Sequence => "icons/sequence.svg",
             Self::Server => "icons/server.svg",
             Self::Table => "icons/table.svg",

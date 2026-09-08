@@ -75,6 +75,7 @@ impl AssetSource for SiftAssets {
             "icons/play.svg" => Some(include_bytes!("../assets/icons/play.svg")),
             "icons/refresh.svg" => Some(include_bytes!("../assets/icons/refresh.svg")),
             "icons/search.svg" => Some(include_bytes!("../assets/icons/search.svg")),
+            "icons/settings.svg" => Some(include_bytes!("../assets/icons/settings.svg")),
             "icons/sequence.svg" => Some(include_bytes!("../assets/icons/sequence.svg")),
             "icons/server.svg" => Some(include_bytes!("../assets/icons/server.svg")),
             "icons/table.svg" => Some(include_bytes!("../assets/icons/table.svg")),

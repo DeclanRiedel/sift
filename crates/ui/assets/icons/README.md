@@ -42,4 +42,4 @@ must be used when Qlementine has no appropriate semantic icon.
 | `warning.svg` | `misc/warning.svg` |
 | `workspace.svg` | `software/desktop.svg` |
 
-`query-history.svg` is original Sift artwork (AGPL-3.0-only).
+`query-history.svg` and `settings.svg` are original Sift artwork (AGPL-3.0-only).

@@ -963,15 +963,16 @@ async fn run_query_executor(
                 }
             }
             ExecutorCommand::Disconnect => {
-                if let Some(profile_id) = context.as_ref().map(|opened| opened.profile_id) {
-                    cancel_active_queries_for_profile(&mut active_queries, profile_id);
-                }
+                cancel_active_queries(&mut active_queries);
                 active_exports.clear();
                 active_transfers.clear();
                 if let Some(task) = notification_task.take() {
                     task.abort();
                 }
                 if let Some(opened) = context.take() {
+                    let _ = opened.client.close_session(opened.session).await;
+                }
+                for (_, opened) in parked_contexts.drain() {
                     let _ = opened.client.close_session(opened.session).await;
                 }
                 if events
@@ -7338,5 +7339,9 @@ mod tests {
         assert!(!queries.contains_key(&20));
         assert!(first_events.try_recv().is_err());
         assert!(matches!(second_events.try_recv(), Ok(QueryControl::Cancel)));
+
+        cancel_active_queries(&mut queries);
+        assert!(queries.is_empty());
+        assert!(matches!(first_events.try_recv(), Ok(QueryControl::Cancel)));
     }
 }
