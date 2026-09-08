@@ -6,25 +6,29 @@
     <meta name="description" content="Set up shared Sift rooms, grant access, bind database connections, and understand collaborative editing and recovery." />
     <title>Shared rooms · Sift</title>
     <link rel="stylesheet" href="styles.css" />
+    <script src="/wiki.js" defer></script>
   </head>
   <body>
     <main>
       <div class="doc-tabs" aria-label="Sift documentation">
         <a href="/">Overview</a>
-        <a href="index.html">Keyboard</a>
-        <a href="configuration.html">Sift configuration</a>
-        <a href="hosting.html">Hosting</a>
-        <a class="active" aria-current="page" href="shared-rooms.html">Shared rooms</a>
+        <a href="/keyboard">Keyboard</a>
+        <a href="/configuration">Sift configuration</a>
+        <a href="/hosting">Hosting</a>
+        <a class="active" aria-current="page" href="/shared-rooms">Shared rooms</a>
+        <a class="github-link" href="https://github.com/DeclanRiedel/sift" aria-label="Sift on GitHub" title="Sift on GitHub"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55v-2.14c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.16 1.18a10.95 10.95 0 0 1 5.75 0c2.19-1.49 3.15-1.18 3.15-1.18.63 1.58.24 2.75.12 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.7 5.4-5.27 5.69.42.36.78 1.06.78 2.14v3.14c0 .3.21.66.79.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg></a>
       </div>
       <header>
         <h1>Shared rooms</h1>
         <p>One server, one room, several independent editors. Share SQL documents,
           presence, and query results without sharing a desktop or a password.</p>
-        <p class="note">Everyone must connect to the same Sift instance and belong
-          to the room's tenant. Two desktops running separate local instances
-          do not become collaborators just because their room names match.</p>
-        <p>SSH logins on the same machine can also use different per-user Sift
-          state roots. Verify the instance identity, not only the SSH hostname.</p>
+        <p class="note">Start with one shared Sift instance. Give collaborators
+          its connection details, add each person to the same tenant, and grant
+          them access to a shared room. Each person connects from their own
+          desktop and joins that room.</p>
+        <p>For SSH, have the administrator provide the account and state-directory
+          details for the shared instance. Confirm its instance identity together
+          before creating or joining a room.</p>
       </header>
 
       <nav aria-label="On this page">
@@ -38,8 +42,9 @@
       <section id="setup">
         <h2>Get started</h2>
         <ol>
-          <li>Choose a shared instance using the <a href="hosting.html">hosting guide</a>.
-            HTTPS and SSH are transport choices; neither grants room access.</li>
+          <li>Choose a shared instance using the <a href="/hosting">hosting guide</a>.
+            Give everyone its HTTPS origin or the administrator-provided SSH
+            connection details.</li>
           <li>Sign in and select the intended tenant. Have its administrator arrange
             tenant membership for your collaborators.</li>
           <li>Open the Collaboration panel, choose <strong>Rooms…</strong>, enter a
@@ -60,7 +65,7 @@
           <strong>Delete</strong> as a durable room action, not a way to disconnect.</p>
         <p>Vim remains the editor interaction mode. <kbd>:</kbd> opens the command
           palette in normal mode; <kbd>Esc</kbd> cancels the current interaction.
-          See the <a href="index.html">keyboard reference</a> for execution commands.</p>
+          See the <a href="/keyboard">keyboard reference</a> for execution commands.</p>
       </section>
 
       <section id="permissions">
@@ -131,10 +136,7 @@
         </table>
       </section>
       <footer>
-        Related: <a href="hosting.html">Hosting</a> ·
-        <a href="configuration.html">sift.toml ownership and apply</a> ·
-        <a href="index.html">Vim keyboard reference</a>
-        <p>AGPL-3.0-only · <a href="https://github.com/DeclanRiedel/sift">GitHub</a></p>
+        <p>AGPL-3.0-only</p>
       </footer>
     </main>
   </body>

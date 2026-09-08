@@ -5,15 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Sift configuration</title>
     <link rel="stylesheet" href="styles.css" />
+    <script src="/wiki.js" defer></script>
   </head>
   <body>
     <main>
       <div class="doc-tabs" aria-label="Sift documentation">
         <a href="/">Overview</a>
-        <a href="index.html">Keyboard</a>
-        <a class="active" href="configuration.html">Sift configuration</a>
-        <a href="hosting.html">Hosting</a>
-        <a href="shared-rooms.html">Shared rooms</a>
+        <a href="/keyboard">Keyboard</a>
+        <a class="active" href="/configuration">Sift configuration</a>
+        <a href="/hosting">Hosting</a>
+        <a href="/shared-rooms">Shared rooms</a>
+        <a class="github-link" href="https://github.com/DeclanRiedel/sift" aria-label="Sift on GitHub" title="Sift on GitHub"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55v-2.14c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.16 1.18a10.95 10.95 0 0 1 5.75 0c2.19-1.49 3.15-1.18 3.15-1.18.63 1.58.24 2.75.12 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.7 5.4-5.27 5.69.42.36.78 1.06.78 2.14v3.14c0 .3.21.66.79.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg></a>
       </div>
       <header>
         <h1><code>sift.toml</code></h1>
@@ -40,6 +42,7 @@
         <a href="#connections-config">Connections</a>
         <a href="#extensions-config">Extensions</a>
         <a href="#workflow">Workflow</a>
+        <a href="#desktop-settings">Desktop settings</a>
       </nav>
 
       <section id="identity">
@@ -132,36 +135,52 @@
 
       <section id="access">
         <h2>Rate and tenant limits</h2>
-        <p>
-          <code>[server.rate_limits]</code> has <code>trusted_local_exempt</code>
-          (default <code>true</code>)
-          and <code>idle_ttl_secs</code> (default <code>600</code>). Each optional bucket—
-          <code>[server.rate_limits.control]</code>,
-          <code>[server.rate_limits.interactive]</code>,
-          <code>[server.rate_limits.query]</code>,
-          <code>[server.rate_limits.heavy_transfer]</code>, and
-          <code>[server.rate_limits.stream_bytes]</code>—uses the same keys:
-          <code>refill_per_second</code>, <code>burst</code>, and <code>cost</code>.
-          Bucket defaults, written as refill_per_second/burst: control
-          <code>20/40</code>, interactive <code>30/60</code>, query <code>10/20</code>,
-          heavy_transfer <code>2/4</code>, and stream_bytes
-          <code>4194304/8388608</code>; <code>cost</code> defaults to <code>1</code>.
-          Omitting a bucket disables that limiter.
-        </p>
-        <p>
-          <code>[server.tenant_limits]</code> has
-          <code>trusted_local_unlimited</code> (default <code>true</code>). Both
-          <code>[server.tenant_limits.defaults]</code> and
-          <code>[server.tenant_limits.ceilings]</code> accept optional
-          <code>connection_profiles</code>, <code>sessions</code>,
-          <code>connections</code>, <code>concurrent_queries</code>,
-          <code>cursors</code>, and <code>retained_result_bytes</code>.
-          Both default to <code>100</code> connection profiles, <code>32</code>
-          sessions, <code>64</code> connections, <code>16</code> concurrent
-          queries, <code>64</code> cursors, and <code>268435456</code> retained
-          result bytes; omitted keys are unlimited.
-          Defaults apply to tenants; ceilings bound later tenant policy.
-        </p>
+        <h3>Rate limits</h3>
+        <table class="compact">
+          <thead><tr><th><code>[server.rate_limits]</code></th><th>Default</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>trusted_local_exempt</code></td><td><code>true</code></td><td>Exempt trusted local access from rate limits.</td></tr>
+            <tr><td><code>idle_ttl_secs</code></td><td><code>600</code></td><td>Retain idle limiter state for 10 minutes.</td></tr>
+          </tbody>
+        </table>
+        <p>Each bucket below accepts <code>refill_per_second</code>,
+          <code>burst</code>, and <code>cost</code>. The default cost is
+          <code>1</code>; omitting a bucket disables that limiter.</p>
+        <table class="compact">
+          <thead><tr><th>Bucket section</th><th><code>refill_per_second</code></th><th><code>burst</code></th></tr></thead>
+          <tbody>
+            <tr><td><code>[server.rate_limits.control]</code></td><td>20</td><td>40</td></tr>
+            <tr><td><code>[server.rate_limits.interactive]</code></td><td>30</td><td>60</td></tr>
+            <tr><td><code>[server.rate_limits.query]</code></td><td>10</td><td>20</td></tr>
+            <tr><td><code>[server.rate_limits.heavy_transfer]</code></td><td>2</td><td>4</td></tr>
+            <tr><td><code>[server.rate_limits.stream_bytes]</code></td><td>4194304<br><small>4 MiB/s</small></td><td>8388608<br><small>8 MiB</small></td></tr>
+          </tbody>
+        </table>
+
+        <h3>Tenant limits</h3>
+        <table class="compact">
+          <thead><tr><th><code>[server.tenant_limits]</code></th><th>Default</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>trusted_local_unlimited</code></td><td><code>true</code></td><td>Exempt trusted local access from tenant quotas.</td></tr>
+          </tbody>
+        </table>
+        <p><code>[server.tenant_limits.defaults]</code> supplies tenant quotas.
+          <code>[server.tenant_limits.ceilings]</code> bounds later tenant policy.
+          Both sections accept the following keys and have the same defaults.
+          Omitted keys are unlimited.</p>
+        <table class="compact">
+          <thead><tr><th>Key</th><th>Default for both sections</th></tr></thead>
+          <tbody>
+            <tr><td><code>connection_profiles</code></td><td>100</td></tr>
+            <tr><td><code>sessions</code></td><td>32</td></tr>
+            <tr><td><code>connections</code></td><td>64</td></tr>
+            <tr><td><code>concurrent_queries</code></td><td>16</td></tr>
+            <tr><td><code>cursors</code></td><td>64</td></tr>
+            <tr><td><code>retained_result_bytes</code></td><td>268435456 <small>(256 MiB)</small></td></tr>
+          </tbody>
+        </table>
+
+        <h3>Authentication and admission</h3>
 
         <table class="compact"><thead><tr><th>Section</th><th>Meaning</th></tr></thead><tbody>
           <tr><td><code>[automation]</code> <code>unattended_apply</code></td><td>Required: <code>disabled</code> or <code>standard-risk</code>.</td></tr>
@@ -274,10 +293,20 @@
         </p>
       </section>
 
+      <section id="desktop-settings">
+        <h2>Desktop settings</h2>
+        <p>UI preferences belong in your local <code>settings.toml</code>,
+          separate from the server's <code>sift.toml</code>.</p>
+        <p>Dialogs have a draggable handle along their top edge. In Settings,
+          <strong>Unpin modals</strong> controls this behavior and is on by default.
+          To keep dialogs fixed, set:</p>
+        <pre><code>ui.unpin_modals = false</code></pre>
+      </section>
+
       <footer>
         Full operational details and threat boundaries are in
         <code>docs/INSTANCE-CONFIG.md</code>.
-        <p>AGPL-3.0-only · <a href="https://github.com/DeclanRiedel/sift">GitHub</a></p>
+        <p>AGPL-3.0-only</p>
       </footer>
     </main>
   </body>

@@ -8136,6 +8136,9 @@ dependencies = [
 name = "sift-website"
 version = "0.1.0"
 dependencies = [
+ "brotli",
+ "flate2",
+ "sha2 0.10.9",
  "tokio",
  "topcoat",
 ]

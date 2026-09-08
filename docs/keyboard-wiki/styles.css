@@ -4,23 +4,11 @@
   --gray: #aaa;
   --border: #444;
   --accent: #b7410e;
-  color-scheme: dark;
-  font-family: Arial, Helvetica, sans-serif;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-:root {
-  --black: #000;
-  --white: #fff;
-  --gray: #aaa;
-  --border: #444;
-  --accent: #b7410e;
   --page-width: 1200px;
   color-scheme: dark;
   font-family: Arial, Helvetica, sans-serif;
+  scrollbar-gutter: stable;
+  scroll-padding-top: calc(var(--tabs-height, 96px) + 16px);
 }
 
 * {
@@ -38,7 +26,7 @@ main {
   width: min(var(--page-width), 100%);
   min-height: 100vh;
   margin: 0 auto;
-  padding: 40px 30px 20px;
+  padding: 0 30px 20px;
   background: var(--black);
   border-inline: 1px dashed var(--border);
   display: flex;
@@ -75,6 +63,17 @@ main > * {
   flex-shrink: 0;
 }
 
+#wiki-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+#wiki-content > * {
+  flex-shrink: 0;
+}
+
 header,
 section,
 footer {
@@ -91,6 +90,23 @@ footer {
   margin-bottom: 28px;
   border-bottom: 1px solid var(--border);
   background: var(--black);
+  padding-right: 44px;
+}
+
+.doc-tabs .github-link {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 44px;
+  padding: 8px;
+}
+
+.doc-tabs .github-link:hover {
+  color: var(--white);
 }
 
 .doc-tabs a {
@@ -209,6 +225,114 @@ pre {
   background: #151515;
 }
 
+kbd {
+  padding: 2px 5px;
+  border: 1px solid #39312b;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #211c18;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  line-height: 1.8;
+}
+
+.copy-block {
+  position: relative;
+  min-width: 0;
+  margin-bottom: 20px;
+}
+
+.copy-block pre {
+  margin: 0;
+  padding: 12px 52px 12px 14px;
+}
+
+.copy-field {
+  position: relative;
+}
+
+.compact td.copy-field,
+.copy-field code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.copy-field code {
+  box-decoration-break: clone;
+}
+
+.copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #202020;
+  color: var(--gray);
+  cursor: pointer;
+}
+
+.copy-block > .copy-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+
+.copy-field > .copy-button {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  opacity: 0;
+  pointer-events: none;
+  box-shadow: -5px 0 8px var(--black);
+}
+
+.copy-field:hover > .copy-button,
+.copy-field:focus-within > .copy-button {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.copy-button:hover,
+.copy-button[data-copied] {
+  color: var(--white);
+  border-color: var(--accent);
+}
+
+.copy-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.copy-button[data-copied]::after {
+  content: "Copied";
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  z-index: 3;
+  padding: 2px 6px;
+  background: #202020;
+  color: var(--white);
+  border: 1px solid var(--border);
+  font: 12px monospace;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 footer {
   margin-top: auto;
   margin-bottom: 0;
@@ -228,7 +352,7 @@ footer {
   }
   main {
     width: 100%;
-    padding: 20px 16px;
+    padding: 0 16px 20px;
     border-inline: 0;
   }
 

@@ -8,4 +8,9 @@ publish = false
 
 [dependencies]
 tokio.workspace = true
-topcoat = { version = "=0.6.2", default-features = false, features = ["router", "serve", "view", "discover"] }
+topcoat = { version = "=0.6.2", default-features = false, features = ["router", "serve", "discover"] }
+
+[build-dependencies]
+brotli = "8"
+flate2 = "1"
+sha2 = "0.10"

@@ -5,15 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Hosting Sift</title>
     <link rel="stylesheet" href="styles.css" />
+    <script src="/wiki.js" defer></script>
   </head>
   <body>
     <main>
       <div class="doc-tabs" aria-label="Sift documentation">
         <a href="/">Overview</a>
-        <a href="index.html">Keyboard</a>
-        <a href="configuration.html">Sift configuration</a>
-        <a class="active" href="hosting.html">Hosting</a>
-        <a href="shared-rooms.html">Shared rooms</a>
+        <a href="/keyboard">Keyboard</a>
+        <a href="/configuration">Sift configuration</a>
+        <a class="active" href="/hosting">Hosting</a>
+        <a href="/shared-rooms">Shared rooms</a>
+        <a class="github-link" href="https://github.com/DeclanRiedel/sift" aria-label="Sift on GitHub" title="Sift on GitHub"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55v-2.14c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.16 1.18a10.95 10.95 0 0 1 5.75 0c2.19-1.49 3.15-1.18 3.15-1.18.63 1.58.24 2.75.12 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.7 5.4-5.27 5.69.42.36.78 1.06.78 2.14v3.14c0 .3.21.66.79.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg></a>
       </div>
       <header>
         <h1>Hosting Sift</h1>
@@ -22,9 +24,9 @@
           elsewhere. Use HTTPS for a shared server or SSH for direct access to
           one remote machine.
         </p>
-        <p>Once connected, follow <a href="shared-rooms.html">Shared rooms</a>
+        <p>Once connected, follow <a href="/shared-rooms">Shared rooms</a>
           to grant membership, bind a database connection, and collaborate.
-          Hosting a server alone does not grant access to its rooms.</p>
+          Set up tenant and room membership for everyone who will join.</p>
       </header>
 
       <nav>
@@ -43,6 +45,14 @@
             <tr><td>Direct SSH</td><td>You can already SSH to the machine and do not want to expose a Sift port.</td></tr>
           </tbody>
         </table>
+        <h3>What runs where?</h3>
+        <p>Your desktop provides the editor and interface. The Sift server owns
+          database connections, shared documents, rooms, and credentials. Database
+          addresses are resolved from the server's machine, so choose a host with
+          network access to the databases you want to use.</p>
+        <p>For HTTPS, prepare a compatible Sift server build, persistent storage,
+          and an HTTPS reverse proxy. For SSH, start with a working system SSH
+          connection; Sift's remote helper handles compatible server provisioning.</p>
         <p class="note">
           Database credentials stay in the server's configured secret store.
           They never belong in <code>sift.toml</code>, URLs, shell arguments, or
@@ -52,18 +62,38 @@
 
       <section id="https">
         <h2>Hosted HTTPS</h2>
-        <p>
-          Configure <code>transport = "network"</code>, disable loopback bypass,
-          select a durable metadata secret backend, and set
-          <code>public_base_url</code> to the exact HTTPS origin. Keep Sift bound
-          to loopback when the TLS proxy is on the same host. The proxy must
-          forward both HTTP and WebSocket upgrades without rewriting
-          <code>/v1</code>.
-        </p>
-        <p>For a private Tailnet, Tailscale Serve provides the HTTPS boundary:</p>
+        <ol>
+          <li><strong>Configure the instance.</strong> In <code>sift.toml</code>,
+            choose <code>transport = "network"</code> and a durable metadata
+            secret backend. For a shared team instance, use
+            <code>deployment = "team"</code> and configure the allowed principals
+            and tenant memberships. Disable loopback authentication bypass.</li>
+          <li><strong>Prepare persistent state.</strong> Validate the manifest,
+            generate its lock, and review the resource plan. Import each requested
+            credential slot into the server's secret store, then apply the plan.
+            Apply required metadata migrations before starting the server.</li>
+          <li><strong>Publish HTTPS.</strong> Keep Sift bound to loopback when the
+            proxy is on the same host. Forward HTTP and WebSocket upgrades on the
+            same origin, preserving the <code>/v1</code> path. Set
+            <code>public_base_url</code> to that exact external HTTPS origin.</li>
+          <li><strong>Check readiness and connect.</strong> Wait for the HTTPS
+            <code>/v1/ready</code> endpoint to succeed. Each person can then add
+            that origin in the desktop, sign in, and select their tenant.</li>
+        </ol>
+        <p>Use the <a href="/configuration">configuration reference</a> for
+          identity, connection profiles, credentials, and tenant policy.</p>
+
+        <h3>Private HTTPS with Tailscale</h3>
+        <p>On a server already connected to your Tailnet, Tailscale Serve can
+          publish the local Sift listener. These commands assume Sift listens
+          on port <code>7474</code>:</p>
         <pre><code>sudo tailscale set --operator=$USER
 tailscale serve --bg http://127.0.0.1:7474
 tailscale serve status</code></pre>
+        <p>Use the HTTPS origin printed by <code>tailscale serve status</code>
+          for both <code>public_base_url</code> and desktop connections. Tailnet
+          access policy controls which devices can reach it; Sift sign-in and
+          tenant membership determine what each person can access.</p>
         <p>
           Wait for the HTTPS <code>/v1/ready</code> endpoint before connecting;
           first certificate issuance may take a moment. In Sift, use
@@ -74,6 +104,9 @@ tailscale serve status</code></pre>
 
       <section id="ssh">
         <h2>Direct SSH</h2>
+        <p>First confirm that your system SSH client can reach the destination.
+          Replace the alias below with an entry from your SSH configuration:</p>
+        <pre><code>ssh my-ssh-config-host</code></pre>
         <p>
           Open the server picker with <kbd>&lt;leader&gt; d c</kbd>, choose SSH, and
           enter a destination already understood by your system OpenSSH client,
@@ -86,6 +119,10 @@ tailscale serve status</code></pre>
           desktop tunnel leaves durable remote state alive; reconnecting opens
           a fresh authenticated grant.
         </p>
+        <p>The remote state directory belongs to the remote OS account. Reuse
+          that account and state directory when reconnecting to your instance.
+          For a team instance, arrange tenant membership and a registered Sift
+          principal key with the administrator before connecting.</p>
       </section>
 
       <section id="recovery">
@@ -99,18 +136,19 @@ tailscale serve status</code></pre>
             <tr><td>Expired login</td><td>Interactive sessions refresh automatically and persist rotated credentials in the OS vault.</td></tr>
           </tbody>
         </table>
-        <p>
-          Operators can run the real two-device checks with
-          <code>test-tailnet-hosted.sh user@device</code> or
-          <code>test-ssh-device.sh user@host</code>. Both checks clean up only
-          temporary state they created.
-        </p>
+        <p>Keep the instance's metadata and secret store on persistent storage.
+          A reconnect restores access to durable documents, rooms, profiles, and
+          history; active transactions and retained query results need separate
+          attention after a restart.</p>
+        <p>If a write was interrupted, check its outcome before running it again.
+          When connectivity fails, check the HTTPS certificate or SSH connection,
+          then server readiness, sign-in, and tenant access in that order.</p>
       </section>
 
       <footer>
         Full deployment and update details are in
         <code>docs/REMOTE-AND-UPDATES.md</code>.
-        <p>AGPL-3.0-only · <a href="https://github.com/DeclanRiedel/sift">GitHub</a></p>
+        <p>AGPL-3.0-only</p>
       </footer>
     </main>
   </body>
