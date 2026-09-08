@@ -17,7 +17,7 @@ protocol_version="$(
   curl -fsS -X POST "$base_url/v1/handshake" \
     -H 'content-type: application/json' \
     -d '{
-      "client_version":"sift-demo-postgres",
+      "client_version":"sift-demo-helper",
       "client_kind":"automation",
       "protocol":{"minimum":2,"maximum":2}
     }' \

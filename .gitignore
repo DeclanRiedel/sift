@@ -8,8 +8,6 @@
 
 # Caches
 /.cache
-/.labs
-
 # Local env files. Commit .env.example only.
 .env
 .env.*

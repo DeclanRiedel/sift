@@ -22,8 +22,8 @@ schema, execution, history, audit, and collaboration. Putting that logic in a
 window process would make hosted and multi-client modes bolt-ons.
 
 **Decision.** `sift-server` owns product behavior. Clients are renderers and
-automation consumers over the public HTTP/WebSocket protocol. The backend lab is
-a development workbench, not the product UI.
+automation consumers over the public HTTP/WebSocket protocol. Development
+clients remain separate from the product UI.
 
 **Consequences.** The server can be tested headlessly and reused by future
 desktop, web, and automation clients. The protocol must stay stable,
@@ -47,7 +47,7 @@ contracts. Some edge mapping code is expected in each product client.
 
 ## ADR-003 — Protocol Is Pure Serde Data
 
-**Context.** The server, SDK, backend lab, and future clients all need the same
+**Context.** The server, SDK, and clients all need the same
 wire contract.
 
 **Decision.** `sift-protocol` contains serde/schemars data types only: request
@@ -155,8 +155,8 @@ bodies is intentionally out of scope for the audit trail.
 
 ## ADR-010 — Product UI Is Deferred Until The Headless Layer Is Stable
 
-**Context.** The backend lab can test routes and workflows, but it is not a
-production client. A product UI should not drive backend architecture before
+**Context.** Development clients can test routes and workflows, but they are
+not production clients. A product UI should not drive backend architecture before
 the headless layer is stable.
 
 **Decision.** Desktop/web product UI work starts after the headless server,

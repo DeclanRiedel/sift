@@ -69,8 +69,8 @@ what sift is and the five product goals; this file is the operational subset.
     password into `.env` on first `start` and boots the container
     with the same value. `.env` is authoritative; the container is
     rebuilt from it. Never edit either side by hand.
-  - **`SIFT_PG_PASSWORD`** — usually unset. The flake demo Postgres
-    (`nix run .#sift-demo-postgres`) uses socket trust auth. Only
+  - **`SIFT_PG_PASSWORD`** — usually unset. The desktop demo Postgres
+    (`nix run .#sift-desktop-demo`) uses socket trust auth. Only
     set when pointing at a non-demo PG.
   - **`SIFT_AUTH__BEARER_TOKEN`** — optional, only if testing bearer
     auth locally. Any string.

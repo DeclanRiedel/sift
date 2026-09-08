@@ -110,207 +110,6 @@
           text = devCommand ''env SIFT_DRIVERS__MOCK=true cargo run -p sift-server --'';
         };
 
-        backendLab = pkgs.writeShellApplication {
-          name = "sift-backend-lab";
-          runtimeInputs = with pkgs; [ nodejs ];
-          text = ''
-            set -euo pipefail
-
-            repo="''${SIFT_REPO:-$PWD}"
-            lab="$repo/.labs/sift-backend-lab"
-            if [ ! -f "$lab/package.json" ]; then
-              echo "Missing $lab. Clone it with:" >&2
-              echo "  git clone git@github.com:DeclanRiedel/sift-backend-lab.git $lab" >&2
-              exit 1
-            fi
-
-            cd "$lab"
-            if [ ! -d node_modules ]; then
-              npm ci
-            fi
-            exec npm run dev -- "$@"
-          '';
-        };
-
-        backendLabBackend = pkgs.writeShellApplication {
-          name = "sift-backend-lab-backend";
-          runtimeInputs = [ pkgs.nix ];
-          text = ''
-            set -euo pipefail
-
-            repo="''${SIFT_REPO:-$PWD}"
-            if [ ! -f "$repo/flake.nix" ] || [ ! -f "$repo/Cargo.toml" ]; then
-              echo "Run this from the sift checkout, or set SIFT_REPO=/path/to/sift." >&2
-              exit 1
-            fi
-
-            cd "$repo"
-            if [ "''${SIFT_BACKEND_LAB_MOCK:-1}" = "1" ]; then
-              exec nix develop "$repo" --command env SIFT_BIND="''${SIFT_BIND:-127.0.0.1:3000}" SIFT_DRIVERS__MOCK=true cargo run -p sift-server --
-            fi
-            exec nix develop "$repo" --command env SIFT_BIND="''${SIFT_BIND:-127.0.0.1:3000}" cargo run -p sift-server --
-          '';
-        };
-
-        backendLabStack = pkgs.writeShellApplication {
-          name = "sift-backend-lab-stack";
-          runtimeInputs = with pkgs; [ curl nodejs nix ];
-          text = ''
-            set -euo pipefail
-
-            repo="''${SIFT_REPO:-$PWD}"
-            lab="$repo/.labs/sift-backend-lab"
-            if [ ! -f "$repo/flake.nix" ] || [ ! -f "$repo/Cargo.toml" ]; then
-              echo "Run this from the sift checkout, or set SIFT_REPO=/path/to/sift." >&2
-              exit 1
-            fi
-            if [ ! -f "$lab/package.json" ]; then
-              echo "Missing $lab. Clone it with:" >&2
-              echo "  git clone git@github.com:DeclanRiedel/sift-backend-lab.git $lab" >&2
-              exit 1
-            fi
-
-            cd "$repo"
-            backend_log="''${SIFT_BACKEND_LAB_BACKEND_LOG:-/tmp/sift-backend-lab-backend.log}"
-            if [ "''${SIFT_BACKEND_LAB_MOCK:-1}" = "1" ]; then
-              nix develop "$repo" --command env SIFT_BIND="''${SIFT_BIND:-127.0.0.1:3000}" SIFT_DRIVERS__MOCK=true cargo run -p sift-server -- >"$backend_log" 2>&1 &
-            else
-              nix develop "$repo" --command env SIFT_BIND="''${SIFT_BIND:-127.0.0.1:3000}" cargo run -p sift-server -- >"$backend_log" 2>&1 &
-            fi
-            backend_pid=$!
-            cleanup() {
-              kill "$backend_pid" >/dev/null 2>&1 || true
-              wait "$backend_pid" >/dev/null 2>&1 || true
-            }
-            trap cleanup EXIT
-
-            ready=0
-            for _ in $(seq 1 "''${SIFT_BACKEND_LAB_READY_TRIES:-480}"); do
-              if curl -fsS "http://''${SIFT_BIND:-127.0.0.1:3000}/v1/health" >/dev/null 2>&1; then
-                ready=1
-                break
-              fi
-              if ! kill -0 "$backend_pid" >/dev/null 2>&1; then
-                echo "sift backend exited before becoming ready. Log follows:" >&2
-                sed -n '1,240p' "$backend_log" >&2
-                exit 1
-              fi
-              sleep 0.25
-            done
-            if [ "$ready" != 1 ]; then
-              echo "sift backend was not ready before timeout. Log follows:" >&2
-              sed -n '1,240p' "$backend_log" >&2
-              exit 1
-            fi
-
-            cd "$lab"
-            if [ ! -d node_modules ]; then
-              npm ci
-            fi
-
-            if [ "$#" -eq 0 ]; then
-              set -- --host 0.0.0.0 --port 5177
-            fi
-
-            echo "Backend log: $backend_log"
-            echo "Lab UI: http://0.0.0.0:5177 (open this host's IP or forwarded URL)"
-            exec ./node_modules/.bin/vite "$@"
-          '';
-        };
-
-        demoPostgres = pkgs.writeShellApplication {
-          name = "sift-demo-postgres";
-          runtimeInputs = with pkgs; [ curl git jq nodejs nix postgresql ];
-          text = ''
-            set -euo pipefail
-
-            repo="''${SIFT_REPO:-$PWD}"
-            lab="$repo/.labs/sift-backend-lab"
-            if [ ! -f "$repo/flake.nix" ] || [ ! -f "$repo/Cargo.toml" ]; then
-              echo "Run this from the sift checkout, or set SIFT_REPO=/path/to/sift." >&2
-              exit 1
-            fi
-            if [ ! -f "$lab/package.json" ]; then
-              echo "Missing $lab. Clone it with:" >&2
-              echo "  git clone git@github.com:DeclanRiedel/sift-backend-lab.git $lab" >&2
-              exit 1
-            fi
-
-            pgdata="''${SIFT_DEMO_PGDATA:-/tmp/sift-demo-pg}"
-            pglog="''${SIFT_DEMO_PG_LOG:-/tmp/sift-demo-pg.log}"
-            backend_log="''${SIFT_BACKEND_LAB_BACKEND_LOG:-/tmp/sift-backend-lab-backend.log}"
-            bind="''${SIFT_BIND:-127.0.0.1:3000}"
-            base_url="http://$bind"
-            workspace_root="''${SIFT_DEMO_WORKSPACE_ROOT:-/tmp/sift-demo-workspace-$(id -u)}"
-            mkdir -p "$workspace_root/queries"
-            if [ ! -f "$workspace_root/README.md" ]; then
-              printf '%s\n\n%s\n' '# Sift Demo Postgres' 'Git-backed workspace for the seeded lab database.' >"$workspace_root/README.md"
-            fi
-            if [ ! -f "$workspace_root/queries/order-summary.sql" ]; then
-              printf '%s\n' 'SELECT * FROM lab.order_summary ORDER BY placed_at DESC;' >"$workspace_root/queries/order-summary.sql"
-            fi
-            workspace_path_literal="$(jq -Rn --arg value "$workspace_root" '$value')"
-            workspace_roots="[{handle=\"demo-postgres\",path=$workspace_path_literal,read_only=false}]"
-
-            pgport="$(sh "$repo/examples/reproducible-instance/scripts/dev-seed-postgres.sh")"
-
-            cd "$repo"
-            # Real (non-mock) backend: a fresh metadata database must be migrated first.
-            nix develop "$repo" --command cargo run -q -p sift-server -- migrate apply
-            nix develop "$repo" --command env \
-              SIFT_BIND="$bind" \
-              SIFT_WORKSPACES__ENABLED=true \
-              SIFT_WORKSPACES__ROOTS="$workspace_roots" \
-              SIFT_VCS__ENABLED=true \
-              SIFT_VCS__NETWORK_ENABLED=false \
-              cargo run -p sift-server -- >"$backend_log" 2>&1 &
-            backend_pid=$!
-            cleanup() {
-              kill "$backend_pid" >/dev/null 2>&1 || true
-              wait "$backend_pid" >/dev/null 2>&1 || true
-              pg_ctl -D "$pgdata" -m fast -w stop >/dev/null 2>&1 || true
-            }
-            trap cleanup EXIT
-
-            ready=0
-            for _ in $(seq 1 "''${SIFT_BACKEND_LAB_READY_TRIES:-480}"); do
-              if curl -fsS "$base_url/v1/health" >/dev/null 2>&1; then
-                ready=1
-                break
-              fi
-              if ! kill -0 "$backend_pid" >/dev/null 2>&1; then
-                echo "sift backend exited before becoming ready. Log follows:" >&2
-                sed -n '1,240p' "$backend_log" >&2
-                exit 1
-              fi
-              sleep 0.25
-            done
-            if [ "$ready" != 1 ]; then
-              echo "sift backend was not ready before timeout. Log follows:" >&2
-              sed -n '1,240p' "$backend_log" >&2
-              exit 1
-            fi
-
-            profile_id="$(sh "$repo/examples/reproducible-instance/scripts/dev-register-demo-connection.sh" "$base_url" "$pgport")"
-            workspace_seed="$(sh "$repo/examples/reproducible-instance/scripts/dev-seed-demo-workspace.sh" "$base_url" "$profile_id")"
-
-            cd "$lab"
-            if [ ! -d node_modules ]; then
-              npm ci
-            fi
-
-            echo "Postgres: host=127.0.0.1 port=$pgport db=sifttest user=sift password=<empty> ssl=disable"
-            echo "Sift connection: Demo Postgres (profile $profile_id)"
-            echo "Sift Git workspace: $workspace_root (repository $(printf '%s' "$workspace_seed" | jq -r .repository_id))"
-            echo "Seeded query: SELECT * FROM lab.order_summary ORDER BY placed_at DESC;"
-            echo "Large result query: SELECT * FROM lab.large ORDER BY id;"
-            echo "Backend log: $backend_log"
-            echo "Postgres log: $pglog"
-            echo "Lab UI: http://127.0.0.1:5177"
-            exec npm run dev -- "$@"
-          '';
-        };
-
         smoke = pkgs.writeShellApplication {
           name = "sift-smoke";
           runtimeInputs = with pkgs; [ curl jq nix ];
@@ -840,10 +639,6 @@ EOF
               sift-help                 Show this TLDR.
               sift-server               Run sift-server with normal configured drivers.
               sift-server-mock          Run sift-server with the mock Postgres driver enabled.
-              sift-backend-lab          Run the browser backend lab UI from .labs/sift-backend-lab.
-              sift-backend-lab-backend  Run the backend for the lab on SIFT_BIND, mock mode by default.
-              sift-backend-lab-stack    Run mock backend + network-bound lab UI together.
-              sift-demo-postgres        Run seeded Postgres + backend + registered demo connection + lab UI.
               sift-health               Curl /v1/health from the configured backend and pretty-print JSON.
               sift-smoke                Start a mock backend and exercise health/session/connection/schema/audit.
               sift-test                 Run cargo nextest for the whole workspace.
@@ -863,7 +658,7 @@ EOF
             Typical flow:
               nix develop
               sift-help
-              sift-backend-lab-stack
+              sift-desktop-demo
 
             Desktop UI flow:
               nix develop
@@ -889,10 +684,6 @@ EOF
             siftHelp
             server
             serverMock
-            backendLab
-            backendLabBackend
-            backendLabStack
-            demoPostgres
             health
             smoke
             test
@@ -950,27 +741,15 @@ EOF
             type = "app";
             program = "${serverMock}/bin/sift-server-mock";
           };
-          backend-lab = {
-            type = "app";
-            program = "${backendLab}/bin/sift-backend-lab";
-          };
-          backend-lab-backend = {
-            type = "app";
-            program = "${backendLabBackend}/bin/sift-backend-lab-backend";
-          };
-          backend-lab-stack = {
-            type = "app";
-            program = "${backendLabStack}/bin/sift-backend-lab-stack";
-          };
-          demo-postgres = {
-            type = "app";
-            program = "${demoPostgres}/bin/sift-demo-postgres";
-          };
           desktop = {
             type = "app";
             program = "${desktop}/bin/sift-desktop";
           };
           desktop-demo = {
+            type = "app";
+            program = "${desktopDemo}/bin/sift-desktop-demo";
+          };
+          sift-desktop-demo = {
             type = "app";
             program = "${desktopDemo}/bin/sift-desktop-demo";
           };
