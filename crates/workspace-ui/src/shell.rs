@@ -33906,7 +33906,8 @@ impl WorkspaceShell {
                             .hover(|slot| {
                                 slot.bg(colors.hovered_surface).border_color(colors.border)
                             })
-                            .on_click(cx.listener(|shell, _, _, cx| {
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.focus_handle.focus(window, cx);
                                 shell.toggle_app_bar_modal(Modal::ServerPicker, cx)
                             }))
                             .min_w_0()
@@ -48048,7 +48049,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn app_bar_dialogs_ignore_mouse_down_outside(cx: &mut TestAppContext) {
+    fn server_picker_dismisses_on_mouse_down_outside(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -48061,7 +48062,7 @@ mod tests {
             MouseButton::Left,
             Modifiers::default(),
         );
-        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_some()));
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
 
         workspace.update(&mut cx, |shell, cx| {
             shell.open_app_bar_modal(Modal::Account, cx)
@@ -48072,6 +48073,33 @@ mod tests {
             Modifiers::default(),
         );
         assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_some()));
+    }
+
+    #[gpui::test]
+    fn server_picker_dismisses_on_escape(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.update(|_, cx| {
+            cx.bind_keys([gpui::KeyBinding::new(
+                "escape",
+                DismissModal,
+                Some("SiftWorkspace"),
+            )]);
+        });
+        cx.run_until_parked();
+
+        let server_bounds = cx
+            .debug_bounds("toolbar-server-picker")
+            .expect("server picker button should be rendered");
+        cx.simulate_click(server_bounds.center(), Modifiers::default());
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.modal().cloned()),
+            Some(Modal::ServerPicker)
+        );
+
+        cx.simulate_keystrokes("escape");
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
     }
 
     #[test]

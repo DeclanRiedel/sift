@@ -7892,7 +7892,15 @@ impl WorkspaceShell {
                 .bottom_0()
                 .left_0()
                 .occlude()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |shell, _, window, cx| {
+                        cx.stop_propagation();
+                        if server_picker {
+                            shell.dismiss_modal(&DismissModal, window, cx);
+                        }
+                    }),
+                )
                 .flex()
                 .items_start()
                 .when(server_picker, |layer| {
