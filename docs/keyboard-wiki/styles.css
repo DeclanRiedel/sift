@@ -4,23 +4,11 @@
   --gray: #aaa;
   --border: #444;
   --accent: #b7410e;
-  color-scheme: dark;
-  font-family: Arial, Helvetica, sans-serif;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-:root {
-  --black: #000;
-  --white: #fff;
-  --gray: #aaa;
-  --border: #444;
-  --accent: #b7410e;
   --page-width: 1200px;
   color-scheme: dark;
   font-family: Arial, Helvetica, sans-serif;
+  scrollbar-gutter: stable;
+  scroll-padding-top: calc(var(--tabs-height, 96px) + 16px);
 }
 
 * {
@@ -72,6 +60,17 @@ main::after {
 }
 
 main > * {
+  flex-shrink: 0;
+}
+
+#wiki-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+#wiki-content > * {
   flex-shrink: 0;
 }
 

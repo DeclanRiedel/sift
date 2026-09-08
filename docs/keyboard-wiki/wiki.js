@@ -1,240 +1,145 @@
-(function () {
-  const SCROLL_KEY_PREFIX = "sift.wiki.scroll.";
-  const PAGE_CONTENT_CACHE = new Map();
-  const LEGACY_PATHS = {
-    "/index.html": "/keyboard",
-    "/configuration.html": "/configuration",
-    "/hosting.html": "/hosting",
-    "/shared-rooms.html": "/shared-rooms",
-  };
-  const WIKI_ROUTES = new Set(["/", "/keyboard", "/configuration", "/hosting", "/shared-rooms"]);
+(() => {
+  const routes = new Set(["/", "/keyboard", "/configuration", "/hosting", "/shared-rooms"]);
+  const legacy = { "/index.html": "/keyboard", "/configuration.html": "/configuration", "/hosting.html": "/hosting", "/shared-rooms.html": "/shared-rooms" };
+  const pages = new Map();
+  const pending = new Map();
+  const positions = new Map();
+  const canonical = path => legacy[path] || path;
+  let active = canonical(location.pathname);
+  let navigation = 0;
+  let content;
+  let tabs;
 
-  const parser = new DOMParser();
-  const state = {
-    activePath: canonicalizePath(location.pathname),
-  };
+  function saveScroll() {
+    positions.set(active, window.scrollY);
+    try { sessionStorage.setItem(`sift.wiki.scroll.${active}`, String(window.scrollY)); } catch {}
+  }
 
-  function canonicalizePath(path) {
-    const normalized = LEGACY_PATHS[path] || (path || "/");
-    if (normalized.length > 1 && normalized.endsWith("/")) {
-      return normalized.slice(0, -1);
+  function restoreScroll(url) {
+    if (url.hash) {
+      let id;
+      try { id = decodeURIComponent(url.hash.slice(1)); } catch { id = url.hash.slice(1); }
+      const target = document.getElementById(id);
+      if (target) { target.scrollIntoView(); return; }
     }
-    return normalized;
+    let y = positions.get(active);
+    if (y === undefined) {
+      try { y = Number(sessionStorage.getItem(`sift.wiki.scroll.${active}`)); } catch {}
+    }
+    window.scrollTo(0, Number.isFinite(y) ? y : 0);
   }
 
-  function isWikiRoute(path) {
-    return WIKI_ROUTES.has(canonicalizePath(path));
+  function load(path) {
+    if (pages.has(path)) return Promise.resolve(pages.get(path));
+    if (pending.has(path)) return pending.get(path);
+    const request = fetch(`/fragments/${path === "/" ? "overview" : path.slice(1)}`)
+      .then(async response => {
+        if (!response.ok || !response.headers.has("X-Wiki-Title")) throw new Error("Invalid wiki fragment");
+        const template = document.createElement("template");
+        template.innerHTML = await response.text();
+        const page = { title: response.headers.get("X-Wiki-Title"), nodes: template.content };
+        pages.set(path, page);
+        return page;
+      }).finally(() => pending.delete(path));
+    pending.set(path, request);
+    return request;
   }
 
-  function saveScroll(path) {
-    try {
-      sessionStorage.setItem(`${SCROLL_KEY_PREFIX}${path}`, String(Math.max(0, Math.round(window.scrollY || 0))));
-    } catch {
-      // Session storage unavailable in restricted browser contexts.
+  function updateTabs() {
+    for (const link of tabs.querySelectorAll("a")) {
+      const selected = canonical(new URL(link.href).pathname) === active;
+      link.classList.toggle("active", selected);
+      if (selected) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
     }
   }
 
-  function restoreScroll(path) {
+  async function navigate(url, push) {
+    const ticket = ++navigation;
+    const path = canonical(url.pathname);
     try {
-      const saved = sessionStorage.getItem(`${SCROLL_KEY_PREFIX}${path}`);
-      const y = parseInt(saved || "", 10);
-      if (!Number.isFinite(y) || y <= 0) {
-        return;
+      const page = await load(path);
+      if (ticket !== navigation) return;
+      saveScroll();
+      if (path !== active) {
+        const previous = pages.get(active);
+        previous.nodes.append(...content.childNodes);
+        content.append(page.nodes);
+        active = path;
+        document.title = page.title;
+        updateTabs();
       }
-      const maxY = Math.max(
-        0,
-        Math.ceil(document.documentElement.scrollHeight - window.innerHeight),
-      );
-      window.scrollTo(0, Math.min(Math.max(0, y), maxY));
+      if (push) history.pushState(null, "", url);
+      restoreScroll(url);
     } catch {
-      // Session storage unavailable in restricted browser contexts.
+      if (ticket === navigation) location.assign(url.href);
     }
   }
 
-  async function loadRoute(path) {
-    const normalized = canonicalizePath(path);
-    const cached = PAGE_CONTENT_CACHE.get(normalized);
-    if (cached) {
-      return cached;
-    }
-
-    const response = await fetch(normalized, {
-      credentials: "same-origin",
-      headers: { "X-Requested-With": "sift-wiki-ajax" },
-      cache: "force-cache",
-    });
-    if (!response.ok) {
-      throw new Error(`wiki route failed: ${response.status}`);
-    }
-
-    const text = await response.text();
-    const doc = parser.parseFromString(text, "text/html");
-    const nextMain = doc.querySelector("main");
-    if (!nextMain) {
-      throw new Error("wiki route returned no main content");
-    }
-
-    const payload = {
-      title: doc.title || "Sift",
-      content: nextMain.innerHTML,
-    };
-    PAGE_CONTENT_CACHE.set(normalized, payload);
-    return payload;
+  function localLink(event) {
+    const link = event.target.closest?.("a[href]");
+    if (!link || link.hasAttribute("download") || (link.target && link.target !== "_self")) return;
+    const url = new URL(link.href);
+    if (url.origin !== location.origin || url.search || !routes.has(canonical(url.pathname))) return;
+    return url;
   }
 
-  function replaceMain(payload) {
+  function init() {
     const main = document.querySelector("main");
-    if (!main) {
-      return;
-    }
+    tabs = main?.querySelector(".doc-tabs");
+    if (!tabs || !routes.has(active)) return;
+    content = document.createElement("div");
+    content.id = "wiki-content";
+    while (tabs.nextSibling) content.append(tabs.nextSibling);
+    main.append(content);
+    pages.set(active, { title: document.title, nodes: document.createDocumentFragment() });
+    history.scrollRestoration = "manual";
+    updateTabs();
+    // Keep hash targets visible beneath the header, including when tabs wrap.
+    const sizeHeader = () => document.documentElement.style.setProperty("--tabs-height", `${tabs.offsetHeight}px`);
+    sizeHeader();
+    new ResizeObserver(sizeHeader).observe(tabs);
+    restoreScroll(new URL(location.href));
 
-    main.innerHTML = payload.content;
-    if (payload.title) {
-      document.title = payload.title;
-    }
-  }
-
-  async function swapRoute(path, options = {}) {
-    const normalized = canonicalizePath(path);
-    if (state.activePath === normalized && !options.force) {
-      return;
-    }
-
-    saveScroll(state.activePath);
-    const payload = await loadRoute(normalized);
-
-    const previous = state.activePath;
-    replaceMain(payload);
-    state.activePath = normalized;
-
-    if (options.push && previous !== normalized) {
-      window.history.pushState({ path: normalized }, "", normalized);
-    } else if (options.replace) {
-      window.history.replaceState({ path: normalized }, "", normalized);
-    }
-
-    restoreScroll(normalized);
-    schedulePrefetch();
-  }
-
-  function isTabNavigationAnchor(anchor) {
-    if (!anchor || !anchor.getAttribute) {
-      return false;
-    }
-
-    if (anchor.target && anchor.target.toLowerCase() !== "_self") {
-      return false;
-    }
-
-    const href = anchor.getAttribute("href");
-    if (!href || href.startsWith("#") || href.startsWith("javascript:")) {
-      return false;
-    }
-
-    let url;
-    try {
-      url = new URL(href, location.href);
-    } catch {
-      return false;
-    }
-
-    if (url.origin !== location.origin) {
-      return false;
-    }
-
-    const targetPath = canonicalizePath(url.pathname);
-    if (!isWikiRoute(targetPath)) {
-      return false;
-    }
-
-    if (url.hash && url.pathname === location.pathname) {
-      return false;
-    }
-
-    return true;
-  }
-
-  async function onDocumentClick(event) {
-    const target = event.target;
-    const anchor = target && target.closest ? target.closest("a") : null;
-    if (!isTabNavigationAnchor(anchor)) {
-      return;
-    }
-
-    event.preventDefault();
-    event.stopPropagation();
-    const targetPath = canonicalizePath(new URL(anchor.href, location.href).pathname);
-    if (targetPath === state.activePath) {
-      return;
-    }
-
-    await swapRoute(targetPath, { push: true }).catch(() => {
-      window.location.href = anchor.href;
-    });
-  }
-
-  function preload(path) {
-    if (PAGE_CONTENT_CACHE.has(path)) {
-      return;
-    }
-
-    void loadRoute(path).catch(() => {
-      PAGE_CONTENT_CACHE.delete(path);
-    });
-  }
-
-  function enqueuePrefetch() {
-    const links = Array.from(document.querySelectorAll(".doc-tabs a[href]"));
-    for (const link of links) {
-      const url = new URL(link.getAttribute("href"), location.href);
-      const path = canonicalizePath(url.pathname);
-      if (!isWikiRoute(path) || PAGE_CONTENT_CACHE.has(path) || path === state.activePath) {
-        continue;
+    document.addEventListener("click", event => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const url = localLink(event);
+      if (!url) return;
+      if (canonical(url.pathname) === active && url.hash) {
+        ++navigation;
+        return; // Native same-page anchors and history.
       }
-      preload(path);
-    }
-  }
-
-  function schedulePrefetch() {
-    const run = () => enqueuePrefetch();
-    if (typeof window.requestIdleCallback === "function") {
-      window.requestIdleCallback(run, { timeout: 1200 });
-    } else {
-      setTimeout(run, 300);
-    }
-  }
-
-  function onPopState() {
-    const targetPath = canonicalizePath(location.pathname);
-    if (targetPath === state.activePath) {
-      return;
-    }
-    void swapRoute(targetPath, { replace: true, force: true }).catch(() => {
-      window.location.reload();
+      event.preventDefault();
+      if (canonical(url.pathname) === active && !url.hash) { ++navigation; return; }
+      void navigate(url, true);
     });
+    window.addEventListener("popstate", () => { void navigate(new URL(location.href), false); });
+    window.addEventListener("pagehide", saveScroll);
+
+    const connection = navigator.connection;
+    if (connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType || "")) return;
+    const prefetch = event => {
+      const url = localLink(event);
+      if (url) void load(canonical(url.pathname)).catch(() => {});
+    };
+    tabs.addEventListener("pointerover", prefetch);
+    tabs.addEventListener("focusin", prefetch);
+    if (connection && connection.effectiveType !== "4g") return;
+    const warm = async () => {
+      for (const path of routes) {
+        if (document.hidden) break;
+        try { await load(path); } catch {}
+      }
+    };
+    // Let the initial page and its assets finish before warming other tabs.
+    const schedule = () => {
+      if ("requestIdleCallback" in window) requestIdleCallback(warm);
+      else setTimeout(warm, 300);
+    };
+    if (document.readyState === "complete") schedule();
+    else window.addEventListener("load", schedule, { once: true });
   }
 
-  async function init() {
-    const currentPath = canonicalizePath(location.pathname);
-    if (currentPath !== location.pathname) {
-      window.history.replaceState({ path: currentPath }, "", currentPath);
-    }
-
-    state.activePath = currentPath;
-    restoreScroll(currentPath);
-    document.addEventListener("click", onDocumentClick);
-    window.addEventListener("popstate", onPopState);
-    window.addEventListener("beforeunload", () => saveScroll(state.activePath));
-    window.addEventListener("pagehide", () => saveScroll(state.activePath));
-
-    schedulePrefetch();
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => {
-      void init();
-    }, { once: true });
-  } else {
-    void init();
-  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init, { once: true });
+  else init();
 })();
