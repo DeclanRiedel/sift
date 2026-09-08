@@ -134,36 +134,52 @@
 
       <section id="access">
         <h2>Rate and tenant limits</h2>
-        <p>
-          <code>[server.rate_limits]</code> has <code>trusted_local_exempt</code>
-          (default <code>true</code>)
-          and <code>idle_ttl_secs</code> (default <code>600</code>). Each optional bucket—
-          <code>[server.rate_limits.control]</code>,
-          <code>[server.rate_limits.interactive]</code>,
-          <code>[server.rate_limits.query]</code>,
-          <code>[server.rate_limits.heavy_transfer]</code>, and
-          <code>[server.rate_limits.stream_bytes]</code>—uses the same keys:
-          <code>refill_per_second</code>, <code>burst</code>, and <code>cost</code>.
-          Bucket defaults, written as refill_per_second/burst: control
-          <code>20/40</code>, interactive <code>30/60</code>, query <code>10/20</code>,
-          heavy_transfer <code>2/4</code>, and stream_bytes
-          <code>4194304/8388608</code>; <code>cost</code> defaults to <code>1</code>.
-          Omitting a bucket disables that limiter.
-        </p>
-        <p>
-          <code>[server.tenant_limits]</code> has
-          <code>trusted_local_unlimited</code> (default <code>true</code>). Both
-          <code>[server.tenant_limits.defaults]</code> and
-          <code>[server.tenant_limits.ceilings]</code> accept optional
-          <code>connection_profiles</code>, <code>sessions</code>,
-          <code>connections</code>, <code>concurrent_queries</code>,
-          <code>cursors</code>, and <code>retained_result_bytes</code>.
-          Both default to <code>100</code> connection profiles, <code>32</code>
-          sessions, <code>64</code> connections, <code>16</code> concurrent
-          queries, <code>64</code> cursors, and <code>268435456</code> retained
-          result bytes; omitted keys are unlimited.
-          Defaults apply to tenants; ceilings bound later tenant policy.
-        </p>
+        <h3>Rate limits</h3>
+        <table class="compact">
+          <thead><tr><th><code>[server.rate_limits]</code></th><th>Default</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>trusted_local_exempt</code></td><td><code>true</code></td><td>Exempt trusted local access from rate limits.</td></tr>
+            <tr><td><code>idle_ttl_secs</code></td><td><code>600</code></td><td>Retain idle limiter state for 10 minutes.</td></tr>
+          </tbody>
+        </table>
+        <p>Each bucket below accepts <code>refill_per_second</code>,
+          <code>burst</code>, and <code>cost</code>. The default cost is
+          <code>1</code>; omitting a bucket disables that limiter.</p>
+        <table class="compact">
+          <thead><tr><th>Bucket section</th><th><code>refill_per_second</code></th><th><code>burst</code></th></tr></thead>
+          <tbody>
+            <tr><td><code>[server.rate_limits.control]</code></td><td>20</td><td>40</td></tr>
+            <tr><td><code>[server.rate_limits.interactive]</code></td><td>30</td><td>60</td></tr>
+            <tr><td><code>[server.rate_limits.query]</code></td><td>10</td><td>20</td></tr>
+            <tr><td><code>[server.rate_limits.heavy_transfer]</code></td><td>2</td><td>4</td></tr>
+            <tr><td><code>[server.rate_limits.stream_bytes]</code></td><td>4194304<br><small>4 MiB/s</small></td><td>8388608<br><small>8 MiB</small></td></tr>
+          </tbody>
+        </table>
+
+        <h3>Tenant limits</h3>
+        <table class="compact">
+          <thead><tr><th><code>[server.tenant_limits]</code></th><th>Default</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>trusted_local_unlimited</code></td><td><code>true</code></td><td>Exempt trusted local access from tenant quotas.</td></tr>
+          </tbody>
+        </table>
+        <p><code>[server.tenant_limits.defaults]</code> supplies tenant quotas.
+          <code>[server.tenant_limits.ceilings]</code> bounds later tenant policy.
+          Both sections accept the following keys and have the same defaults.
+          Omitted keys are unlimited.</p>
+        <table class="compact">
+          <thead><tr><th>Key</th><th>Default for both sections</th></tr></thead>
+          <tbody>
+            <tr><td><code>connection_profiles</code></td><td>100</td></tr>
+            <tr><td><code>sessions</code></td><td>32</td></tr>
+            <tr><td><code>connections</code></td><td>64</td></tr>
+            <tr><td><code>concurrent_queries</code></td><td>16</td></tr>
+            <tr><td><code>cursors</code></td><td>64</td></tr>
+            <tr><td><code>retained_result_bytes</code></td><td>268435456 <small>(256 MiB)</small></td></tr>
+          </tbody>
+        </table>
+
+        <h3>Authentication and admission</h3>
 
         <table class="compact"><thead><tr><th>Section</th><th>Meaning</th></tr></thead><tbody>
           <tr><td><code>[automation]</code> <code>unattended_apply</code></td><td>Required: <code>disabled</code> or <code>standard-risk</code>.</td></tr>
