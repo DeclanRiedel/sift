@@ -27951,6 +27951,13 @@ impl WorkspaceShell {
     }
 
     fn remove_active_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let closing_item_id = self
+            .panes
+            .get(self.active_pane)
+            .and_then(|pane| pane.read(cx).active_item().map(|item| item.id));
+        if let Some(item_id) = closing_item_id {
+            self.clear_staged_result_edits_for_item(item_id, cx);
+        }
         let removed_document_id = self.panes.get(self.active_pane).and_then(|pane| {
             let pane = pane.read(cx);
             pane.active_item()
@@ -30158,6 +30165,27 @@ impl WorkspaceShell {
 
     fn staged_result_change_count(&self) -> usize {
         self.staged_result_edits.len() + self.staged_result_deletes.len()
+    }
+
+    fn clear_staged_result_edits_for_item(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let edit_count = self.staged_result_edits.len();
+        let delete_count = self.staged_result_deletes.len();
+        self.staged_result_edits
+            .retain(|edit| edit.item_id != item_id);
+        self.staged_result_deletes
+            .retain(|delete| delete.item_id != item_id);
+        if self.staged_result_edits.len() == edit_count
+            && self.staged_result_deletes.len() == delete_count
+        {
+            return;
+        }
+        self.result_cell_edit_target = None;
+        self.result_edit_conflicts.clear();
+        self.pending_edit_set = None;
+        self.result_edit_plan = None;
+        self.result_edit_pending = false;
+        self.result_edit_error = None;
+        self.sync_staged_result_cells(item_id, cx);
     }
 
     fn parse_result_cell_value(
@@ -51911,6 +51939,46 @@ mod tests {
             assert_eq!(shell.selected_plan_captures, vec![second, third]);
             shell.toggle_plan_capture_selection(second, cx);
             assert_eq!(shell.selected_plan_captures, vec![third]);
+        });
+    }
+
+    #[gpui::test]
+    fn closing_result_tab_discards_its_staged_edits(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.new_query(window, cx);
+            shell.panes[0].update(cx, |pane, _| pane.activate_item(0, false));
+            shell.staged_result_edits.push(StagedResultEdit {
+                item_id: 1,
+                column: "name".into(),
+                original: sift_protocol::Value::Text("before".into()),
+                value: sift_protocol::Value::Text("after".into()),
+                original_row: vec![("id".into(), sift_protocol::Value::Int64(1))],
+                source: DatabaseObjectSource {
+                    instance_id: "local".into(),
+                    tenant_id: 1,
+                    profile_id: 2,
+                    profile_name: "demo/postgres".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    catalog: Some("sifttest".into()),
+                    schema: "public".into(),
+                    object: "people".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                    last_refreshed_at_ms: None,
+                },
+            });
+            assert_eq!(shell.staged_result_item_id(), Some(1));
+
+            shell.remove_active_item(window, cx);
+
+            assert!(shell.staged_result_edits.is_empty());
+            assert_eq!(shell.staged_result_item_id(), None);
+            assert_eq!(
+                shell.panes[0].read(cx).active_item().map(|item| item.id),
+                Some(2)
+            );
         });
     }
 
