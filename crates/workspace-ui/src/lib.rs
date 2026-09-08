@@ -1,5 +1,6 @@
 //! GPUI-owned projection of one server-authoritative Sift workspace.
 
+mod binary_preview;
 pub mod editor;
 mod lifecycle;
 mod presentation;

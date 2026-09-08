@@ -168,10 +168,15 @@ Outer joins offer direct paths only; self-referencing foreign keys are supported
 - [x] Result search UI
 - [x] Copy as CSV, JSON, SQL, or Markdown
 - [x] JSON and text large viewers
-- [ ] Image and blob viewers
+- [x] Image and blob viewers
 - [x] Foreign-key picker
 - [x] Aggregate selected cells
 - [x] Saved grid layouts
+
+Value inspector previews PNG/JPEG/GIF/WebP first frames with bounded background
+decoding. Binary values have paged hex/ASCII inspection (`j/k`, 4 KiB per page)
+and page copying. Image limits: 16 MiB input, 4096×4096 pixels, 64 MiB decoder
+allocation; unsupported or oversized images retain hex access.
 
 ### Schema and migration
 

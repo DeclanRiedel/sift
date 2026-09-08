@@ -12,6 +12,7 @@ benchmark = []
 chrono = { workspace = true }
 csv = { workspace = true }
 gpui = { workspace = true }
+image = { workspace = true, features = ["jpeg", "gif", "webp"] }
 modalkit = { workspace = true }
 percent-encoding = { workspace = true }
 regex = { workspace = true }

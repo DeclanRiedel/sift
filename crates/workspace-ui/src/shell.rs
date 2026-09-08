@@ -9845,6 +9845,8 @@ pub struct WorkspaceShell {
     pending_object_ddl: HashSet<u64>,
     object_peek: Option<ObjectPeekState>,
     pending_table_designer_item: Option<u64>,
+    binary_preview: RefCell<Option<crate::binary_preview::CachedPreview>>,
+    binary_page: std::cell::Cell<usize>,
     pending_delete_database_object: Option<DatabaseObjectTarget>,
     table_designer: Option<TableDesignerState>,
     expanded_tenants: HashSet<i64>,
@@ -11088,6 +11090,8 @@ impl WorkspaceShell {
             pending_object_ddl: HashSet::new(),
             object_peek: None,
             pending_table_designer_item: None,
+            binary_preview: RefCell::new(None),
+            binary_page: std::cell::Cell::new(0),
             pending_delete_database_object: None,
             table_designer: None,
             expanded_tenants: HashSet::new(),
@@ -11606,6 +11610,7 @@ impl WorkspaceShell {
         self.table_definitions.clear();
         self.table_definition_sections.clear();
         self.pending_object_ddl.clear();
+        self.binary_preview.borrow_mut().take();
         self.table_designer = None;
         self.pending_database_execution = None;
         self.pending_database_explain = None;
@@ -26818,6 +26823,26 @@ impl WorkspaceShell {
         true
     }
 
+    fn move_binary_page(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let Some((_, results)) = self.focused_pane_results_item(cx) else {
+            return false;
+        };
+        let Some(selected) = results.read(cx).selected_value() else {
+            return false;
+        };
+        let sift_protocol::Value::Blob(bytes) = selected.value else {
+            return false;
+        };
+        self.binary_page.set(
+            self.binary_page
+                .get()
+                .saturating_add_signed(delta)
+                .min(bytes.len().saturating_sub(1) / 4096),
+        );
+        cx.notify();
+        true
+    }
+
     fn toggle_selected_inspector_field(&mut self, cx: &mut Context<Self>) -> bool {
         let Some((_, results)) = self.focused_pane_results_item(cx) else {
             return false;
@@ -26889,10 +26914,17 @@ impl WorkspaceShell {
             .unwrap_or_default();
         let text = match view {
             ResultInspectorView::Fields | ResultInspectorView::RelationDefinition => return false,
-            ResultInspectorView::Value => results
-                .read(cx)
-                .selected_value()
-                .map(|selected| render_value(&selected.value).text),
+            ResultInspectorView::Value => {
+                results
+                    .read(cx)
+                    .selected_value()
+                    .map(|selected| match &selected.value {
+                        sift_protocol::Value::Blob(bytes) => {
+                            crate::binary_preview::hex_page(bytes, self.binary_page.get())
+                        }
+                        value => render_value(value).text,
+                    })
+            }
             ResultInspectorView::RowJson => results
                 .read(cx)
                 .selected_row_json()
@@ -28883,6 +28915,12 @@ impl WorkspaceShell {
                         .is_some_and(|view| self.select_result_inspector_view(view, cx)),
                     "j" if fields_selected => self.move_inspector_field_selection(1, cx),
                     "k" if fields_selected => self.move_inspector_field_selection(-1, cx),
+                    "j" if inspector_view == ResultInspectorView::Value => {
+                        self.move_binary_page(1, cx)
+                    }
+                    "k" if inspector_view == ResultInspectorView::Value => {
+                        self.move_binary_page(-1, cx)
+                    }
                     "g" if fields_selected && self.inspector_g_pending => {
                         self.inspector_field_selected = 0;
                         self.inspector_g_pending = false;
@@ -34537,6 +34575,56 @@ impl WorkspaceShell {
     ) -> gpui::AnyElement {
         let colors = cx.theme().colors;
         let selected = results.read(cx).selected_value();
+        if !selected
+            .as_ref()
+            .is_some_and(|selected| matches!(selected.value, sift_protocol::Value::Blob(_)))
+        {
+            self.binary_preview.borrow_mut().take();
+        }
+        let image_preview = selected.as_ref().and_then(|selected| {
+            let sift_protocol::Value::Blob(bytes) = &selected.value else {
+                return None;
+            };
+            if bytes.len() > 16 * 1024 * 1024 {
+                return Some(Some(Err(
+                    "Image preview limited to 16 MiB; hex remains available".into(),
+                )));
+            }
+            let mut cached = self.binary_preview.borrow_mut();
+            if cached
+                .as_ref()
+                .is_none_or(|cached| cached.bytes.as_ref() != bytes)
+            {
+                let bytes = Arc::new(bytes.clone());
+                self.binary_page.set(0);
+                *cached = Some(crate::binary_preview::CachedPreview {
+                    bytes: bytes.clone(),
+                    result: None,
+                    task: None,
+                });
+                let task = cx.spawn(async move |shell, cx| {
+                    let decode_bytes = bytes.clone();
+                    let result = cx
+                        .background_spawn(
+                            async move { crate::binary_preview::decode(&decode_bytes) },
+                        )
+                        .await;
+                    let _ = shell.update(cx, |shell, cx| {
+                        if let Some(cached) = shell
+                            .binary_preview
+                            .borrow_mut()
+                            .as_mut()
+                            .filter(|cached| Arc::ptr_eq(&cached.bytes, &bytes))
+                        {
+                            cached.result = Some(result);
+                        }
+                        cx.notify();
+                    });
+                });
+                cached.as_mut().unwrap().task = Some(task);
+            }
+            Some(cached.as_ref().unwrap().result.clone())
+        });
         let (text, format_label) = selected.as_ref().map_or_else(
             || (String::new(), None),
             |selected| match &selected.value {
@@ -34559,31 +34647,8 @@ impl WorkspaceShell {
                     } else {
                         None
                     };
-                    let visible = bytes.len().min(4_096);
-                    let mut dump = String::new();
-                    for (offset, chunk) in bytes[..visible].chunks(16).enumerate() {
-                        let hex = chunk
-                            .iter()
-                            .map(|byte| format!("{byte:02x}"))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        let ascii = chunk
-                            .iter()
-                            .map(|byte| {
-                                if byte.is_ascii_graphic() || *byte == b' ' {
-                                    char::from(*byte)
-                                } else {
-                                    '.'
-                                }
-                            })
-                            .collect::<String>();
-                        dump.push_str(&format!("{:08x}  {hex:<47}  |{ascii}|\n", offset * 16));
-                    }
-                    if visible < bytes.len() {
-                        dump.push_str(&format!("\n… {} bytes omitted", bytes.len() - visible));
-                    }
                     (
-                        format!("{} bytes\n\n{dump}", bytes.len()),
+                        crate::binary_preview::hex_page(bytes, self.binary_page.get()),
                         Some(image.unwrap_or("BINARY").to_owned()),
                     )
                 }
@@ -34655,6 +34720,41 @@ impl WorkspaceShell {
                     .flex_1()
                     .min_h_0()
                     .overflow_scroll()
+                    .children(image_preview.map(|preview| {
+                        match preview {
+                            Some(Ok(image)) => {
+                                let dimensions = image.size(0);
+                                div()
+                                    .p_3()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(format!(
+                                        "{} × {} · first frame",
+                                        u32::from(dimensions.width),
+                                        u32::from(dimensions.height)
+                                    ))
+                                    .child(
+                                        img(image)
+                                            .w_full()
+                                            .h(px(280.))
+                                            .object_fit(gpui::ObjectFit::Contain),
+                                    )
+                                    .into_any_element()
+                            }
+                            Some(Err(message)) => div()
+                                .p_3()
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child(message)
+                                .into_any_element(),
+                            None => div()
+                                .p_3()
+                                .text_xs()
+                                .child("Loading image preview…")
+                                .into_any_element(),
+                        }
+                    }))
                     .when(selected.is_none(), |viewer| {
                         viewer.child(
                             div()
