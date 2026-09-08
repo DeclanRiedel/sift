@@ -46,6 +46,8 @@ pub struct CompletionAnalysis {
     pub relations: Vec<CompletionRelation>,
     /// A bare JOIN table slot, suitable for a complete FK join snippet.
     pub join_slot: bool,
+    /// Outer joins get direct suggestions only, preserving their null semantics.
+    pub join_max_hops: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3434,10 +3436,23 @@ pub fn detect_completion_context(
             matches!(token, Token::Word(word) if word.value.eq_ignore_ascii_case("CROSS") || word.value.eq_ignore_ascii_case("NATURAL"))
         });
     if join_slot {
-        relations = completion_relations(statement_tokens);
+        let mut binding_tokens = statement_tokens.to_vec();
+        if flavor == Flavor::Postgres {
+            for token in &mut binding_tokens {
+                if let Token::Word(word) = token {
+                    if word.quote_style.is_none() {
+                        word.value.make_ascii_lowercase();
+                    }
+                }
+            }
+        }
+        relations = completion_relations(&binding_tokens);
     }
     Ok(CompletionAnalysis {
         join_slot,
+        join_max_hops: if statement_tokens.iter().rev().skip(1).take(2).any(|token| {
+            matches!(token, Token::Word(word) if word.quote_style.is_none() && matches_ci(&word.value, &["LEFT", "RIGHT", "FULL", "OUTER"]))
+        }) { 1 } else { 3 },
         context: classify_completion(&tokens),
         cursor,
         prefix_start,

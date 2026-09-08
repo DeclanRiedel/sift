@@ -130,7 +130,7 @@ pub fn join_candidates(
     let mut out = Vec::new();
     let mut work = 0;
     while let Some((node, qualifier, visited, sql)) = queue.pop_front() {
-        if visited.len() > 3 {
+        if visited.len() > ctx.join_max_hops.min(3) {
             continue;
         }
         for edge in edges.iter().filter(|edge| edge.from.id == node.id) {
@@ -138,7 +138,7 @@ pub fn join_candidates(
             if work > 2048 {
                 return out;
             }
-            if visited.contains(&edge.to.id) {
+            if visited.contains(&edge.to.id) && !(visited.len() == 1 && edge.to.id == node.id) {
                 continue;
             }
             let mut alias = format!("sift_join_{}", visited.len());
@@ -188,6 +188,9 @@ pub fn join_candidates(
                 }
             }
             let mut next = visited.clone();
+            if edge.to.id == node.id {
+                continue;
+            }
             next.push(edge.to.id.clone());
             queue.push_back((edge.to, alias, next, insert));
         }
@@ -320,6 +323,17 @@ mod tests {
     #[test]
     fn excludes_unproven_edges_wrong_slots_and_previous_statements() {
         let mut graph = graph();
+        let upper = suggestions("SELECT * FROM orders O JOIN ", &graph, Engine::Postgres);
+        assert!(upper[0].insert.contains("\"o\".\"user_id\""));
+        assert_eq!(
+            suggestions(
+                "SELECT * FROM orders O LEFT JOIN ",
+                &graph,
+                Engine::Postgres
+            )
+            .len(),
+            1
+        );
         assert!(suggestions(
             "SELECT * FROM orders o CROSS JOIN ",
             &graph,

@@ -132,6 +132,7 @@ reverse traversal and paths of up to three hops. Source aliases are preserved;
 generated aliases avoid collisions. Nested/parenthesized statements and
 CROSS/NATURAL JOIN slots retain ordinary completion. Missing or slow graph
 metadata falls back to ordinary candidates while the bounded fetch warms cache.
+Outer joins offer direct paths only; self-referencing foreign keys are supported.
 
 ### Execution and safety
 
