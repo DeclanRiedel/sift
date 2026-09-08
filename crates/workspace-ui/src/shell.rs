@@ -8141,6 +8141,21 @@ impl gpui::Render for Pane {
                                     )
                             })
                     }))
+                    .children(
+                        active
+                            .as_ref()
+                            .is_some_and(|item| item.kind == ItemKind::Problems)
+                            .then(|| {
+                                div()
+                                    .debug_selector(|| "problems-tab-divider".into())
+                                    .absolute()
+                                    .left_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .h(px(1.))
+                                    .bg(colors.subtle_border)
+                            }),
+                    )
             }))
             .children(pending_close.map(|item| {
                 let item_id = item.id;
@@ -50072,6 +50087,7 @@ mod tests {
             shell.show_global_problems(window, cx);
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("problems-tab-divider").is_some());
         let copy = cx
             .debug_bounds("copy-message-0")
             .expect("copy button beside the error");
