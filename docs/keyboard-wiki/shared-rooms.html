@@ -21,11 +21,13 @@
         <h1>Shared rooms</h1>
         <p>One server, one room, several independent editors. Share SQL documents,
           presence, and query results without sharing a desktop or a password.</p>
-        <p class="note">Everyone must connect to the same Sift instance and belong
-          to the room's tenant. Two desktops running separate local instances
-          do not become collaborators just because their room names match.</p>
-        <p>SSH logins on the same machine can also use different per-user Sift
-          state roots. Verify the instance identity, not only the SSH hostname.</p>
+        <p class="note">Start with one shared Sift instance. Give collaborators
+          its connection details, add each person to the same tenant, and grant
+          them access to a shared room. Each person connects from their own
+          desktop and joins that room.</p>
+        <p>For SSH, have the administrator provide the account and state-directory
+          details for the shared instance. Confirm its instance identity together
+          before creating or joining a room.</p>
       </header>
 
       <nav aria-label="On this page">
@@ -40,7 +42,8 @@
         <h2>Get started</h2>
         <ol>
           <li>Choose a shared instance using the <a href="/hosting">hosting guide</a>.
-            HTTPS and SSH are transport choices; neither grants room access.</li>
+            Give everyone its HTTPS origin or the administrator-provided SSH
+            connection details.</li>
           <li>Sign in and select the intended tenant. Have its administrator arrange
             tenant membership for your collaborators.</li>
           <li>Open the Collaboration panel, choose <strong>Rooms…</strong>, enter a
