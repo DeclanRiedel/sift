@@ -39,6 +39,8 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         gpui::KeyBinding::new("right", ed::MoveRight, ctx),
         gpui::KeyBinding::new("up", ed::MoveUp, ctx),
         gpui::KeyBinding::new("down", ed::MoveDown, ctx),
+        gpui::KeyBinding::new("ctrl-alt-up", ed::AddCursorAbove, ctx),
+        gpui::KeyBinding::new("ctrl-alt-down", ed::AddCursorBelow, ctx),
         gpui::KeyBinding::new("shift-left", ed::SelectLeft, standard_ctx),
         gpui::KeyBinding::new("shift-right", ed::SelectRight, standard_ctx),
         gpui::KeyBinding::new("shift-up", ed::SelectUp, standard_ctx),

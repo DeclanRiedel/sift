@@ -91,9 +91,13 @@ delete, import, and export workflows.
 - [x] Scratch SQL query tabs
 - [x] Snippets and templates
 - [x] SQL variables
-- [ ] Multi-cursor editing
+- [x] Multi-cursor editing
 - [x] Code folding
 - [x] Configurable formatting rules
+
+Ctrl+Alt+Up/Down adds Vim cursors on adjacent lines (maximum 128). Insert edits
+and deletions apply across the group; Escape closes secondary cursors.
+Completion is suppressed while multiple cursors are active.
 
 ### SQL intelligence
 

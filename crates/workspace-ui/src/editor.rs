@@ -957,6 +957,8 @@ actions!(
         Paste,
         Undo,
         VimUndo,
+        AddCursorAbove,
+        AddCursorBelow,
         Redo,
         ExitInsertMode,
         Complete,
@@ -1076,6 +1078,8 @@ pub struct QueryEditor {
     keymap: EditorKeymap,
     vim_mode: VimMode,
     vim_entered: String,
+    secondary_cursors: Vec<usize>,
+    secondary_selections: Vec<Range<usize>>,
     vim_store: SharedStore<EmptyInfo>,
     vim: Option<VimEngine>,
     cursor_blink: Entity<CursorBlink>,
@@ -1135,6 +1139,8 @@ impl QueryEditor {
             keymap: EditorKeymap::Vim,
             vim_mode: VimMode::Normal,
             vim_entered: String::new(),
+            secondary_cursors: Vec::new(),
+            secondary_selections: Vec::new(),
             vim_store,
             vim: Some(vim),
             cursor_blink,
@@ -1317,6 +1323,8 @@ impl QueryEditor {
             EditorKeymap::Vim => VimMode::Normal,
         };
         self.vim_entered.clear();
+        self.secondary_cursors.clear();
+        self.secondary_selections.clear();
         self.vim = (self.keymap == EditorKeymap::Vim).then(|| {
             VimEngine::with_store(
                 self.document.text(),
@@ -1621,6 +1629,9 @@ impl QueryEditor {
     }
 
     fn complete(&mut self, _: &Complete, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.secondary_cursors.is_empty() {
+            return;
+        }
         if self.manifest_schema {
             self.open_manifest_completion(cx);
             return;
@@ -2205,6 +2216,7 @@ impl QueryEditor {
             self.request_semantic(SemanticRequestKind::Analyze, cx);
         }
         let auto_complete = allow_auto_completion
+            && self.secondary_cursors.is_empty()
             && self.keymap == EditorKeymap::Vim
             && self.vim_mode == VimMode::Insert
             && (self.manifest_schema
@@ -2432,6 +2444,20 @@ impl QueryEditor {
             );
             document_changed = true;
         }
+        self.secondary_cursors = snapshot
+            .followers
+            .iter()
+            .map(|cursor| byte_from_line_column(self.document.text(), *cursor))
+            .collect();
+        self.secondary_selections = snapshot
+            .follower_selections
+            .iter()
+            .map(|(start, end)| {
+                let start = byte_from_line_column(self.document.text(), *start);
+                let end = byte_from_line_column(self.document.text(), *end);
+                start.min(end)..start.max(end)
+            })
+            .collect();
         let cursor = byte_from_line_column(self.document.text(), snapshot.cursor);
         if let Some((start, end)) = snapshot.selection {
             let start = byte_from_line_column(self.document.text(), start);
@@ -2498,6 +2524,7 @@ impl QueryEditor {
         if self.keymap == EditorKeymap::Vim
             && self.vim_mode == VimMode::Insert
             && self.document.selection().is_empty()
+            && self.secondary_cursors.is_empty()
         {
             let snapshot = self
                 .vim
@@ -2772,6 +2799,26 @@ impl QueryEditor {
             return;
         }
         self.vim_key(modalkit::crossterm::event::KeyCode::Esc, cx);
+    }
+
+    fn add_cursor_above(&mut self, _: &AddCursorAbove, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_cursor_line(-1, cx);
+    }
+
+    fn add_cursor_below(&mut self, _: &AddCursorBelow, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_cursor_line(1, cx);
+    }
+
+    fn add_cursor_line(&mut self, direction: isize, cx: &mut Context<Self>) {
+        if self.read_only || !matches!(self.vim_mode, VimMode::Normal | VimMode::Insert) {
+            return;
+        }
+        self.semantic.cancel_completion();
+        self.snippet_tabstops.clear();
+        if let Some(vim) = self.vim.as_mut() {
+            let snapshot = vim.add_cursor_line(direction);
+            self.apply_vim_snapshot(snapshot, cx);
+        }
     }
 
     fn execute_statement(&mut self, _: &ExecuteStatement, _: &mut Window, cx: &mut Context<Self>) {
@@ -3914,6 +3961,8 @@ impl gpui::Render for QueryEditor {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::vim_undo))
+            .on_action(cx.listener(Self::add_cursor_above))
+            .on_action(cx.listener(Self::add_cursor_below))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::exit_insert_mode))
             .on_action(cx.listener(Self::execute_statement))
@@ -4303,7 +4352,10 @@ impl Element for QueryEditorElement {
                 }
             }
 
-            if !selection.is_empty() {
+            for selection in std::iter::once(&selection)
+                .chain(&editor.secondary_selections)
+                .filter(|selection| !selection.is_empty())
+            {
                 let sel_start = selection.start.clamp(offset, line_end);
                 let sel_end = selection.end.clamp(offset, line_end);
                 let spans_newline = selection.end > line_end;
@@ -4320,6 +4372,26 @@ impl Element for QueryEditorElement {
                             point(text_left + x1, top + line_height),
                         ),
                         theme.colors.selected_surface,
+                    ));
+                }
+            }
+
+            for cursor in &editor.secondary_cursors {
+                if (!editor_focused || cursor_visible) && *cursor >= offset && *cursor <= line_end {
+                    let x = shaped.x_for_index(*cursor - offset);
+                    selections.push(fill(
+                        Bounds::new(
+                            point(text_left + x, top),
+                            size(
+                                if block_cursor {
+                                    BLOCK_CURSOR_FALLBACK_WIDTH
+                                } else {
+                                    px(1.5)
+                                },
+                                line_height,
+                            ),
+                        ),
+                        theme.colors.accent,
                     ));
                 }
             }
@@ -5337,6 +5409,26 @@ mod tests {
             editor.update_wraps(px(900.), cx.theme(), window);
             assert!(editor.visual_rows().len() < narrow.len());
             assert_eq!(editor.document.text(), text);
+        });
+    }
+
+    #[gpui::test]
+    fn multi_cursor_backspace_mirrors_all_edits_into_document(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("α\nβ", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.document.set_selection(0..0, false);
+            editor.resync_keymap_after_external_change(cx);
+            editor.add_cursor_below(&AddCursorBelow, window, cx);
+            assert_eq!(editor.secondary_cursors.len(), 1);
+            editor.vim_text("iX", cx);
+            assert_eq!(editor.document.text(), "Xα\nXβ");
+            editor.backspace(&Backspace, window, cx);
+            assert_eq!(editor.document.text(), "α\nβ");
+            editor.vim_text("é", cx);
+            editor.exit_insert_mode(&ExitInsertMode, window, cx);
+            assert!(editor.secondary_cursors.is_empty());
+            editor.vim_undo(&VimUndo, window, cx);
+            assert_eq!(editor.document.text(), "α\nβ");
         });
     }
 

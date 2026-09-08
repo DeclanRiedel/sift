@@ -9,7 +9,7 @@ use modalkit::{
         application::EmptyInfo,
         buffer::{CursorGroupId, EditBuffer},
         context::Resolve,
-        cursor::Cursor,
+        cursor::{Cursor, CursorGroup},
         store::{RegisterCell, RegisterPutFlags, SharedStore},
     },
     env::vim::{
@@ -26,6 +26,8 @@ use super::VimMode;
 pub(super) struct VimSnapshot {
     pub text: Option<String>,
     pub cursor: (usize, usize),
+    pub followers: Vec<(usize, usize)>,
+    pub follower_selections: Vec<((usize, usize), (usize, usize))>,
     pub selection: Option<((usize, usize), (usize, usize))>,
     pub mode: VimMode,
     pub entered: String,
@@ -79,6 +81,29 @@ impl VimEngine {
 
     pub fn set_viewport_rows(&mut self, rows: usize) {
         self.viewport.dimensions.1 = rows.max(1);
+    }
+
+    pub fn add_cursor_line(&mut self, direction: isize) -> VimSnapshot {
+        let leader = self.buffer.get_leader(self.cursor_group);
+        let mut followers = self.buffer.get_followers(self.cursor_group);
+        if followers.len() >= 127 {
+            return self.snapshot(false, false, false);
+        }
+        let text = self.buffer.get_text();
+        let text = text.strip_suffix('\n').unwrap_or(&text);
+        let lines = text.split('\n').collect::<Vec<_>>();
+        let row = leader
+            .y
+            .saturating_add_signed(direction)
+            .min(lines.len().saturating_sub(1));
+        let column = leader.x.min(lines[row].chars().count());
+        let next = Cursor::new(row, column);
+        followers.push(leader);
+        self.buffer.set_group(
+            self.cursor_group,
+            CursorGroup::new(next.into(), followers.into_iter().map(Into::into).collect()),
+        );
+        self.snapshot(false, false, false)
     }
 
     pub fn set_cursor(&mut self, text: &str, cursor: usize) {
@@ -304,6 +329,19 @@ impl VimEngine {
         VimSnapshot {
             text,
             cursor,
+            followers: self
+                .buffer
+                .get_followers(self.cursor_group)
+                .into_iter()
+                .map(|cursor| (cursor.y, cursor.x))
+                .collect(),
+            follower_selections: self
+                .buffer
+                .get_follower_selections(self.cursor_group)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(start, end, _)| ((start.y, start.x), (end.y, end.x)))
+                .collect(),
             selection,
             mode,
             entered: self.entered.clone(),
@@ -388,6 +426,23 @@ fn cursor_from_byte(text: &str, byte: usize) -> Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiple_cursors_edit_unicode_and_undo_together() {
+        let mut vim = VimEngine::new("α one\nβ two\nγ three", 0);
+        let snapshot = vim.add_cursor_line(1);
+        assert_eq!(snapshot.followers.len(), 1);
+        vim.input_text("i");
+        let inserted = vim.input_text("é");
+        assert_eq!(inserted.text.as_deref(), Some("éα one\néβ two\nγ three"));
+        let removed = vim.input_key(KeyCode::Backspace);
+        assert_eq!(removed.text.as_deref(), Some("α one\nβ two\nγ three"));
+        vim.input_text("X");
+        let escaped = vim.input_key(KeyCode::Esc);
+        assert!(escaped.followers.is_empty());
+        let undone = vim.input_text("u");
+        assert_eq!(undone.text.as_deref(), Some("α one\nβ two\nγ three"));
+    }
 
     #[test]
     fn mouse_selection_yanks_the_exact_range_in_both_directions() {
