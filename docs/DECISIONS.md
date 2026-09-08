@@ -2251,3 +2251,29 @@ with warnings denied and tests passed after the final execution-count/row-bound
 fixes. PostgreSQL/SQL Server live driver suites (19/8) and server DDL/plan suites
 (2/5/2) passed with protocol 2. Remaining platform/parser/DBA exclusions are
 explicit in the evidence matrix and do not block work on the IDE.
+
+## ADR-057 — Catalog JOIN Suggestions And Native Vim Cursor Groups
+
+**Status:** Accepted (2026-09-08).
+
+JOIN completion uses catalog-proven foreign-key column pairs, preserving their
+order for composite predicates. It never guesses keys from names or parses
+constraint definition strings. Traversal is bounded to three edges and 2,048
+expansions; outer joins use direct paths only. Suggestions are literal SQL
+completion candidates, so database identifiers cannot become snippet tabstops.
+Unsupported contexts or unavailable graphs retain ordinary completion. Graph
+fetches use existing schema supervision and cache coalescing, with a 250 ms
+completion wait budget. The core Driver contract and public protocol stay intact.
+
+ModalKit owns local Vim cursor groups and edit semantics. Sift renders followers
+and mirrors each resulting edit into the existing query-text CRDT, with one
+local undo record/update per edit. Authoritative remote text resets local cursor
+groups. Result bytes and image caches remain local result presentation state.
+
+General object design reuses structured table migration preview/apply and
+canonical PostgreSQL/SQL Server replacement SQL for views, routines and triggers.
+Replacement scripts remain bound to their source connection/database and require
+normal explicit audited execution. Unsupported replacement semantics remain
+unavailable; the designer does not manufacture a drop/recreate migration.
+Shared-query browsing projects authenticated room/document entries and opens
+them through the existing room service, preserving permission and audit checks.
