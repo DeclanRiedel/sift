@@ -41,6 +41,7 @@
         <a href="#connections-config">Connections</a>
         <a href="#extensions-config">Extensions</a>
         <a href="#workflow">Workflow</a>
+        <a href="#desktop-settings">Desktop settings</a>
       </nav>
 
       <section id="identity">
@@ -273,6 +274,16 @@
           values. Applying creates an immutable generation, and startup refuses
           unapplied drift.
         </p>
+      </section>
+
+      <section id="desktop-settings">
+        <h2>Desktop settings</h2>
+        <p>UI preferences belong in your local <code>settings.toml</code>,
+          separate from the server's <code>sift.toml</code>.</p>
+        <p>Dialogs have a draggable handle along their top edge. In Settings,
+          <strong>Unpin modals</strong> controls this behavior and is on by default.
+          To keep dialogs fixed, set:</p>
+        <pre><code>ui.unpin_modals = false</code></pre>
       </section>
 
       <footer>
