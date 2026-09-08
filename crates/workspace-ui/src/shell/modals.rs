@@ -977,7 +977,10 @@ impl WorkspaceShell {
                                         })),
                                 )
                                 .child(
-                                    Button::new("discard-result-cell-edits", "Discard all")
+                                    Button::new(
+                                        "discard-result-cell-edits",
+                                        "Undo all staged changes",
+                                    )
                                         .tone(ButtonTone::DangerGhost)
                                         .disabled(pending)
                                         .on_click(cx.listener(|shell, _, window, cx| {

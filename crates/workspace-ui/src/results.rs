@@ -931,6 +931,7 @@ pub enum ResultsEvent {
     RevertSelectedCellRequested,
     DeleteSelectedRowRequested,
     ReviewStagedEditsRequested,
+    UndoAllStagedEditsRequested,
     StagedChangesChanged,
     SubmitCellEdit {
         text: String,
@@ -4284,6 +4285,7 @@ impl ResultsView {
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
         let tab_height = cx.theme().metrics.tab_height;
+        let staged_change_count = self.staged_cells.len() + self.staged_row_deletions;
         div()
             .h(tab_height)
             .flex_none()
@@ -4347,15 +4349,28 @@ impl ResultsView {
                                 self.selection_summary()
                                     .map(|summary| div().max_w(px(240.)).truncate().child(summary)),
                             )
-                            .children((!self.staged_cells.is_empty()).then(|| {
+                            .children((staged_change_count > 0).then(|| {
                                 Button::new(
                                     "review-staged-result-edits",
-                                    format!("Review {} staged", self.staged_cells.len()),
+                                    format!("Review {staged_change_count} staged"),
                                 )
                                 .debug_selector("review-staged-result-edits")
                                 .tone(ButtonTone::Neutral)
                                 .on_click(cx.listener(
                                     |_, _, _, cx| cx.emit(ResultsEvent::ReviewStagedEditsRequested),
+                                ))
+                            }))
+                            .children((staged_change_count > 0).then(|| {
+                                Button::new(
+                                    "undo-all-staged-result-edits",
+                                    "Undo all staged changes",
+                                )
+                                .debug_selector("undo-all-staged-result-edits")
+                                .tone(ButtonTone::Ghost)
+                                .on_click(cx.listener(
+                                    |_, _, _, cx| {
+                                        cx.emit(ResultsEvent::UndoAllStagedEditsRequested)
+                                    },
                                 ))
                             }))
                             .children((!self.large_view).then(|| {

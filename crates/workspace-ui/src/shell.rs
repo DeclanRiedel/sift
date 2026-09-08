@@ -2292,6 +2292,9 @@ pub enum PaneEvent {
     ReviewStagedResultEditsRequested {
         item_id: u64,
     },
+    UndoAllStagedResultEditsRequested {
+        item_id: u64,
+    },
     SubmitResultCellEditRequested {
         item_id: u64,
         text: String,
@@ -4462,6 +4465,9 @@ impl Pane {
             }
             ResultsEvent::ReviewStagedEditsRequested => {
                 cx.emit(PaneEvent::ReviewStagedResultEditsRequested { item_id })
+            }
+            ResultsEvent::UndoAllStagedEditsRequested => {
+                cx.emit(PaneEvent::UndoAllStagedResultEditsRequested { item_id })
             }
             ResultsEvent::StagedChangesChanged => cx.notify(),
             ResultsEvent::SubmitCellEdit { text } => {
@@ -27371,6 +27377,12 @@ impl WorkspaceShell {
             PaneEvent::ReviewStagedResultEditsRequested { item_id } => {
                 self.active_pane = index;
                 self.open_staged_result_edits(*item_id, window, cx);
+            }
+            PaneEvent::UndoAllStagedResultEditsRequested { item_id } => {
+                self.active_pane = index;
+                if self.staged_result_item_id() == Some(*item_id) {
+                    self.discard_staged_result_edits(window, cx);
+                }
             }
             PaneEvent::SubmitResultCellEditRequested { item_id, text } => {
                 self.submit_result_cell_edit(emitter, *item_id, text, window, cx);
@@ -52345,14 +52357,10 @@ mod tests {
         assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
         assert!(!cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
         assert!(cx.debug_bounds("tab-staged-changes").is_some());
-        let pane = workspace.read_with(&cx, |shell, _| shell.panes[shell.active_pane].clone());
-        workspace.update_in(&mut cx, |shell, window, cx| {
-            shell.open_result_cell_editor(&pane, item_id, window, cx)
-        });
-        results.update(&mut cx, |results, cx| {
-            results.set_inline_cell_edit_text("open", cx)
-        });
-        cx.simulate_keystrokes("enter");
+        let undo_all = cx
+            .debug_bounds("undo-all-staged-result-edits")
+            .expect("undo all staged changes button");
+        cx.simulate_click(undo_all.center(), Modifiers::default());
         cx.run_until_parked();
         workspace.read_with(&cx, |shell, cx| {
             assert!(shell.staged_result_edits.is_empty());
@@ -52360,6 +52368,7 @@ mod tests {
         });
         assert!(cx.debug_bounds("tab-staged-changes").is_none());
 
+        let pane = workspace.read_with(&cx, |shell, _| shell.panes[shell.active_pane].clone());
         workspace.update_in(&mut cx, |shell, window, cx| {
             shell.open_result_cell_editor(&pane, item_id, window, cx)
         });
