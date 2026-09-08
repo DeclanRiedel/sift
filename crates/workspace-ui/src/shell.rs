@@ -671,6 +671,7 @@ enum CommandPaletteMode {
     Checkpoints,
     OpenTabs,
     SavedQueries,
+    SharedQueries,
     QueryHistory,
 }
 
@@ -685,6 +686,7 @@ impl CommandPaletteMode {
             Some('^') => (Self::Checkpoints, input[1..].trim_start()),
             Some('#') => (Self::OpenTabs, input[1..].trim_start()),
             Some('?') => (Self::SavedQueries, input[1..].trim_start()),
+            Some('&') => (Self::SharedQueries, input[1..].trim_start()),
             Some('!') => (Self::QueryHistory, input[1..].trim_start()),
             _ => (Self::Commands, input),
         }
@@ -699,6 +701,7 @@ impl CommandPaletteMode {
             Self::Checkpoints => "CHECKPOINT",
             Self::OpenTabs => "TAB",
             Self::SavedQueries => "SAVED",
+            Self::SharedQueries => "SHARED",
             Self::QueryHistory => "HISTORY",
         }
     }
@@ -719,6 +722,7 @@ enum CommandPaletteItem {
         title: String,
     },
     SavedQuery(sift_api_types::SavedQuery),
+    SharedQuery(DocumentNavEntry, String),
     QueryHistory(sift_api_types::QueryHistory),
 }
 
@@ -32136,6 +32140,38 @@ impl WorkspaceShell {
                     .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
                 matches.into_iter().map(|(_, _, item)| item).collect()
             }
+            CommandPaletteMode::SharedQueries => {
+                let mut matches = self
+                    .lifecycle
+                    .tenants
+                    .iter()
+                    .flat_map(|tenant| {
+                        tenant.rooms.iter().flat_map(move |room| {
+                            room.documents.iter().map(move |document| {
+                                (document, format!("{} / {}", tenant.name, room.name))
+                            })
+                        })
+                    })
+                    .filter_map(|(document, room)| {
+                        fuzzy_palette_match(&query, &document.title, [room.clone()]).map(
+                            |(score, ranges)| {
+                                (
+                                    score,
+                                    CommandPaletteMatch {
+                                        item: CommandPaletteItem::SharedQuery(
+                                            document.clone(),
+                                            room,
+                                        ),
+                                        ranges,
+                                    },
+                                )
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                matches.sort_by_key(|item| std::cmp::Reverse(item.0));
+                matches.into_iter().map(|(_, item)| item).collect()
+            }
             CommandPaletteMode::SavedQueries => {
                 let mut matches = self
                     .saved_queries
@@ -32243,6 +32279,9 @@ impl WorkspaceShell {
             CommandPaletteItem::SavedQuery(query) => {
                 format!("saved:{instance}:{}", query.id.0)
             }
+            CommandPaletteItem::SharedQuery(document, _) => {
+                format!("shared:{instance}:{}:{}", document.room_id.0, document.id.0)
+            }
             CommandPaletteItem::QueryHistory(entry) => {
                 format!("history:{instance}:{}", entry.id.0)
             }
@@ -32330,6 +32369,10 @@ impl WorkspaceShell {
             CommandPaletteItem::SavedQuery(query) => {
                 self.dismiss_modal(&DismissModal, window, cx);
                 self.open_saved_query(query, window, cx);
+            }
+            CommandPaletteItem::SharedQuery(document, _) => {
+                self.dismiss_modal(&DismissModal, window, cx);
+                self.open_room_document(&document, window, cx);
             }
             CommandPaletteItem::QueryHistory(entry) => {
                 self.dismiss_modal(&DismissModal, window, cx);
@@ -33310,6 +33353,9 @@ impl WorkspaceShell {
             CommandId::OpenSchemaSwitcher => self.open_schema_search(window, cx),
             CommandId::OpenTabSwitcher => self.open_command_palette_with_query("#", window, cx),
             CommandId::OpenSavedQuerySwitcher => self.open_saved_query_search(window, cx),
+            CommandId::OpenSharedQueryBrowser => {
+                self.open_command_palette_with_query("&", window, cx)
+            }
             CommandId::ManageSnippets => self.open_snippets(window, cx),
             CommandId::Quit => {
                 if self.transaction_state.transaction().is_some() {
@@ -34891,7 +34937,7 @@ impl WorkspaceShell {
             self.focused_database_item(cx).map(|(id, _)| id) == Some(item_id);
         let keyboard_help = match selected {
             ResultInspectorView::Fields => "h/l views · j/k fields · Enter toggle · 1/2/3/4 views",
-            ResultInspectorView::Value => "h/l views · y copy · 1/2/3/4 views",
+            ResultInspectorView::Value => "h/l views · j/k binary pages · y copy · 1/2/3/4 views",
             ResultInspectorView::RowJson => "h/l views · / filter · f fold · w wrap · y copy",
             ResultInspectorView::RelationDefinition => "1/2/3 results · 4 definition",
         };
@@ -50188,6 +50234,51 @@ mod tests {
                 .document()
                 .text()
                 .contains("CREATE OR REPLACE VIEW public.jobs AS SELECT 1 AS id;"));
+        });
+    }
+
+    #[gpui::test]
+    fn shared_query_browser_filters_room_names_and_reuses_document_tabs(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Team".into(),
+                connections: vec![],
+                rooms: vec![crate::RoomNavEntry {
+                    id: sift_api_types::RoomId(2),
+                    tenant_id: sift_api_types::TenantId(1),
+                    name: "Operations".into(),
+                    workspaces: vec![],
+                    documents: vec![DocumentNavEntry {
+                        id: sift_api_types::DocumentId(3),
+                        room_id: sift_api_types::RoomId(2),
+                        title: "Active jobs".into(),
+                        kind: "sql".into(),
+                        position: 0,
+                        snapshot: vec![],
+                    }],
+                }],
+            }];
+            shell
+                .query_input
+                .update(cx, |input, cx| input.set_text("& operations", cx));
+            let items = shell.command_palette_items(cx);
+            assert_eq!(items.len(), 1);
+            let CommandPaletteItem::SharedQuery(document, room) = &items[0].item else {
+                panic!("expected shared query")
+            };
+            assert_eq!(room, "Team / Operations");
+            shell.open_room_document(document, window, cx);
+            let count = shell.panes[shell.active_pane].read(cx).items.len();
+            shell.open_room_document(document, window, cx);
+            assert_eq!(shell.panes[shell.active_pane].read(cx).items.len(), count);
+            shell
+                .query_input
+                .update(cx, |input, cx| input.set_text("& missing", cx));
+            assert!(shell.command_palette_items(cx).is_empty());
         });
     }
 

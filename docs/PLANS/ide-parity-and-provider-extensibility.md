@@ -214,9 +214,13 @@ view replacement require separate drop/recreate workflows and remain excluded.
 - [~] Extension system
 - [~] Governed MCP tools
 - [ ] Declarative extension contribution renderer
-- [ ] Shared-query browser UI
+- [x] Shared-query browser UI
 - [ ] Reviewable AI SQL generation
 - [ ] AI error and plan explanation
+
+“Find Shared Query…” (`<leader> f c`, or `&` in the command palette) searches
+accessible room documents by title, tenant, and room. Results show room context
+and open the live collaborative document, reusing existing tabs.
 
 ## DBMS Workbench
 

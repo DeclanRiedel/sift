@@ -69,6 +69,7 @@ impl WorkspaceShell {
                             "Loading saved queries…".into()
                         }
                         CommandPaletteMode::SavedQueries => "No matching saved queries".into(),
+                        CommandPaletteMode::SharedQueries => "No matching shared queries in accessible rooms".into(),
                         CommandPaletteMode::QueryHistory if self.query_history.loading => {
                             "Loading query history…".into()
                         }
@@ -110,6 +111,7 @@ impl WorkspaceShell {
                                             .child("^ checkpoints")
                                             .child("# tabs")
                                             .child("? saved")
+                                            .child("& shared")
                                             .child("! history"),
                                     )
                                 }),
@@ -214,6 +216,9 @@ impl WorkspaceShell {
                                                             saved.tags.join(", ")
                                                         };
                                                         (saved.name, right, true, false)
+                                                    }
+                                                    CommandPaletteItem::SharedQuery(document, room) => {
+                                                        (document.title, room, true, false)
                                                     }
                                                     CommandPaletteItem::QueryHistory(entry) => {
                                                         let status = match entry.status {
