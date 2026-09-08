@@ -170,9 +170,11 @@ pub(crate) async fn import(
     };
     let session = request.session_id;
     let connection = request.connection_id;
-    let target = request
+    let mut target = request
         .table
         .ok_or_else(|| ApiError::BadRequest("import table is required".into()))?;
+    target.kind = Some(sift_protocol::ObjectKind::Table);
+    target.routine_args = None;
     store.authorize_connection_operation(
         session,
         connection,

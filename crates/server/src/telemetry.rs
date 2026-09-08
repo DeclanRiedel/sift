@@ -199,12 +199,35 @@ async fn export_batch(
     endpoint: &url::Url,
     spans: Vec<serde_json::Value>,
 ) -> bool {
-    client
+    let Ok(mut response) = client
         .post(endpoint.clone())
         .json(&payload(spans))
         .send()
         .await
-        .is_ok_and(|response| response.status().is_success())
+    else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) if body.len().saturating_add(chunk.len()) <= 64 * 1024 => {
+                body.extend_from_slice(&chunk)
+            }
+            Ok(None) => break,
+            _ => return false,
+        }
+    }
+    if body.is_empty() {
+        return true;
+    }
+    let Ok(response) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return false;
+    };
+    let rejected = &response["partialSuccess"]["rejectedSpans"];
+    rejected.is_null() || rejected.as_u64() == Some(0) || rejected.as_str() == Some("0")
 }
 
 #[cfg(test)]
@@ -213,16 +236,23 @@ mod tests {
     #[tokio::test]
     async fn otlp_http_delivers_to_a_collector_and_reports_rejection() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let app = axum::Router::new().route(
-            "/traces",
-            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
-                let tx = tx.clone();
-                async move {
-                    tx.send(body).await.unwrap();
-                    axum::Json(serde_json::json!({}))
-                }
-            }),
-        );
+        let app = axum::Router::new()
+            .route(
+                "/partial",
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({"partialSuccess":{"rejectedSpans":"1"}}))
+                }),
+            )
+            .route(
+                "/traces",
+                axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let tx = tx.clone();
+                    async move {
+                        tx.send(body).await.unwrap();
+                        axum::Json(serde_json::json!({}))
+                    }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
@@ -244,6 +274,7 @@ mod tests {
             "HTTP POST"
         );
         assert!(!export_batch(&client, &endpoint.join("/missing").unwrap(), vec![]).await);
+        assert!(!export_batch(&client, &endpoint.join("/partial").unwrap(), vec![]).await);
         task.abort();
     }
     #[test]

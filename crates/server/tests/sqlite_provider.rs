@@ -74,6 +74,11 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         .await
         .unwrap()
         .contains("sift_http_requests_total"));
+    assert!(client
+        .metrics()
+        .await
+        .unwrap()
+        .contains("sift_http_requests_total"));
     client
         .execute(session, connection, "INSERT INTO items VALUES(1,'kept')")
         .await

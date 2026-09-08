@@ -134,6 +134,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "githubNativeAuthExchange",
     "handshake",
     "health",
+    "readMetrics",
     "hoverSemanticDocument",
     "importCsv",
     "installExtension",
@@ -1457,6 +1458,17 @@ impl Client {
 
     pub async fn health(&self) -> Result<Health> {
         self.get("/v1/health").await
+    }
+
+    /// Administrator-only Prometheus text exposition.
+    pub async fn metrics(&self) -> Result<String> {
+        let response = self
+            .send_response(self.http.get(self.url("/v1/metrics")))
+            .await?;
+        if !response.status().is_success() {
+            return Err(server_error(response).await);
+        }
+        Ok(response.text().await?)
     }
 
     pub async fn instance_configuration(&self) -> Result<InstanceConfigurationDocument> {

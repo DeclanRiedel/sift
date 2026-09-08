@@ -23,3 +23,23 @@ dump/restore. These are API/operator milestones; no visual acceptance required.
 Each implementation milestone will document its supported scope and automated
 acceptance, then be committed separately. Final acceptance includes workspace
 formatting, strict Clippy, and workspace tests.
+
+## Completed milestones
+
+- `0098c9c`: typed Parquet transfers and administrator HTTP observability.
+- `89c56e5`: offline backup policies, conditional encrypted uploads and
+  PostgreSQL operator recovery.
+- Final integration: metrics SDK coverage, bounded OTLP response handling and
+  normalized Parquet target authorization.
+
+Acceptance on 2026-09-08: workspace tests passed, including all 244 server-library
+tests, 76 API integration tests and 454 workspace-UI unit tests. The isolated
+PostgreSQL 17.10 recovery test passed separately, including dry-run non-mutation,
+restore rollback, no-overwrite publication, audit entry points and process timeout.
+No existing database or external object-store account was used. Remote PUT and
+OTLP delivery were tested against local HTTP fixtures; live cloud credentials,
+remote retention and production restore compatibility are operator concerns.
+Final `cargo fmt --all -- --check` and
+`cargo clippy --workspace --all-targets -- -D warnings` also passed.
+
+See [backend operations](../BACKEND-OPERATIONS.md) for usage and explicit limits.
