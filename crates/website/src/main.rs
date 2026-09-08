@@ -26,6 +26,7 @@ async fn home() -> Result {
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
                 <title>"Sift overview"</title>
                 <link rel="stylesheet" href="/styles.css"/>
+                <script src="/wiki.js"></script>
             </head>
             <body>
                 <main>
@@ -94,6 +95,15 @@ fn asset(content: &'static str, mime: &'static str) -> Result<Response> {
         .header("Content-Type", mime)
         .body(Body::from(content))?)
 }
+
+#[route(GET "/wiki.js")]
+async fn wiki_script() -> Result<Response> {
+    asset(
+        include_str!("../../../docs/keyboard-wiki/wiki.js"),
+        "application/javascript; charset=utf-8",
+    )
+}
+
 #[route(GET "/styles.css")]
 async fn stylesheet() -> Result<Response> {
     asset(
