@@ -25,7 +25,7 @@
         </p>
         <p>Once connected, follow <a href="/shared-rooms">Shared rooms</a>
           to grant membership, bind a database connection, and collaborate.
-          Hosting a server alone does not grant access to its rooms.</p>
+          Set up tenant and room membership for everyone who will join.</p>
       </header>
 
       <nav>
@@ -44,6 +44,14 @@
             <tr><td>Direct SSH</td><td>You can already SSH to the machine and do not want to expose a Sift port.</td></tr>
           </tbody>
         </table>
+        <h3>What runs where?</h3>
+        <p>Your desktop provides the editor and interface. The Sift server owns
+          database connections, shared documents, rooms, and credentials. Database
+          addresses are resolved from the server's machine, so choose a host with
+          network access to the databases you want to use.</p>
+        <p>For HTTPS, prepare a compatible Sift server build, persistent storage,
+          and an HTTPS reverse proxy. For SSH, start with a working system SSH
+          connection; Sift's remote helper handles compatible server provisioning.</p>
         <p class="note">
           Database credentials stay in the server's configured secret store.
           They never belong in <code>sift.toml</code>, URLs, shell arguments, or
@@ -53,18 +61,38 @@
 
       <section id="https">
         <h2>Hosted HTTPS</h2>
-        <p>
-          Configure <code>transport = "network"</code>, disable loopback bypass,
-          select a durable metadata secret backend, and set
-          <code>public_base_url</code> to the exact HTTPS origin. Keep Sift bound
-          to loopback when the TLS proxy is on the same host. The proxy must
-          forward both HTTP and WebSocket upgrades without rewriting
-          <code>/v1</code>.
-        </p>
-        <p>For a private Tailnet, Tailscale Serve provides the HTTPS boundary:</p>
+        <ol>
+          <li><strong>Configure the instance.</strong> In <code>sift.toml</code>,
+            choose <code>transport = "network"</code> and a durable metadata
+            secret backend. For a shared team instance, use
+            <code>deployment = "team"</code> and configure the allowed principals
+            and tenant memberships. Disable loopback authentication bypass.</li>
+          <li><strong>Prepare persistent state.</strong> Validate the manifest,
+            generate its lock, and review the resource plan. Import each requested
+            credential slot into the server's secret store, then apply the plan.
+            Apply required metadata migrations before starting the server.</li>
+          <li><strong>Publish HTTPS.</strong> Keep Sift bound to loopback when the
+            proxy is on the same host. Forward HTTP and WebSocket upgrades on the
+            same origin, preserving the <code>/v1</code> path. Set
+            <code>public_base_url</code> to that exact external HTTPS origin.</li>
+          <li><strong>Check readiness and connect.</strong> Wait for the HTTPS
+            <code>/v1/ready</code> endpoint to succeed. Each person can then add
+            that origin in the desktop, sign in, and select their tenant.</li>
+        </ol>
+        <p>Use the <a href="/configuration">configuration reference</a> for
+          identity, connection profiles, credentials, and tenant policy.</p>
+
+        <h3>Private HTTPS with Tailscale</h3>
+        <p>On a server already connected to your Tailnet, Tailscale Serve can
+          publish the local Sift listener. These commands assume Sift listens
+          on port <code>7474</code>:</p>
         <pre><code>sudo tailscale set --operator=$USER
 tailscale serve --bg http://127.0.0.1:7474
 tailscale serve status</code></pre>
+        <p>Use the HTTPS origin printed by <code>tailscale serve status</code>
+          for both <code>public_base_url</code> and desktop connections. Tailnet
+          access policy controls which devices can reach it; Sift sign-in and
+          tenant membership determine what each person can access.</p>
         <p>
           Wait for the HTTPS <code>/v1/ready</code> endpoint before connecting;
           first certificate issuance may take a moment. In Sift, use
@@ -75,6 +103,9 @@ tailscale serve status</code></pre>
 
       <section id="ssh">
         <h2>Direct SSH</h2>
+        <p>First confirm that your system SSH client can reach the destination.
+          Replace the alias below with an entry from your SSH configuration:</p>
+        <pre><code>ssh my-ssh-config-host</code></pre>
         <p>
           Open the server picker with <kbd>&lt;leader&gt; d c</kbd>, choose SSH, and
           enter a destination already understood by your system OpenSSH client,
@@ -87,6 +118,10 @@ tailscale serve status</code></pre>
           desktop tunnel leaves durable remote state alive; reconnecting opens
           a fresh authenticated grant.
         </p>
+        <p>The remote state directory belongs to the remote OS account. Reuse
+          that account and state directory when reconnecting to your instance.
+          For a team instance, arrange tenant membership and a registered Sift
+          principal key with the administrator before connecting.</p>
       </section>
 
       <section id="recovery">
@@ -100,12 +135,13 @@ tailscale serve status</code></pre>
             <tr><td>Expired login</td><td>Interactive sessions refresh automatically and persist rotated credentials in the OS vault.</td></tr>
           </tbody>
         </table>
-        <p>
-          Operators can run the real two-device checks with
-          <code>test-tailnet-hosted.sh user@device</code> or
-          <code>test-ssh-device.sh user@host</code>. Both checks clean up only
-          temporary state they created.
-        </p>
+        <p>Keep the instance's metadata and secret store on persistent storage.
+          A reconnect restores access to durable documents, rooms, profiles, and
+          history; active transactions and retained query results need separate
+          attention after a restart.</p>
+        <p>If a write was interrupted, check its outcome before running it again.
+          When connectivity fails, check the HTTPS certificate or SSH connection,
+          then server readiness, sign-in, and tenant access in that order.</p>
       </section>
 
       <footer>
