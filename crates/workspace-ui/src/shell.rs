@@ -4693,6 +4693,9 @@ impl Pane {
     /// active query item's editor when there is one, else the pane itself. This
     /// keeps the `SiftEditor` key context active so editing keys route.
     fn active_focus_handle(&self, cx: &App) -> FocusHandle {
+        if self.pending_close_item.is_some() {
+            return self.focus_handle.clone();
+        }
         self.active_item()
             .filter(|item| ItemRegistry::definition(&item.kind).runtime.is_editor())
             .and_then(|item| self.editors.get(&item.id))
@@ -27970,31 +27973,13 @@ impl WorkspaceShell {
         let Some(target) = self.panes.get(self.active_pane).cloned() else {
             return;
         };
-        while let Some(pane_index) = self.panes.iter().position(|pane| pane == &target) {
-            let clean_item = target.read(cx).items.iter().position(|item| !item.dirty);
-            let Some(item_index) = clean_item else {
-                break;
-            };
-            self.active_pane = pane_index;
-            target.update(cx, |pane, _| pane.activate_item(item_index, false));
-            self.remove_active_item(window, cx);
-        }
-        if let Some(pane_index) = self.panes.iter().position(|pane| pane == &target) {
-            self.active_pane = pane_index;
-            let dirty_count = target
-                .read(cx)
-                .items
-                .iter()
-                .filter(|item| item.dirty)
-                .count();
-            if dirty_count > 0 {
-                self.show_toast(
-                    format!("Kept {dirty_count} tab(s) with unsaved changes"),
-                    cx,
-                );
-                self.focus_active_pane(window, cx);
-            }
-        }
+        let item_ids = target
+            .read(cx)
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        self.close_pane_items(self.active_pane, &item_ids, window, cx);
     }
 
     fn close_pane_items(
@@ -28009,11 +27994,10 @@ impl WorkspaceShell {
         };
         let item_ids = item_ids.iter().copied().collect::<HashSet<_>>();
         while let Some(current_pane_index) = self.panes.iter().position(|pane| pane == &target) {
-            let clean_item = target
-                .read(cx)
-                .items
-                .iter()
-                .position(|item| item_ids.contains(&item.id) && !item.dirty);
+            let clean_item = target.read(cx).items.iter().position(|item| {
+                item_ids.contains(&item.id)
+                    && !self.item_needs_close_confirmation(&target, item.id, cx)
+            });
             let Some(item_index) = clean_item else {
                 break;
             };
@@ -28023,15 +28007,25 @@ impl WorkspaceShell {
         }
         if let Some(current_pane_index) = self.panes.iter().position(|pane| pane == &target) {
             self.active_pane = current_pane_index;
-            let dirty_count = target
+            let protected_items = target
                 .read(cx)
                 .items
                 .iter()
-                .filter(|item| item_ids.contains(&item.id) && item.dirty)
-                .count();
-            if dirty_count > 0 {
+                .filter(|item| {
+                    item_ids.contains(&item.id)
+                        && self.item_needs_close_confirmation(&target, item.id, cx)
+                })
+                .map(|item| item.id)
+                .collect::<Vec<_>>();
+            if let Some(&item_id) = protected_items.first() {
+                target.update(cx, |pane, _| {
+                    if let Some(index) = pane.items.iter().position(|item| item.id == item_id) {
+                        pane.activate_item(index, false);
+                    }
+                    pane.pending_close_item = Some(item_id);
+                });
                 self.show_toast(
-                    format!("Kept {dirty_count} tab(s) with unsaved changes"),
+                    format!("Kept {} tab(s) with unsaved changes", protected_items.len()),
                     cx,
                 );
             }
@@ -28074,6 +28068,18 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn item_needs_close_confirmation(&self, pane: &Entity<Pane>, item_id: u64, cx: &App) -> bool {
+        let pane = pane.read(cx);
+        pane.items
+            .iter()
+            .any(|item| item.id == item_id && item.dirty)
+            || self.staged_result_item_id() == Some(item_id)
+            || pane
+                .results
+                .get(&item_id)
+                .is_some_and(|results| results.read(cx).has_staged_changes())
+    }
+
     fn close_active_item(
         &mut self,
         _: &CloseActiveItem,
@@ -28084,11 +28090,13 @@ impl WorkspaceShell {
             return;
         };
         if let Some(item) = pane.read(cx).active_item() {
-            if item.dirty {
+            if self.item_needs_close_confirmation(pane, item.id, cx) {
                 let item_id = item.id;
                 pane.update(cx, |pane, _| {
                     pane.pending_close_item = Some(item_id);
                 });
+                let focus = pane.read(cx).focus_handle.clone();
+                focus.focus(window, cx);
                 cx.notify();
                 return;
             }
@@ -44755,6 +44763,36 @@ mod tests {
             0
         );
         assert_eq!(workspace.read_with(&cx, |shell, _| shell.pane_count()), 1);
+    }
+
+    #[gpui::test]
+    fn staged_data_close_shortcuts_require_explicit_discard(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let results = workspace.read_with(&cx, |shell, cx| shell.focused_pane_results(cx).unwrap());
+        results.update(&mut cx, |results, cx| {
+            results.set_staged_row_deletions(1, cx)
+        });
+        workspace.update_in(&mut cx, |shell, window, cx| shell.focus_results(window, cx));
+
+        for shortcut in ["ctrl-k t c", "ctrl-k w c"] {
+            cx.simulate_keystrokes(shortcut);
+            workspace.read_with(&cx, |shell, cx| {
+                let pane = shell.panes[0].read(cx);
+                assert_eq!(pane.items.len(), 1);
+                assert!(!pane.items[0].dirty);
+                assert_eq!(pane.pending_close_item, Some(1));
+                assert!(results.read(cx).has_staged_changes());
+            });
+            cx.simulate_keystrokes("escape");
+            workspace.read_with(&cx, |shell, cx| {
+                assert_eq!(shell.panes[0].read(cx).pending_close_item, None);
+                assert!(results.read(cx).has_staged_changes());
+            });
+        }
+        cx.simulate_keystrokes("ctrl-k t c d");
+        workspace.read_with(&cx, |shell, cx| assert_eq!(shell.active_item_count(cx), 0));
     }
 
     #[gpui::test]
