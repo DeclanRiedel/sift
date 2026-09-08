@@ -3248,7 +3248,7 @@ impl QueryEditor {
                 Some(
                     div()
                         .absolute()
-                        .right(px(2.))
+                        .right(px(8.))
                         .top(y)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(

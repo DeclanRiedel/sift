@@ -50091,6 +50091,8 @@ mod tests {
         let copy = cx
             .debug_bounds("copy-message-0")
             .expect("copy button beside the error");
+        let editor = cx.debug_bounds("editor-scroll").expect("Problems editor");
+        assert!(copy.right() <= editor.right() - px(8.));
         cx.simulate_click(copy.center(), Modifiers::default());
         assert!(cx
             .read_from_clipboard()
