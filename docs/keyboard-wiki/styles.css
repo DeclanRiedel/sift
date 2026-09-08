@@ -90,6 +90,23 @@ footer {
   margin-bottom: 28px;
   border-bottom: 1px solid var(--border);
   background: var(--black);
+  padding-right: 44px;
+}
+
+.doc-tabs .github-link {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 44px;
+  padding: 8px;
+}
+
+.doc-tabs .github-link:hover {
+  color: var(--white);
 }
 
 .doc-tabs a {
