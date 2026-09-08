@@ -31,12 +31,10 @@
       block.append(pre, copyButton(pre.querySelector("code") || pre, "Copy code block"));
     }
     if (path !== "/configuration") return;
-    for (const code of root.querySelectorAll("table th code, table td:first-child code")) {
-      if (code.parentElement.classList.contains("copy-field")) continue;
-      const field = document.createElement("span");
-      field.className = "copy-field";
-      code.replaceWith(field);
-      field.append(code, copyButton(code, `Copy ${code.textContent}`));
+    for (const cell of root.querySelectorAll("table th, table td:first-child")) {
+      if (!cell.querySelector("code") || cell.classList.contains("copy-field")) continue;
+      cell.classList.add("copy-field");
+      cell.append(copyButton(cell, `Copy ${cell.textContent.trim()}`));
     }
   }
 

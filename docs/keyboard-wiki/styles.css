@@ -248,16 +248,17 @@ kbd {
 }
 
 .copy-field {
-  display: inline-block;
   position: relative;
-  max-width: 100%;
-  vertical-align: middle;
+}
+
+.compact td.copy-field,
+.copy-field code {
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .copy-field code {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  white-space: normal;
+  box-decoration-break: clone;
 }
 
 .copy-button {
@@ -284,8 +285,8 @@ kbd {
 
 .copy-field > .copy-button {
   position: absolute;
-  top: 0;
-  right: 0;
+  top: 6px;
+  right: 6px;
   opacity: 0;
   pointer-events: none;
   box-shadow: -5px 0 8px var(--black);
