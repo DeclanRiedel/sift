@@ -244,7 +244,7 @@ kbd {
 
 .copy-block pre {
   margin: 0;
-  padding-top: 46px;
+  padding: 12px 52px 12px 14px;
 }
 
 .copy-field {
