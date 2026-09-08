@@ -3432,8 +3432,8 @@ pub fn detect_completion_context(
     let join_slot = statement_tokens.last().is_some_and(|token| {
             matches!(token, Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("JOIN"))
         }) && !statement_tokens.iter().any(|token| matches!(token, Token::LParen | Token::RParen))
-        && !statement_tokens.iter().rev().nth(1).is_some_and(|token| {
-            matches!(token, Token::Word(word) if word.value.eq_ignore_ascii_case("CROSS") || word.value.eq_ignore_ascii_case("NATURAL"))
+        && !statement_tokens.iter().rev().skip(1).take(3).any(|token| {
+            matches!(token, Token::Word(word) if word.quote_style.is_none() && (word.value.eq_ignore_ascii_case("CROSS") || word.value.eq_ignore_ascii_case("NATURAL")))
         });
     if join_slot {
         let mut binding_tokens = statement_tokens.to_vec();

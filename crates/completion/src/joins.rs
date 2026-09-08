@@ -326,6 +326,12 @@ mod tests {
     #[test]
     fn excludes_unproven_edges_wrong_slots_and_previous_statements() {
         let mut graph = graph();
+        assert!(suggestions(
+            "SELECT * FROM orders NATURAL LEFT OUTER JOIN ",
+            &graph,
+            Engine::Postgres
+        )
+        .is_empty());
         let upper = suggestions("SELECT * FROM orders O JOIN ", &graph, Engine::Postgres);
         assert!(upper[0].insert.contains("\"o\".\"user_id\""));
         assert_eq!(
