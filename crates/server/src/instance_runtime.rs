@@ -145,6 +145,7 @@ impl InstanceRoot {
         config.updater.check_interval_secs = self.manifest.server.updater.check_interval_secs;
         config.updater.jitter_secs = self.manifest.server.updater.jitter_secs;
         config.log.filter = self.manifest.server.log.filter.clone();
+        config.log.otlp_endpoint = self.manifest.server.log.otlp_endpoint.clone();
         config.drivers.mock = self.manifest.server.drivers.mock;
         config.drivers.mock_extra = self.manifest.server.drivers.mock_extra;
         config.drivers.sqlite = self.manifest.server.drivers.sqlite.clone();

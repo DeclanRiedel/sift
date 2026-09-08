@@ -41,7 +41,7 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         rooms: RoomRuntime::default(),
         shutdown: Default::default(),
         auth: AuthState::default(),
-        metadata: Some(metadata),
+        metadata: Some(metadata.clone()),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -59,10 +59,128 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         .await
         .unwrap()
         .id;
+    let metrics_response = reqwest::Client::new()
+        .get(format!("http://{addr}/v1/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert!(metrics_response.status().is_success());
+    assert_eq!(
+        metrics_response.headers()[reqwest::header::CONTENT_TYPE],
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    assert!(metrics_response
+        .text()
+        .await
+        .unwrap()
+        .contains("sift_http_requests_total"));
     client
         .execute(session, connection, "INSERT INTO items VALUES(1,'kept')")
         .await
         .unwrap();
+    // Parquet stays typed through the real SQLite driver and atomic importer.
+    {
+        use futures::StreamExt;
+        let stream = store
+            .export_stream(
+                session,
+                connection,
+                ExportRequest {
+                    sql: "SELECT id,label FROM items".into(),
+                    params: vec![],
+                    format: ExportFormat::Parquet,
+                    header: true,
+                    null_display: None,
+                },
+            )
+            .await
+            .unwrap();
+        futures::pin_mut!(stream);
+        let mut data = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            data.extend_from_slice(&chunk.unwrap());
+        }
+        let recipe = TransferRecipe {
+            id: TransferRecipeId(1),
+            workspace_id: WorkspaceId(1),
+            name: "parquet".into(),
+            direction: TransferDirection::Import,
+            source: TransferEndpoint::Upload,
+            sink: TransferEndpoint::Table,
+            format_id: "parquet".into(),
+            format_version: "1".into(),
+            options: serde_json::json!({}),
+            revision: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let request = sift_metadata::http::ExecuteTransferRecipeRequest {
+            session_id: session,
+            connection_id: connection,
+            sql: None,
+            params: vec![],
+            data: Some(data),
+            table: Some(ObjectPath {
+                catalog: None,
+                schema: None,
+                name: "parquet_copy".into(),
+                kind: Some(ObjectKind::Table),
+                routine_args: None,
+            }),
+            sheet: None,
+            create_table: true,
+            conflict_policy: None,
+            dry_run: true,
+            resume_from_row: 0,
+            type_mappings: Default::default(),
+        };
+        sift_server::transfer::execute_recipe(
+            &store,
+            &metadata,
+            PrincipalId(1),
+            &recipe,
+            request.clone(),
+        )
+        .await
+        .unwrap();
+        let db = rusqlite::Connection::open(&path).unwrap();
+        assert!(db.prepare("SELECT * FROM parquet_copy").is_err());
+        let mut apply = request;
+        apply.dry_run = false;
+        sift_server::transfer::execute_recipe(
+            &store,
+            &metadata,
+            PrincipalId(1),
+            &recipe,
+            apply.clone(),
+        )
+        .await
+        .unwrap();
+        let row = db
+            .query_row("SELECT id,label FROM parquet_copy", [], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
+            .unwrap();
+        assert_eq!(row, (1, "kept".into()));
+        db.execute_batch("CREATE UNIQUE INDEX copy_id ON parquet_copy(id)")
+            .unwrap();
+        apply.create_table = false;
+        assert!(sift_server::transfer::execute_recipe(
+            &store,
+            &metadata,
+            PrincipalId(1),
+            &recipe,
+            apply
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM parquet_copy", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
     let tx = client
         .begin_transaction(
             session,

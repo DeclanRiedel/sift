@@ -155,12 +155,15 @@ impl UpdaterConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct LogConfig {
     pub filter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otlp_endpoint: Option<String>,
 }
 
 impl Default for LogConfig {
     fn default() -> Self {
         Self {
             filter: "sift=info,tower_http=info".into(),
+            otlp_endpoint: None,
         }
     }
 }

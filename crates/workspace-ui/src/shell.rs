@@ -8981,6 +8981,7 @@ fn export_extension(format: sift_protocol::ExportFormat) -> &'static str {
         sift_protocol::ExportFormat::Markdown => "md",
         sift_protocol::ExportFormat::Xlsx => "xlsx",
         sift_protocol::ExportFormat::SqlInsert => "sql",
+        sift_protocol::ExportFormat::Parquet => "parquet",
     }
 }
 

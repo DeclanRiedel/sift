@@ -638,7 +638,7 @@ fn qualified_table(table: &str, engine: Engine) -> ApiResult<String> {
         .join("."))
 }
 
-fn execute_request(
+pub(crate) fn execute_request(
     connection: ConnectionId,
     sql: String,
     params: Vec<Value>,

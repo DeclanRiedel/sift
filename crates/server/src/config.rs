@@ -156,6 +156,8 @@ impl Default for VcsConfig {
 pub struct LogConfig {
     /// `tracing-subscriber` env-filter directive string.
     pub filter: String,
+    /// Optional complete OTLP/HTTP JSON traces URL; HTTPS or loopback HTTP.
+    pub otlp_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -781,6 +783,7 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             filter: "sift=info,tower_http=info".to_string(),
+            otlp_endpoint: None,
         }
     }
 }

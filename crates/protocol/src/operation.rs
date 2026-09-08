@@ -667,6 +667,7 @@ pub enum Operation {
     BackupState,
     /// Local-owner export of an allowlisted, read-only metadata inspection snapshot.
     InspectMetadata,
+    ReadMetrics,
     RestoreState {
         applied: bool,
     },
@@ -869,6 +870,7 @@ impl Operation {
             Self::Vault { .. } => OperationKind::Metadata,
             Self::BackupState => OperationKind::BackupState,
             Self::InspectMetadata => OperationKind::InspectMetadata,
+            Self::ReadMetrics => OperationKind::ReadMetrics,
             Self::RestoreState { .. } => OperationKind::RestoreState,
         }
     }
@@ -1255,6 +1257,7 @@ impl Operation {
             ),
             Operation::BackupState => summary("backup", "instance_state", None),
             Operation::InspectMetadata => summary("inspect", "metadata_snapshot", None),
+            Operation::ReadMetrics => summary("read", "metrics", None),
             Operation::RestoreState { applied } => summary(
                 if *applied {
                     "restore"

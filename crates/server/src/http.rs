@@ -217,6 +217,7 @@ impl Default for AuthState {
 }
 
 pub fn app(state: AppState) -> Router {
+    let metrics = Arc::new(crate::telemetry::Metrics::default());
     if let Some(metadata) = &state.metadata {
         state.sessions.set_authorization_store(metadata.clone());
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -224,6 +225,7 @@ pub fn app(state: AppState) -> Router {
         }
     }
     let router = ApiRouter::new()
+        .api_route("/v1/metrics", get_with(read_metrics, doc("readMetrics", "Administrator-only Prometheus metrics")))
         .api_route(
             "/v1/handshake",
             post_with(
@@ -1234,6 +1236,7 @@ pub fn app(state: AppState) -> Router {
     let router = router.finish_api_with(&mut api, |t| t.title("sift API").version(VERSION));
     let openapi_doc = Arc::new(finalize_openapi(api));
     router
+        .layer(Extension(metrics.clone()))
         .layer(Extension(crate::hosting::HostingHttp::default()))
         .layer(Extension(openapi_doc))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
@@ -1245,6 +1248,7 @@ pub fn app(state: AppState) -> Router {
             protocol_version_middleware,
         ))
         .layer(from_fn(correlation_middleware))
+        .layer(from_fn_with_state(metrics, crate::telemetry::observe))
         .layer(
             tower_http::compression::CompressionLayer::new()
                 .gzip(true)
@@ -2982,6 +2986,30 @@ async fn handshake(
         },
         capabilities: handshake_capabilities(state.auth.instance_configuration.as_ref()),
     }))
+}
+
+async fn read_metrics(
+    State(state): State<AppState>,
+    Extension(metrics): Extension<Arc<crate::telemetry::Metrics>>,
+    auth: Option<Extension<AuthContext>>,
+) -> ApiResult<Response> {
+    let auth = require_instance_admin(&state, auth.as_ref().map(|Extension(auth)| auth))?;
+    state.sessions.push_operation_full(
+        Operation::ReadMetrics,
+        OperationStatus::Succeeded,
+        Some(auth.principal_id.0),
+        None,
+        None,
+        None,
+    );
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        metrics.render(),
+    )
+        .into_response())
 }
 
 async fn health(State(state): State<AppState>) -> Json<Health> {

@@ -120,6 +120,8 @@ pub enum ExportFormat {
     Xlsx,
     /// Portable SQL INSERT statements targeting a quoted `result` table.
     SqlInsert,
+    /// Schema-driven, bounded Apache Parquet file.
+    Parquet,
 }
 
 /// Body of `POST /v1/sessions/:id/connections/:conn_id/export`. The

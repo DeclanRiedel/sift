@@ -39,6 +39,7 @@ pub fn content_type(format: ExportFormat) -> &'static str {
         ExportFormat::Markdown => "text/markdown; charset=utf-8",
         ExportFormat::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ExportFormat::SqlInsert => "application/sql; charset=utf-8",
+        ExportFormat::Parquet => "application/vnd.apache.parquet",
     }
 }
 
@@ -63,6 +64,36 @@ pub fn encode_stream<G: PageRetention>(
         // Owned by the generator so it drops (releasing the cursor) when
         // the stream is exhausted or the consumer is dropped.
         let _guard = guard;
+        if format == ExportFormat::Parquet {
+            let mut encoder = None;
+            let mut completed = false;
+            while let Some(page) = rx.recv().await {
+                _guard.page_received();
+                match page {
+                    Page::NextResult { columns } => {
+                        if encoder.is_some() {
+                            Err(std::io::Error::other("Parquet supports one result set"))?;
+                        }
+                        encoder = Some(crate::parquet_transfer::Encoder::new(&columns)?);
+                    }
+                    Page::Rows { rows } => {
+                        let mut current = encoder.take().ok_or_else(|| std::io::Error::other("Parquet requires column metadata"))?;
+                        encoder = Some(tokio::task::spawn_blocking(move || {
+                            current.write(&rows)?;
+                            Ok::<_, std::io::Error>(current)
+                        }).await.map_err(std::io::Error::other)??);
+                    }
+                    Page::Done { .. } => { completed = true; }
+                    Page::Error { error } => { Err(std::io::Error::other(format!("{}: {}", error.code, error.message)))?; }
+                }
+                _guard.page_processed();
+                if completed { break; }
+            }
+            if !completed { Err(std::io::Error::other("Parquet query stream ended before completion"))?; }
+            let encoder = encoder.ok_or_else(|| std::io::Error::other("Parquet requires a result set"))?;
+            yield tokio::task::spawn_blocking(move || encoder.finish()).await.map_err(std::io::Error::other)??;
+            return;
+        }
         let mut columns: Vec<ColumnMetadata> = Vec::new();
         let mut row_buf = BytesMut::with_capacity(8192);
         let mut header_sent = false;
@@ -242,6 +273,7 @@ fn encode_row(
             buf.split().freeze()
         }
         ExportFormat::Xlsx => unreachable!("XLSX rows are buffered into the workbook"),
+        ExportFormat::Parquet => unreachable!("Parquet is encoded from typed pages"),
     }
 }
 
@@ -261,6 +293,7 @@ fn write_delimited_value(buf: &mut BytesMut, v: &Value, format: ExportFormat, nu
         | ExportFormat::Html
         | ExportFormat::Markdown
         | ExportFormat::Xlsx
+        | ExportFormat::Parquet
         | ExportFormat::SqlInsert => {}
     }
 }
@@ -524,7 +557,7 @@ fn markdown_escape(value: &str) -> String {
         .replace('\n', "<br>")
 }
 
-fn value_to_text(value: &Value) -> String {
+pub(crate) fn value_to_text(value: &Value) -> String {
     match value {
         Value::Null | Value::TypedNull { .. } => String::new(),
         Value::Bool(value) => value.to_string(),
@@ -663,5 +696,31 @@ mod tests {
         buffer.put_u8(b' ');
         write_sql_value(&mut buffer, &Value::Text("O'Brien".into()));
         assert_eq!(&buffer[..], b"\"odd\"\"name\" 'O''Brien'");
+    }
+
+    #[tokio::test]
+    async fn parquet_rejects_multiple_results_and_incomplete_streams_without_output() {
+        for pages in [
+            vec![Page::NextResult {
+                columns: vec![synthetic_column(0)],
+            }],
+            vec![
+                Page::NextResult {
+                    columns: vec![synthetic_column(0)],
+                },
+                Page::NextResult {
+                    columns: vec![synthetic_column(0)],
+                },
+            ],
+        ] {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            for page in pages {
+                tx.send(page).await.unwrap();
+            }
+            drop(tx);
+            let stream = encode_stream(rx, ExportFormat::Parquet, true, String::new(), Retention);
+            futures::pin_mut!(stream);
+            assert!(stream.next().await.unwrap().is_err());
+        }
     }
 }

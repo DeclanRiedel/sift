@@ -175,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
     let mut runtime =
         sift_server::runtime::RuntimeState::acquire(&cfg).context("acquiring runtime state")?;
     init_tracing(&cfg);
+    sift_server::telemetry::configure_otlp(cfg.log.otlp_endpoint.as_deref())?;
     sift_server::updater::spawn_background(&cfg).context("starting signed background updater")?;
 
     tracing::info!(
