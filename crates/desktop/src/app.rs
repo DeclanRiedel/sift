@@ -656,6 +656,20 @@ fn semantic_target_matches(
         && connection_profile_id == Some(target.profile_id)
 }
 
+fn query_context<'a>(
+    active: &'a Option<QueryContext>,
+    parked: &'a HashMap<i64, QueryContext>,
+    profile_id: Option<i64>,
+) -> Option<&'a QueryContext> {
+    match profile_id {
+        Some(profile_id) => active
+            .as_ref()
+            .filter(|opened| opened.profile_id == profile_id)
+            .or_else(|| parked.get(&profile_id)),
+        None => active.as_ref(),
+    }
+}
+
 fn spawn_notification_stream(
     context: &QueryContext,
     events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
@@ -699,19 +713,20 @@ async fn check_connection_health(context: &QueryContext) -> ConnectionHealthRepo
     }
 }
 
-/// Owns the SDK client and the current session/connection. Connection is
-/// explicit — the user picks a profile in the UI; the executor opens it and
-/// runs queries against it. The UI thread never touches the SDK directly.
+/// Owns SDK clients and live session/connection sets. Connection selection is
+/// explicit, but switching profiles parks the previous context so tabs can
+/// keep running and reuse their original connection. The UI thread never
+/// touches the SDK directly.
 async fn run_query_executor(
     mut targets: tokio::sync::watch::Receiver<DesktopServer>,
     mut commands: tokio::sync::mpsc::Receiver<ExecutorCommand>,
     events: tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
 ) {
     let mut context: Option<QueryContext> = None;
+    let mut parked_contexts: HashMap<i64, QueryContext> = HashMap::new();
     let mut health_tick = tokio::time::interval(std::time::Duration::from_secs(15));
     health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut active_queries: HashMap<u64, (u64, tokio::sync::mpsc::UnboundedSender<QueryControl>)> =
-        HashMap::new();
+    let mut active_queries: HashMap<u64, ActiveQuery> = HashMap::new();
     let mut active_exports: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
     let mut active_transfers: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
     let mut notification_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -720,7 +735,7 @@ async fn run_query_executor(
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
-            _ = health_tick.tick(), if context.is_some() && active_queries.values().all(|(_, control)| control.is_closed()) => {
+            _ = health_tick.tick(), if context.as_ref().is_some_and(|opened| !active_queries.values().any(|query| query.profile_id == Some(opened.profile_id) && !query.control.is_closed())) => {
                 let opened = context.as_ref().expect("guarded by context");
                 let report = check_connection_health(opened).await;
                 if events.send(ExecutorEvent::ConnectionHealth(report)).is_err() {
@@ -745,6 +760,9 @@ async fn run_query_executor(
                     task.abort();
                 }
                 if let Some(previous) = context.take() {
+                    let _ = previous.client.close_session(previous.session).await;
+                }
+                for (_, previous) in parked_contexts.drain() {
                     let _ = previous.client.close_session(previous.session).await;
                 }
                 if events.send(ExecutorEvent::Connection(ConnectionStatus::Disconnected)).is_err() {
@@ -836,17 +854,18 @@ async fn run_query_executor(
                 profile_id,
                 name,
             } => {
-                cancel_active_queries(&mut active_queries);
-                active_exports.clear();
-                active_transfers.clear();
                 if let Some(task) = notification_task.take() {
                     task.abort();
                 }
                 if let Some(previous) = context.take() {
-                    let _ = previous.client.close_session(previous.session).await;
+                    parked_contexts.insert(previous.profile_id, previous);
                 }
                 let server = targets.borrow().clone();
-                match open_query_context(&server, tenant_id, profile_id, &events).await {
+                let opened = match parked_contexts.remove(&profile_id) {
+                    Some(opened) => Ok(opened),
+                    None => open_query_context(&server, tenant_id, profile_id, &events).await,
+                };
+                match opened {
                     Ok(opened) => {
                         if events
                             .send(ExecutorEvent::Connection(ConnectionStatus::Connected {
@@ -888,13 +907,14 @@ async fn run_query_executor(
                 configuration,
                 credentials,
             } => {
-                cancel_active_queries(&mut active_queries);
-                active_exports.clear();
-                active_transfers.clear();
                 if let Some(task) = notification_task.take() {
                     task.abort();
                 }
                 if let Some(previous) = context.take() {
+                    parked_contexts.insert(previous.profile_id, previous);
+                }
+                if let Some(previous) = parked_contexts.remove(&0) {
+                    cancel_active_queries_for_profile(&mut active_queries, 0);
                     let _ = previous.client.close_session(previous.session).await;
                 }
                 let server = targets.borrow().clone();
@@ -943,7 +963,9 @@ async fn run_query_executor(
                 }
             }
             ExecutorCommand::Disconnect => {
-                cancel_active_queries(&mut active_queries);
+                if let Some(profile_id) = context.as_ref().map(|opened| opened.profile_id) {
+                    cancel_active_queries_for_profile(&mut active_queries, profile_id);
+                }
                 active_exports.clear();
                 active_transfers.clear();
                 if let Some(task) = notification_task.take() {
@@ -1513,17 +1535,30 @@ async fn run_query_executor(
                 }
             }
             ExecutorCommand::CloseSession { session_id } => {
+                let active_profile_id = context
+                    .as_ref()
+                    .filter(|opened| opened.session == session_id)
+                    .map(|opened| opened.profile_id);
                 let active_connection_closed = context
                     .as_ref()
                     .is_some_and(|opened| opened.session == session_id);
                 if active_connection_closed {
-                    cancel_active_queries(&mut active_queries);
+                    if let Some(profile_id) = active_profile_id {
+                        cancel_active_queries_for_profile(&mut active_queries, profile_id);
+                    }
                     active_exports.clear();
                     active_transfers.clear();
                     if let Some(task) = notification_task.take() {
                         task.abort();
                     }
                     context = None;
+                }
+                let parked_profile_id = parked_contexts.iter().find_map(|(profile_id, opened)| {
+                    (opened.session == session_id).then_some(*profile_id)
+                });
+                if let Some(profile_id) = parked_profile_id {
+                    cancel_active_queries_for_profile(&mut active_queries, profile_id);
+                    parked_contexts.remove(&profile_id);
                 }
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
@@ -1540,6 +1575,7 @@ async fn run_query_executor(
                     .send(ExecutorEvent::SessionResourceClosed {
                         result,
                         active_connection_closed,
+                        closed_profile_id: active_profile_id.or(parked_profile_id),
                     })
                     .is_err()
                 {
@@ -1550,6 +1586,16 @@ async fn run_query_executor(
                 session_id,
                 connection_id,
             } => {
+                let active_profile_id = context.as_ref().and_then(|opened| {
+                    (opened.session == session_id
+                        && [
+                            opened.connection,
+                            opened.metadata_connection,
+                            opened.plan_connection,
+                        ]
+                        .contains(&connection_id))
+                    .then_some(opened.profile_id)
+                });
                 let active_connection_closed = context.as_ref().is_some_and(|opened| {
                     opened.session == session_id
                         && [
@@ -1559,10 +1605,22 @@ async fn run_query_executor(
                         ]
                         .contains(&connection_id)
                 });
+                let parked_profile = parked_contexts.iter().find_map(|(profile_id, opened)| {
+                    (opened.session == session_id
+                        && [
+                            opened.connection,
+                            opened.metadata_connection,
+                            opened.plan_connection,
+                        ]
+                        .contains(&connection_id))
+                    .then_some(*profile_id)
+                });
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
                     Ok(client) if active_connection_closed => {
-                        cancel_active_queries(&mut active_queries);
+                        if let Some(profile_id) = active_profile_id {
+                            cancel_active_queries_for_profile(&mut active_queries, profile_id);
+                        }
                         active_exports.clear();
                         active_transfers.clear();
                         if let Some(task) = notification_task.take() {
@@ -1574,12 +1632,20 @@ async fn run_query_executor(
                             .await
                             .map_err(|error| format!("closing active session failed: {error}"))
                     }
+                    Ok(client) if parked_profile.is_some() => client
+                        .close_session(session_id)
+                        .await
+                        .map_err(|error| format!("closing connection session failed: {error}")),
                     Ok(client) => client
                         .close_connection(session_id, connection_id)
                         .await
                         .map_err(|error| format!("closing connection failed: {error}")),
                     Err(error) => Err(error),
                 };
+                if let Some(profile_id) = parked_profile {
+                    cancel_active_queries_for_profile(&mut active_queries, profile_id);
+                    parked_contexts.remove(&profile_id);
+                }
                 if active_connection_closed {
                     let _ = events.send(ExecutorEvent::Connection(ConnectionStatus::Disconnected));
                 }
@@ -1587,6 +1653,7 @@ async fn run_query_executor(
                     .send(ExecutorEvent::SessionResourceClosed {
                         result,
                         active_connection_closed,
+                        closed_profile_id: active_profile_id.or(parked_profile),
                     })
                     .is_err()
                 {
@@ -1594,11 +1661,11 @@ async fn run_query_executor(
                 }
             }
             ExecutorCommand::DisconnectConnectionProfile { profile_id } => {
+                cancel_active_queries_for_profile(&mut active_queries, profile_id);
                 let active_connection_closed = context
                     .as_ref()
                     .is_some_and(|opened| opened.profile_id == profile_id);
                 if active_connection_closed {
-                    cancel_active_queries(&mut active_queries);
                     active_exports.clear();
                     active_transfers.clear();
                     if let Some(task) = notification_task.take() {
@@ -1606,6 +1673,7 @@ async fn run_query_executor(
                     }
                     context = None;
                 }
+                parked_contexts.remove(&profile_id);
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
                     Ok(client) => client
@@ -1626,16 +1694,19 @@ async fn run_query_executor(
                 }
             }
             ExecutorCommand::CheckConnectionHealth => {
-                active_queries.retain(|_, (_, control)| !control.is_closed());
-                if active_queries.is_empty() {
-                    if let Some(opened) = context.as_ref() {
-                        let report = check_connection_health(opened).await;
-                        if events
-                            .send(ExecutorEvent::ConnectionHealth(report))
-                            .is_err()
-                        {
-                            return;
-                        }
+                active_queries.retain(|_, query| !query.control.is_closed());
+                let idle_context = context.as_ref().filter(|opened| {
+                    !active_queries
+                        .values()
+                        .any(|query| query.profile_id == Some(opened.profile_id))
+                });
+                if let Some(opened) = idle_context {
+                    let report = check_connection_health(opened).await;
+                    if events
+                        .send(ExecutorEvent::ConnectionHealth(report))
+                        .is_err()
+                    {
+                        return;
                     }
                 }
             }
@@ -1673,8 +1744,12 @@ async fn run_query_executor(
             }
             ExecutorCommand::CommitTransaction | ExecutorCommand::RollbackTransaction => {
                 let commit = matches!(command, ExecutorCommand::CommitTransaction);
-                active_queries.retain(|_, (_, control)| !control.is_closed());
-                let result = if commit && !active_queries.is_empty() {
+                active_queries.retain(|_, query| !query.control.is_closed());
+                let active_profile_id = context.as_ref().map(|opened| opened.profile_id);
+                let active_profile_has_query = active_queries
+                    .values()
+                    .any(|query| query.profile_id == active_profile_id);
+                let result = if commit && active_profile_has_query {
                     Err("Wait for running queries before committing the transaction".into())
                 } else {
                     match context.as_mut() {
@@ -1791,13 +1866,15 @@ async fn run_query_executor(
             ExecutorCommand::Execute {
                 item_id,
                 execution_id,
+                profile_id,
                 sql,
                 params,
                 transform,
                 source,
                 variable_context,
             } => {
-                let Some(opened) = context.as_ref() else {
+                let opened = query_context(&context, &parked_contexts, profile_id);
+                let Some(opened) = opened else {
                     if events
                         .send(ExecutorEvent::Execution {
                             item_id,
@@ -1812,11 +1889,18 @@ async fn run_query_executor(
                     }
                     continue;
                 };
-                if let Some((_, previous)) = active_queries.remove(&item_id) {
-                    let _ = previous.send(QueryControl::Cancel);
+                if let Some(previous) = active_queries.remove(&item_id) {
+                    let _ = previous.control.send(QueryControl::Cancel);
                 }
                 let (control_sender, control_receiver) = tokio::sync::mpsc::unbounded_channel();
-                active_queries.insert(item_id, (execution_id, control_sender));
+                active_queries.insert(
+                    item_id,
+                    ActiveQuery {
+                        execution_id,
+                        profile_id,
+                        control: control_sender,
+                    },
+                );
                 let client = opened.client.clone();
                 let session = opened.session;
                 let connection = opened.connection;
@@ -1854,6 +1938,7 @@ async fn run_query_executor(
                 let Some(opened) = context
                     .as_ref()
                     .filter(|opened| opened.profile_id == profile_id)
+                    .or_else(|| parked_contexts.get(&profile_id))
                 else {
                     if events
                         .send(ExecutorEvent::ExplainFinished {
@@ -1920,10 +2005,10 @@ async fn run_query_executor(
             } => {
                 if active_queries
                     .get(&item_id)
-                    .is_some_and(|(active, _)| *active == execution_id)
+                    .is_some_and(|query| query.execution_id == execution_id)
                 {
-                    if let Some((_, control)) = active_queries.remove(&item_id) {
-                        let _ = control.send(QueryControl::Cancel);
+                    if let Some(query) = active_queries.remove(&item_id) {
+                        let _ = query.control.send(QueryControl::Cancel);
                     }
                 }
             }
@@ -1941,7 +2026,7 @@ async fn run_query_executor(
                     if let Some(task) = notification_task.take() {
                         task.abort();
                     }
-                    let _ = previous.client.close_session(previous.session).await;
+                    parked_contexts.insert(previous.profile_id, previous);
                 }
                 let server = targets.borrow().clone();
                 let result = create_connection_profile(
@@ -2054,6 +2139,7 @@ async fn run_query_executor(
                 tenant_id,
                 profile_id,
             } => {
+                cancel_active_queries_for_profile(&mut active_queries, profile_id);
                 if context
                     .as_ref()
                     .is_some_and(|opened| opened.profile_id == profile_id)
@@ -2064,6 +2150,9 @@ async fn run_query_executor(
                         }
                         let _ = opened.client.close_session(opened.session).await;
                     }
+                }
+                if let Some(opened) = parked_contexts.remove(&profile_id) {
+                    let _ = opened.client.close_session(opened.session).await;
                 }
                 let server = targets.borrow().clone();
                 let result = delete_connection_profile(&server, tenant_id, profile_id).await;
@@ -4912,10 +5001,12 @@ async fn run_query_executor(
                 }
             }
             ExecutorCommand::LoadTableDefinition { item_id, source } => {
-                let event = match context.as_ref() {
-                    Some(opened) if opened.profile_id == source.profile_id => {
-                        load_table_definition(opened, item_id, &source).await
-                    }
+                let opened = context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == source.profile_id)
+                    .or_else(|| parked_contexts.get(&source.profile_id));
+                let event = match opened {
+                    Some(opened) => load_table_definition(opened, item_id, &source).await,
                     _ => ExecutorEvent::TableDefinitionFailed {
                         item_id,
                         message: "Connect to this table before loading its definition".into(),
@@ -5542,8 +5633,12 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::PreviewResultEdits { item_id, edit_set } => {
-                let event = match context.as_ref() {
+            ExecutorCommand::PreviewResultEdits {
+                item_id,
+                profile_id,
+                edit_set,
+            } => {
+                let event = match query_context(&context, &parked_contexts, profile_id) {
                     Some(opened) => opened
                         .client
                         .preview_edits(
@@ -5569,8 +5664,12 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::ApplyResultEdits { item_id, edit_set } => {
-                let event = match context.as_ref() {
+            ExecutorCommand::ApplyResultEdits {
+                item_id,
+                profile_id,
+                edit_set,
+            } => {
+                let event = match query_context(&context, &parked_contexts, profile_id) {
                     Some(opened) => opened
                         .client
                         .apply_edits(
@@ -5618,10 +5717,11 @@ async fn run_query_executor(
             }
             ExecutorCommand::ExportResult {
                 item_id,
+                profile_id,
                 destination,
                 request,
             } => {
-                let Some(opened) = context.as_ref() else {
+                let Some(opened) = query_context(&context, &parked_contexts, profile_id) else {
                     let _ = events.send(ExecutorEvent::ResultExported {
                         item_id,
                         destination,
@@ -5662,11 +5762,12 @@ async fn run_query_executor(
             }
             ExecutorCommand::CapturePlan {
                 item_id,
+                profile_id,
                 sql,
                 params,
                 source,
             } => {
-                let result = match context.as_ref() {
+                let result = match query_context(&context, &parked_contexts, profile_id) {
                     Some(opened) => capture_plan(opened, sql, params, source).await,
                     None => Err("Connect before saving a plan capture".into()),
                 };
@@ -5743,8 +5844,12 @@ async fn run_query_executor(
                 }
             }
             ExecutorCommand::LoadObjectDdl { item_id, source } => {
-                let event = match context.as_ref() {
-                    Some(opened) if opened.profile_id == source.profile_id => {
+                let opened = context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == source.profile_id)
+                    .or_else(|| parked_contexts.get(&source.profile_id));
+                let event = match opened {
+                    Some(opened) => {
                         let path = sift_protocol::ObjectPath {
                             catalog: source.catalog.clone(),
                             schema: Some(source.schema.clone()),
@@ -5823,7 +5928,20 @@ async fn run_query_executor(
                     text,
                     request,
                 };
-                let delivered = context.as_ref().is_some_and(|opened| {
+                let opened = context
+                    .iter()
+                    .chain(parked_contexts.values())
+                    .find(|opened| {
+                        target.as_ref().is_none_or(|target| {
+                            semantic_target_matches(
+                                &opened.instance_id,
+                                opened.tenant_id,
+                                opened.connection_profile_id,
+                                target,
+                            )
+                        })
+                    });
+                let delivered = opened.is_some_and(|opened| {
                     target.as_ref().is_none_or(|target| {
                         semantic_target_matches(
                             &opened.instance_id,
@@ -5839,16 +5957,14 @@ async fn run_query_executor(
                             item_id,
                             text_revision,
                             outcome: Box::new(if let Some(target) = target.as_ref().filter(|target| {
-                                context
-                                    .as_ref()
-                                    .is_none_or(|opened| {
-                                        !semantic_target_matches(
+                                opened.is_none_or(|opened| {
+                                    !semantic_target_matches(
                                             &opened.instance_id,
                                             opened.tenant_id,
                                             opened.connection_profile_id,
                                             target,
                                         )
-                                    })
+                                })
                             }) {
                                 SemanticOutcome::Failed(format!(
                                     "Query tab uses {}{}; connect that database to enable SQL intelligence.",
@@ -5876,6 +5992,9 @@ async fn run_query_executor(
             }
             ExecutorCommand::CloseSemanticDocument { item_id } => {
                 if let Some(opened) = context.as_ref() {
+                    let _ = opened.semantic.send(SemanticControl::Close(item_id));
+                }
+                for opened in parked_contexts.values() {
                     let _ = opened.semantic.send(SemanticControl::Close(item_id));
                 }
             }
@@ -5915,11 +6034,30 @@ enum QueryControl {
     Cancel,
 }
 
-fn cancel_active_queries(
-    active_queries: &mut HashMap<u64, (u64, tokio::sync::mpsc::UnboundedSender<QueryControl>)>,
+struct ActiveQuery {
+    execution_id: u64,
+    profile_id: Option<i64>,
+    control: tokio::sync::mpsc::UnboundedSender<QueryControl>,
+}
+
+fn cancel_active_queries(active_queries: &mut HashMap<u64, ActiveQuery>) {
+    for (_, query) in active_queries.drain() {
+        let _ = query.control.send(QueryControl::Cancel);
+    }
+}
+
+fn cancel_active_queries_for_profile(
+    active_queries: &mut HashMap<u64, ActiveQuery>,
+    profile_id: i64,
 ) {
-    for (_, (_, control)) in active_queries.drain() {
-        let _ = control.send(QueryControl::Cancel);
+    let item_ids = active_queries
+        .iter()
+        .filter_map(|(item_id, query)| (query.profile_id == Some(profile_id)).then_some(*item_id))
+        .collect::<Vec<_>>();
+    for item_id in item_ids {
+        if let Some(query) = active_queries.remove(&item_id) {
+            let _ = query.control.send(QueryControl::Cancel);
+        }
     }
 }
 
@@ -7169,5 +7307,36 @@ mod tests {
         assert!(!semantic_target_matches("local", 8, Some(42), &target));
         assert!(!semantic_target_matches("local", 7, Some(41), &target));
         assert!(!semantic_target_matches("local", 7, None, &target));
+    }
+
+    #[test]
+    fn disconnecting_one_profile_keeps_other_profile_queries_running() {
+        let (first, mut first_events) = tokio::sync::mpsc::unbounded_channel();
+        let (second, mut second_events) = tokio::sync::mpsc::unbounded_channel();
+        let mut queries = HashMap::from([
+            (
+                10,
+                ActiveQuery {
+                    execution_id: 1,
+                    profile_id: Some(5),
+                    control: first,
+                },
+            ),
+            (
+                20,
+                ActiveQuery {
+                    execution_id: 2,
+                    profile_id: Some(6),
+                    control: second,
+                },
+            ),
+        ]);
+
+        cancel_active_queries_for_profile(&mut queries, 6);
+
+        assert!(queries.contains_key(&10));
+        assert!(!queries.contains_key(&20));
+        assert!(first_events.try_recv().is_err());
+        assert!(matches!(second_events.try_recv(), Ok(QueryControl::Cancel)));
     }
 }

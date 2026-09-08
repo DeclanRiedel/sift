@@ -2772,8 +2772,8 @@ impl TransactionUiState {
     }
 }
 
-/// Shell → executor. The executor owns the SDK client, session, and
-/// connection; the shell only reports intent (connect / disconnect / run).
+/// Shell → executor. The executor owns SDK clients, sessions, and connections;
+/// the shell only reports intent (connect / disconnect / run).
 #[derive(Clone)]
 pub enum ExecutorCommand {
     Connect {
@@ -2909,6 +2909,7 @@ pub enum ExecutorCommand {
     Execute {
         item_id: u64,
         execution_id: u64,
+        profile_id: Option<i64>,
         sql: String,
         params: Vec<sift_protocol::Value>,
         transform: Option<sift_protocol::ResultTransform>,
@@ -3543,14 +3544,17 @@ pub enum ExecutorCommand {
     },
     PreviewResultEdits {
         item_id: u64,
+        profile_id: Option<i64>,
         edit_set: sift_protocol::EditSet,
     },
     ApplyResultEdits {
         item_id: u64,
+        profile_id: Option<i64>,
         edit_set: sift_protocol::EditSet,
     },
     ExportResult {
         item_id: u64,
+        profile_id: Option<i64>,
         destination: PathBuf,
         request: sift_protocol::ExportRequest,
     },
@@ -3559,6 +3563,7 @@ pub enum ExecutorCommand {
     },
     CapturePlan {
         item_id: u64,
+        profile_id: Option<i64>,
         sql: String,
         params: Vec<sift_protocol::Value>,
         source: Option<sift_protocol::VersionedExecutionContext>,
@@ -3645,6 +3650,7 @@ pub enum ExecutorEvent {
     SessionResourceClosed {
         result: Result<(), String>,
         active_connection_closed: bool,
+        closed_profile_id: Option<i64>,
     },
     ConnectionProfileDisconnected {
         profile_id: i64,
@@ -9794,6 +9800,9 @@ pub struct WorkspaceShell {
     server_sessions_loading: bool,
     server_sessions_error: Option<String>,
     connection_status: ConnectionStatus,
+    /// Profiles with live executor sessions. `connection_status` remains the
+    /// profile currently selected for global schema/transaction controls.
+    connected_profiles: HashSet<i64>,
     connection_health: Option<ConnectionHealthReport>,
     connection_health_history: Vec<ConnectionHealthReport>,
     connection_health_expanded: bool,
@@ -11029,6 +11038,7 @@ impl WorkspaceShell {
             server_sessions_loading: false,
             server_sessions_error: None,
             connection_status: ConnectionStatus::Disconnected,
+            connected_profiles: HashSet::new(),
             connection_health: None,
             connection_health_history: Vec::new(),
             connection_health_expanded: false,
@@ -11567,6 +11577,7 @@ impl WorkspaceShell {
         if let Some(sender) = &self.executor_sender {
             let _ = sender.send(ExecutorCommand::Disconnect);
         }
+        self.connected_profiles.clear();
         self.connection_status = ConnectionStatus::Disconnected;
         self.connection_schema = ConnectionSchemaState::Unavailable;
         self.invalidate_connection_projection();
@@ -12177,12 +12188,25 @@ impl WorkspaceShell {
     fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
         match event {
             ExecutorEvent::Connection(status) => {
+                let previous_profile = match self.connection_status {
+                    ConnectionStatus::Connected { profile_id, .. }
+                    | ConnectionStatus::Connecting { profile_id }
+                    | ConnectionStatus::Failed { profile_id, .. } => Some(profile_id),
+                    ConnectionStatus::Disconnected => None,
+                };
                 self.connection_health = None;
                 self.connection_health_history.clear();
                 self.connection_health_expanded = false;
                 self.connection_last_success_ms = None;
                 if let ConnectionStatus::Connected { profile_id, .. } = &status {
                     self.expanded_connections.insert(*profile_id);
+                    self.connected_profiles.insert(*profile_id);
+                } else if let ConnectionStatus::Failed { profile_id, .. } = &status {
+                    self.connected_profiles.remove(profile_id);
+                } else if matches!(status, ConnectionStatus::Disconnected) {
+                    if let Some(profile_id) = previous_profile {
+                        self.connected_profiles.remove(&profile_id);
+                    }
                 }
                 self.status.database = match &status {
                     ConnectionStatus::Connected { name, .. } => name.clone(),
@@ -12531,7 +12555,14 @@ impl WorkspaceShell {
             ExecutorEvent::SessionResourceClosed {
                 result,
                 active_connection_closed,
+                closed_profile_id,
             } => {
+                if result.is_ok() {
+                    if let Some(profile_id) = closed_profile_id {
+                        self.connected_profiles.remove(&profile_id);
+                    }
+                    self.sync_database_item_states(cx);
+                }
                 match result {
                     Ok(()) => {
                         if active_connection_closed {
@@ -12556,6 +12587,7 @@ impl WorkspaceShell {
                     ),
                     Err(message) => self.show_error_toast(message, cx),
                 }
+                self.connected_profiles.remove(&profile_id);
                 if matches!(
                     self.connection_status,
                     ConnectionStatus::Connected { profile_id: active, .. } if active == profile_id
@@ -14924,6 +14956,7 @@ impl WorkspaceShell {
                 tenant_id,
                 profile_id,
             } => {
+                self.connected_profiles.remove(&profile_id);
                 if let Some(tenant) = self
                     .lifecycle
                     .tenants
@@ -15305,6 +15338,7 @@ impl WorkspaceShell {
 
     fn sync_database_item_states(&mut self, cx: &mut Context<Self>) {
         let status = self.connection_status.clone();
+        let connected_profiles = self.connected_profiles.clone();
         for pane in &self.panes {
             pane.update(cx, |pane, _| {
                 let sources = pane
@@ -15317,9 +15351,7 @@ impl WorkspaceShell {
                     .collect::<Vec<_>>();
                 for (item_id, source) in sources {
                     let state = match &status {
-                        ConnectionStatus::Connected { profile_id, .. }
-                            if *profile_id == source.profile_id =>
-                        {
+                        _ if connected_profiles.contains(&source.profile_id) => {
                             DatabaseItemState::Live
                         }
                         ConnectionStatus::Connecting { profile_id }
@@ -15338,6 +15370,31 @@ impl WorkspaceShell {
                 }
             });
         }
+    }
+
+    fn profile_is_connected(&self, profile_id: i64) -> bool {
+        self.connected_profiles.contains(&profile_id)
+            || matches!(
+                self.connection_status,
+                ConnectionStatus::Connected {
+                    profile_id: active,
+                    ..
+                } if active == profile_id
+            )
+    }
+
+    fn query_profile_id(&self, item_id: u64, cx: &App) -> Option<i64> {
+        self.database_source(item_id, cx)
+            .map(|source| source.profile_id)
+            .or_else(|| {
+                self.query_semantic_targets
+                    .get(&item_id)
+                    .map(|target| target.profile_id)
+            })
+            .or(match self.connection_status {
+                ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
+                _ => None,
+            })
     }
 
     fn execute_database_item(&mut self, item_id: u64, sql: String, cx: &mut Context<Self>) {
@@ -15654,10 +15711,7 @@ impl WorkspaceShell {
             );
             return;
         }
-        if matches!(
-            self.connection_status,
-            ConnectionStatus::Connected { profile_id, .. } if profile_id == source.profile_id
-        ) {
+        if self.profile_is_connected(source.profile_id) {
             self.sync_database_item_states(cx);
             self.send_execution_with_context(item_id, sql, params, variable_context, cx);
             return;
@@ -15717,12 +15771,37 @@ impl WorkspaceShell {
         variable_context: Option<sift_protocol::SqlVariableHistoryContext>,
         cx: &mut Context<Self>,
     ) {
-        let production = match &self.connection_status {
-            ConnectionStatus::Connected { name, .. } => {
-                ConnectionEnvironment::from_name(name) == ConnectionEnvironment::Production
-            }
-            _ => false,
-        };
+        let profile_id = self.query_profile_id(item_id, cx);
+        let production = profile_id
+            .and_then(|profile_id| {
+                self.database_source(item_id, cx)
+                    .filter(|source| source.profile_id == profile_id)
+                    .map(|source| source.profile_name)
+                    .or_else(|| {
+                        self.query_semantic_targets
+                            .get(&item_id)
+                            .filter(|target| target.profile_id == profile_id)
+                            .map(|target| target.profile_name.clone())
+                    })
+                    .or_else(|| {
+                        self.lifecycle
+                            .tenants
+                            .iter()
+                            .flat_map(|tenant| tenant.connections.iter())
+                            .find(|connection| connection.id == profile_id)
+                            .map(|connection| connection.name.clone())
+                    })
+                    .or_else(|| match &self.connection_status {
+                        ConnectionStatus::Connected {
+                            profile_id: active,
+                            name,
+                        } if *active == profile_id => Some(name.clone()),
+                        _ => None,
+                    })
+            })
+            .is_some_and(|name| {
+                ConnectionEnvironment::from_name(&name) == ConnectionEnvironment::Production
+            });
         if production && sql_may_mutate(&sql) {
             self.pending_production_execution = Some(PendingProductionExecution {
                 item_id,
@@ -15786,10 +15865,12 @@ impl WorkspaceShell {
         let execution_id = self.next_execution_id;
         self.next_execution_id = self.next_execution_id.saturating_add(1);
         let source = self.versioned_execution_context(item_id, cx);
+        let profile_id = self.query_profile_id(item_id, cx);
         if sender
             .send(ExecutorCommand::Execute {
                 item_id,
                 execution_id,
+                profile_id,
                 sql,
                 params,
                 transform,
@@ -15884,10 +15965,7 @@ impl WorkspaceShell {
                 );
                 return;
             }
-            if matches!(
-                self.connection_status,
-                ConnectionStatus::Connected { profile_id, .. } if profile_id == source.profile_id
-            ) {
+            if self.profile_is_connected(source.profile_id) {
                 self.send_explain(
                     item_id,
                     source.tenant_id,
@@ -16542,6 +16620,12 @@ impl WorkspaceShell {
             );
         }
         self.fail_running_explains("Explain interrupted because the database disconnected", cx);
+        if let ConnectionStatus::Connected { profile_id, .. }
+        | ConnectionStatus::Connecting { profile_id }
+        | ConnectionStatus::Failed { profile_id, .. } = self.connection_status
+        {
+            self.connected_profiles.remove(&profile_id);
+        }
         self.connection_status = ConnectionStatus::Disconnected;
         self.operation_capabilities.clear();
         self.connection_schema = ConnectionSchemaState::Unavailable;
@@ -17570,10 +17654,7 @@ impl WorkspaceShell {
             }
             ConnectionTreeAction::Connection(connection) => {
                 let connection_id = connection.id;
-                let connected = matches!(
-                    self.connection_status,
-                    ConnectionStatus::Connected { profile_id, .. } if profile_id == connection_id
-                );
+                let connected = self.profile_is_connected(connection_id);
                 let (connection_color, status_color, status_label) = match &self.connection_status {
                     ConnectionStatus::Connected { profile_id, .. }
                         if *profile_id == connection_id =>
@@ -17590,6 +17671,11 @@ impl WorkspaceShell {
                     ConnectionStatus::Failed { profile_id, .. } if *profile_id == connection_id => {
                         (colors.danger, Some(colors.danger), Some("Failed"))
                     }
+                    _ if connected => (
+                        colors.success,
+                        Some(colors.success),
+                        provider_display_name(&connection.provider_id),
+                    ),
                     _ => (
                         colors.muted_text,
                         None,
@@ -18180,8 +18266,7 @@ impl WorkspaceShell {
         match item.action {
             ConnectionTreeAction::Tenant(id) => self.toggle_tenant(id, cx),
             ConnectionTreeAction::Connection(entry) => {
-                if matches!(self.connection_status, ConnectionStatus::Connected { profile_id, .. } if profile_id == entry.id)
-                {
+                if self.profile_is_connected(entry.id) {
                     self.toggle_connection(entry.id, cx);
                 }
             }
@@ -27315,6 +27400,7 @@ impl WorkspaceShell {
                     let source = self.versioned_execution_context(*item_id, cx);
                     let _ = sender.send(ExecutorCommand::CapturePlan {
                         item_id: *item_id,
+                        profile_id: self.query_profile_id(*item_id, cx),
                         sql: sql.clone(),
                         params,
                         source,
@@ -29476,6 +29562,10 @@ impl WorkspaceShell {
             })
             .detach();
         }
+
+        //move toast to zindex max so click doesnt trigger activate new connection if slept
+        //support keeping multiple connections open
+        // Apply or discard the staged table changes before editing another result - connects were <leader> w c or t c to closed so?
         cx.notify();
     }
 
@@ -29669,6 +29759,7 @@ impl WorkspaceShell {
         if sender
             .send(ExecutorCommand::ExportResult {
                 item_id,
+                profile_id: self.query_profile_id(item_id, cx),
                 destination,
                 request,
             })
@@ -30423,7 +30514,11 @@ impl WorkspaceShell {
         self.result_edit_plan = None;
         self.pending_edit_set = None;
         if sender
-            .send(ExecutorCommand::PreviewResultEdits { item_id, edit_set })
+            .send(ExecutorCommand::PreviewResultEdits {
+                item_id,
+                profile_id: self.query_profile_id(item_id, cx),
+                edit_set,
+            })
             .is_err()
         {
             self.result_edit_pending = false;
@@ -30461,7 +30556,11 @@ impl WorkspaceShell {
         self.result_edit_pending = true;
         self.result_edit_error = None;
         if sender
-            .send(ExecutorCommand::ApplyResultEdits { item_id, edit_set })
+            .send(ExecutorCommand::ApplyResultEdits {
+                item_id,
+                profile_id: self.query_profile_id(item_id, cx),
+                edit_set,
+            })
             .is_err()
         {
             self.result_edit_pending = false;
@@ -42260,7 +42359,11 @@ mod tests {
         });
         assert!(matches!(
             receiver.try_recv(),
-            Ok(ExecutorCommand::Execute { item_id: executed, .. }) if executed == item_id
+            Ok(ExecutorCommand::Execute {
+                item_id: executed,
+                profile_id: Some(9),
+                ..
+            }) if executed == item_id
         ));
         workspace.update(&mut cx, |shell, cx| {
             shell.route_result(item_id, ResultState::Ready(Default::default()), cx);
@@ -46195,6 +46298,80 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.status.database.clone()),
             "No database"
         );
+    }
+
+    #[gpui::test]
+    fn switching_connections_keeps_previous_profile_live(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Connected {
+                    profile_id: 5,
+                    name: "warehouse".into(),
+                }),
+                cx,
+            );
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Connected {
+                    profile_id: 6,
+                    name: "analytics".into(),
+                }),
+                cx,
+            );
+
+            assert!(shell.profile_is_connected(5));
+            assert!(shell.profile_is_connected(6));
+        });
+    }
+
+    #[gpui::test]
+    fn query_tab_executes_on_its_original_live_profile(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Connected {
+                    profile_id: 5,
+                    name: "warehouse".into(),
+                }),
+                cx,
+            );
+            shell.query_semantic_targets.insert(
+                1,
+                SemanticConnectionTarget {
+                    instance_id: "local".into(),
+                    tenant_id: 1,
+                    profile_id: 5,
+                    profile_name: "warehouse".into(),
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    database: None,
+                },
+            );
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Connected {
+                    profile_id: 6,
+                    name: "analytics".into(),
+                }),
+                cx,
+            );
+            shell.execute_database_item(1, "select 1".into(), cx);
+        });
+
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::Execute {
+                item_id: 1,
+                profile_id: Some(5),
+                ..
+            })
+        ));
     }
 
     #[gpui::test]
