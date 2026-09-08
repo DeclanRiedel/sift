@@ -19,6 +19,7 @@ use zip::write::SimpleFileOptions;
 use zip::{AesMode, CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::config::Config;
+pub mod policy;
 
 const FORMAT_VERSION: u32 = 1;
 const MANIFEST_ENTRY: &str = "manifest.json";
@@ -969,7 +970,7 @@ mod tests {
         WorkspaceId,
     };
 
-    fn write_private_key(path: &Path, byte: &str) {
+    pub(super) fn write_private_key(path: &Path, byte: &str) {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -994,7 +995,7 @@ mod tests {
         config
     }
 
-    fn memory_config(root: &Path) -> Config {
+    pub(super) fn memory_config(root: &Path) -> Config {
         std::fs::create_dir_all(root).unwrap();
         let mut config = Config::default();
         config.runtime.state_dir = Some(root.join("runtime").display().to_string());

@@ -271,23 +271,26 @@ and open the live collaborative document, reusing existing tabs.
 - [ ] Error quarantine
 - [ ] Resumable transfer UI
 - [ ] Cross-engine type-mapping editor
-- [ ] Parquet support
+- [x] Parquet support
 
 Transfer preview is implemented. Quarantine report retrieval, durable resume
 with checkpoints/source validation, and a dedicated type-mapping editor remain
 open; existing preview and result plumbing do not complete those workflows.
 
+Parquet has bounded typed API export and transactional flat-type import; see
+[backend operations](../BACKEND-OPERATIONS.md) for supported types and limits.
+
 ### Backup, restore, and maintenance
 
 - [x] Sift state backup and restore
 - [x] Metadata migration lifecycle
-- [ ] Sift backup scheduling and retention
-- [ ] Sift backup remote/object-store destinations
+- [x] Sift backup scheduling and retention
+- [x] Sift backup remote/object-store destinations
 - [ ] Tenant-selective Sift restore and disaster-recovery orchestration
 - [x] Scheduled runs
 - [x] Durable task history
 - [x] Task cancellation and recovery
-- [ ] PostgreSQL dump and restore
+- [x] PostgreSQL dump and restore
 - [ ] SQL Server backup and restore
 - [ ] Restore preview and target validation
 - [ ] VACUUM and ANALYZE actions
@@ -296,7 +299,10 @@ open; existing preview and result plumbing do not complete those workflows.
 - [ ] Integrity checks
 
 The checked Sift recovery features are implemented operator CLI workflows
-(ADRs 038/039), not connected-database backups or a complete recovery UI.
+(ADRs 038/039/058), not a complete recovery UI. Backup policies are offline,
+timer-driven and support encrypted conditional HTTPS PUT destinations. PostgreSQL
+has a separate bounded custom-archive CLI with explicit transactional apply;
+cluster/PITR recovery and destination compatibility preview remain separate.
 
 ### Engine-specific depth
 
@@ -336,7 +342,10 @@ and the [overnight handoff](database-provider-overnight.md).
 
 ### Platform and operations
 
-- [ ] Prometheus metrics endpoint
-- [ ] OpenTelemetry trace export
+- [x] Prometheus metrics endpoint
+- [x] OpenTelemetry trace export
 - [~] Cross-platform desktop packaging
 - [ ] Signed artifact and installer validation matrix
+
+Observability currently covers HTTP request metrics and opt-in bounded
+OTLP/HTTP request-span export, not SQL/result payloads or full driver traces.

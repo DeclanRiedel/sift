@@ -13,6 +13,7 @@ use sift_server::{
     session::SessionStore,
     Shutdown,
 };
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,6 +22,26 @@ async fn main() -> anyhow::Result<()> {
     let mut instance_selection = None;
     let mut configured_instance_root = None;
     let mut cfg = match command {
+        ServerCommand::PostgresBackup {
+            spec,
+            archive,
+            restore,
+            apply,
+        } => {
+            let config = load_config().context("loading config")?;
+            config.validate().context("validating config")?;
+            let report =
+                sift_server::postgres_backup::run(&config, &spec, &archive, restore, apply).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        ServerCommand::BackupPolicy { policy } => {
+            let config = load_config().context("loading config")?;
+            config.validate().context("validating config")?;
+            let report = sift_server::state_backup::policy::run(&config, &policy).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
         ServerCommand::BackupCreate { output, key_file } => {
             let config = load_config().context("loading config")?;
             config.validate().context("validating config")?;
@@ -429,6 +450,15 @@ async fn main() -> anyhow::Result<()> {
 
 #[derive(Debug, PartialEq, Eq)]
 enum ServerCommand {
+    PostgresBackup {
+        spec: PathBuf,
+        archive: PathBuf,
+        restore: bool,
+        apply: bool,
+    },
+    BackupPolicy {
+        policy: PathBuf,
+    },
     BackupCreate {
         output: std::path::PathBuf,
         key_file: std::path::PathBuf,
@@ -492,10 +522,47 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
             state_dir: None,
         });
     };
+    if first == "postgres" {
+        let action = args.next().context("postgres requires dump or restore")?;
+        anyhow::ensure!(
+            matches!(action.as_str(), "dump" | "restore"),
+            "postgres requires dump or restore"
+        );
+        let mut spec = None;
+        let mut archive = None;
+        let mut apply = false;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--spec" if spec.is_none() => {
+                    spec = Some(args.next().context("--spec requires a path")?.into())
+                }
+                "--archive" if archive.is_none() => {
+                    archive = Some(args.next().context("--archive requires a path")?.into())
+                }
+                "--apply" if !apply && action == "restore" => apply = true,
+                _ => anyhow::bail!("unknown or duplicate postgres argument"),
+            }
+        }
+        return Ok(ServerCommand::PostgresBackup {
+            spec: spec.context("--spec is required")?,
+            archive: archive.context("--archive is required")?,
+            restore: action == "restore",
+            apply,
+        });
+    }
     if first == "backup" {
         let action = args
             .next()
             .context("backup requires one of: create, inspect, restore")?;
+        if action == "run-policy" {
+            anyhow::ensure!(
+                args.next().as_deref() == Some("--policy"),
+                "backup run-policy requires --policy"
+            );
+            let policy = args.next().context("--policy requires a path")?.into();
+            anyhow::ensure!(args.next().is_none(), "unexpected backup policy argument");
+            return Ok(ServerCommand::BackupPolicy { policy });
+        }
         let mut output = None;
         let mut archive = None;
         let mut key_file = None;
@@ -896,6 +963,50 @@ mod command_tests {
             }
         );
         assert!(parse_command(args(&["remote", "issue", "--capability", "secret"])).is_err());
+        assert_eq!(
+            parse_command(args(&[
+                "postgres",
+                "restore",
+                "--spec",
+                "target.json",
+                "--archive",
+                "data.dump"
+            ]))
+            .unwrap(),
+            ServerCommand::PostgresBackup {
+                spec: "target.json".into(),
+                archive: "data.dump".into(),
+                restore: true,
+                apply: false
+            }
+        );
+        assert!(parse_command(args(&[
+            "postgres",
+            "dump",
+            "--spec",
+            "source.json",
+            "--archive",
+            "data.dump",
+            "--apply"
+        ]))
+        .is_err());
+        assert!(parse_command(args(&[
+            "postgres",
+            "restore",
+            "--spec",
+            "target.json",
+            "--archive",
+            "data.dump",
+            "--apply",
+            "--apply"
+        ]))
+        .is_err());
+        assert_eq!(
+            parse_command(args(&["backup", "run-policy", "--policy", "policy.json"])).unwrap(),
+            ServerCommand::BackupPolicy {
+                policy: "policy.json".into()
+            }
+        );
         assert_eq!(
             parse_command(args(&["migrate", "status"])).unwrap(),
             ServerCommand::MigrateStatus

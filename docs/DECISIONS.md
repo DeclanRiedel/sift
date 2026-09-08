@@ -2277,3 +2277,33 @@ normal explicit audited execution. Unsupported replacement semantics remain
 unavailable; the designer does not manufacture a drop/recreate migration.
 Shared-query browsing projects authenticated room/document entries and opens
 them through the existing room service, preserving permission and audit checks.
+
+## ADR-058 — Backend Transfers, Offline Backup Policies And Operator Recovery
+
+Status: accepted. Date: 2026-09-08.
+
+Parquet uses the existing export and transfer authorization/audit boundaries,
+with schema-driven primitive columns, explicit text fallback, bounded artifacts
+and transactional flat-type imports. No core Driver signatures change. Unsupported
+types, conflicting import options and multiple result sets fail explicitly.
+
+State-backup policies preserve ADR-039's offline consistency boundary. An external
+timer invokes a due-checking command; Sift never stops a serving process implicitly.
+A private ledger owns exact archive UUIDs, checkpoints pending uploads and gates
+local retention on successful creation/delivery. Only encrypted archive bytes go
+to explicitly configured HTTPS PUT destinations. Signing, remote lifecycle and
+service maintenance windows remain operator-owned.
+
+PostgreSQL logical recovery is a separate operator CLI using explicitly selected
+client tools, not a new Driver trait method or a Sift-state archive payload.
+Connection fields are explicit, password files stay external, inherited libpq
+configuration is cleared and raw diagnostics are suppressed. Output publication
+never overwrites. Restore validates a private input snapshot and requires explicit
+apply to an existing target; apply uses a single transaction without database
+drop/create or ownership/ACL replay. Only trusted archives are eligible operationally.
+
+HTTP metrics are administrator-only and audited. OTLP/HTTP export is opt-in and
+bounded, with allowlisted method/status/timing fields, no raw paths, SQL, credentials
+or result data. This is best-effort request-span observability, not full distributed
+driver tracing. Usage, safety boundaries and automated acceptance are recorded in
+[backend operations](BACKEND-OPERATIONS.md).

@@ -665,6 +665,14 @@ pub enum Operation {
         item_id: Option<i64>,
     },
     BackupState,
+    DumpPostgres,
+    RestorePostgres {
+        applied: bool,
+    },
+    BackupPolicy {
+        uploaded: bool,
+        pruned: u64,
+    },
     /// Local-owner export of an allowlisted, read-only metadata inspection snapshot.
     InspectMetadata,
     ReadMetrics,
@@ -869,6 +877,9 @@ impl Operation {
             },
             Self::Vault { .. } => OperationKind::Metadata,
             Self::BackupState => OperationKind::BackupState,
+            Self::DumpPostgres => OperationKind::BackupState,
+            Self::RestorePostgres { .. } => OperationKind::RestoreState,
+            Self::BackupPolicy { .. } => OperationKind::BackupState,
             Self::InspectMetadata => OperationKind::InspectMetadata,
             Self::ReadMetrics => OperationKind::ReadMetrics,
             Self::RestoreState { .. } => OperationKind::RestoreState,
@@ -1256,6 +1267,9 @@ impl Operation {
                 (*item_id).or(*vault_id),
             ),
             Operation::BackupState => summary("backup", "instance_state", None),
+            Operation::DumpPostgres => summary("dump", "postgres_database", None),
+            Operation::RestorePostgres { .. } => summary("restore", "postgres_database", None),
+            Operation::BackupPolicy { .. } => summary("backup.policy", "instance_state", None),
             Operation::InspectMetadata => summary("inspect", "metadata_snapshot", None),
             Operation::ReadMetrics => summary("read", "metrics", None),
             Operation::RestoreState { applied } => summary(

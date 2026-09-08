@@ -93,6 +93,10 @@ JSON suitable for automation. V1 writes only to an explicit local destination:
 scheduling, retention deletion, cloud/object-store upload, tenant-selective
 restore, and backing up connected databases are deliberately separate work.
 
+Scheduling/retention and encrypted HTTPS destinations are now implemented as the
+separate ADR-058 operator policy layer; see [backend operations](../BACKEND-OPERATIONS.md).
+It preserves this archive format and offline maintenance-lock requirement.
+
 ## Required tests
 
 Implemented hardening coverage (2026-08-03): file and memory round trips;
