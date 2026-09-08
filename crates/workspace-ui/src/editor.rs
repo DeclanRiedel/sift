@@ -2852,6 +2852,57 @@ impl QueryEditor {
         cx.notify();
     }
 
+    fn drag_selection_to(
+        &mut self,
+        pointer: gpui::Point<Pixels>,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(anchor) = self.mouse_anchor else {
+            return;
+        };
+        let viewport = self.scroll_handle.bounds();
+        if viewport.size.width <= px(0.) || viewport.size.height <= px(0.) {
+            return;
+        }
+
+        let mut offset = self.scroll_handle.offset();
+        let edge_scroll = if pointer.y < viewport.top() {
+            (viewport.top() - pointer.y)
+                .max(EDITOR_LINE_HEIGHT)
+                .min(EDITOR_LINE_HEIGHT * 4.)
+        } else if pointer.y > viewport.bottom() {
+            -((pointer.y - viewport.bottom())
+                .max(EDITOR_LINE_HEIGHT)
+                .min(EDITOR_LINE_HEIGHT * 4.))
+        } else {
+            px(0.)
+        };
+        if edge_scroll != px(0.) {
+            let content_height = EDITOR_VERTICAL_INSET * 2.
+                + EDITOR_LINE_HEIGHT * self.visual_rows().len().max(1) as f32;
+            let max_scroll = (content_height - viewport.size.height).max(px(0.));
+            offset.y = (offset.y + edge_scroll).min(px(0.)).max(-max_scroll);
+            self.scroll_handle.set_offset(offset);
+        }
+
+        let text_left = (viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET)
+            .min(viewport.right() - px(1.));
+        let position = point(
+            pointer.x.clamp(text_left, viewport.right() - px(1.)),
+            pointer.y.clamp(
+                viewport.top() + EDITOR_VERTICAL_INSET,
+                viewport.bottom() - px(1.),
+            ),
+        );
+        if let Some(cursor) = self.byte_index_for_point(position, theme, window) {
+            self.document
+                .set_selection(anchor.min(cursor)..anchor.max(cursor), cursor < anchor);
+            self.selection_changed(cx);
+        }
+    }
+
     fn offset_from_utf16(&self, offset: usize) -> usize {
         offset_from_utf16(self.document.text(), offset)
     }
@@ -3788,28 +3839,7 @@ impl gpui::Render for QueryEditor {
             .on_mouse_move(
                 cx.listener(|editor, event: &gpui::MouseMoveEvent, window, cx| {
                     if event.dragging() {
-                        if let Some(anchor) = editor.mouse_anchor {
-                            let viewport = editor.scroll_handle.bounds();
-                            let position = point(
-                                event.position.x.clamp(
-                                    viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET,
-                                    viewport.right() - px(1.),
-                                ),
-                                event.position.y.clamp(
-                                    viewport.top() + EDITOR_VERTICAL_INSET,
-                                    viewport.bottom() - px(1.),
-                                ),
-                            );
-                            if let Some(cursor) =
-                                editor.byte_index_for_point(position, cx.theme(), window)
-                            {
-                                editor.document.set_selection(
-                                    anchor.min(cursor)..anchor.max(cursor),
-                                    cursor < anchor,
-                                );
-                                editor.selection_changed(cx);
-                            }
-                        }
+                        editor.drag_selection_to(event.position, cx.theme(), window, cx);
                     } else {
                         editor.mouse_anchor = None;
                         editor.request_hover_at(event.position, window, cx);
@@ -6042,6 +6072,50 @@ mod tests {
             editor.read_with(&cx, |editor, _| editor.cursor_position().0),
             expected_line
         );
+    }
+
+    #[gpui::test]
+    fn read_only_editor_drag_selects_and_scrolls_past_the_viewport_edge(cx: &mut TestAppContext) {
+        let text = (0..300)
+            .map(|line| format!("Problem {line}: query failed"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    cx.new(|cx| QueryEditor::new(doc(&text), cx).read_only())
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+
+        let viewport = editor.read_with(&cx, |editor, _| editor.scroll_handle.bounds());
+        let start = point(
+            viewport.left() + EDITOR_GUTTER_WIDTH + EDITOR_TEXT_INSET + px(2.),
+            viewport.top() + EDITOR_VERTICAL_INSET + EDITOR_LINE_HEIGHT / 2.,
+        );
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: start,
+            button: MouseButton::Left,
+            ..Default::default()
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.drag_selection_to(
+                point(start.x + px(120.), viewport.bottom() + px(48.)),
+                cx.theme(),
+                window,
+                cx,
+            );
+            editor.finish_mouse_selection(cx);
+        });
+
+        editor.read_with(&cx, |editor, _| {
+            assert!(editor.scroll_handle.offset().y < px(0.));
+            assert!(!editor.document.selected_text().is_empty());
+            assert!(editor.mouse_anchor.is_none());
+        });
     }
 
     #[gpui::test]
