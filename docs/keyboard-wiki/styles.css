@@ -248,9 +248,8 @@ kbd {
 }
 
 .copy-field {
-  display: inline-flex;
-  align-items: flex-start;
-  gap: 5px;
+  display: inline-block;
+  position: relative;
   max-width: 100%;
   vertical-align: middle;
 }
@@ -281,6 +280,21 @@ kbd {
   position: absolute;
   top: 8px;
   right: 8px;
+}
+
+.copy-field > .copy-button {
+  position: absolute;
+  top: 0;
+  right: 0;
+  opacity: 0;
+  pointer-events: none;
+  box-shadow: -5px 0 8px var(--black);
+}
+
+.copy-field:hover > .copy-button,
+.copy-field:focus-within > .copy-button {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .copy-button:hover,
