@@ -45338,7 +45338,12 @@ mod tests {
             assert!(items.iter().all(|item| {
                 item.command.is_some()
                     || (item.label == "Wiki"
-                        && item.url == cfg!(debug_assertions).then_some(app_bar::DEV_WIKI_URL))
+                        && item.url
+                            == Some(if cfg!(debug_assertions) {
+                                app_bar::DEV_WIKI_URL
+                            } else {
+                                app_bar::WIKI_URL
+                            }))
                     || (item.label == "License"
                         && item.url == Some("https://github.com/declan/sift/blob/master/LICENSE"))
             }));

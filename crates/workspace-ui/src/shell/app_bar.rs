@@ -3,6 +3,7 @@
 use super::*;
 
 pub(super) const DEV_WIKI_URL: &str = "http://127.0.0.1:8787";
+pub(super) const WIKI_URL: &str = "https://sift.declanriedel.dev";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AppBarMenu {
@@ -45,7 +46,11 @@ impl AppBarMenuItem {
             label: "Wiki",
             shortcut: "",
             command: None,
-            url: cfg!(debug_assertions).then_some(DEV_WIKI_URL),
+            url: Some(if cfg!(debug_assertions) {
+                DEV_WIKI_URL
+            } else {
+                WIKI_URL
+            }),
         }
     }
 
