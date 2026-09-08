@@ -13,11 +13,13 @@ use sift_protocol::{Engine, SchemaSnapshot};
 
 mod dictionary;
 pub mod fuzzy;
+mod joins;
 mod keywords;
 mod rank;
 
 pub use dictionary::Dictionary;
 pub use fuzzy::{fuzzy_match, FuzzyMatch};
+pub use joins::join_candidates;
 pub use sift_semantic::CompletionAnalysis as ContextResult;
 
 /// Compatibility entry point. Stateful callers obtain this analysis from the

@@ -44,6 +44,8 @@ pub struct CompletionAnalysis {
     pub prefix: String,
     pub prefix_lower: String,
     pub relations: Vec<CompletionRelation>,
+    /// A bare JOIN table slot, suitable for a complete FK join snippet.
+    pub join_slot: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3421,7 +3423,21 @@ pub fn detect_completion_context(
     if flavor == Flavor::Tsql {
         enrich_tsql_pseudo_relations(sql, &mut relations);
     }
+    let statement_tokens = tokens
+        .iter()
+        .rposition(|token| matches!(token, Token::SemiColon))
+        .map_or(tokens.as_slice(), |index| &tokens[index + 1..]);
+    let join_slot = statement_tokens.last().is_some_and(|token| {
+            matches!(token, Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("JOIN"))
+        }) && !statement_tokens.iter().any(|token| matches!(token, Token::LParen | Token::RParen))
+        && !statement_tokens.iter().rev().nth(1).is_some_and(|token| {
+            matches!(token, Token::Word(word) if word.value.eq_ignore_ascii_case("CROSS") || word.value.eq_ignore_ascii_case("NATURAL"))
+        });
+    if join_slot {
+        relations = completion_relations(statement_tokens);
+    }
     Ok(CompletionAnalysis {
+        join_slot,
         context: classify_completion(&tokens),
         cursor,
         prefix_start,

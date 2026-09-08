@@ -39,8 +39,46 @@ pub async fn generate_completion_from_semantic(
     let shallow = registry
         .schema_cached(session_id, conn_id, SchemaScope::shallow())
         .await?;
-    generate_completion_from_analysis(registry, session_id, conn_id, engine, limit, ctx, shallow)
-        .await
+    let mut response = generate_completion_from_analysis(
+        registry,
+        session_id,
+        conn_id,
+        engine,
+        limit,
+        ctx.clone(),
+        shallow,
+    )
+    .await?;
+    if ctx.join_slot {
+        // Graph construction remains in the supervised schema service. A slow
+        // or unsupported graph must not hold the completion popup open.
+        let scope = SchemaScope {
+            depth: SchemaDepth::Graph {
+                options: sift_protocol::CatalogGraphOptions {
+                    max_nodes: Some(20_000),
+                    ..Default::default()
+                },
+            },
+            filter: None,
+        };
+        let registry = registry.clone();
+        let fetch =
+            tokio::spawn(async move { registry.schema_cached(session_id, conn_id, scope).await });
+        // A timed-out waiter leaves the bounded fetch running to warm the
+        // shared cache. Its keyed gate coalesces concurrent provider builds.
+        if let Ok(Ok(Ok(cached))) =
+            tokio::time::timeout(std::time::Duration::from_millis(250), fetch).await
+        {
+            if let Some(graph) = &cached.snapshot.graph {
+                let cap = limit.unwrap_or(50).min(200) as usize;
+                let mut joins = sift_completion::join_candidates(&ctx, graph, engine, cap);
+                joins.append(&mut response.candidates);
+                joins.truncate(cap);
+                response.candidates = joins;
+            }
+        }
+    }
+    Ok(response)
 }
 
 async fn generate_completion_from_analysis(

@@ -103,7 +103,7 @@ delete, import, and export workflows.
 - [x] CTE and temporary-object completion
 - [x] Automatic Vim-insert completion with manual Ctrl+Space fallback
 - [x] Live query-tab connection/database binding for SQL intelligence
-- [~] Foreign-key JOIN completion
+- [x] Foreign-key JOIN completion
 - [x] Syntax diagnostics
 - [x] Semantic diagnostics
 - [x] Idle-debounced diagnostics with stale markers hidden while typing
@@ -114,7 +114,7 @@ delete, import, and export workflows.
 - [x] Statement selection
 - [x] Catalog-aware binding
 - [x] Hover types and object metadata
-- [ ] Multi-hop JOIN suggestions
+- [x] Multi-hop JOIN suggestions
 - [x] Star expansion
 - [x] Unsafe UPDATE/DELETE inspection UI
 - [x] Cartesian JOIN inspection UI
@@ -122,6 +122,12 @@ delete, import, and export workflows.
 Safety inspections appear through revision-bound editor diagnostics. Mutation
 breadth and Cartesian joins are independent findings, including joins nested
 in FROM relations. These warnings do not rewrite or block SQL.
+
+JOIN table slots offer catalog-proven FK snippets, including composite keys,
+reverse traversal and paths of up to three hops. Source aliases are preserved;
+generated aliases avoid collisions. Nested/parenthesized statements and
+CROSS/NATURAL JOIN slots retain ordinary completion. Missing or slow graph
+metadata falls back to ordinary candidates while the bounded fetch warms cache.
 
 ### Execution and safety
 
