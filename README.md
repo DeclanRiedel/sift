@@ -12,17 +12,12 @@
   </tr>
 </table>
 
-## Goals
+## Features
 
-1. Keep product behaviour in the server and expose it through the public API.
-2. Use one server for local and hosted workflows.
-3. Make editing, navigation, execution, and collaboration feel immediate.
-4. Stay responsive through cursors, caching, prefetching, and pooling.
-5. Keep the protocol versioned and usable by third-party clients.
-
-## License
-
-Copyright © 2026 Declan Riedel. Licensed under
-[AGPL-3.0-only](LICENSE). Network users of a modified version must receive its
-corresponding source. Third-party assets retain their own licenses; Qlementine
-icon attribution lives in [crates/ui/assets/icons](crates/ui/assets/icons/README.md).
+- PostgreSQL, SQL Server, and SQLite connections
+- Keyboard first editor
+- Schema browsing and search
+- Query results, table editing, and export
+- Query history, explain plans, and Problems view
+- Local desktop and self-hosted team workflows
+- Versioned API
