@@ -178,7 +178,9 @@ pub fn join_candidates(
                     label: format!("{} ({}-hop JOIN)", edge.to.qualified_name, visited.len())
                         .into(),
                     insert: insert.clone().into(),
-                    kind: CompletionKind::Snippet,
+                    // This is literal catalog SQL, not a user snippet. In
+                    // particular, `$1` inside an identifier is not a tabstop.
+                    kind: CompletionKind::Table,
                     detail: Some("Catalog-proven foreign key; review JOIN before execution".into()),
                     qualified_name: Some(edge.to.qualified_name.clone()),
                     score: 2000 - visited.len() as i32 * 100,
@@ -308,6 +310,7 @@ mod tests {
             Engine::Postgres,
         );
         assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].kind, CompletionKind::Table);
         assert_eq!(candidates[0].insert, "\"public\".\"users\" AS sift_join_1 ON \"o\".\"user_id\" = sift_join_1.\"id\" AND \"o\".\"tenant\" = sift_join_1.\"tenant\"");
         assert!(candidates[1].insert.contains(
             " JOIN \"public\".\"teams\" AS sift_join_2 ON sift_join_1.\"id\" = sift_join_2.\"id\""
