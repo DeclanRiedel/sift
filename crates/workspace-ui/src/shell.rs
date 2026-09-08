@@ -7997,7 +7997,8 @@ impl gpui::Render for Pane {
                             .gap(px(2.))
                             .px_1()
                             .border_l_1()
-                            .border_r_1()
+                            // The pane splitter owns the outer edge so two
+                            // side-by-side panes share one divider line.
                             .border_color(colors.subtle_border)
                             .bg(active_tab_background)
                             .children(active.as_ref().and_then(|item| self.results.get(&item.id)).filter(|result| result.read(cx).collapsed).map(|result| {
