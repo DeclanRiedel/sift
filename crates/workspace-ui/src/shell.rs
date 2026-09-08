@@ -6171,7 +6171,7 @@ impl Pane {
                         "object-browser-design",
                         "Design",
                         'd',
-                        !table_selected,
+                        selected_source.is_none(),
                         selected_source.clone(),
                     ))
                     .child(toolbar_action(
@@ -9845,6 +9845,7 @@ pub struct WorkspaceShell {
     pending_object_ddl: HashSet<u64>,
     object_peek: Option<ObjectPeekState>,
     pending_table_designer_item: Option<u64>,
+    pending_object_designs: HashMap<u64, DatabaseObjectSource>,
     binary_preview: RefCell<Option<crate::binary_preview::CachedPreview>>,
     binary_page: std::cell::Cell<usize>,
     pending_delete_database_object: Option<DatabaseObjectTarget>,
@@ -11090,6 +11091,7 @@ impl WorkspaceShell {
             pending_object_ddl: HashSet::new(),
             object_peek: None,
             pending_table_designer_item: None,
+            pending_object_designs: HashMap::new(),
             binary_preview: RefCell::new(None),
             binary_page: std::cell::Cell::new(0),
             pending_delete_database_object: None,
@@ -11610,6 +11612,7 @@ impl WorkspaceShell {
         self.table_definitions.clear();
         self.table_definition_sections.clear();
         self.pending_object_ddl.clear();
+        self.pending_object_designs.clear();
         self.binary_preview.borrow_mut().take();
         self.table_designer = None;
         self.pending_database_execution = None;
@@ -13302,6 +13305,31 @@ impl WorkspaceShell {
                 if !self.pending_object_ddl.remove(&item_id) {
                     return;
                 }
+                if let Some(source) = self.pending_object_designs.remove(&item_id) {
+                    let draft = sift_snippets::editable_object_ddl(
+                        &source.provider_id,
+                        source.object_kind,
+                        &ddl,
+                    );
+                    for pane in &self.panes {
+                        pane.update(cx, |pane, cx| {
+                            if let Some(editor) = pane.editors.get(&item_id) {
+                                editor.update(cx, |editor, cx| {
+                                    editor.replace_text_from_owner(
+                                        draft.as_deref().unwrap_or(&ddl),
+                                        cx,
+                                    );
+                                    editor.set_read_only(draft.is_none(), cx);
+                                });
+                            }
+                        });
+                    }
+                    if draft.is_none() {
+                        self.show_error_toast("Canonical DDL cannot be converted to an editable replacement for this provider; definition remains read-only".into(), cx);
+                    }
+                    cx.notify();
+                    return;
+                }
                 if let Some(peek) = self
                     .object_peek
                     .as_mut()
@@ -13519,6 +13547,17 @@ impl WorkspaceShell {
             }
             ExecutorEvent::ObjectDdlFailed { item_id, message } => {
                 if !self.pending_object_ddl.remove(&item_id) {
+                    return;
+                }
+                if self.pending_object_designs.remove(&item_id).is_some() {
+                    for pane in &self.panes {
+                        pane.update(cx, |pane, cx| {
+                            if let Some(editor) = pane.editors.get(&item_id) {
+                                editor.update(cx, |editor, cx| editor.replace_text_from_owner("-- Object definition unavailable. Close this draft and retry Design.", cx));
+                            }
+                        });
+                    }
+                    self.show_error_toast(format!("Object designer unavailable: {message}"), cx);
                     return;
                 }
                 if let Some(peek) = self
@@ -19727,6 +19766,52 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(
+            source.object_kind,
+            sift_protocol::ObjectKind::View
+                | sift_protocol::ObjectKind::ScalarFunction
+                | sift_protocol::ObjectKind::TableValuedFunction
+                | sift_protocol::ObjectKind::Procedure
+                | sift_protocol::ObjectKind::Trigger
+        ) && matches!(
+            source.provider_id.as_str(),
+            "sift/postgres" | "sift/sql-server"
+        ) {
+            let Some(sender) = self.executor_sender.clone() else {
+                self.show_error_toast("Object designer requires a connected executor".into(), cx);
+                return;
+            };
+            let item_id = self.open_sql_scratch(
+                format!("design-{}.sql", source.object),
+                "-- Loading canonical definition for design…".into(),
+                window,
+                cx,
+            );
+            if let Some(pane) = self.panes.get(self.active_pane) {
+                pane.update(cx, |pane, cx| {
+                    if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
+                        item.source = Some(ItemSource::DatabaseObject(source.clone()));
+                    }
+                    if let Some(editor) = pane.editors.get(&item_id) {
+                        editor.update(cx, |editor, cx| editor.set_read_only(true, cx));
+                    }
+                });
+            }
+            if sender
+                .send(ExecutorCommand::LoadObjectDdl {
+                    item_id,
+                    source: source.clone(),
+                })
+                .is_ok()
+            {
+                self.pending_object_ddl.insert(item_id);
+                self.pending_object_designs.insert(item_id, source.clone());
+            } else {
+                self.show_error_toast("Object designer executor stopped; retry Design".into(), cx);
+            }
+            self.persist(cx);
+            return;
+        }
         if !matches!(
             source.object_kind,
             sift_protocol::ObjectKind::Table | sift_protocol::ObjectKind::PartitionedTable
@@ -19741,7 +19826,7 @@ impl WorkspaceShell {
                 );
                 return;
             };
-            self.open_sql_scratch(
+            let item_id = self.open_sql_scratch(
                 format!(
                     "design-{}-{}.sql",
                     format!("{:?}", source.object_kind).to_ascii_lowercase(),
@@ -19751,6 +19836,14 @@ impl WorkspaceShell {
                 window,
                 cx,
             );
+            if let Some(pane) = self.panes.get(self.active_pane) {
+                pane.update(cx, |pane, _| {
+                    if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
+                        item.source = Some(ItemSource::DatabaseObject(source.clone()));
+                    }
+                });
+            }
+            self.persist(cx);
             return;
         }
         let Some(target) = self.database_target_from_source(source) else {
@@ -28033,6 +28126,7 @@ impl WorkspaceShell {
                 self.pending_database_explain = None;
             }
             self.pending_object_ddl.remove(&item_id);
+            self.pending_object_designs.remove(&item_id);
             if self
                 .table_designer
                 .as_ref()
@@ -50057,6 +50151,44 @@ mod tests {
             CommandRegistry::definition(CommandId::NewQuery).language,
             "<leader> q n"
         );
+    }
+
+    #[gpui::test]
+    fn object_designer_loads_canonical_ddl_and_retains_database_binding(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(128);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            let source = object_source(sift_protocol::ObjectKind::View);
+            shell.design_object_browser_object(&source, window, cx);
+            let ExecutorCommand::LoadObjectDdl {
+                item_id,
+                source: requested,
+            } = commands.try_recv().unwrap()
+            else {
+                panic!("expected DDL request")
+            };
+            assert_eq!(requested, source);
+            shell.on_executor_event(
+                ExecutorEvent::ObjectDdlLoaded {
+                    item_id,
+                    ddl: "CREATE VIEW public.jobs AS SELECT 1 AS id;".into(),
+                },
+                cx,
+            );
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let item = pane.active_item().unwrap();
+            assert_eq!(item.source, Some(ItemSource::DatabaseObject(source)));
+            assert!(pane
+                .editor(item_id)
+                .unwrap()
+                .read(cx)
+                .document()
+                .text()
+                .contains("CREATE OR REPLACE VIEW public.jobs AS SELECT 1 AS id;"));
+        });
     }
 
     #[gpui::test]

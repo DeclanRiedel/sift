@@ -1,5 +1,42 @@
 //! Reviewable editor templates, never authoritative catalog definitions or executed DDL.
 
+/// Turn a canonical routine/view definition into a reviewable replacement.
+/// Unsupported kinds retain their dedicated designer instead of guessing DDL.
+pub fn editable_object_ddl(
+    provider: &sift_protocol::ProviderId,
+    kind: sift_protocol::ObjectKind,
+    ddl: &str,
+) -> Option<String> {
+    use sift_protocol::ObjectKind;
+    let keyword = match kind {
+        ObjectKind::View => "VIEW",
+        ObjectKind::ScalarFunction | ObjectKind::TableValuedFunction => "FUNCTION",
+        ObjectKind::Procedure => "PROCEDURE",
+        ObjectKind::Trigger => "TRIGGER",
+        _ => return None,
+    };
+    let replacement = match provider.as_str() {
+        "sift/postgres" => "CREATE OR REPLACE",
+        "sift/sql-server" => "CREATE OR ALTER",
+        _ => return None,
+    };
+    // Anchor at the start of the supplied definition. Never rewrite words
+    // in a function body, quoted string, or comment.
+    let (preamble, definition) = if provider.as_str() == "sift/sql-server" {
+        const SETTINGS: &str = "SET ANSI_NULLS ON; SET QUOTED_IDENTIFIER ON;\nGO\n";
+        ddl.strip_prefix(SETTINGS)
+            .map_or(("", ddl), |definition| (SETTINGS, definition))
+    } else {
+        ("", ddl)
+    };
+    let pattern = regex::Regex::new(&format!(
+        r"(?i)\A\s*(?:CREATE\s+(?:OR\s+(?:REPLACE|ALTER)\s+)?|ALTER\s+){keyword}\b"
+    ))
+    .ok()?;
+    let matched = pattern.find(definition)?;
+    Some(format!("-- Review changes before executing against this object's connection.\n{preamble}{replacement} {keyword}{}", &definition[matched.end()..]))
+}
+
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -67,6 +104,30 @@ pub fn table_preview_sql(
 mod tests {
     use super::*;
     use sift_protocol::{Engine, ObjectKind, ProviderId};
+
+    #[test]
+    fn canonical_design_preserves_body_and_rejects_unrecognized_scripts() {
+        let ddl = "CREATE VIEW public.v AS SELECT 'CREATE VIEW untouched' AS label;";
+        let draft =
+            editable_object_ddl(&Engine::Postgres.provider_id(), ObjectKind::View, ddl).unwrap();
+        assert!(draft.contains("CREATE OR REPLACE VIEW public.v AS SELECT 'CREATE VIEW untouched'"));
+        assert!(editable_object_ddl(
+            &Engine::SqlServer.provider_id(),
+            ObjectKind::Procedure,
+            "CREATE PROCEDURE [dbo].[p] AS SELECT 1;"
+        )
+        .unwrap()
+        .contains("CREATE OR ALTER PROCEDURE [dbo].[p]"));
+        assert!(editable_object_ddl(
+            &Engine::Postgres.provider_id(),
+            ObjectKind::View,
+            "-- CREATE VIEW\nSELECT 1"
+        )
+        .is_none());
+        assert!(
+            editable_object_ddl(&Engine::Sqlite.provider_id(), ObjectKind::View, ddl).is_none()
+        );
+    }
 
     #[test]
     fn previews_quote_each_engine_and_unknown_providers_fail_closed() {

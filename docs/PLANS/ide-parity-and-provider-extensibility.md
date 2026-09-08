@@ -189,11 +189,17 @@ allocation; unsupported or oversized images retain hex access.
 - [x] Dependency ordering
 - [x] Diagram projection
 - [x] Diagram mutation preview
-- [~] General object designer UI
+- [x] General object designer UI
 - [x] Rollback script generation
 - [x] Live database versus migration-folder diff
 - [x] Drift notifications
 - [x] Diagram export
+
+Objects → Design (`d`) combines structured table design with canonical editable
+replacement SQL for PostgreSQL/SQL Server views, functions, procedures and
+triggers, plus sequence/type templates. Drafts retain source database binding;
+loading/unsupported definitions remain read-only. SQLite views and materialized
+view replacement require separate drop/recreate workflows and remain excluded.
 
 ### Collaboration and assistance
 

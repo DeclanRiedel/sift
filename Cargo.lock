@@ -8110,6 +8110,7 @@ dependencies = [
 name = "sift-snippets"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "sift-protocol",
  "thiserror 1.0.69",
 ]
