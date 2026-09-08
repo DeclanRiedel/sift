@@ -116,21 +116,13 @@ pub(super) fn menu_items(menu: AppBarMenu) -> Vec<AppBarMenuItem> {
             Item::available(CommandId::CommitTransaction),
             Item::available(CommandId::RollbackTransaction),
         ],
-        AppBarMenu::Terminal => vec![
-            Item::available(CommandId::ToggleBottomDock),
-            Item::available(CommandId::FocusProblems),
-        ],
+        AppBarMenu::Terminal => vec![Item::available(CommandId::FocusProblems)],
         AppBarMenu::Help => vec![
             Item::wiki(),
             Item::license(),
-            Item::available(CommandId::OpenCommandPalette),
             Item::available(CommandId::OpenKeymaps),
-            Item::available(CommandId::OpenSettings),
         ],
         AppBarMenu::Profile => vec![
-            Item::available(CommandId::OpenSettings),
-            Item::available(CommandId::OpenKeymaps),
-            Item::available(CommandId::ToggleTheme),
             Item::available(CommandId::OpenServerConfiguration),
             Item::available(CommandId::ViewMetadata),
         ],

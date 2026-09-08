@@ -45311,17 +45311,11 @@ mod tests {
         assert_eq!(
             profile.iter().map(|item| item.label).collect::<Vec<_>>(),
             vec![
-                "Settings",
-                "Keymaps",
-                "Toggle Light/Dark Theme",
                 "Open Current Instance sift.toml",
                 "View Sift Metadata (Read-only Snapshot)"
             ]
         );
-        assert_eq!(profile[0].command, Some(CommandId::OpenSettings));
-        assert_eq!(profile[1].command, Some(CommandId::OpenKeymaps));
-        assert_eq!(profile[2].command, Some(CommandId::ToggleTheme));
-        assert_eq!(profile[3].command, Some(CommandId::OpenServerConfiguration));
+        assert_eq!(profile[0].command, Some(CommandId::OpenServerConfiguration));
 
         for menu in [
             AppBarMenu::Main,
@@ -45354,6 +45348,33 @@ mod tests {
         assert_eq!(help[0].label, "Wiki");
         assert_eq!(help[1].label, "License");
         assert_eq!(help[1].shortcut, "AGPL-3.0-only");
+    }
+
+    #[test]
+    fn app_bar_commands_have_one_menu_location() {
+        let mut commands = std::collections::HashSet::new();
+        for menu in [
+            AppBarMenu::Main,
+            AppBarMenu::File,
+            AppBarMenu::Edit,
+            AppBarMenu::Selection,
+            AppBarMenu::View,
+            AppBarMenu::Go,
+            AppBarMenu::Run,
+            AppBarMenu::Terminal,
+            AppBarMenu::Help,
+            AppBarMenu::Profile,
+        ] {
+            for command in app_bar::menu_items(menu)
+                .into_iter()
+                .filter_map(|item| item.command)
+            {
+                assert!(
+                    commands.insert(command),
+                    "duplicate app-bar command: {command:?}"
+                );
+            }
+        }
     }
 
     #[gpui::test]
