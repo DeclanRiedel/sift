@@ -6,16 +6,16 @@
     <meta name="description" content="Set up shared Sift rooms, grant access, bind database connections, and understand collaborative editing and recovery." />
     <title>Shared rooms · Sift</title>
     <link rel="stylesheet" href="styles.css" />
-    <script src="/wiki.js"></script>
+    <script src="/wiki.js" defer></script>
   </head>
   <body>
     <main>
       <div class="doc-tabs" aria-label="Sift documentation">
         <a href="/">Overview</a>
-        <a href="index.html">Keyboard</a>
-        <a href="configuration.html">Sift configuration</a>
-        <a href="hosting.html">Hosting</a>
-        <a class="active" aria-current="page" href="shared-rooms.html">Shared rooms</a>
+        <a href="/keyboard">Keyboard</a>
+        <a href="/configuration">Sift configuration</a>
+        <a href="/hosting">Hosting</a>
+        <a class="active" aria-current="page" href="/shared-rooms">Shared rooms</a>
       </div>
       <header>
         <h1>Shared rooms</h1>
@@ -39,7 +39,7 @@
       <section id="setup">
         <h2>Get started</h2>
         <ol>
-          <li>Choose a shared instance using the <a href="hosting.html">hosting guide</a>.
+          <li>Choose a shared instance using the <a href="/hosting">hosting guide</a>.
             HTTPS and SSH are transport choices; neither grants room access.</li>
           <li>Sign in and select the intended tenant. Have its administrator arrange
             tenant membership for your collaborators.</li>
@@ -61,7 +61,7 @@
           <strong>Delete</strong> as a durable room action, not a way to disconnect.</p>
         <p>Vim remains the editor interaction mode. <kbd>:</kbd> opens the command
           palette in normal mode; <kbd>Esc</kbd> cancels the current interaction.
-          See the <a href="index.html">keyboard reference</a> for execution commands.</p>
+          See the <a href="/keyboard">keyboard reference</a> for execution commands.</p>
       </section>
 
       <section id="permissions">
@@ -132,9 +132,9 @@
         </table>
       </section>
       <footer>
-        Related: <a href="hosting.html">Hosting</a> ·
-        <a href="configuration.html">sift.toml ownership and apply</a> ·
-        <a href="index.html">Vim keyboard reference</a>
+        Related: <a href="/hosting">Hosting</a> ·
+        <a href="/configuration">sift.toml ownership and apply</a> ·
+        <a href="/keyboard">Vim keyboard reference</a>
         <p>AGPL-3.0-only · <a href="https://github.com/DeclanRiedel/sift">GitHub</a></p>
       </footer>
     </main>

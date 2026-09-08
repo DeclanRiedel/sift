@@ -10,9 +10,9 @@ async fn main() -> std::io::Result<()> {
     let bind = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:8787".into());
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
+        let listener = tokio::net::TcpListener::bind(&bind).await?;
     println!("Website: http://{}", listener.local_addr()?);
-    println!("Wiki: http://{}/index.html", listener.local_addr()?);
+    println!("Wiki: http://{}/keyboard", listener.local_addr()?);
     topcoat::serve(listener, Router::builder().discover().build()).await
 }
 
@@ -32,10 +32,10 @@ async fn home() -> Result {
                 <main>
                     <div class="doc-tabs" aria-label="Sift documentation">
                         <a class="active" href="/">"Overview"</a>
-                        <a href="/index.html">"Keyboard"</a>
-                        <a href="/configuration.html">"Sift configuration"</a>
-                        <a href="/hosting.html">"Hosting"</a>
-                        <a href="/shared-rooms.html">"Shared rooms"</a>
+                        <a href="/keyboard">"Keyboard"</a>
+                        <a href="/configuration">"Sift configuration"</a>
+                        <a href="/hosting">"Hosting"</a>
+                        <a href="/shared-rooms">"Shared rooms"</a>
                     </div>
                     <header>
                         <h1>"Sift"</h1>
@@ -65,29 +65,61 @@ async fn home() -> Result {
 }
 
 // Only trusted, compile-time documentation is rendered without escaping.
-#[page("/index.html")]
+#[page("/keyboard")]
 async fn keyboard() -> Result {
     Ok(View::unescaped_unchecked(include_str!(
         "../../../docs/keyboard-wiki/index.html"
     )))
 }
-#[page("/configuration.html")]
+#[page("/configuration")]
 async fn configuration() -> Result {
     Ok(View::unescaped_unchecked(include_str!(
         "../../../docs/keyboard-wiki/configuration.html"
     )))
 }
-#[page("/hosting.html")]
+#[page("/hosting")]
 async fn hosting() -> Result {
     Ok(View::unescaped_unchecked(include_str!(
         "../../../docs/keyboard-wiki/hosting.html"
     )))
 }
-#[page("/shared-rooms.html")]
+#[page("/shared-rooms")]
 async fn rooms() -> Result {
     Ok(View::unescaped_unchecked(include_str!(
         "../../../docs/keyboard-wiki/shared-rooms.html"
     )))
+}
+
+#[route(GET "/index.html")]
+async fn keyboard_legacy() -> Result<Response> {
+    Ok(Response::builder()
+        .status(301)
+        .header("Location", "/keyboard")
+        .body(Body::empty())?)
+}
+
+#[route(GET "/configuration.html")]
+async fn configuration_legacy() -> Result<Response> {
+    Ok(Response::builder()
+        .status(301)
+        .header("Location", "/configuration")
+        .body(Body::empty())?)
+}
+
+#[route(GET "/hosting.html")]
+async fn hosting_legacy() -> Result<Response> {
+    Ok(Response::builder()
+        .status(301)
+        .header("Location", "/hosting")
+        .body(Body::empty())?)
+}
+
+#[route(GET "/shared-rooms.html")]
+async fn shared_rooms_legacy() -> Result<Response> {
+    Ok(Response::builder()
+        .status(301)
+        .header("Location", "/shared-rooms")
+        .body(Body::empty())?)
 }
 
 fn asset(content: &'static str, mime: &'static str) -> Result<Response> {

@@ -38,7 +38,7 @@ main {
   width: min(var(--page-width), 100%);
   min-height: 100vh;
   margin: 0 auto;
-  padding: 40px 30px 20px;
+  padding: 0 30px 20px;
   background: var(--black);
   border-inline: 1px dashed var(--border);
   display: flex;
@@ -228,7 +228,7 @@ footer {
   }
   main {
     width: 100%;
-    padding: 20px 16px;
+    padding: 0 16px 20px;
     border-inline: 0;
   }
 
