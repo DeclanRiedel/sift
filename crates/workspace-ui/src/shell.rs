@@ -4559,6 +4559,7 @@ impl Pane {
                 if let Some(result) = self.results.get(&item_id) {
                     result.update(cx, |result, cx| result.set_pending(cx));
                 }
+                cx.notify();
                 cx.emit(PaneEvent::ExecuteRequested {
                     item_id,
                     sql: self.execution_sql(item_id, sql),
@@ -24662,6 +24663,7 @@ impl WorkspaceShell {
             QueryEditor::new(QueryDocument::with_random_peer(""), cx).with_keymap(EditorKeymap::Vim)
         });
         let results = self.new_results_view(cx);
+        results.update(cx, |results, _| results.collapsed = true);
         if let Some(pane) = self.panes.get(self.active_pane) {
             pane.update(cx, |pane, cx| {
                 pane.open_query(
@@ -50481,6 +50483,18 @@ mod tests {
             assert!(item.source.is_none());
             assert!(!item.dirty);
             assert_eq!(pane.editor(item.id).unwrap().read(cx).document().text(), "");
+            assert!(pane.results.get(&item.id).unwrap().read(cx).collapsed);
+        });
+
+        workspace.update(&mut cx, |shell, cx| {
+            let pane = shell.panes[shell.active_pane].read(cx);
+            let result = pane
+                .results
+                .get(&pane.active_item().unwrap().id)
+                .unwrap()
+                .clone();
+            result.update(cx, |result, cx| result.set_pending(cx));
+            assert!(!result.read(cx).collapsed);
         });
 
         cx.run_until_parked();

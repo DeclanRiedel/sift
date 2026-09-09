@@ -2258,6 +2258,7 @@ impl ResultsView {
     }
 
     pub fn set_pending(&mut self, cx: &mut Context<Self>) {
+        self.collapsed = false;
         self.query_started_at = Some(std::time::Instant::now());
         self.state = ResultState::Pending;
         self.execution_progress = Some(sift_protocol::ExecutionProgress {
