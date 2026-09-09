@@ -195,6 +195,12 @@ pub enum InstanceConfigurationAction {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
+    /// Typed PostgreSQL SQL execution/preview. Uses ExecuteQuery admission.
+    PostgresMaintenance {
+        session: SessionId,
+        connection: ConnectionId,
+        request: crate::PostgresMaintenanceRequest,
+    },
     /// Transport envelope recorded for every HTTP action. Semantic handlers
     /// may additionally emit a richer operation variant.
     HttpRequest {
@@ -742,6 +748,7 @@ impl Operation {
             Self::DeletePlanCapture { .. } => OperationKind::DeletePlanCapture,
             Self::GenerateDdl { .. } => OperationKind::GenerateDdl,
             Self::ExecuteQuery { .. } => OperationKind::ExecuteQuery,
+            Self::PostgresMaintenance { .. } => OperationKind::ExecuteQuery,
             Self::ExportQuery { .. } => OperationKind::ExportQuery,
             Self::Complete { .. } => OperationKind::Complete,
             Self::CompleteSemanticDocument { .. } => OperationKind::Complete,
@@ -1073,6 +1080,15 @@ impl Operation {
             Operation::ExecuteQuery { session, .. } => {
                 summary("execute", "query", Some(session.0 as i64))
             }
+            Operation::PostgresMaintenance {
+                connection,
+                request,
+                ..
+            } => summary(
+                if request.apply { "apply" } else { "preview" },
+                "postgres_maintenance",
+                Some(connection.0 as i64),
+            ),
             Operation::ExportQuery { connection, .. } => {
                 summary("export", "query", Some(connection.0 as i64))
             }

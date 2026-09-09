@@ -1192,6 +1192,10 @@ pub fn app(state: AppState) -> Router {
             get_with(watch_process_alerts, doc("watchProcessAlerts", "Watch bounded, deduplicated process alerts as NDJSON")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/maintenance/postgres",
+            post_with(postgres_maintenance, doc("postgresMaintenance", "Preview or apply explicit-target PostgreSQL maintenance")),
+        )
+        .api_route(
             "/v1/sessions/:id/queries",
             post_with(execute_query, doc("executeQuery", "Execute query over synchronous HTTP")),
         )

@@ -26,6 +26,7 @@ pub mod error;
 pub mod execution;
 pub mod extension;
 pub mod handshake;
+pub mod maintenance;
 pub mod migration;
 pub mod operation;
 pub mod pagination;
@@ -33,6 +34,9 @@ pub mod plan;
 pub mod policy;
 pub mod process;
 pub mod provider;
+pub use maintenance::{
+    PostgresMaintenanceAction, PostgresMaintenanceReport, PostgresMaintenanceRequest,
+};
 pub mod remote;
 pub mod result;
 pub mod room;

@@ -235,6 +235,27 @@ pub(super) async fn list_processes(
     Ok(Json(processes))
 }
 
+pub(super) async fn postgres_maintenance(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::PostgresMaintenanceRequest>,
+) -> ApiResult<Json<sift_protocol::PostgresMaintenanceReport>> {
+    let _guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(session)?.map(|id| id.0);
+    let report = finish_operation_as(
+        &state.sessions,
+        Operation::PostgresMaintenance {
+            session,
+            connection,
+            request: request.clone(),
+        },
+        crate::maintenance::run(&state.sessions, session, connection, request).await,
+        actor,
+        |_| None,
+    )?;
+    Ok(Json(report))
+}
+
 pub(super) async fn kill_process(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

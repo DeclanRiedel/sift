@@ -729,6 +729,82 @@ fn collect_refs(value: &serde_json::Value, out: &mut Vec<String>) {
 }
 
 #[tokio::test]
+async fn postgres_maintenance_previews_without_execution_and_supervises_apply() {
+    let state = test_state_with_driver(
+        MockDriver::builder()
+            .engine(Engine::Postgres)
+            .execute_pending()
+            .build(),
+    );
+    state
+        .sessions
+        .set_request_timeout(std::time::Duration::from_millis(30));
+    let session = state
+        .sessions
+        .open_session(sift_protocol::OpenSessionRequest {
+            tag: None,
+            tenant_id: None,
+        });
+    let connection = state
+        .sessions
+        .open_connection(session.id, Engine::Postgres, pg_spec())
+        .await
+        .unwrap();
+    let sessions = state.sessions.clone();
+    let app = app(state);
+    let path = format!(
+        "/v1/sessions/{}/connections/{}/maintenance/postgres",
+        session.id, connection.id
+    );
+    let mut request = sift_protocol::PostgresMaintenanceRequest {
+        action: sift_protocol::PostgresMaintenanceAction::Analyze,
+        schema: "public".into(),
+        name: "items".into(),
+        apply: false,
+    };
+    let response = app
+        .clone()
+        .oneshot(post_json(&path, &request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let report: sift_protocol::PostgresMaintenanceReport = body_json(response.into_body()).await;
+    assert!(!report.applied);
+    assert_eq!(report.sql, "ANALYZE \"public\".\"items\"");
+    request.apply = true;
+    let response = app
+        .clone()
+        .oneshot(post_json(&path, &request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+
+    // An active transaction blocks even preview; no implicit commit/rollback.
+    // Timeout may close its connection, so use a fresh one.
+    let connection = sessions
+        .open_connection(session.id, Engine::Postgres, pg_spec())
+        .await
+        .unwrap();
+    sessions
+        .begin_transaction(
+            session.id,
+            sift_protocol::BeginTransactionRequest {
+                connection: connection.id,
+                mode: sift_protocol::TxMode::default(),
+            },
+        )
+        .await
+        .unwrap();
+    request.apply = false;
+    let path = format!(
+        "/v1/sessions/{}/connections/{}/maintenance/postgres",
+        session.id, connection.id
+    );
+    let response = app.oneshot(post_json(&path, request)).await.unwrap();
+    assert!(!response.status().is_success());
+}
+
+#[tokio::test]
 async fn bulk_insert_is_public_http_api() {
     let driver = MockDriver::builder()
         .engine(Engine::SqlServer)

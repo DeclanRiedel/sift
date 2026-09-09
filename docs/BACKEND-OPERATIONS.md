@@ -2,6 +2,36 @@
 
 These features are API/operator workflows; no desktop interaction is required.
 
+## PostgreSQL maintenance
+
+`POST /v1/sessions/{session}/connections/{connection}/maintenance/postgres`
+accepts explicit `schema`, `name`, an `action` object and optional `apply: true`.
+For example:
+
+```json
+{"schema":"public","name":"items","action":{"action":"vacuum","analyze":true}}
+```
+
+Actions are `vacuum` (optional `analyze`), `analyze`, `reindex_table` and
+`reindex_index` (optional `concurrently`). The SDK exposes `postgres_maintenance`.
+Omitting `apply` returns generated SQL only, after connection-policy and active
+transaction checks. Apply uses normal ExecuteQuery permissions, native database
+privileges, request timeout/cancellation and a typed audited operation.
+
+No database-wide target, VACUUM FULL, arbitrary options, implicit transaction end
+or automatic repair is offered. Names are independently quoted and limited to
+63 bytes to avoid PostgreSQL name truncation. Restricted SQL policies fail
+closed if their parser cannot authorize a command. Preview is not an existence
+or native privilege check. Applied means the command returned successfully;
+native notices are not guaranteed to be surfaced by every driver, so this is
+not proof that every partition/index was processed. Native locks can delay other sessions,
+and cancellation does not guarantee undoing maintenance already performed.
+Concurrent reindex failure can leave an invalid temporary index: see
+[REINDEX](https://www.postgresql.org/docs/current/sql-reindex.html).
+[VACUUM](https://www.postgresql.org/docs/current/sql-vacuum.html) and
+[ANALYZE](https://www.postgresql.org/docs/current/sql-analyze.html) retain their
+native target/partition semantics and privilege requirements.
+
 ## Query-performance history
 
 `GET /v1/metadata/history/performance?days=7&profile_id=123` returns hourly

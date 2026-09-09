@@ -22,6 +22,12 @@ durable history, bounded to 30 days and 10,000 executions with explicit cap
 reporting. No duplicate SQL storage or automatic history deletion. Metadata and
 authenticated HTTP tests plus strict server/SDK Clippy passed.
 
+Milestone 6 complete: typed explicit-target PostgreSQL VACUUM/ANALYZE/REINDEX,
+preview by default, ExecuteQuery policy admission, transaction rejection and
+supervised apply. Quoting/read-only-policy unit tests and HTTP preview/timeout/
+transaction tests passed, as did strict server/SDK Clippy. Live maintenance
+acceptance remains to be run against a disposable PostgreSQL fixture.
+
 ## Order and acceptance
 
 1. Transfer quarantine: authorized report download containing source row numbers,

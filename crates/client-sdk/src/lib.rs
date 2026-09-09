@@ -157,6 +157,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listMetadataDocuments",
     "listMetadataHistory",
     "getQueryPerformance",
+    "postgresMaintenance",
     "listMetadataRoomMembers",
     "listMetadataRooms",
     "listMetadataSavedQueries",
@@ -3767,6 +3768,19 @@ impl Client {
         self.get(&format!(
             "/v1/metadata/history/performance?days={days}{profile}"
         ))
+        .await
+    }
+
+    pub async fn postgres_maintenance(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::PostgresMaintenanceRequest,
+    ) -> Result<sift_protocol::PostgresMaintenanceReport> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/maintenance/postgres"),
+            &request,
+        )
         .await
     }
 
