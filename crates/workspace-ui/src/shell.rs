@@ -2337,6 +2337,16 @@ pub enum PaneEvent {
         sql: String,
         analyze: bool,
     },
+    BenchmarkRequested {
+        item_id: u64,
+        sql: String,
+        run_id: uuid::Uuid,
+        iterations: u32,
+    },
+    CancelBenchmarkRequested {
+        item_id: u64,
+        run_id: uuid::Uuid,
+    },
     HistoryRequested {
         item_id: u64,
         cursor: Option<String>,
@@ -2932,6 +2942,15 @@ pub enum ExecutorCommand {
         profile_id: i64,
         sql: String,
         analyze: bool,
+    },
+    Benchmark {
+        item_id: u64,
+        profile_id: i64,
+        request: sift_protocol::BenchmarkRequest,
+    },
+    CancelBenchmark {
+        profile_id: i64,
+        run_id: uuid::Uuid,
     },
     Cancel {
         item_id: u64,
@@ -3710,6 +3729,15 @@ pub enum ExecutorEvent {
         item_id: u64,
         request_id: u64,
         response: Result<Box<sift_protocol::ExplainResponse>, String>,
+    },
+    BenchmarkFinished {
+        item_id: u64,
+        run_id: uuid::Uuid,
+        response: Result<sift_protocol::BenchmarkReport, String>,
+    },
+    BenchmarkCancelFailed {
+        run_id: uuid::Uuid,
+        message: String,
     },
     ProfileCreated {
         entry: ConnectionNavEntry,
@@ -4504,6 +4532,20 @@ impl Pane {
                     sql,
                     analyze: *analyze,
                 });
+            }
+            ResultsEvent::BenchmarkRequested { run_id, iterations } => {
+                cx.emit(PaneEvent::BenchmarkRequested {
+                    item_id,
+                    sql: self.targeted_query_sql(item_id, cx),
+                    run_id: *run_id,
+                    iterations: *iterations,
+                });
+            }
+            ResultsEvent::CancelBenchmarkRequested { run_id } => {
+                cx.emit(PaneEvent::CancelBenchmarkRequested {
+                    item_id,
+                    run_id: *run_id,
+                })
             }
             ResultsEvent::CapturePlanRequested => {
                 let sql = self.targeted_query_sql(item_id, cx);
@@ -9718,6 +9760,7 @@ pub struct WorkspaceShell {
     pending_semantic_rename: Option<PendingSemanticRename>,
     next_execution_id: u64,
     running_explains: HashMap<u64, u64>,
+    running_benchmarks: HashMap<u64, (uuid::Uuid, i64)>,
     next_explain_id: u64,
     saved_queries: Vec<sift_api_types::SavedQuery>,
     snippets: Vec<sift_protocol::SqlSnippet>,
@@ -10959,6 +11002,7 @@ impl WorkspaceShell {
             pending_semantic_rename: None,
             next_execution_id: 1,
             running_explains: HashMap::new(),
+            running_benchmarks: HashMap::new(),
             next_explain_id: 1,
             saved_queries: Vec::new(),
             snippets: sift_snippets::builtins(),
@@ -13148,6 +13192,32 @@ impl WorkspaceShell {
                 }
                 self.running_explains.remove(&item_id);
                 self.route_explain(item_id, response, cx);
+            }
+            ExecutorEvent::BenchmarkFinished {
+                item_id,
+                run_id,
+                response,
+            } => {
+                if self
+                    .running_benchmarks
+                    .get(&item_id)
+                    .is_some_and(|(id, _)| *id == run_id)
+                {
+                    self.running_benchmarks.remove(&item_id);
+                }
+                self.route_benchmark(item_id, run_id, response, cx);
+            }
+            ExecutorEvent::BenchmarkCancelFailed { run_id, message } => {
+                if self
+                    .running_benchmarks
+                    .values()
+                    .any(|(id, _)| *id == run_id)
+                {
+                    self.show_error_toast(
+                        format!("Could not confirm benchmark cancellation: {message}"),
+                        cx,
+                    );
+                }
             }
             ExecutorEvent::Semantic {
                 item_id,
@@ -16176,6 +16246,24 @@ impl WorkspaceShell {
             if pane.update(cx, |pane, cx| {
                 pane.set_explain_result(item_id, response.clone(), cx)
             }) {
+                break;
+            }
+        }
+        cx.notify();
+    }
+
+    fn route_benchmark(
+        &mut self,
+        item_id: u64,
+        run_id: uuid::Uuid,
+        response: Result<sift_protocol::BenchmarkReport, String>,
+        cx: &mut Context<Self>,
+    ) {
+        for pane in &self.panes {
+            if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+                results.update(cx, |results, cx| {
+                    results.set_benchmark_result(run_id, response, cx)
+                });
                 break;
             }
         }
@@ -27654,6 +27742,93 @@ impl WorkspaceShell {
                 sql,
                 analyze,
             } => self.explain_database_item(*item_id, sql.clone(), *analyze, cx),
+            PaneEvent::BenchmarkRequested {
+                item_id,
+                sql,
+                run_id,
+                iterations,
+            } => {
+                let instance = self
+                    .database_source(*item_id, cx)
+                    .map(|source| source.instance_id)
+                    .or_else(|| {
+                        self.query_semantic_targets
+                            .get(item_id)
+                            .map(|target| target.instance_id.clone())
+                    });
+                if instance.is_some_and(|instance| {
+                    self.selected_instance_id.as_deref() != Some(instance.as_str())
+                }) {
+                    self.route_benchmark(
+                        *item_id,
+                        *run_id,
+                        Err("Tab belongs to another Sift server".into()),
+                        cx,
+                    );
+                    return;
+                }
+                let profile_id = self.query_profile_id(*item_id, cx);
+                let Some(profile_id) = profile_id.filter(|id| self.profile_is_connected(*id))
+                else {
+                    self.route_benchmark(
+                        *item_id,
+                        *run_id,
+                        Err("Connect this query's database before benchmarking".into()),
+                        cx,
+                    );
+                    return;
+                };
+                let params = match self.remembered_query_params(sql) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        self.route_benchmark(*item_id, *run_id, Err(error), cx);
+                        return;
+                    }
+                };
+                let command = ExecutorCommand::Benchmark {
+                    item_id: *item_id,
+                    profile_id,
+                    request: sift_protocol::BenchmarkRequest {
+                        run_id: *run_id,
+                        sql: sql.clone(),
+                        params,
+                        warmups: 2,
+                        iterations: *iterations,
+                        query_timeout_ms: 30_000,
+                        total_budget_ms: 120_000,
+                        delay_ms: 0,
+                        workload_confirmed: true,
+                    },
+                };
+                if self
+                    .executor_sender
+                    .as_ref()
+                    .is_none_or(|sender| sender.send(command).is_err())
+                {
+                    self.route_benchmark(
+                        *item_id,
+                        *run_id,
+                        Err("Database executor unavailable".into()),
+                        cx,
+                    );
+                } else {
+                    self.running_benchmarks
+                        .insert(*item_id, (*run_id, profile_id));
+                }
+            }
+            PaneEvent::CancelBenchmarkRequested { item_id, run_id } => {
+                let profile_id = self
+                    .running_benchmarks
+                    .get(item_id)
+                    .filter(|(id, _)| id == run_id)
+                    .map(|(_, profile)| *profile);
+                if let (Some(profile_id), Some(sender)) = (profile_id, &self.executor_sender) {
+                    let _ = sender.send(ExecutorCommand::CancelBenchmark {
+                        profile_id,
+                        run_id: *run_id,
+                    });
+                }
+            }
             PaneEvent::HistoryRequested { item_id, cursor } => {
                 if let Some(sender) = &self.executor_sender {
                     if sender
@@ -33424,6 +33599,15 @@ impl WorkspaceShell {
             }
             CommandId::PickForeignKeyValue => self.open_foreign_key_picker(window, cx),
             CommandId::FocusResults => self.focus_results(window, cx),
+            CommandId::ShowPerformance => {
+                self.focus_results(window, cx);
+                if let Some(results) = self.focused_pane_results(cx) {
+                    results.update(cx, ResultsView::show_performance);
+                    if let Some(pane) = self.panes.get(self.active_pane) {
+                        pane.update(cx, |_, cx| cx.notify());
+                    }
+                }
+            }
             CommandId::FocusProblems => self.show_global_problems(window, cx),
             CommandId::FocusAutomations => self.focus_automations(window, cx),
             CommandId::NewRunConfiguration => self.open_run_configuration_editor(None, window, cx),

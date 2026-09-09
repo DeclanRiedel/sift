@@ -2000,6 +2000,75 @@ async fn run_query_executor(
                     });
                 }));
             }
+            ExecutorCommand::Benchmark {
+                item_id,
+                profile_id,
+                request,
+            } => {
+                let run_id = request.run_id;
+                let opened = context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == profile_id)
+                    .or_else(|| parked_contexts.get(&profile_id));
+                if let Some(opened) = opened {
+                    let client = opened.client.clone();
+                    let session = opened.session;
+                    let connection = opened.connection;
+                    let events = events.clone();
+                    std::mem::drop(tokio::spawn(async move {
+                        let response = client
+                            .benchmark(session, connection, request)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = events.send(ExecutorEvent::BenchmarkFinished {
+                            item_id,
+                            run_id,
+                            response,
+                        });
+                    }));
+                } else {
+                    let _ = events.send(ExecutorEvent::BenchmarkFinished {
+                        item_id,
+                        run_id,
+                        response: Err("Connect this database before benchmarking".into()),
+                    });
+                }
+            }
+            ExecutorCommand::CancelBenchmark { profile_id, run_id } => {
+                if let Some(opened) = context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == profile_id)
+                    .or_else(|| parked_contexts.get(&profile_id))
+                {
+                    let client = opened.client.clone();
+                    let session = opened.session;
+                    let connection = opened.connection;
+                    let events = events.clone();
+                    std::mem::drop(tokio::spawn(async move {
+                        // A very quick Escape can overtake the start HTTP request.
+                        // Retry briefly, then report uncertainty instead of claiming cancellation.
+                        let mut failure = None;
+                        for attempt in 0..4 {
+                            match client.cancel_benchmark(session, connection, run_id).await {
+                                Ok(()) => return,
+                                Err(error) => failure = Some(error.to_string()),
+                            }
+                            if attempt < 3 {
+                                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            }
+                        }
+                        let _ = events.send(ExecutorEvent::BenchmarkCancelFailed {
+                            run_id,
+                            message: failure.unwrap_or_else(|| "Cancellation unavailable".into()),
+                        });
+                    }));
+                } else {
+                    let _ = events.send(ExecutorEvent::BenchmarkCancelFailed {
+                        run_id,
+                        message: "Original database connection is no longer available".into(),
+                    });
+                }
+            }
             ExecutorCommand::Cancel {
                 item_id,
                 execution_id,

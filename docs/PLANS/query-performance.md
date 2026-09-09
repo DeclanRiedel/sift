@@ -1,6 +1,7 @@
 # Query performance workbench
 
-Status: implementation started; no new execution action is available yet.
+Status: serial benchmark API and initial Performance panel implemented; the
+complete workbench, durable library and advanced tools remain in progress.
 
 ## Design contract
 
@@ -32,13 +33,18 @@ Status: implementation started; no new execution action is available yet.
 - [ ] Timing dimensions: database execution, client elapsed, first row, full
   consumption; unavailable dimensions remain optional and separate.
 - [x] Validated serial-run iteration, warm-up, timeout, delay and total budgets.
-- [ ] Immutable query/config snapshot and capability matrix.
-- [ ] Versioned API types and audited Profile/Benchmark/cancel/save actions.
+- [x] Freeze SQL, parameters and configuration for a serial benchmark.
+- [ ] Full profiling capability matrix and captured environment context.
+- [x] Versioned benchmark report and audited Benchmark/cancel API actions.
+- [ ] Dedicated Profile/save actions.
 
 ## Milestone 2 — profile and Performance panel
 
 - [ ] Current statement/selection targeting, explicit execution preview.
 - [ ] Summary, Runs, Plan, Compare and Saved sections; keyboard navigation.
+- [x] Initial Performance tab: summary, virtualized samples, in-memory baseline,
+  JSON clipboard export and keyboard controls. Open through the command palette
+  (`Query Performance: Open Benchmark Panel`) without executing anything.
 - [ ] PostgreSQL JSON actual plan, buffers and supported runtime counters.
 - [ ] SQL Server actual plans and supported statistics IO/time collection.
 - [ ] SQLite plan and timing; capability-gated deeper runtime counters.
@@ -50,15 +56,25 @@ Status: implementation started; no new execution action is available yet.
 
 ## Milestone 3 — serial benchmark runner
 
-- [ ] Dedicated connections with enforced read restrictions and permissions.
-- [ ] Preset: two warm-ups, ten measured runs, one connection; editable limits.
-- [ ] Per-statement timeout, overall deadline, delay, cancel and partial results.
-- [ ] Fully drain without retaining rows by default; distinguish optional
-  fetch/render measurements from instrumented profiles.
+- [x] Dedicated connections, single-read SQL validation and per-iteration policy
+  checks. PostgreSQL/SQLite use read-only transactions. SQL Server explicitly
+  requires a read-only account for database-enforced protection; it has no
+  read-only transaction mode. Neither mechanism sandboxes external functions.
+- [x] Preset: two warm-ups, ten measured runs, one connection. UI cycles 1/10/100
+  measured runs; API exposes all validated limits.
+- [ ] UI editors for warm-ups, timeouts, total budget and inter-query delay.
+- [x] Per-statement timeout, sampling deadline, delay, cancellation and partial
+  reports. Setup/cleanup are separately bounded and may outlast sampling budget.
+- [x] Fully drain without retaining result rows. Server-observed execution/drain
+  and first-row timings are labelled separately from database/desktop timings.
+- [ ] Optional fetch/render measurements and instrumented profile populations.
 - [ ] Capture preparation mode, reuse, isolation, session settings, engine
   version and observed/unknown cache conditions.
-- [ ] Safe session cleanup, disconnect handling, production workload approval.
-- [ ] All samples visible, median/mean/range/variability and sample-size warnings.
+- [x] Dedicated connection cleanup, source-disconnect cancellation and explicit
+  whole-workload confirmation. Cancellation stays bound to the original profile;
+  failure to confirm cancellation is surfaced rather than silently ignored.
+- [x] All samples visible, median/mean/range/sample deviation; insufficient tail
+  percentiles remain unavailable. Unfinished row counts are unknown, not zero.
 
 ## Milestone 4 — save and compare
 
@@ -66,6 +82,8 @@ Status: implementation started; no new execution action is available yet.
 - [ ] Names, notes, tags, workspace/Git context, private visibility and retention.
 - [ ] Saved browser independent of open query tabs; validate rerun connection.
 - [ ] Baseline pinning, A/B variants and before/after comparisons.
+- [x] In-memory baseline pinning and observed median delta; incomplete runs,
+  different engines and selected configuration mismatches suppress comparison.
 - [ ] Alternating/randomized A/B order; record ordering and seed.
 - [ ] Absolute/relative deltas and variability; explicitly inconclusive verdicts.
 - [ ] Compatibility warnings for parameters, data, versions and settings.
@@ -103,3 +121,17 @@ Status: implementation started; no new execution action is available yet.
   No execution endpoint, persistence or Performance UI is wired yet.
   Verification: formatting check, strict workspace Clippy and workspace tests
   passed for this foundation (including all 29 core and 472 editor tests).
+
+- Serial benchmark implementation: POST `.../connections/:id/benchmark` accepts
+  a frozen `BenchmarkRequest`; POST `.../benchmark/:run_id/cancel` requests stop.
+  Client SDK methods expose both. The server owns a dedicated reused connection,
+  drains every row page without the grid retention cap, and returns versioned
+  samples and summary. Result export includes SQL but omits bind values; the UI
+  labels this explicitly. No automatic cache clearing, query rewriting or DML.
+  Performance controls: `r` confirms/runs, Escape requests cancellation, `i`
+  cycles measured iterations, `b` pins a baseline and `y` copies JSON.
+  Reports and pinned baselines are currently transient, not a saved-run library.
+  Backend milestone: `0f043a9`. Verification: formatting, strict workspace Clippy
+  and workspace tests pass, including 473 UI/editor tests. Focused regressions
+  cover draining beyond the grid limit, timeout/partial reports, cancellation
+  cleanup, SQL write/batch rejection and stale UI completion responses.

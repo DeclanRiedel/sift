@@ -106,6 +106,11 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         gpui::KeyBinding::new("enter", res::EditSelectedCell, results_ctx),
         gpui::KeyBinding::new("shift-h", res::PreviousResultTab, results_ctx),
         gpui::KeyBinding::new("shift-l", res::NextResultTab, results_ctx),
+        gpui::KeyBinding::new("r", res::RunBenchmark, Some("SiftPerformance")),
+        gpui::KeyBinding::new("escape", res::StopBenchmark, Some("SiftPerformance")),
+        gpui::KeyBinding::new("i", res::CycleBenchmarkIterations, Some("SiftPerformance")),
+        gpui::KeyBinding::new("b", res::PinBenchmarkBaseline, Some("SiftPerformance")),
+        gpui::KeyBinding::new("y", res::CopyBenchmarkReport, Some("SiftPerformance")),
     ]
 }
 

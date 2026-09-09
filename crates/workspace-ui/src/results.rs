@@ -32,6 +32,12 @@ mod filter;
 use filter::PreparedFilters;
 
 const MIN_COLUMN_WIDTH: f32 = 144.0;
+fn benchmark_ms(ns: Option<f64>) -> String {
+    ns.map_or_else(
+        || "unavailable".into(),
+        |v| format!("{:.3} ms", v / 1_000_000.0),
+    )
+}
 const DEFAULT_COLUMN_WIDTH: f32 = 184.0;
 const MAX_COLUMN_WIDTH: f32 = 960.0;
 const COLUMN_RESIZE_HANDLE_WIDTH: f32 = 7.0;
@@ -784,6 +790,7 @@ pub enum ResultTab {
     Messages,
     Explain,
     History,
+    Performance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -806,7 +813,12 @@ pub(crate) enum ResultPlacement {
 }
 
 impl ResultTab {
-    const AUXILIARY: [ResultTab; 3] = [ResultTab::Messages, ResultTab::Explain, ResultTab::History];
+    const AUXILIARY: [ResultTab; 4] = [
+        ResultTab::Messages,
+        ResultTab::Explain,
+        ResultTab::History,
+        ResultTab::Performance,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -814,6 +826,7 @@ impl ResultTab {
             ResultTab::Messages => "Messages",
             ResultTab::Explain => "Explain",
             ResultTab::History => "History",
+            ResultTab::Performance => "Performance",
         }
     }
 }
@@ -843,7 +856,12 @@ actions!(
         DeleteSelectedRow,
         YankSelectedWithHeaders,
         PreviousResultTab,
-        NextResultTab
+        NextResultTab,
+        RunBenchmark,
+        StopBenchmark,
+        CycleBenchmarkIterations,
+        PinBenchmarkBaseline,
+        CopyBenchmarkReport
     ]
 );
 
@@ -946,6 +964,13 @@ pub enum ResultsEvent {
     /// executes the statement to collect runtime counters.
     ExplainRequested {
         analyze: bool,
+    },
+    BenchmarkRequested {
+        run_id: uuid::Uuid,
+        iterations: u32,
+    },
+    CancelBenchmarkRequested {
+        run_id: uuid::Uuid,
     },
     CapturePlanRequested,
     OpenPlanCapturesRequested,
@@ -1181,6 +1206,11 @@ pub struct ResultsView {
     window_held: bool,
     explain: ExplainState,
     analyze_supported: bool,
+    benchmark_pending: Option<uuid::Uuid>,
+    benchmark_report: Option<sift_protocol::BenchmarkReport>,
+    benchmark_baseline: Option<sift_protocol::BenchmarkReport>,
+    benchmark_error: Option<String>,
+    benchmark_iterations: u32,
     rendered_plan_nodes: Vec<RenderedPlanNode>,
     plan_scroll_handle: UniformListScrollHandle,
     large_view: bool,
@@ -1289,6 +1319,11 @@ impl ResultsView {
             window_held: false,
             explain: ExplainState::Empty,
             analyze_supported: true,
+            benchmark_pending: None,
+            benchmark_report: None,
+            benchmark_baseline: None,
+            benchmark_error: None,
+            benchmark_iterations: 10,
             rendered_plan_nodes: Vec::new(),
             plan_scroll_handle: UniformListScrollHandle::new(),
             large_view: false,
@@ -2682,6 +2717,7 @@ impl ResultsView {
             ResultTab::Messages => result_count,
             ResultTab::Explain => result_count + 1,
             ResultTab::History => result_count + 2,
+            ResultTab::Performance => result_count + 3,
         };
         let next = (current as isize + delta).rem_euclid(total as isize) as usize;
         if next < result_count {
@@ -5753,6 +5789,157 @@ impl ResultsView {
             }))
     }
 
+    pub(crate) fn set_benchmark_result(
+        &mut self,
+        run_id: uuid::Uuid,
+        result: Result<sift_protocol::BenchmarkReport, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.benchmark_pending != Some(run_id) {
+            return;
+        }
+        self.benchmark_pending = None;
+        match result {
+            Ok(report) => {
+                self.benchmark_report = Some(report);
+                self.benchmark_error = None;
+            }
+            Err(error) => self.benchmark_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn show_performance(&mut self, cx: &mut Context<Self>) {
+        self.collapsed = false;
+        self.select_tab(ResultTab::Performance, cx);
+    }
+
+    fn run_benchmark(&mut self, _: &RunBenchmark, _: &mut Window, cx: &mut Context<Self>) {
+        if self.tab != ResultTab::Performance || self.benchmark_pending.is_some() {
+            return;
+        }
+        let run_id = uuid::Uuid::new_v4();
+        self.benchmark_pending = Some(run_id);
+        self.benchmark_error = None;
+        cx.emit(ResultsEvent::BenchmarkRequested {
+            run_id,
+            iterations: self.benchmark_iterations,
+        });
+        cx.notify();
+    }
+    fn stop_benchmark(&mut self, _: &StopBenchmark, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(run_id) = self.benchmark_pending {
+            cx.emit(ResultsEvent::CancelBenchmarkRequested { run_id });
+        }
+    }
+    fn cycle_benchmark_iterations(
+        &mut self,
+        _: &CycleBenchmarkIterations,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.benchmark_pending.is_none() {
+            self.benchmark_iterations = match self.benchmark_iterations {
+                1 => 10,
+                10 => 100,
+                _ => 1,
+            };
+            cx.notify();
+        }
+    }
+    fn pin_benchmark_baseline(
+        &mut self,
+        _: &PinBenchmarkBaseline,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.benchmark_pending.is_none() {
+            self.benchmark_baseline = self.benchmark_report.clone();
+            cx.notify();
+        }
+    }
+    fn copy_benchmark_report(
+        &mut self,
+        _: &CopyBenchmarkReport,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(report) = &self.benchmark_report {
+            if let Ok(json) = serde_json::to_string_pretty(report) {
+                cx.write_to_clipboard(ClipboardItem::new_string(json));
+            }
+        }
+    }
+
+    fn render_performance(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = cx.theme().colors;
+        let pending = self.benchmark_pending.is_some();
+        let summary = self.benchmark_report.as_ref().map(|report| {
+            let measured = report
+                .samples
+                .iter()
+                .filter(|s| !s.warmup && s.outcome == sift_protocol::BenchmarkOutcome::Success)
+                .count();
+            format!(
+                "{} · {measured} measured reads · median {} · mean {} · range {}–{} · deviation {}",
+                if report.completed {
+                    "Complete"
+                } else {
+                    "Partial run"
+                },
+                benchmark_ms(report.median_ns),
+                benchmark_ms(report.mean_ns),
+                benchmark_ms(report.min_ns.map(|v| v as f64)),
+                benchmark_ms(report.max_ns.map(|v| v as f64)),
+                benchmark_ms(report.standard_deviation_ns)
+            )
+        });
+        let comparison = self.benchmark_baseline.as_ref().zip(self.benchmark_report.as_ref()).map(|(base, current)| {
+            if base.engine != current.engine { return "Baseline uses a different engine; timing comparison unavailable".to_string(); }
+            if !base.completed || !current.completed { return "Comparison is inconclusive: at least one run is incomplete".into(); }
+            if base.query_timeout_ms != current.query_timeout_ms || base.delay_ms != current.delay_ms || base.warmups != current.warmups || base.parameter_count != current.parameter_count {
+                return "Benchmark configurations differ; rerun with matching settings before comparing".into();
+            }
+            match base.median_ns.zip(current.median_ns) {
+                Some((a, b)) if a > 0.0 => format!("Baseline median {} → {} ({:+.1}%). Observed difference only: data, parameters, cache and load may differ.",
+                    benchmark_ms(Some(a)), benchmark_ms(Some(b)), (b / a - 1.0) * 100.0),
+                _ => "Baseline comparison needs successful timed samples and a non-zero baseline".into(),
+            }
+        });
+        let count = self
+            .benchmark_report
+            .as_ref()
+            .map_or(0, |r| r.samples.len());
+        div().flex().flex_col().size_full().gap_2().p_3()
+            .child(div().flex().flex_wrap().items_center().gap_2()
+                .child(Button::new("benchmark-iterations", format!("[i] {} measured runs", self.benchmark_iterations))
+                    .disabled(pending).on_click(cx.listener(|view, _, window, cx| view.cycle_benchmark_iterations(&CycleBenchmarkIterations, window, cx))))
+                .child(div().debug_selector(|| "benchmark-run".into()).child(Button::new("benchmark-run", format!("[r] Confirm & run {} reads", self.benchmark_iterations + 2))
+                    .disabled(pending).on_click(cx.listener(|view, _, window, cx| view.run_benchmark(&RunBenchmark, window, cx)))))
+                .child(Button::new("benchmark-cancel", "[Esc] Cancel").disabled(!pending)
+                    .on_click(cx.listener(|view, _, window, cx| view.stop_benchmark(&StopBenchmark, window, cx))))
+                .child(Button::new("benchmark-baseline", "[b] Pin baseline").disabled(self.benchmark_report.is_none() || pending)
+                    .on_click(cx.listener(|view, _, window, cx| view.pin_benchmark_baseline(&PinBenchmarkBaseline, window, cx))))
+                .child(Button::new("benchmark-copy", "[y] Copy JSON (includes SQL)").disabled(self.benchmark_report.is_none())
+                    .on_click(cx.listener(|view, _, window, cx| view.copy_benchmark_report(&CopyBenchmarkReport, window, cx)))))
+            .child(div().text_sm().text_color(colors.muted_text).child(
+                "Current statement or selection · 2 warm-ups excluded · 30s/query · 2min total · full result drain, no retained rows. Repeated reads can load production databases and invoke side effects. Use a read-only account."))
+            .children(pending.then(|| div().text_sm().child("Benchmark running on a dedicated connection… Results arrive when the run finishes or is cancelled.")))
+            .children(self.benchmark_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
+            .children(summary.map(|s| div().text_sm().child(s)))
+            .children(comparison.map(|s| div().text_sm().text_color(colors.muted_text).child(s)))
+            .children(self.benchmark_report.as_ref().map(|report| div().text_xs().text_color(colors.muted_text).child(report.warnings.join(" · "))))
+            .child(div().text_xs().text_color(colors.muted_text).child("Run · phase · outcome · full drain · first row · rows"))
+            .child(uniform_list("benchmark-samples", count, cx.processor(|view, range: Range<usize>, _, _| {
+                range.filter_map(|index| view.benchmark_report.as_ref()?.samples.get(index)).map(|sample| {
+                    div().h(px(26.)).text_sm().child(format!("{} · {} · {:?} · {} · {} · {}",
+                        sample.ordinal + 1, if sample.warmup { "warm-up" } else { "measured" }, sample.outcome,
+                        benchmark_ms(Some(sample.elapsed_ns as f64)), benchmark_ms(sample.first_row_ns.map(|v| v as f64)), sample.rows.map_or_else(|| "unavailable".into(), |rows| rows.to_string())))
+                }).collect::<Vec<_>>()
+            })).flex_1().min_h_0())
+            .into_any_element()
+    }
+
     fn render_explain(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = cx.theme().colors;
         match &self.explain {
@@ -6227,11 +6414,21 @@ impl gpui::Render for ResultsView {
             ResultTab::Messages => self.render_messages(cx).into_any_element(),
             ResultTab::Explain => self.render_explain(cx),
             ResultTab::History => self.render_history(cx),
+            ResultTab::Performance => self.render_performance(cx),
         };
 
         div()
             .id("sift-results")
-            .key_context("SiftResults")
+            .key_context(if self.tab == ResultTab::Performance {
+                "SiftResults SiftPerformance"
+            } else {
+                "SiftResults"
+            })
+            .on_action(cx.listener(Self::run_benchmark))
+            .on_action(cx.listener(Self::stop_benchmark))
+            .on_action(cx.listener(Self::cycle_benchmark_iterations))
+            .on_action(cx.listener(Self::pin_benchmark_baseline))
+            .on_action(cx.listener(Self::copy_benchmark_report))
             .track_focus(&self.focus_handle)
             .on_mouse_down(
                 MouseButton::Left,
@@ -7818,6 +8015,44 @@ mod tests {
                     },
                 ]
             );
+        });
+    }
+
+    #[gpui::test]
+    fn performance_opens_explicitly_and_rejects_stale_completions(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |_window, cx| {
+                    let view = cx.new(ResultsView::new);
+                    cx.new(|_| ResultsHost(view))
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let host = window.root(&mut cx).unwrap();
+        let view = host.read_with(&cx, |host, _| host.0.clone());
+        view.update(&mut cx, |view, cx| {
+            view.collapsed = true;
+            view.show_performance(cx);
+            assert!(!view.collapsed);
+            assert_eq!(view.active_tab(), ResultTab::Performance);
+        });
+        cx.run_until_parked();
+        let run = cx
+            .debug_bounds("benchmark-run")
+            .expect("benchmark run button");
+        cx.simulate_click(run.center(), Modifiers::default());
+        cx.run_until_parked();
+        view.update(&mut cx, |view, cx| {
+            let pending = view.benchmark_pending.expect("one pending benchmark");
+            view.set_benchmark_result(uuid::Uuid::new_v4(), Err("stale".into()), cx);
+            assert_eq!(view.benchmark_pending, Some(pending));
+            assert!(view.benchmark_error.is_none());
+            view.set_benchmark_result(pending, Err("cancelled".into()), cx);
+            assert!(view.benchmark_pending.is_none());
+            assert_eq!(view.benchmark_error.as_deref(), Some("cancelled"));
+            view.select_relative_tab(-1, cx);
+            assert_eq!(view.active_tab(), ResultTab::History);
         });
     }
 
