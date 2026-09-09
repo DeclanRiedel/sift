@@ -315,6 +315,18 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
     skip.conflict_policy = CsvConflictPolicy::Skip;
     let imported = client.import_csv(session, connection, skip).await.unwrap();
     assert_eq!((imported.rows_inserted, imported.rows_skipped), (1, 1));
+    let mut quarantine = request("id,label\n2,NULL\n4,duplicate\n");
+    quarantine.conflict_policy = CsvConflictPolicy::Quarantine;
+    let rejected = client
+        .import_csv(session, connection, quarantine)
+        .await
+        .unwrap();
+    assert_eq!((rejected.rows_inserted, rejected.rows_skipped), (0, 2));
+    assert_eq!(rejected.quarantined_rows[0].row_number, 0);
+    assert_eq!(
+        rejected.quarantined_rows[0].values,
+        vec![Some("2".into()), None]
+    );
     assert_eq!(
         client
             .execute(

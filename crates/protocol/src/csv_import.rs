@@ -14,8 +14,19 @@ pub enum CsvConflictPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CsvQuarantinedRow {
+    /// Zero-based logical data-row offset; excludes the header, not physical lines.
     pub row_number: u64,
     pub reason: String,
+    /// Source values in report column order, preserving SQL null separately.
+    #[serde(default)]
+    pub values: Vec<Option<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CsvQuarantineReport {
+    pub version: u32,
+    pub columns: Vec<String>,
+    pub rows: Vec<CsvQuarantinedRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

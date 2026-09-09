@@ -3,6 +3,15 @@
 use super::*;
 
 impl Client {
+    /// Download an expiring quarantine report using normal workspace authorization.
+    pub async fn transfer_quarantine_report(
+        &self,
+        artifact: WorkspaceArtifactId,
+    ) -> Result<sift_protocol::CsvQuarantineReport> {
+        let bytes = self.workspace_artifact(artifact).await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
     pub async fn transfer_recipes(&self, workspace: WorkspaceId) -> Result<Vec<TransferRecipe>> {
         self.get(&format!(
             "/v1/metadata/workspaces/{}/transfer-recipes",

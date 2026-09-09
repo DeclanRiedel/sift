@@ -2,6 +2,23 @@
 
 These features are API/operator workflows; no desktop interaction is required.
 
+## Transfer quarantine
+
+CSV imports accept `conflict_policy: "quarantine"` for PostgreSQL, SQL Server
+and SQLite. Rejected rows include zero-based logical data-row offsets (header
+excluded), sanitized reasons and source values in inferred-column order. JSON
+null represents a null source value, not the text `"NULL"`. Multiline CSV fields
+remain one logical row. Authorization, connection, cancellation and other fatal
+errors stop the import rather than being treated as bad rows.
+
+Upload-to-table recipes publish a seven-day workspace artifact when rows are
+rejected. Download its `quarantine_artifact.id` through the existing artifact
+endpoint or SDK `transfer_quarantine_report`. Reports contain `version: 1`,
+`columns` and `rows`, and have the same 64 MiB bound and authorization as other
+artifacts. These contain database data; do not publish them as logs. SQLite
+quarantine uses one transaction; PostgreSQL and SQL Server retain the existing
+row-at-a-time commit behavior. Parquet quarantine remains unsupported.
+
 ## Parquet
 
 The query export endpoint accepts `"format":"parquet"`. Transfer recipes accept

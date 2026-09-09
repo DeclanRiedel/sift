@@ -79,6 +79,15 @@ async fn json<T: serde::de::DeserializeOwned>(body: Body) -> T {
 
 #[tokio::test]
 async fn csv_import_skip_reports_inserted_and_duplicate_rows() {
+    check_import(CsvConflictPolicy::Skip).await;
+}
+
+#[tokio::test]
+async fn csv_import_quarantine_preserves_rejected_source_values() {
+    check_import(CsvConflictPolicy::Quarantine).await;
+}
+
+async fn check_import(policy: CsvConflictPolicy) {
     let router = app(state());
     let session: sift_protocol::SessionInfo = json(
         router
@@ -118,7 +127,7 @@ async fn csv_import_skip_reports_inserted_and_duplicate_rows() {
         delimiter: ',',
         null_value: Some("NULL".into()),
         create_table: false,
-        conflict_policy: CsvConflictPolicy::Skip,
+        conflict_policy: policy,
         dry_run: false,
         resume_from_row: 0,
         type_mappings: Default::default(),
@@ -166,6 +175,18 @@ async fn csv_import_skip_reports_inserted_and_duplicate_rows() {
     let response: CsvImportResponse = json(response.into_body()).await;
     assert_eq!(response.rows_inserted, 1);
     assert_eq!(response.rows_skipped, 1);
+    if policy == CsvConflictPolicy::Quarantine {
+        assert_eq!(response.quarantined_rows.len(), 1);
+        let rejected = &response.quarantined_rows[0];
+        assert_eq!(rejected.row_number, 1);
+        assert_eq!(rejected.reason, "constraint conflict");
+        assert_eq!(
+            rejected.values,
+            vec![Some("001".into()), Some("Alice again".into())]
+        );
+    } else {
+        assert!(response.quarantined_rows.is_empty());
+    }
     assert_eq!(
         response.columns[0].inferred_type,
         sift_protocol::InferredCsvType::Int64

@@ -3721,6 +3721,12 @@ impl SessionStore {
             }
         })
         .await?;
+        self.with_transaction(session_id, tx_id, |entry| {
+            // A successful native rollback-to recovers statement failures inside
+            // this savepoint. Failed native rollbacks never reach this point.
+            entry.failed.store(false, Ordering::Release);
+            Ok(())
+        })?;
         self.update_savepoints(session_id, tx_id, |savepoints| {
             if let Some(index) = savepoints.iter().position(|savepoint| {
                 savepoint.name == state_name && savepoint.state == SavepointState::Active

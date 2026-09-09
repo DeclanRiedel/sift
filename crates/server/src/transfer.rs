@@ -84,8 +84,21 @@ pub async fn execute_recipe(
         let quarantine_artifact = if result.quarantined_rows.is_empty() {
             None
         } else {
-            let report = serde_json::to_vec_pretty(&result.quarantined_rows)
-                .map_err(|error| ApiError::Internal(error.to_string()))?;
+            let report = serde_json::to_vec(&sift_protocol::CsvQuarantineReport {
+                version: 1,
+                columns: result
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect(),
+                rows: result.quarantined_rows.clone(),
+            })
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+            if report.len() > MAX_ARTIFACT_BYTES {
+                return Err(ApiError::BadRequest(
+                    "quarantine report exceeds 64 MiB".into(),
+                ));
+            }
             Some(metadata.create_workspace_artifact(
                 recipe.workspace_id,
                 actor,

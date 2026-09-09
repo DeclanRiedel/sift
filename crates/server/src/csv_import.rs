@@ -487,15 +487,11 @@ async fn ingest_skip(
             Ok(response) => response,
             Err(error) if quarantine => {
                 skipped += 1;
-                let mut reason = error.to_string();
-                let mut end = reason.len().min(240);
-                while !reason.is_char_boundary(end) {
-                    end -= 1;
-                }
-                reason.truncate(end);
+                let reason = quarantine_reason(error)?;
                 quarantined.push(sift_protocol::CsvQuarantinedRow {
                     row_number: index as u64,
                     reason,
+                    values: record.clone(),
                 });
                 continue;
             }
@@ -521,11 +517,34 @@ async fn ingest_skip(
                 quarantined.push(sift_protocol::CsvQuarantinedRow {
                     row_number: index as u64,
                     reason: "constraint conflict".into(),
+                    values: record.clone(),
                 });
             }
         }
     }
     Ok((inserted, skipped, quarantined))
+}
+
+fn quarantine_reason(error: ApiError) -> ApiResult<String> {
+    if let ApiError::Driver(driver) = &error {
+        let native = driver.native_code.as_deref().unwrap_or_default();
+        let row_error = driver.code == Code::InvalidParameterValue
+            || (driver.provider_id == Some(Engine::Sqlite.provider_id())
+                && native.parse::<i32>().is_ok_and(|code| code & 255 == 19))
+            || (native.len() == 5
+                && native.bytes().all(|byte| byte.is_ascii_digit())
+                && (native.starts_with("22") || native.starts_with("23")))
+            || matches!(
+                native,
+                "245" | "515" | "547" | "8114" | "8115" | "8152" | "2628" | "2601" | "2627"
+            );
+        if row_error {
+            return Ok("row rejected: invalid value or constraint violation".into());
+        }
+    }
+    // Infrastructure, authorization, cancellation and transaction failures must
+    // stop the transfer, not silently turn the remaining source into rejects.
+    Err(error)
 }
 
 fn cast_placeholder(engine: Engine, index: usize, target_type: &str) -> String {
@@ -689,11 +708,13 @@ async fn import_sqlite(
         TxMode,
     };
     if request.conflict_policy == CsvConflictPolicy::Quarantine {
-        return Err(DriverError::new(
-            Code::UnsupportedForEngine,
-            "SQLite CSV quarantine is unsupported; choose abort or skip",
-        )
-        .into());
+        for operation in [
+            OperationKind::Savepoint,
+            OperationKind::RollbackToSavepoint,
+            OperationKind::ReleaseSavepoint,
+        ] {
+            store.authorize_connection_operation(session, connection, operation, None, &[])?;
+        }
     }
     let transaction = store
         .begin_transaction_as(
@@ -743,8 +764,16 @@ async fn import_sqlite(
             ));
         }
         let mut inserted = 0;
-        for batch in
-            prepared.records[request.resume_from_row as usize..].chunks((32766 / width).min(128))
+        let mut quarantined = Vec::new();
+        let quarantine = request.conflict_policy == CsvConflictPolicy::Quarantine;
+        let batch_size = if quarantine {
+            1
+        } else {
+            (32766 / width).min(128)
+        };
+        for (batch_index, batch) in prepared.records[request.resume_from_row as usize..]
+            .chunks(batch_size)
+            .enumerate()
         {
             let mut params = Vec::with_capacity(batch.len() * width);
             let mut groups = Vec::new();
@@ -766,7 +795,7 @@ async fn import_sqlite(
                 }
                 groups.push(format!("({})", slots.join(", ")));
             }
-            let suffix = if request.conflict_policy == CsvConflictPolicy::Skip {
+            let suffix = if request.conflict_policy != CsvConflictPolicy::Abort {
                 " ON CONFLICT DO NOTHING"
             } else {
                 ""
@@ -780,20 +809,51 @@ async fn import_sqlite(
                 params,
             );
             command.tx = tx.clone();
-            inserted += store
+            let savepoint = sift_protocol::SavepointRequest {
+                connection,
+                tx_id: transaction.tx_id,
+                name: "sift_quarantine_row".into(),
+            };
+            if quarantine {
+                store.create_savepoint(session, savepoint.clone()).await?;
+            }
+            let response = store
                 .execute_http_as(session, command, OperationKind::ImportCsv)
-                .await?
-                .affected_rows
-                .unwrap_or(0);
+                .await;
+            let (count, reason) = match response {
+                Ok(response) => (
+                    response.affected_rows.unwrap_or(0),
+                    "constraint conflict".to_owned(),
+                ),
+                Err(error) if quarantine => {
+                    let reason = quarantine_reason(error)?;
+                    store
+                        .rollback_to_savepoint(session, savepoint.clone())
+                        .await?;
+                    (0, reason)
+                }
+                Err(error) => return Err(error),
+            };
+            inserted += count;
+            if quarantine {
+                store.release_savepoint(session, savepoint).await?;
+            }
+            if quarantine && count == 0 {
+                quarantined.push(sift_protocol::CsvQuarantinedRow {
+                    row_number: request.resume_from_row + batch_index as u64,
+                    reason,
+                    values: batch[0].clone(),
+                });
+            }
         }
-        Ok::<_, ApiError>(inserted)
+        Ok::<_, ApiError>((inserted, quarantined))
     }
     .await;
     let end = EndTransactionRequest {
         connection,
         tx_id: transaction.tx_id,
     };
-    let inserted = match work {
+    let (inserted, quarantined_rows) = match work {
         Ok(count) => match store
             .commit_transaction_as(session, end.clone(), OperationKind::ImportCsv)
             .await
@@ -831,13 +891,26 @@ async fn import_sqlite(
         rows_validated: total,
         resume_from_row: total,
         dry_run: false,
-        quarantined_rows: vec![],
+        quarantined_rows,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quarantine_sanitizes_row_errors_but_preserves_fatal_failures() {
+        let error = DriverError::new(Code::InvalidParameterValue, "password=do-not-report");
+        assert_eq!(
+            quarantine_reason(error.into()).unwrap(),
+            "row rejected: invalid value or constraint violation"
+        );
+        assert!(
+            quarantine_reason(DriverError::new(Code::QueryCanceled, "canceled").into()).is_err()
+        );
+        assert!(quarantine_reason(ApiError::Forbidden("policy".into())).is_err());
+    }
 
     fn request(data: &str) -> CsvImportRequest {
         CsvImportRequest {
