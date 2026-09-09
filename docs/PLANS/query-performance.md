@@ -26,12 +26,13 @@ Status: implementation started; no new execution action is available yet.
 ## Milestone 1 — contracts and measurement foundations
 
 - [x] Record design and full implementation checklist.
-- [ ] Pure measurement model: warm-up/measured samples and explicit outcomes.
-- [ ] Deterministic summaries excluding warm-ups and unsuccessful samples;
+- [x] Pure measurement model: warm-up/measured samples and explicit outcomes.
+- [x] Deterministic summaries excluding warm-ups and unsuccessful samples;
   retain outcome counts and flag insufficient samples for tail percentiles.
 - [ ] Timing dimensions: database execution, client elapsed, first row, full
   consumption; unavailable dimensions remain optional and separate.
-- [ ] Validated limits, immutable query/config snapshot and capability matrix.
+- [x] Validated serial-run iteration, warm-up, timeout, delay and total budgets.
+- [ ] Immutable query/config snapshot and capability matrix.
 - [ ] Versioned API types and audited Profile/Benchmark/cancel/save actions.
 
 ## Milestone 2 — profile and Performance panel
@@ -91,3 +92,14 @@ Status: implementation started; no new execution action is available yet.
 - [ ] Run formatting, strict workspace Clippy and workspace tests at milestones.
 - [ ] Commit verified milestones and update this checklist honestly.
 - [ ] Graduate stable cross-layer decisions into docs/DECISIONS.md.
+
+## Implementation log
+
+- Initial core foundation: `crates/core/src/performance.rs` provides serial-run
+  budget validation and single-dimension timing summaries. Four focused tests
+  cover rejected budgets, warm-up/outcome exclusion, missing/zero/large timings,
+  variance and nearest-rank percentiles. p95 requires 100 timed successes and
+  p99 requires 1,000; these display floors do not promise statistical confidence.
+  No execution endpoint, persistence or Performance UI is wired yet.
+  Verification: formatting check, strict workspace Clippy and workspace tests
+  passed for this foundation (including all 29 core and 472 editor tests).

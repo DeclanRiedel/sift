@@ -240,6 +240,8 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Idle-in-transaction alerts (bounded API subscriptions)
 - [ ] Server dashboard
 - [x] Query-performance history (scoped hourly API summaries)
+- [~] Query performance workbench: profiling, repeatable benchmarks, saved runs
+  and comparisons — [implementation checklist](query-performance.md)
 
 ### Security and administration
 

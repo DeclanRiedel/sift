@@ -3,4 +3,5 @@
 
 pub mod catalog;
 pub mod comparison;
+pub mod performance;
 pub mod schema_diff;
