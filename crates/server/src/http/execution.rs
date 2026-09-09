@@ -279,6 +279,27 @@ pub(super) async fn check_integrity(
     retained_json_response(&state.sessions, session, bytes)
 }
 
+pub(super) async fn sql_server_recovery(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::SqlServerRecoveryRequest>,
+) -> ApiResult<Json<sift_protocol::SqlServerRecoveryReport>> {
+    let _guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(session)?.map(|id| id.0);
+    let report = finish_operation_as(
+        &state.sessions,
+        Operation::SqlServerRecovery {
+            session,
+            connection,
+            request: request.clone(),
+        },
+        crate::sql_server_recovery::run(&state.sessions, session, connection, request).await,
+        actor,
+        |_| None,
+    )?;
+    Ok(Json(report))
+}
+
 pub(super) async fn kill_process(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

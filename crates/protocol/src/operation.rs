@@ -195,6 +195,11 @@ pub enum InstanceConfigurationAction {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
+    SqlServerRecovery {
+        session: SessionId,
+        connection: ConnectionId,
+        request: crate::SqlServerRecoveryRequest,
+    },
     CheckIntegrity {
         session: SessionId,
         connection: ConnectionId,
@@ -755,6 +760,7 @@ impl Operation {
             Self::ExecuteQuery { .. } => OperationKind::ExecuteQuery,
             Self::PostgresMaintenance { .. } => OperationKind::ExecuteQuery,
             Self::CheckIntegrity { .. } => OperationKind::ExecuteQuery,
+            Self::SqlServerRecovery { .. } => OperationKind::ExecuteQuery,
             Self::ExportQuery { .. } => OperationKind::ExportQuery,
             Self::Complete { .. } => OperationKind::Complete,
             Self::CompleteSemanticDocument { .. } => OperationKind::Complete,
@@ -1086,6 +1092,19 @@ impl Operation {
             Operation::ExecuteQuery { session, .. } => {
                 summary("execute", "query", Some(session.0 as i64))
             }
+            Operation::SqlServerRecovery {
+                connection,
+                request,
+                ..
+            } => summary(
+                match request {
+                    crate::SqlServerRecoveryRequest::Backup { apply: true, .. } => "backup",
+                    crate::SqlServerRecoveryRequest::Restore { apply: true, .. } => "restore",
+                    _ => "preview",
+                },
+                "sql_server_database",
+                Some(connection.0 as i64),
+            ),
             Operation::CheckIntegrity { connection, .. } => {
                 summary("check", "database_integrity", Some(connection.0 as i64))
             }

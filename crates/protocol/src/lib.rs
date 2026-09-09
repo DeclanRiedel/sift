@@ -27,6 +27,8 @@ pub mod execution;
 pub mod extension;
 pub mod handshake;
 pub mod integrity;
+pub mod sql_server_recovery;
+pub use sql_server_recovery::{RestoreFileMove, SqlServerRecoveryReport, SqlServerRecoveryRequest};
 pub mod maintenance;
 pub use integrity::{IntegrityCheckReport, IntegrityCheckRequest, IntegrityOutcome};
 pub mod migration;

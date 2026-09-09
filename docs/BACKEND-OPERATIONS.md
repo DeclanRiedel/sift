@@ -236,6 +236,48 @@ No retry or shutdown delivery guarantee is implied. This slice exports HTTP
 request method/status/timing spans, not query contents, result streaming duration,
 or a full distributed parent/child trace of driver internals.
 
+## SQL Server backup and restore
+
+`POST /v1/sessions/{session}/connections/{connection}/recovery/sql-server` and
+SDK `sql_server_recovery` require a SQL Server connection to `master` with
+`VIEW ANY DATABASE` plus native backup/restore privileges. Both actions default
+to preview when `apply` is omitted:
+
+```json
+{"action":"backup","database":"app","archive_path":"/var/opt/mssql/backup/app.bak"}
+```
+
+Backup uses COPY_ONLY and CHECKSUM and **appends** a backup set if the media file
+already exists (`NOINIT`, `NOSKIP`). It never formats or overwrites existing
+backup sets. Preview checks the source and returns SQL without creating a file;
+it does not prove the server can write the selected directory.
+
+```json
+{"action":"restore","database":"app_recovered","archive_path":"/var/opt/mssql/backup/app.bak","backup_set":1,"moves":[{"logical_name":"app","destination":"/var/opt/mssql/data/app_recovered.mdf"},{"logical_name":"app_log","destination":"/var/opt/mssql/data/app_recovered.ldf"}]}
+```
+
+Restore preview reads HEADERONLY and FILELISTONLY and runs VERIFYONLY with the
+explicit MOVE destinations. It requires an undamaged full backup with checksums,
+a compatible server major version, an absent target with a name distinct from
+the archive source (server-collation comparison), and exactly one destination
+for every data/log file. No system databases, partial/log/PITR restore, FILESTREAM,
+automatic single-user mode, database deletion or `REPLACE` is offered. The native
+distinct-name/no-REPLACE safeguard also prevents overwriting a database created
+between preflight and apply.
+
+Paths are absolute **SQL Server-side** paths, not paths on the Sift client/server.
+Keep the archive immutable and destinations quiescent during preview/apply;
+preview is not a filesystem reservation or proof of complete data integrity.
+Cancellation/failure can leave a new database in RESTORING state or a partial
+backup set. Inspect it explicitly; Sift never automatically deletes the new
+database, files or media. Backups are not encrypted by this command.
+
+Each action is audited and uses ExecuteQuery policy admission and the configured
+request timeout/cancellation. Read-only or schema-restricted policies fail closed
+when they cannot authorize native commands. See Microsoft's
+[BACKUP](https://learn.microsoft.com/en-us/sql/t-sql/statements/backup-transact-sql?view=sql-server-ver17)
+and [RESTORE safeguards and VERIFYONLY/MOVE](https://learn.microsoft.com/en-us/sql/t-sql/statements/restore-statements-arguments-transact-sql?view=sql-server-ver17).
+
 ## PostgreSQL dump and restore
 
 Operator CLI:
@@ -291,3 +333,7 @@ and validated destination metadata for restores.
 - Disposable real PostgreSQL dump/restore, dry-run and rollback test:
   `cargo test -p sift-server --lib --features live-pg postgres_backup::tests::real_postgres`.
   It creates its own private cluster; it does not use your configured database.
+- Disposable SQL Server backup/append/new-name restore, integrity and resume:
+  `cargo test -p sift-server --lib --features live-mssql sql_server_recovery`.
+  Requires Docker and the locally installed SQL Server 2022 image. It creates
+  and removes a container with no host volumes; no configured database is used.

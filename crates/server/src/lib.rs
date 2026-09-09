@@ -60,6 +60,7 @@ pub mod search;
 pub mod session;
 pub mod shutdown;
 pub mod sql_policy;
+pub mod sql_server_recovery;
 pub mod state_backup;
 pub mod telemetry;
 pub mod transfer;

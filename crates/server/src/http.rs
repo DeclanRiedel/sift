@@ -1200,6 +1200,10 @@ pub fn app(state: AppState) -> Router {
             post_with(check_integrity, doc("checkIntegrity", "Run a scoped native integrity check without repair")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/recovery/sql-server",
+            post_with(sql_server_recovery, doc("sqlServerRecovery", "Preview or apply copy-only backup or restore to a new database name")),
+        )
+        .api_route(
             "/v1/sessions/:id/queries",
             post_with(execute_query, doc("executeQuery", "Execute query over synchronous HTTP")),
         )

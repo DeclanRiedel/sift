@@ -293,8 +293,8 @@ Parquet has bounded typed API export and transactional flat-type import; see
 - [x] Durable task history
 - [x] Task cancellation and recovery
 - [x] PostgreSQL dump and restore
-- [ ] SQL Server backup and restore
-- [~] Restore preview and target validation (PostgreSQL operator preflight)
+- [x] SQL Server backup and restore (copy-only backup/new-name restore API)
+- [x] Restore preview and target validation (PostgreSQL/SQL Server backend workflows)
 - [x] VACUUM and ANALYZE actions (explicit-target PostgreSQL API)
 - [x] REINDEX actions (explicit-target PostgreSQL API)
 - [~] Table and index maintenance (PostgreSQL API; broader provider/UI work remains)

@@ -10,7 +10,8 @@ Milestone 2 complete: durable CSV recipe resume with target-side checkpoints.
 Real SQLite tests cover failed chunks, persisted progress, reconnect/replay
 without unique keys, and changed source/owner rejection. Formatting and strict
 server Clippy passed. PostgreSQL checkpoint/reconnect/replay acceptance also
-passed in milestone 8's disposable cluster. SQL Server live acceptance remains.
+passed in milestone 8's disposable cluster; SQL Server passed in milestone 9's
+disposable container. All three engines now have live checkpoint acceptance.
 
 Milestones 3/4 complete: bounded NDJSON subscriptions over audited process
 sampling, configurable thresholds, deduplicated/resolved transitions and
@@ -33,13 +34,22 @@ CHECKDB API/SDK checks, no repair or extension installation, bounded structured
 findings and typed audit. Real SQLite checks cover clean data, a reported
 constraint violation left untouched, and denied out-of-range PRAGMAs. Report
 unit tests and strict server/SDK Clippy passed. Live PostgreSQL heap acceptance
-passed in milestone 8; SQL Server live acceptance remains pending.
+passed in milestone 8; SQL Server CHECKDB and process-list acceptance passed
+in milestone 9's disposable container.
 
 Milestone 8 complete: PostgreSQL restore preflight validates destination identity,
 version, empty-state and write/CREATE availability before dry-run/apply reports.
 Unit validation tests and disposable-cluster preview, restore, refusal and
 checkpoint/maintenance/heap acceptance passed. Compatibility is a conservative
 preflight, not a guarantee for extensions, collations or concurrent DDL.
+
+Milestone 9 complete: preview-first SQL Server copy-only/checksummed backup and
+restore to a distinct new database name with explicit file relocation. Native
+header/file/VERIFYONLY validation, guarded apply, API/SDK and typed audit are in
+place. Unit tests and disposable SQL Server 2022 backup/append/restore/refusal,
+CHECKDB/process sampling and checkpoint acceptance passed. Strict server/SDK
+Clippy with both live feature gates passed. No user databases or host volumes
+were used; the fixture container was removed.
 
 ## Order and acceptance
 
