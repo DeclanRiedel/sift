@@ -2215,6 +2215,7 @@ pub enum PaneEvent {
     EditorStateChanged {
         item_id: u64,
         dirty: Option<bool>,
+        problems_changed: bool,
     },
     RoomUpdateRequested {
         item_id: u64,
@@ -4536,6 +4537,7 @@ impl Pane {
                 cx.emit(PaneEvent::EditorStateChanged {
                     item_id,
                     dirty: Some(dirty),
+                    problems_changed: true,
                 });
                 cx.emit(PaneEvent::RoomUpdateRequested {
                     item_id,
@@ -4547,6 +4549,7 @@ impl Pane {
             | EditorEvent::DiagnosticsChanged => cx.emit(PaneEvent::EditorStateChanged {
                 item_id,
                 dirty: None,
+                problems_changed: matches!(event, EditorEvent::DiagnosticsChanged),
             }),
             EditorEvent::OpenCommandPalette => cx.emit(PaneEvent::OpenCommandPaletteRequested),
             EditorEvent::SaveRequested => cx.emit(PaneEvent::SaveItemRequested { item_id }),
@@ -21349,6 +21352,16 @@ impl WorkspaceShell {
     }
 
     fn sync_global_problems_editor(&mut self, cx: &mut Context<Self>) {
+        // Most editing sessions have no Problems document. Avoid collecting,
+        // cloning and formatting every tab's diagnostics unless one exists.
+        if !self.panes.iter().any(|pane| {
+            pane.read(cx)
+                .items
+                .iter()
+                .any(|item| item.kind == ItemKind::Problems)
+        }) {
+            return;
+        }
         let text = self.global_problems_text(cx);
         for pane in &self.panes {
             pane.update(cx, |pane, cx| {
@@ -27371,7 +27384,11 @@ impl WorkspaceShell {
                     }
                 });
             }
-            PaneEvent::EditorStateChanged { item_id, dirty } => {
+            PaneEvent::EditorStateChanged {
+                item_id,
+                dirty,
+                problems_changed,
+            } => {
                 if self
                     .editor_for_item(*item_id, cx)
                     .is_some_and(|editor| editor.read(cx).vim_mode() != VimMode::Insert)
@@ -27391,7 +27408,9 @@ impl WorkspaceShell {
                         }
                     });
                 }
-                self.sync_global_problems_editor(cx);
+                if *problems_changed {
+                    self.sync_global_problems_editor(cx);
+                }
                 cx.notify();
             }
             PaneEvent::RoomUpdateRequested { item_id, update } => {

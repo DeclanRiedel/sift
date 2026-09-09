@@ -30,7 +30,7 @@ product requirements.
    sole owner of SQL context and correctness.
 2. Automatic completion waits 180 ms and is revision-cancelled. Ctrl+Space is
    immediate. A typing burst therefore produces at most one admitted request.
-3. Diagnostics wait for 650 ms of idle time. Editing hides prior-revision
+3. Diagnostics wait for 1200 ms of idle time. Editing hides prior-revision
    markers immediately; incomplete SQL is not painted as a persistent error.
 4. Query tabs carry a credential-free semantic target: instance, tenant,
    connection profile, provider, and database when known. The executor rejects
@@ -51,3 +51,34 @@ product requirements.
 - A wrong-profile catalog is an error, never a fallback.
 - Manual completion continues to work when automatic activation declines a
   context.
+
+## Interaction refinement (2026-09-09)
+
+Measure with the existing GPUI `frame_budget` harness under `release-dev`, the
+same optimized profile used by the desktop demo. Its timings exclude GPU
+submission, compositor and physical input/display latency; they are not an
+end-to-end typing latency claim.
+
+Implementation order and constraints:
+
+1. Separate cursor/mode changes from diagnostics changes. Do not format the
+   global Problems document when none is open, or refresh it for cursor motion.
+   Status and Vim mode must still update normally.
+2. Mirror ordinary single-cursor Insert text as a known splice, retaining
+   ModalKit's command/undo state. Complex commands, selections, IME, and
+   multi-cursor edits retain the authoritative snapshot path. Verify actual
+   buffer length/cursor changes before taking this path: ModalKit represents
+   Replace mode as Insert with a different insertion style. Avoid platform and
+   unnamed-register clipboard copies on ordinary Insert character events.
+3. Reuse visible completion candidates only for a proven identifier extension.
+   The server remains authoritative and refreshes the bounded, potentially
+   incomplete list in the background. Never reuse across punctuation, cursor
+   movement, target changes, or external edits. Do not pretend a capped response
+   is a complete catalog cache.
+4. Preserve viewport rendering and bound cache invalidation where syntax and
+   layout dependencies permit. Cache relative wrap ranges by source line and
+   exact text, invalidated by width/font/style changes. Avoid new parsing or
+   database I/O on input.
+
+References: [CodeMirror completion validity](https://codemirror.net/examples/autocompletion/)
+and [Zed text snapshots](https://zed.dev/blog/zed-decoded-rope-sumtree).
