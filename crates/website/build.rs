@@ -19,22 +19,23 @@ impl Bundle {
         &mut self,
         route: &str,
         file: &str,
-        content: &str,
+        content: impl AsRef<[u8]>,
         mime: &str,
         title: Option<&str>,
     ) -> io::Result<()> {
+        let content = content.as_ref();
         let raw = self.out.join(file);
         fs::create_dir_all(raw.parent().unwrap())?;
         fs::write(&raw, content)?;
         let gzip = raw.with_file_name(format!("{}.gz", raw.file_name().unwrap().to_str().unwrap()));
         let br = raw.with_file_name(format!("{}.br", raw.file_name().unwrap().to_str().unwrap()));
         let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
-        encoder.write_all(content.as_bytes())?;
+        encoder.write_all(content)?;
         fs::write(&gzip, encoder.finish()?)?;
         let mut compressed = Vec::new();
         {
             let mut encoder = brotli::CompressorWriter::new(&mut compressed, 4096, 11, 22);
-            encoder.write_all(content.as_bytes())?;
+            encoder.write_all(content)?;
         }
         fs::write(&br, compressed)?;
         let etag = format!("W/\"{}\"", digest(content));
@@ -47,7 +48,13 @@ impl Bundle {
         Ok(())
     }
 
-    fn fingerprint(&mut self, name: &str, content: &str, mime: &str) -> io::Result<String> {
+    fn fingerprint(
+        &mut self,
+        name: &str,
+        content: impl AsRef<[u8]>,
+        mime: &str,
+    ) -> io::Result<String> {
+        let content = content.as_ref();
         let (stem, extension) = name.rsplit_once('.').unwrap();
         let path = format!("/assets/{stem}.{}.{extension}", &digest(content)[..16]);
         self.add(&path, &path[1..], content, mime, None)?;
@@ -55,13 +62,15 @@ impl Bundle {
     }
 }
 
-fn digest(content: &str) -> String {
-    format!("{:x}", Sha256::digest(content.as_bytes()))
+fn digest(content: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(content))
 }
 
 fn main() -> io::Result<()> {
     let docs = Path::new("../../docs/keyboard-wiki");
     println!("cargo:rerun-if-changed={}", docs.display());
+    let icon = Path::new("../desktop/assets/sift-icon.ico");
+    println!("cargo:rerun-if-changed={}", icon.display());
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let mut bundle = Bundle {
         out: out.join("site"),
@@ -69,6 +78,7 @@ fn main() -> io::Result<()> {
         // Leave unversioned HTML/fragments with the CDN's revalidation default.
         headers: "/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n\n".into(),
     };
+    let favicon = bundle.fingerprint("sift.ico", fs::read(icon)?, "image/x-icon")?;
     let cells = bundle.fingerprint(
         "cells.svg",
         &fs::read_to_string(docs.join("cells.svg"))?,
@@ -94,7 +104,7 @@ fn main() -> io::Result<()> {
             .replace("href=\"styles.css\"", &format!("href={styles:?}"))
             .replace("href=\"/styles.css\"", &format!("href={styles:?}"))
             .replace("src=\"/wiki.js\"", &format!("src={script:?}"))
-            .replace("</head>", "<link rel=\"icon\" href=\"data:,\" />\n</head>");
+            .replace("href=\"sift.ico\"", &format!("href={favicon:?}"));
         let title = html
             .split_once("<title>")
             .expect("wiki title")
@@ -134,6 +144,8 @@ fn main() -> io::Result<()> {
     fs::write(out.join("assets.rs"), bundle.assets)?;
     fs::write(out.join("headers.txt"), bundle.headers)?;
     let aliases = [
+        ("/favicon.ico", favicon.as_str()),
+        ("/sift.ico", favicon.as_str()),
         ("/wiki.js", script.as_str()),
         ("/styles.css", styles.as_str()),
         ("/cells.svg", cells.as_str()),

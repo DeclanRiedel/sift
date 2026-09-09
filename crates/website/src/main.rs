@@ -122,9 +122,6 @@ fn serve(cx: &Cx) -> Result<Response> {
             .header("Cache-Control", "no-cache")
             .body(Body::empty())?);
     }
-    if path == "/favicon.ico" {
-        return Ok(Response::builder().status(204).body(Body::empty())?);
-    }
     let Some(asset) = ASSETS.iter().find(|asset| asset.path == path) else {
         return Ok(Response::builder().status(404).body(Body::empty())?);
     };
@@ -210,6 +207,40 @@ async fn site_head(cx: &Cx) -> Result<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn favicon_uses_desktop_icon_in_pages_and_exported_assets() {
+        let target = ALIASES
+            .iter()
+            .find(|(from, _)| *from == "/favicon.ico")
+            .unwrap()
+            .1;
+        assert!(ALIASES.contains(&("/sift.ico", target)));
+        let icon = ASSETS.iter().find(|asset| asset.path == target).unwrap();
+        assert_eq!(icon.mime, "image/x-icon");
+        assert_eq!(
+            icon.raw,
+            include_bytes!("../../desktop/assets/sift-icon.ico")
+        );
+        assert_eq!(icon.file, &target[1..]);
+        for path in [
+            "/",
+            "/keyboard",
+            "/configuration",
+            "/hosting",
+            "/shared-rooms",
+        ] {
+            let page = ASSETS.iter().find(|asset| asset.path == path).unwrap();
+            let html = std::str::from_utf8(page.raw).unwrap();
+            assert_eq!(html.matches("rel=\"icon\"").count(), 1);
+            assert!(html.contains(&format!("rel=\"icon\" href=\"{target}\"")));
+            assert!(!html.contains("href=\"data:,\""));
+        }
+        assert!(
+            include_str!(concat!(env!("OUT_DIR"), "/redirects.txt"))
+                .contains(&format!("/favicon.ico {target} 302"))
+        );
+    }
 
     #[test]
     fn encoding_preferences_and_exclusions() {
