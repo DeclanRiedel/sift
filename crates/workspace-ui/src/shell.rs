@@ -61,6 +61,7 @@ mod items;
 mod modal_layout;
 mod modals;
 mod pane_layout;
+mod result_editing;
 mod sql_drafts;
 mod status_bar;
 use sql_drafts::*;
@@ -8154,21 +8155,6 @@ impl gpui::Render for Pane {
                                     )
                             })
                     }))
-                    .children(
-                        active
-                            .as_ref()
-                            .is_some_and(|item| item.kind == ItemKind::Problems)
-                            .then(|| {
-                                div()
-                                    .debug_selector(|| "problems-tab-divider".into())
-                                    .absolute()
-                                    .left_0()
-                                    .right_0()
-                                    .bottom_0()
-                                    .h(px(1.))
-                                    .bg(colors.subtle_border)
-                            }),
-                    )
             }))
             .children(pending_close.map(|item| {
                 let item_id = item.id;
@@ -8333,7 +8319,8 @@ impl gpui::Render for Pane {
                                 });
                                 let problems = item.kind == ItemKind::Problems;
                                 let copy_editor = editor.clone();
-                                let message_controls = problems.then(|| div().h(px(28.)).flex_none().px_2().flex().items_center().gap_1().bg(colors.toolbar)
+                                let message_controls = problems.then(|| div().h(px(28.)).flex_none().px_2().flex().items_center().gap_1().bg(colors.toolbar).relative()
+                                    .child(div().debug_selector(|| "problems-tab-divider".into()).absolute().left_0().right_0().bottom_0().h(px(1.)).bg(colors.subtle_border))
                                     .child(div().flex_1())
                                     .child(Button::new("copy-all-messages", "Copy all").debug_selector("copy-all-messages").tone(ButtonTone::Ghost).start_icon(IconName::Copy)
                                         .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_editor.read(cx).document().text().to_owned()))))
@@ -9684,6 +9671,9 @@ pub struct WorkspaceShell {
     room_document_sender: Option<tokio::sync::mpsc::UnboundedSender<RoomDocumentCommand>>,
     room_document_generations: HashMap<i64, u64>,
     running_queries: HashMap<u64, u64>,
+    // Captured from executed SQL, never from subsequent editor text. None
+    // explicitly invalidates a previous table target on non-editable reruns.
+    result_edit_sources: HashMap<u64, Option<DatabaseObjectSource>>,
     pending_result_focus: Option<u64>,
     modal_offset: gpui::Point<Pixels>,
     data_window: Option<gpui::WindowHandle<data_window::DataWindow>>,
@@ -10936,6 +10926,7 @@ impl WorkspaceShell {
             room_document_sender: None,
             room_document_generations: HashMap::new(),
             running_queries: HashMap::new(),
+            result_edit_sources: HashMap::new(),
             pending_result_focus: None,
             modal_offset: gpui::point(px(0.), px(0.)),
             data_window: None,
@@ -15940,6 +15931,11 @@ impl WorkspaceShell {
         self.next_execution_id = self.next_execution_id.saturating_add(1);
         let source = self.versioned_execution_context(item_id, cx);
         let profile_id = self.query_profile_id(item_id, cx);
+        let edit_source = if transform.is_none() {
+            self.executed_result_source(item_id, &sql, cx)
+        } else {
+            None
+        };
         if sender
             .send(ExecutorCommand::Execute {
                 item_id,
@@ -15954,6 +15950,7 @@ impl WorkspaceShell {
             .is_ok()
         {
             self.running_queries.insert(item_id, execution_id);
+            self.result_edit_sources.insert(item_id, edit_source);
             // Dropping any held page cancels the run that produced it.
             self.held_result_pages.remove(&item_id);
             self.status.execution = "Running…".into();
@@ -28156,6 +28153,7 @@ impl WorkspaceShell {
         if let Some(item_id) = removed_item_id {
             self.held_result_pages.remove(&item_id);
             self.theme_items.remove(&item_id);
+            self.result_edit_sources.remove(&item_id);
         }
         if let (Some(sender), Some(item_id)) = (&self.executor_sender, removed_item_id) {
             self.semantic_analyze_tasks.remove(&item_id);
@@ -29981,12 +29979,18 @@ impl WorkspaceShell {
         ) {
             return;
         }
-        let Some(source) = pane.read(cx).database_source(item_id) else {
-            self.show_error_toast("Only database table results can be edited".into(), cx);
+        let Some(source) = self.result_edit_source(pane, item_id, cx) else {
+            self.show_error_toast(
+                "Cannot edit this result: no unambiguous table target".into(),
+                cx,
+            );
             return;
         };
         if source.object_kind != sift_protocol::ObjectKind::Table {
-            self.show_error_toast("Only base-table results can be edited".into(), cx);
+            self.show_error_toast(
+                result_editing::read_only_message(source.object_kind).into(),
+                cx,
+            );
             return;
         }
         let Some(results) = pane.read(cx).results.get(&item_id).cloned() else {
@@ -30019,6 +30023,7 @@ impl WorkspaceShell {
             .map(|edit| edit.value.clone())
             .unwrap_or_else(|| selected.original.clone());
         let json_cell = selected_cells.len() == 1
+            && pane.read(cx).database_source(item_id).is_some()
             && matches!(&selected.original, sift_protocol::Value::Json(_));
         self.result_cell_edit_target = Some(ResultCellEditTarget {
             item_id,
@@ -30113,12 +30118,18 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(source) = pane.read(cx).database_source(item_id) else {
-            self.show_error_toast("Only database table results can be edited".into(), cx);
+        let Some(source) = self.result_edit_source(pane, item_id, cx) else {
+            self.show_error_toast(
+                "Cannot edit this result: no unambiguous table target".into(),
+                cx,
+            );
             return;
         };
         if source.object_kind != sift_protocol::ObjectKind::Table {
-            self.show_error_toast("Only base-table results can be edited".into(), cx);
+            self.show_error_toast(
+                result_editing::read_only_message(source.object_kind).into(),
+                cx,
+            );
             return;
         }
         if self
@@ -30261,12 +30272,18 @@ impl WorkspaceShell {
         ) {
             return;
         }
-        let Some(source) = pane.read(cx).database_source(item_id) else {
-            self.show_error_toast("Only database table results can be edited".into(), cx);
+        let Some(source) = self.result_edit_source(pane, item_id, cx) else {
+            self.show_error_toast(
+                "Cannot edit this result: no unambiguous table target".into(),
+                cx,
+            );
             return;
         };
         if source.object_kind != sift_protocol::ObjectKind::Table {
-            self.show_error_toast("Only base-table rows can be deleted".into(), cx);
+            self.show_error_toast(
+                result_editing::read_only_message(source.object_kind).into(),
+                cx,
+            );
             return;
         }
         let Some(original_row) = pane
@@ -30326,6 +30343,17 @@ impl WorkspaceShell {
 
     fn staged_result_change_count(&self) -> usize {
         self.staged_result_edits.len() + self.staged_result_deletes.len()
+    }
+
+    fn staged_result_profile_id(&self) -> Option<i64> {
+        self.staged_result_edits
+            .first()
+            .map(|edit| edit.source.profile_id)
+            .or_else(|| {
+                self.staged_result_deletes
+                    .first()
+                    .map(|delete| delete.source.profile_id)
+            })
     }
 
     fn clear_staged_result_edits_for_item(&mut self, item_id: u64, cx: &mut Context<Self>) {
@@ -30721,7 +30749,7 @@ impl WorkspaceShell {
         if sender
             .send(ExecutorCommand::PreviewResultEdits {
                 item_id,
-                profile_id: self.query_profile_id(item_id, cx),
+                profile_id: self.staged_result_profile_id(),
                 edit_set,
             })
             .is_err()
@@ -30763,7 +30791,7 @@ impl WorkspaceShell {
         if sender
             .send(ExecutorCommand::ApplyResultEdits {
                 item_id,
-                profile_id: self.query_profile_id(item_id, cx),
+                profile_id: self.staged_result_profile_id(),
                 edit_set,
             })
             .is_err()
@@ -50669,6 +50697,11 @@ mod tests {
             .unwrap()
             .contains("The table is unavailable"));
         let clear = cx.debug_bounds("clear-problems").unwrap();
+        let divider = cx.debug_bounds("problems-tab-divider").unwrap();
+        assert!(
+            divider.top() >= clear.bottom(),
+            "divider belongs below the controls"
+        );
         cx.simulate_click(clear.center(), Modifiers::default());
         cx.run_until_parked();
         workspace.read_with(&cx, |shell, cx| {
@@ -52777,6 +52810,159 @@ mod tests {
             assert!(expected.is_empty());
             assert_eq!(shell.staged_result_item_id(), Some(1));
             assert_eq!(shell.staged_result_change_count(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn postgres_query_result_retains_its_executed_table_and_rejects_views(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(32);
+        let (pane, item_id) = workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.new_query(window, cx);
+            let pane = shell.panes[shell.active_pane].clone();
+            let item_id = pane.read(cx).active_item().unwrap().id;
+            assert!(pane.read(cx).database_source(item_id).is_none());
+            shell.executor_sender = Some(sender);
+            shell.query_semantic_targets.insert(
+                item_id,
+                SemanticConnectionTarget {
+                    instance_id: "local".into(),
+                    tenant_id: 1,
+                    profile_id: 2,
+                    profile_name: "postgres".into(),
+                    provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                    database: Some("demo".into()),
+                },
+            );
+            let mut snapshot =
+                sift_protocol::SchemaSnapshot::empty(sift_protocol::SchemaScope::shallow());
+            snapshot.trees.push(sift_protocol::CatalogTree {
+                name: "demo".into(),
+                schemas: vec![sift_protocol::SchemaTree {
+                    name: "lab".into(),
+                    objects: vec![
+                        sift_protocol::ObjectInfo::new("orders", sift_protocol::ObjectKind::Table),
+                        sift_protocol::ObjectInfo::new(
+                            "order_view",
+                            sift_protocol::ObjectKind::View,
+                        ),
+                    ],
+                }],
+            });
+            shell.connection_schema = ConnectionSchemaState::Ready {
+                profile_id: 2,
+                snapshot: Box::new(snapshot),
+            };
+            shell.send_execution_now(
+                item_id,
+                "SELECT * FROM \"lab\".\"orders\" LIMIT 100;".into(),
+                vec![],
+                None,
+                None,
+                cx,
+            );
+            assert!(matches!(
+                commands.try_recv(),
+                Ok(ExecutorCommand::Execute {
+                    profile_id: Some(2),
+                    ..
+                })
+            ));
+            let results = pane.read(cx).results.get(&item_id).unwrap().clone();
+            results.update(cx, |results, cx| {
+                results.set_state(
+                    ResultState::Ready(crate::results::ResultData {
+                        columns: vec![crate::results::ResultColumn {
+                            name: "id".into(),
+                            type_label: "int8".into(),
+                            nullable: false,
+                        }],
+                        rows: vec![sift_protocol::Row::new(vec![sift_protocol::Value::Int64(
+                            1,
+                        )])],
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                results.select_cell(0, 0, cx);
+            });
+            // Editor text and active connection are not result provenance.
+            assert!(
+                shell.result_edit_source(&pane, item_id, cx).is_none(),
+                "pending run cannot retarget an old grid"
+            );
+            shell.running_queries.remove(&item_id);
+            pane.read(cx)
+                .editor(item_id)
+                .unwrap()
+                .update(cx, |editor, cx| {
+                    editor.replace_text_from_owner("SELECT * FROM lab.order_view", cx)
+                });
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 99,
+                name: "other".into(),
+            };
+            shell.open_result_cell_editor(&pane, item_id, window, cx);
+            assert_eq!(
+                shell
+                    .result_cell_edit_target
+                    .as_ref()
+                    .unwrap()
+                    .source
+                    .object,
+                "orders"
+            );
+            results.update(cx, |results, cx| results.set_inline_cell_edit_text("2", cx));
+            (pane, item_id)
+        });
+        // Input changes update the range buffers through GPUI subscriptions.
+        cx.run_until_parked();
+        while commands.try_recv().is_ok() {}
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.submit_result_cell_edit(&pane, item_id, "2", window, cx);
+            assert_eq!(shell.staged_result_edits.len(), 1);
+            assert_eq!(shell.staged_result_edits[0].source.profile_id, 2);
+            assert_eq!(shell.staged_result_edit_set().unwrap().table.name, "orders");
+            assert!(commands.try_recv().is_err(), "editing only stages changes");
+            shell.preview_result_cell_edit(cx);
+            assert!(matches!(
+                commands.try_recv(),
+                Ok(ExecutorCommand::PreviewResultEdits {
+                    profile_id: Some(2),
+                    ..
+                })
+            ));
+            shell.discard_staged_result_edits(window, cx);
+            shell.send_execution_now(
+                item_id,
+                "SELECT count(*) FROM lab.orders".into(),
+                vec![],
+                None,
+                None,
+                cx,
+            );
+            shell.running_queries.remove(&item_id);
+            assert!(shell.result_edit_source(&pane, item_id, cx).is_none());
+            shell.send_execution_now(
+                item_id,
+                "SELECT * FROM lab.order_view".into(),
+                vec![],
+                None,
+                None,
+                cx,
+            );
+            shell.running_queries.remove(&item_id);
+            shell.open_result_cell_editor(&pane, item_id, window, cx);
+            assert_eq!(
+                shell.toasts.last().unwrap().message,
+                "Cannot edit rows in a view"
+            );
+            shell.selected_instance_id = Some("other-server".into());
+            assert!(shell
+                .executed_result_source(item_id, "SELECT * FROM lab.orders", cx)
+                .is_none());
         });
     }
 

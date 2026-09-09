@@ -4254,7 +4254,12 @@ impl ResultsView {
             .child(tab.label())
     }
 
-    fn result_set_tab_row(index: usize, selected: bool, colors: ThemeColors) -> Stateful<Div> {
+    fn result_set_tab_row(
+        index: usize,
+        count: usize,
+        selected: bool,
+        colors: ThemeColors,
+    ) -> Stateful<Div> {
         div()
             .id(("result-set-tab", index))
             .debug_selector(move || format!("result-set-tab-{}", index + 1))
@@ -4279,7 +4284,11 @@ impl ResultsView {
             })
             .when(!selected, |el| el.text_color(colors.muted_text))
             .hover(|el| el.text_color(colors.text))
-            .child(format!("Results {}", index + 1))
+            .child(if count == 1 {
+                "Result".to_owned()
+            } else {
+                format!("Results {}", index + 1)
+            })
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4310,6 +4319,7 @@ impl ResultsView {
                             .children((0..self.result_set_count()).map(|index| {
                                 Self::result_set_tab_row(
                                     index,
+                                    self.result_set_count(),
                                     self.tab == ResultTab::Data && index == self.active_result_set,
                                     colors,
                                 )

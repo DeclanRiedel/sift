@@ -35,6 +35,7 @@ must be used when Qlementine has no appropriate semantic icon.
 | `refresh.svg` | `action/refresh.svg` |
 | `search.svg` | `navigation/search.svg` |
 | `server.svg` | `hardware/server.svg` |
+| `settings.svg` | `navigation/settings.svg` (24px) |
 | `terminal.svg` | `software/command-line.svg` |
 | `user.svg` | `misc/user.svg` |
 | `users.svg` | `misc/users.svg` |
@@ -42,4 +43,4 @@ must be used when Qlementine has no appropriate semantic icon.
 | `warning.svg` | `misc/warning.svg` |
 | `workspace.svg` | `software/desktop.svg` |
 
-`query-history.svg` and `settings.svg` are original Sift artwork (AGPL-3.0-only).
+`query-history.svg` is original Sift artwork (AGPL-3.0-only).
