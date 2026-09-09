@@ -128,3 +128,20 @@ overlapped the run, so these are diagnostic observations, not a portable gate.
 ```sh
 cargo bench -p sift-workspace-ui --features benchmark --profile release-dev --bench frame_budget -- vim_rapid_completion_large_document --sample-size 10 --warm-up-time 1 --measurement-time 2
 ```
+
+## Quiet deletion and Insert input (2026-09-09)
+
+After `cdc081f`, the corrected `vim_typing_large_document` fixture (explicit
+Backspace binding and unchanged-length assertion) measured a mean 13.973 ms per
+insert/backspace pair under `release-dev`, with a 95% confidence interval of
+13.868–14.080 ms. Across 584 observed CPU frames, dirty-to-draw p50 was 6.971 ms,
+p95 7.930 ms, p99 9.519 ms and maximum 12.763 ms; 15 frames exceeded 8.33 ms.
+Ten samples used one-second requested warmup and two-second requested measurement.
+
+This validates the actual insert/delete workload, not an end-to-end latency or
+speedup claim. An earlier probe and compilation overlapped part of this run;
+Criterion's automatic comparison is not a controlled before/after result.
+Network, workspace shell, GPU submission and compositor latency remain excluded.
+Fixture construction makes wall-clock benchmark execution much longer than the
+measured individual edits. Behaviour tests separately cover completion suppression,
+Unicode/newline/selection deletion, boundary no-ops, undo and native Replace mode.
