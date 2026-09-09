@@ -16246,6 +16246,12 @@ impl WorkspaceShell {
         if matches!(request, SemanticRequestKind::Complete { .. }) {
             self.semantic_completion_tasks.remove(&item_id);
         }
+        if request == SemanticRequestKind::Analyze {
+            // Every SQL edit schedules analysis before any fresh completion.
+            // Drop the previous token's timer, including when deletion must
+            // not schedule a replacement completion at all.
+            self.semantic_completion_tasks.remove(&item_id);
+        }
         if !request.is_debounced() {
             self.dispatch_semantic_request(item_id, revision, request, cx);
             return;

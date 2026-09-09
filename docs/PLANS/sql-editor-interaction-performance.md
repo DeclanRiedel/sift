@@ -115,3 +115,21 @@ It covers local keyword menus and acceptance, not network or compositor latency.
   arrived controls. Document synchronization remains serial and non-interruptible
   so an HTTP update cannot leave an unknown committed server revision. Dropping
   a read future does not promise cancellation of server-side computation.
+
+## Deletion and manual input
+
+Backspace and forward Delete in ordinary single-cursor Insert mode apply one known range
+edit to both buffers, including selected text and Unicode/newline boundaries.
+They do not clone a Vim text snapshot, import the platform clipboard, or emit an
+intermediate cursor-only update. Pure deletion through the general Vim path also
+suppresses automatic completion. An existing popup never overrides that policy.
+Replace mode retains native Vim deletion semantics and also suppresses completion.
+
+Each actual deletion invalidates old replies and resets the existing 1200 ms
+diagnostic idle timer. No automatic completion is scheduled when that timer
+fires: analysis resumes, not autofill. New text or explicit completion can request
+suggestions again. Analysis intents cancel the previous token's completion timer;
+dispatch also checks that the editor still expects that revision/caret, so Escape
+or boundary deletion cannot leave an orphaned completion lookup. No-op deletion
+does not create a revision or undo record. Insert-mode key/text input skips platform
+clipboard imports; Normal-mode paste retains clipboard synchronization.

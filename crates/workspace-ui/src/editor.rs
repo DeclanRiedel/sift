@@ -1573,8 +1573,12 @@ impl QueryEditor {
     pub fn allows_semantic_request(&self, request: &SemanticRequestKind) -> bool {
         self.semantic_enabled()
             && match request {
-                SemanticRequestKind::Complete { .. } | SemanticRequestKind::AutoComplete { .. } => {
+                SemanticRequestKind::Complete { cursor }
+                | SemanticRequestKind::AutoComplete { cursor } => {
                     self.vim_mode == VimMode::Insert
+                        && self
+                            .semantic
+                            .completion_requested_at(self.revision, *cursor)
                 }
                 SemanticRequestKind::Hover { .. } => self.vim_mode == VimMode::Normal,
                 _ => true,
@@ -2477,7 +2481,8 @@ impl QueryEditor {
             && (reopen_completion
                 || self.manifest_schema
                 || should_auto_complete(self.document.text(), self.document.cursor()));
-        if (reopen_completion || auto_complete)
+        if allow_auto_completion
+            && (reopen_completion || auto_complete)
             && (self.language != EditorLanguage::Sql || self.vim_mode == VimMode::Insert)
         {
             if self.manifest_schema {
@@ -2654,13 +2659,14 @@ impl QueryEditor {
     }
 
     fn apply_vim_snapshot(&mut self, snapshot: VimSnapshot, cx: &mut Context<Self>) {
-        self.apply_vim_snapshot_with_edit(snapshot, false, cx);
+        self.apply_vim_snapshot_with_edit(snapshot, false, true, cx);
     }
 
     fn apply_vim_snapshot_with_edit(
         &mut self,
         snapshot: VimSnapshot,
         mirrored_edit: bool,
+        allow_auto_completion: bool,
         cx: &mut Context<Self>,
     ) {
         let open_command_palette = snapshot.open_command_palette;
@@ -2669,6 +2675,7 @@ impl QueryEditor {
             self.vim_mode != snapshot.mode || self.vim_entered != snapshot.entered;
         self.vim_entered = snapshot.entered;
         let mut document_changed = mirrored_edit;
+        let mut inserted_text = mirrored_edit;
         if let Some(snapshot_text) = snapshot
             .text
             .filter(|text| !self.read_only && text != self.document.text())
@@ -2706,6 +2713,7 @@ impl QueryEditor {
                     .nth(suffix_chars - 1)
                     .map_or(snapshot_text.len(), |(offset, _)| prefix + offset)
             };
+            inserted_text = new_suffix > prefix;
             self.document
                 .replace_range(prefix..old_suffix, &snapshot_text[prefix..new_suffix]);
             self.adjust_snippet_tabstops(
@@ -2749,7 +2757,7 @@ impl QueryEditor {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
         if document_changed {
-            self.edited(cx);
+            self.edited_with_auto_completion(allow_auto_completion && inserted_text, cx);
         } else {
             self.selection_changed(cx);
         }
@@ -2760,7 +2768,9 @@ impl QueryEditor {
         code: modalkit::crossterm::event::KeyCode,
         cx: &mut Context<Self>,
     ) -> bool {
-        let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+        let clipboard = (self.vim_mode != VimMode::Insert)
+            .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+            .flatten();
         let Some(vim) = self.vim.as_mut() else {
             return false;
         };
@@ -2770,8 +2780,13 @@ impl QueryEditor {
         let rows = (f32::from(self.scroll_handle.bounds().size.height)
             / f32::from(EDITOR_LINE_HEIGHT)) as usize;
         vim.set_viewport_rows(rows);
+        let deletion = matches!(
+            code,
+            modalkit::crossterm::event::KeyCode::Backspace
+                | modalkit::crossterm::event::KeyCode::Delete
+        );
         let snapshot = vim.input_key(code);
-        self.apply_vim_snapshot(snapshot, cx);
+        self.apply_vim_snapshot_with_edit(snapshot, false, !deletion, cx);
         true
     }
 
@@ -2791,14 +2806,16 @@ impl QueryEditor {
                     self.document.replace_range(range, text);
                     // The snapshot contains only cursor/mode state. Applying
                     // it must not manufacture a second text edit or undo step.
-                    self.apply_vim_snapshot_with_edit(snapshot, true, cx);
+                    self.apply_vim_snapshot_with_edit(snapshot, true, true, cx);
                 } else {
                     self.apply_vim_snapshot(snapshot, cx);
                 }
                 return true;
             }
         }
-        let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+        let clipboard = (self.vim_mode != VimMode::Insert)
+            .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+            .flatten();
         let Some(vim) = self.vim.as_mut() else {
             return false;
         };
@@ -2810,23 +2827,38 @@ impl QueryEditor {
         true
     }
 
-    fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        if self.keymap == EditorKeymap::Vim
-            && self.vim_mode == VimMode::Insert
-            && self.document.selection().is_empty()
-            && self.secondary_cursors.is_empty()
+    /// Delete a known range directly in both models. No full text snapshot,
+    /// clipboard round trip, or intermediate cursor-only notification.
+    fn delete_in_insert(&mut self, backward: bool, cx: &mut Context<Self>) -> bool {
+        if self.vim_mode != VimMode::Insert
+            || !self.secondary_cursors.is_empty()
+            || !self.vim.as_mut().is_some_and(VimEngine::is_plain_insert)
         {
-            let snapshot = self
-                .vim
-                .as_mut()
-                .expect("Vim keymap must own an engine")
-                .backspace_without_text_snapshot();
-            self.document.backspace();
-            self.apply_vim_snapshot(snapshot, cx);
-            self.edited_with_auto_completion(false, cx);
+            return false;
+        }
+        let selection = self.document.selection();
+        let cursor = self.document.cursor();
+        let range = if !selection.is_empty() {
+            selection
+        } else if backward {
+            self.document.prev_boundary(cursor)..cursor
+        } else {
+            cursor..self.document.next_boundary(cursor)
+        };
+        if range.is_empty() {
+            if self.semantic.cancel_completion() {
+                cx.notify();
+            }
+            return true;
+        }
+        self.adjust_snippet_tabstops(range.clone(), 0);
+        self.replace_completion_text(range, "", cx);
+        self.edited_with_auto_completion(false, cx);
+        true
+    }
+
+    fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only || self.delete_in_insert(true, cx) {
             return;
         }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Backspace, cx) {
@@ -2837,14 +2869,14 @@ impl QueryEditor {
     }
 
     fn delete_forward(&mut self, _: &DeleteForward, _: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
+        if self.read_only || self.delete_in_insert(false, cx) {
             return;
         }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Delete, cx) {
             return;
         }
         self.document.delete_forward();
-        self.edited(cx);
+        self.edited_with_auto_completion(false, cx);
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
@@ -4060,7 +4092,7 @@ impl EntityInputHandler for QueryEditor {
         self.document.replace_range(range, new_text);
         self.marked_range = None;
         self.resync_keymap_after_external_change(cx);
-        self.edited(cx);
+        self.edited_with_auto_completion(!new_text.is_empty(), cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -5774,6 +5806,93 @@ mod tests {
         assert!(requests
             .iter()
             .all(|(_, request)| !matches!(request, SemanticRequestKind::AutoComplete { .. })));
+    }
+
+    #[gpui::test]
+    fn deletion_bursts_close_completion_and_resume_only_idle_analysis(cx: &mut TestAppContext) {
+        let (mut cx, editor, spy) = editor_with_spy("SELECT * FROM use", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx);
+            editor.complete(&Complete, window, cx);
+            let revision = editor.revision;
+            editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Completions {
+                    context: sift_protocol::completion::CompletionContext::ExpectingTable,
+                    cursor: 17,
+                    replaced: sift_protocol::TextRange { start: 14, end: 17 },
+                    candidates: vec![candidate("users")],
+                },
+                cx,
+            );
+            editor.backspace(&Backspace, window, cx);
+            assert!(editor.semantic.completion().is_none());
+            editor.backspace(&Backspace, window, cx);
+            editor.set_cursor_offset(14, cx);
+            editor.delete_forward(&DeleteForward, window, cx);
+            assert_eq!(editor.document.text(), "SELECT * FROM ");
+            assert!(editor.semantic.completion().is_none());
+            editor.vim_text("α", cx);
+            editor.backspace(&Backspace, window, cx);
+            assert_eq!(editor.document.text(), "SELECT * FROM ");
+        });
+        cx.run_until_parked();
+        spy.read_with(&cx, |spy, _| {
+            assert!(!spy
+                .0
+                .iter()
+                .any(|(_, request)| matches!(request, SemanticRequestKind::AutoComplete { .. })));
+            assert!(spy
+                .0
+                .iter()
+                .any(|(_, request)| *request == SemanticRequestKind::Analyze));
+        });
+    }
+
+    #[gpui::test]
+    fn insert_deletion_handles_selections_newlines_and_boundaries(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("α\nβ", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx);
+            editor.set_cursor_offset(2, cx);
+            editor.delete_forward(&DeleteForward, window, cx);
+            assert_eq!(editor.document.text(), "αβ");
+            editor.vim_text("X", cx);
+            assert_eq!(editor.document.text(), "αXβ");
+            editor.document.set_selection(0..3, false);
+            editor.backspace(&Backspace, window, cx);
+            assert_eq!(editor.document.text(), "β");
+            let revision = editor.revision;
+            editor.complete(&Complete, window, cx);
+            editor.backspace(&Backspace, window, cx);
+            assert_eq!(editor.revision, revision);
+            assert!(!editor.allows_semantic_request(&SemanticRequestKind::Complete { cursor: 0 }));
+            editor.delete_forward(&DeleteForward, window, cx);
+            assert_eq!(editor.document.text(), "");
+            editor.vim_undo(&VimUndo, window, cx);
+            assert_eq!(editor.document.text(), "β");
+            editor.vim_text("Z", cx);
+            assert_eq!(editor.document.text(), "Zβ");
+        });
+    }
+
+    #[gpui::test]
+    fn replace_mode_backspace_keeps_native_vim_semantics(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("abc", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.set_cursor_offset(0, cx);
+            let mut reference = VimEngine::new("abc", 0);
+            reference.input_text("RX");
+            let expected = reference.input_key(modalkit::crossterm::event::KeyCode::Backspace);
+            editor.vim_text("R", cx);
+            editor.vim_text("X", cx);
+            editor.backspace(&Backspace, window, cx);
+            assert_eq!(
+                editor.document.text(),
+                expected.text.as_deref().unwrap_or("Xbc")
+            );
+            assert!(editor.semantic.completion().is_none());
+        });
     }
 
     /// Collects the semantic intents an editor raises so tests can assert on

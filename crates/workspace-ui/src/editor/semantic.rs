@@ -212,6 +212,10 @@ impl SemanticState {
         self.completion.as_ref()
     }
 
+    pub fn completion_requested_at(&self, revision: u64, cursor: u32) -> bool {
+        self.pending_completion == Some((revision, cursor))
+    }
+
     /// Keep a bounded preview while the server refreshes a simple identifier
     /// extension. This is not a complete catalog cache: punctuation, deletions,
     /// quoted replacements and edits away from the old range end must requery.

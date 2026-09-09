@@ -11,7 +11,7 @@ use modalkit::{
     editing::{
         application::EmptyInfo,
         buffer::{CursorGroupId, EditBuffer},
-        context::{EditContextBuilder, Resolve},
+        context::{EditContext, EditContextBuilder, Resolve},
         cursor::{Cursor, CursorGroup},
         store::{RegisterCell, RegisterPutFlags, SharedStore},
     },
@@ -86,6 +86,14 @@ impl VimEngine {
 
     pub fn set_viewport_rows(&mut self, rows: usize) {
         self.viewport.dimensions.1 = rows.max(1);
+    }
+
+    pub fn is_plain_insert(&mut self) -> bool {
+        // Replace mode also reports Insert. Inspect a cloned context so probing
+        // the insertion style does not consume pending Vim action state.
+        let context: EditContext = self.bindings.state().clone().into();
+        self.bindings.mode() == ModalVimMode::Insert
+            && context.get_insert_style() == Some(InsertStyle::Insert)
     }
 
     /// Apply a completion splice without rebuilding the rope or key machine.
@@ -270,16 +278,6 @@ impl VimEngine {
         let (text_changed, clipboard_changed) =
             self.input_key_event(KeyEvent::new(code, KeyModifiers::NONE));
         self.snapshot(text_changed, false, clipboard_changed)
-    }
-
-    /// Apply insert-mode Backspace without cloning the complete ModalKit
-    /// buffer into the snapshot. The caller already knows the exact local
-    /// deletion and mirrors it into the canonical CRDT document directly.
-    pub fn backspace_without_text_snapshot(&mut self) -> VimSnapshot {
-        debug_assert_eq!(self.bindings.mode(), ModalVimMode::Insert);
-        let (_, clipboard_changed) =
-            self.input_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        self.snapshot(false, false, clipboard_changed)
     }
 
     fn input_key_event(&mut self, event: KeyEvent) -> (bool, bool) {
@@ -595,16 +593,6 @@ mod tests {
             assert_eq!(snapshot.cursor, (0, 4));
             assert_eq!(snapshot.text, None);
         }
-    }
-
-    #[test]
-    fn insert_backspace_can_skip_the_full_text_snapshot() {
-        let mut vim = VimEngine::new("abc", 3);
-        assert_eq!(vim.input_text("i").mode, VimMode::Insert);
-        let snapshot = vim.backspace_without_text_snapshot();
-        assert_eq!(snapshot.text, None);
-        assert_eq!(snapshot.cursor, (0, 2));
-        assert_eq!(vim.input_text("x").text.as_deref(), Some("abx"));
     }
 
     #[test]
