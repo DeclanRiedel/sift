@@ -12,6 +12,8 @@
   </tr>
 </table>
 
+![Sift desktop showing PostgreSQL schema browsing, the SQL editor, and staged table edits](docs/assets/sift-desktop.png)
+
 ## Features
 
 - PostgreSQL, SQL Server, and SQLite connections
