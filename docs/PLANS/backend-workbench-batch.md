@@ -9,8 +9,8 @@ workspace tests passed (2026-09-09).
 Milestone 2 complete: durable CSV recipe resume with target-side checkpoints.
 Real SQLite tests cover failed chunks, persisted progress, reconnect/replay
 without unique keys, and changed source/owner rejection. Formatting and strict
-server Clippy passed. PostgreSQL and SQL Server paths compile but have not yet
-received live checkpoint acceptance tests; retain that validation gap explicitly.
+server Clippy passed. PostgreSQL checkpoint/reconnect/replay acceptance also
+passed in milestone 8's disposable cluster. SQL Server live acceptance remains.
 
 Milestones 3/4 complete: bounded NDJSON subscriptions over audited process
 sampling, configurable thresholds, deduplicated/resolved transitions and
@@ -26,14 +26,20 @@ Milestone 6 complete: typed explicit-target PostgreSQL VACUUM/ANALYZE/REINDEX,
 preview by default, ExecuteQuery policy admission, transaction rejection and
 supervised apply. Quoting/read-only-policy unit tests and HTTP preview/timeout/
 transaction tests passed, as did strict server/SDK Clippy. Live maintenance
-acceptance remains to be run against a disposable PostgreSQL fixture.
+acceptance passed in milestone 8's disposable PostgreSQL fixture.
 
 Milestone 7 complete: scoped SQLite, PostgreSQL heap/amcheck and SQL Server
 CHECKDB API/SDK checks, no repair or extension installation, bounded structured
 findings and typed audit. Real SQLite checks cover clean data, a reported
 constraint violation left untouched, and denied out-of-range PRAGMAs. Report
-unit tests and strict server/SDK Clippy passed; live PostgreSQL/SQL Server
-acceptance remains explicitly pending.
+unit tests and strict server/SDK Clippy passed. Live PostgreSQL heap acceptance
+passed in milestone 8; SQL Server live acceptance remains pending.
+
+Milestone 8 complete: PostgreSQL restore preflight validates destination identity,
+version, empty-state and write/CREATE availability before dry-run/apply reports.
+Unit validation tests and disposable-cluster preview, restore, refusal and
+checkpoint/maintenance/heap acceptance passed. Compatibility is a conservative
+preflight, not a guarantee for extensions, collations or concurrent DDL.
 
 ## Order and acceptance
 

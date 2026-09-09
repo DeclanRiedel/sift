@@ -111,7 +111,7 @@ pub async fn run(
                     "PostgreSQL heap checks require an already-installed amcheck extension".into(),
                 ));
             };
-            (format!("SELECT msg::text FROM {}.verify_heapam($1::regclass, on_error_stop => false, check_toast => false) LIMIT 1001", quoted_identifier(namespace)?), vec![Value::Text(target)])
+            (format!("SELECT msg::text FROM {}.verify_heapam($1::text::regclass, on_error_stop => false, check_toast => false) LIMIT 1001", quoted_identifier(namespace)?), vec![Value::Text(target)])
         }
     };
     let result = execute(store, session, connection, sql, params).await?;

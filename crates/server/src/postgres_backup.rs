@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 use tokio::process::Command;
+pub mod target;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -118,6 +119,8 @@ pub struct Report {
     pub action: &'static str,
     pub applied: bool,
     pub archive_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<target::TargetValidation>,
 }
 
 pub async fn run(
@@ -236,6 +239,7 @@ async fn dump(spec: &Spec, output: &Path) -> anyhow::Result<Report> {
         action: "dump",
         applied: true,
         archive_bytes: bytes,
+        target: None,
     })
 }
 
@@ -265,6 +269,7 @@ async fn restore_archive(spec: &Spec, archive: &Path, apply: bool) -> anyhow::Re
     let mut validate = spec.command("pg_restore");
     validate.arg("--file=-").arg(snapshot.path());
     execute(&mut validate, Duration::from_secs(spec.timeout_seconds)).await?;
+    let target = target::check(spec, snapshot.path()).await?;
     if apply {
         let mut command = spec.command("pg_restore");
         command
@@ -284,6 +289,7 @@ async fn restore_archive(spec: &Spec, archive: &Path, apply: bool) -> anyhow::Re
         action: "restore",
         applied: apply,
         archive_bytes: bytes,
+        target: Some(target),
     })
 }
 
@@ -399,6 +405,23 @@ mod tests {
         );
         assert!(dump(&spec, &archive).await.is_err());
         spec.database = "destination".into();
+        // Preview validates the target, including objects that need not collide
+        // with anything in the archive. No --clean or implicit overwrite.
+        execute(
+            &mut sql(&spec, "CREATE TABLE unrelated(id int)"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert!(restore_archive(&spec, &archive, false).await.is_err());
+        execute(
+            &mut sql(&spec, "DROP TABLE unrelated"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let validated = restore_archive(&spec, &archive, false).await.unwrap();
+        assert!(validated.target.unwrap().empty);
         assert!(
             !restore_archive(&spec, &archive, false)
                 .await
@@ -415,6 +438,158 @@ mod tests {
         execute(&mut sql(&spec, "DO $$ BEGIN IF (SELECT label FROM sample WHERE id=9223372036854775807) IS DISTINCT FROM 'restored' THEN RAISE EXCEPTION 'bad restore'; END IF; END $$"), Duration::from_secs(5)).await.unwrap();
         assert!(restore_archive(&spec, &archive, true).await.is_err());
         execute(&mut sql(&spec, "DO $$ BEGIN IF (SELECT count(*) FROM sample) <> 1 THEN RAISE EXCEPTION 'failed restore changed rows'; END IF; END $$"), Duration::from_secs(5)).await.unwrap();
+        // Reuse this disposable cluster for native maintenance, heap diagnostics
+        // and checkpoint acceptance; never depend on the developer's databases.
+        use sift_protocol::*;
+        let store = crate::SessionStore::new(
+            crate::DriverRegistry::builder()
+                .register(sift_driver_postgres::PgDriver::new())
+                .build(),
+        );
+        let session = store
+            .open_session(OpenSessionRequest {
+                tag: None,
+                tenant_id: None,
+            })
+            .id;
+        let connection_spec = ConnectionSpec {
+            host: spec.host.clone(),
+            port: Some(spec.port),
+            database: Some(spec.database.clone()),
+            user: spec.user.clone(),
+            password: None,
+            ssl_mode: Some(SslMode::Disable),
+            engine_specific: None,
+        };
+        let connection = store
+            .open_connection(session, Engine::Postgres, connection_spec.clone())
+            .await
+            .unwrap()
+            .id;
+        for (action, name) in [
+            (
+                PostgresMaintenanceAction::Vacuum { analyze: true },
+                "sample",
+            ),
+            (PostgresMaintenanceAction::Analyze, "sample"),
+            (
+                PostgresMaintenanceAction::ReindexTable {
+                    concurrently: false,
+                },
+                "sample",
+            ),
+            (
+                PostgresMaintenanceAction::ReindexIndex { concurrently: true },
+                "sample_pkey",
+            ),
+        ] {
+            assert!(
+                crate::maintenance::run(
+                    &store,
+                    session,
+                    connection,
+                    PostgresMaintenanceRequest {
+                        action,
+                        schema: "public".into(),
+                        name: name.into(),
+                        apply: true
+                    }
+                )
+                .await
+                .unwrap()
+                .applied
+            );
+        }
+        let heap = IntegrityCheckRequest::PostgresHeap {
+            schema: "public".into(),
+            name: "sample".into(),
+        };
+        assert!(
+            crate::integrity::run(&store, session, connection, heap.clone())
+                .await
+                .is_err()
+        );
+        execute(
+            &mut sql(&spec, "CREATE EXTENSION amcheck"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::integrity::run(&store, session, connection, heap)
+                .await
+                .unwrap()
+                .outcome,
+            IntegrityOutcome::NoIssuesReported
+        );
+        execute(
+            &mut sql(
+                &spec,
+                "CREATE TABLE resume_rows(value bigint CONSTRAINT pause_resume CHECK(value<100))",
+            ),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let request = CsvImportRequest {
+            table: "public.resume_rows".into(),
+            data: format!(
+                "value\n{}",
+                (0..150).map(|n| format!("{n}\n")).collect::<String>()
+            )
+            .into_bytes(),
+            header: true,
+            delimiter: ',',
+            null_value: None,
+            create_table: false,
+            conflict_policy: CsvConflictPolicy::Abort,
+            dry_run: false,
+            resume_from_row: 0,
+            type_mappings: Default::default(),
+        };
+        let run_id = "8433f24a-2465-4a26-a6f9-cb24012aee08";
+        assert!(crate::csv_import::import_with_checkpoint(
+            &store,
+            session,
+            connection,
+            request.clone(),
+            "public.resume_checkpoint",
+            run_id,
+            "fixture"
+        )
+        .await
+        .is_err());
+        execute(&mut sql(&spec, "DO $$ BEGIN IF (SELECT count(*) FROM resume_rows) <> 100 OR (SELECT next_row FROM resume_checkpoint) <> 100 THEN RAISE EXCEPTION 'bad checkpoint'; END IF; END $$; ALTER TABLE resume_rows DROP CONSTRAINT pause_resume"), Duration::from_secs(5)).await.unwrap();
+        let other = store
+            .open_connection(session, Engine::Postgres, connection_spec)
+            .await
+            .unwrap()
+            .id;
+        let resumed = crate::csv_import::import_with_checkpoint(
+            &store,
+            session,
+            other,
+            request.clone(),
+            "public.resume_checkpoint",
+            run_id,
+            "fixture",
+        )
+        .await
+        .unwrap();
+        assert_eq!((resumed.rows_inserted, resumed.resume_from_row), (50, 150));
+        let replay = crate::csv_import::import_with_checkpoint(
+            &store,
+            session,
+            other,
+            request,
+            "public.resume_checkpoint",
+            run_id,
+            "fixture",
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay.rows_inserted, 0);
+        store.close_session(session).unwrap();
     }
     #[test]
     fn rejects_connection_string_targets_and_inherited_passwords() {

@@ -247,7 +247,7 @@ sift-server postgres restore --spec /absolute/path/target.json --archive /path/n
 ```
 
 The specification contains `tools_directory` (absolute directory containing
-`pg_dump` and `pg_restore`), `host`, `port`, `database`, `user`, optional absolute
+`pg_dump`, `pg_restore` and `psql`), `host`, `port`, `database`, `user`, optional absolute
 `password_file` (private libpq pgpass format), optional `ssl_mode` (defaults to
 `verify-full`) and `timeout_seconds` (defaults to 3600, maximum 86400). Select
 compatible PostgreSQL client tools explicitly. Connection strings, arbitrary
@@ -255,10 +255,17 @@ tool flags and inherited libpq configuration are not accepted.
 
 Dump creates a private custom archive and publishes it without overwriting an
 existing file. Restore takes a private snapshot of the input (maximum 16 GiB)
-and decodes it without executing SQL by default. This validates the archive,
-not compatibility with the destination. `--apply` restores to the explicitly
+and decodes it without executing archive SQL by default. A read-only destination
+query verifies database/user identity, an empty target, CREATE privilege and a
+writable primary. The target major version must be at least both the archive's
+source and dump-tool major versions (10+ release archives only). The archive
+table of contents is bounded to 1 MiB. `--apply` restores to the explicitly
 named, already-existing database in one transaction, without creating/dropping
-the database or replaying ownership/ACLs. Prefer an empty destination. Failure
+the database or replaying ownership/ACLs. A non-empty destination is rejected.
+Preflight is not proof of complete compatibility: extension availability,
+encoding/collation differences and object-level privileges may still cause a
+transactional restore failure. Keep the destination quiescent between preflight
+and apply; the check is not a reservation against other administrators. Failure
 rolls the transaction back; dump/restore never silently replaces existing data.
 
 Only restore archives from trusted sources: PostgreSQL archives contain
@@ -271,7 +278,8 @@ this command; protect them as database contents.
 Commands are audited against configured Sift metadata. Subprocesses have bounded
 run time and are killed/reaped on timeout or Ctrl-C. Password bytes never enter
 arguments or Sift metadata; raw subprocess output is suppressed because it can
-contain credentials or SQL. Reports expose action, apply status and archive size.
+contain credentials or SQL. Reports expose action, apply status, archive size
+and validated destination metadata for restores.
 
 ## Automated acceptance
 
