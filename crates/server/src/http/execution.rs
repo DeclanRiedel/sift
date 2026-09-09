@@ -256,6 +256,29 @@ pub(super) async fn postgres_maintenance(
     Ok(Json(report))
 }
 
+pub(super) async fn check_integrity(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::IntegrityCheckRequest>,
+) -> ApiResult<Response> {
+    let _guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(session)?.map(|id| id.0);
+    let report = finish_operation_as(
+        &state.sessions,
+        Operation::CheckIntegrity {
+            session,
+            connection,
+            request: request.clone(),
+        },
+        crate::integrity::run(&state.sessions, session, connection, request).await,
+        actor,
+        |report| Some(report.findings.len() as i64),
+    )?;
+    let bytes =
+        serde_json::to_vec(&report).map_err(|error| ApiError::Internal(error.to_string()))?;
+    retained_json_response(&state.sessions, session, bytes)
+}
+
 pub(super) async fn kill_process(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

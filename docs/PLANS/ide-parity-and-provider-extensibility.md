@@ -298,7 +298,7 @@ Parquet has bounded typed API export and transactional flat-type import; see
 - [x] VACUUM and ANALYZE actions (explicit-target PostgreSQL API)
 - [x] REINDEX actions (explicit-target PostgreSQL API)
 - [~] Table and index maintenance (PostgreSQL API; broader provider/UI work remains)
-- [ ] Integrity checks
+- [x] Integrity checks (scoped native API checks; no repair)
 
 The checked Sift recovery features are implemented operator CLI workflows
 (ADRs 038/039/058), not a complete recovery UI. Backup policies are offline,

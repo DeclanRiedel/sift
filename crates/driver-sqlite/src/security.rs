@@ -113,11 +113,16 @@ pub fn install(
                 match name.as_str() {
                     "table_info" | "table_xinfo" | "index_list" | "index_info" | "index_xinfo"
                     | "foreign_key_list" => true,
+                    // These arguments bound diagnostic output, not persistent
+                    // database settings. Keep arbitrary PRAGMA writes denied.
+                    "integrity_check" | "quick_check" => pragma_value.map_or(true, |value| {
+                        value
+                            .parse::<u32>()
+                            .is_ok_and(|limit| (1..=1000).contains(&limit))
+                    }),
                     "schema_version" | "user_version" | "application_id" | "compile_options"
-                    | "database_list" | "table_list" | "integrity_check" | "quick_check"
-                    | "foreign_key_check" | "page_count" | "freelist_count" => {
-                        pragma_value.is_none()
-                    }
+                    | "database_list" | "table_list" | "foreign_key_check" | "page_count"
+                    | "freelist_count" => pragma_value.is_none(),
                     _ => false,
                 }
             }

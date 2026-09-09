@@ -195,6 +195,11 @@ pub enum InstanceConfigurationAction {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
+    CheckIntegrity {
+        session: SessionId,
+        connection: ConnectionId,
+        request: crate::IntegrityCheckRequest,
+    },
     /// Typed PostgreSQL SQL execution/preview. Uses ExecuteQuery admission.
     PostgresMaintenance {
         session: SessionId,
@@ -749,6 +754,7 @@ impl Operation {
             Self::GenerateDdl { .. } => OperationKind::GenerateDdl,
             Self::ExecuteQuery { .. } => OperationKind::ExecuteQuery,
             Self::PostgresMaintenance { .. } => OperationKind::ExecuteQuery,
+            Self::CheckIntegrity { .. } => OperationKind::ExecuteQuery,
             Self::ExportQuery { .. } => OperationKind::ExportQuery,
             Self::Complete { .. } => OperationKind::Complete,
             Self::CompleteSemanticDocument { .. } => OperationKind::Complete,
@@ -1079,6 +1085,9 @@ impl Operation {
             }
             Operation::ExecuteQuery { session, .. } => {
                 summary("execute", "query", Some(session.0 as i64))
+            }
+            Operation::CheckIntegrity { connection, .. } => {
+                summary("check", "database_integrity", Some(connection.0 as i64))
             }
             Operation::PostgresMaintenance {
                 connection,

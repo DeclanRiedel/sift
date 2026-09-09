@@ -28,6 +28,13 @@ supervised apply. Quoting/read-only-policy unit tests and HTTP preview/timeout/
 transaction tests passed, as did strict server/SDK Clippy. Live maintenance
 acceptance remains to be run against a disposable PostgreSQL fixture.
 
+Milestone 7 complete: scoped SQLite, PostgreSQL heap/amcheck and SQL Server
+CHECKDB API/SDK checks, no repair or extension installation, bounded structured
+findings and typed audit. Real SQLite checks cover clean data, a reported
+constraint violation left untouched, and denied out-of-range PRAGMAs. Report
+unit tests and strict server/SDK Clippy passed; live PostgreSQL/SQL Server
+acceptance remains explicitly pending.
+
 ## Order and acceptance
 
 1. Transfer quarantine: authorized report download containing source row numbers,

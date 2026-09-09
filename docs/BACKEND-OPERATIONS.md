@@ -2,6 +2,36 @@
 
 These features are API/operator workflows; no desktop interaction is required.
 
+## Native integrity checks
+
+`POST /v1/sessions/{session}/connections/{connection}/integrity` and SDK
+`check_integrity` accept one explicitly selected check:
+
+- `{"check":"sqlite","quick":false}`: `main.integrity_check`, or `quick_check`
+  when quick is true. Attached databases and foreign-key violations are outside
+  this check; see [SQLite PRAGMA](https://www.sqlite.org/pragma.html).
+- `{"check":"postgres_heap","schema":"public","name":"items"}`: PostgreSQL
+  14+ `verify_heapam` using the catalog-discovered, already-installed `amcheck`
+  extension. No automatic installation. Checks the selected heap, not indexes,
+  partitions recursively, or TOAST values; see [amcheck](https://www.postgresql.org/docs/current/amcheck.html).
+- `{"check":"sql_server","physical_only":false}`: current-database
+  `DBCC CHECKDB` with no repair option. Physical-only skips additional logical
+  checks. Native limitations apply, including memory-optimized tables and
+  unsupported database editions; see [CHECKDB](https://learn.microsoft.com/en-us/sql/t-sql/database-console-commands/dbcc-checkdb-transact-sql?view=sql-server-ver17).
+
+Reports distinguish `no_issues_reported`, `issues_reported`, and `incomplete`.
+The first means only that this scoped check returned without reported issues,
+not proof of database health. Diagnostic findings are capped at 1,000; caps or
+returned warnings mark the report incomplete. Native errors, timeouts and
+unexpected result shapes are failed requests, never successful checks. SQL
+Server corruption errors use the normal API error channel, not findings rows.
+Findings may expose data details and should be treated as database contents.
+
+Checks use ExecuteQuery policy admission, native database privileges, normal
+timeouts/cancellation, result limits and typed audit. Active transactions are
+rejected. Native diagnostic work can take locks and consume substantial I/O;
+it does not request repair, but it is not a zero-impact operation.
+
 ## PostgreSQL maintenance
 
 `POST /v1/sessions/{session}/connections/{connection}/maintenance/postgres`

@@ -84,6 +84,56 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         .await
         .unwrap();
     // Parquet stays typed through the real SQLite driver and atomic importer.
+    for quick in [false, true] {
+        let report = client
+            .check_integrity(session, connection, IntegrityCheckRequest::Sqlite { quick })
+            .await
+            .unwrap();
+        assert_eq!(report.outcome, IntegrityOutcome::NoIssuesReported);
+        assert!(report.findings.is_empty());
+    }
+    // Introduce a recoverable constraint violation, not file corruption.
+    for sql in [
+        "PRAGMA main.integrity_check(0)",
+        "PRAGMA main.quick_check(1001)",
+        "PRAGMA user_version=123",
+    ] {
+        assert!(client.execute(session, connection, sql).await.is_err());
+    }
+    let local = rusqlite::Connection::open(&path).unwrap();
+    local.execute_batch("PRAGMA ignore_check_constraints=ON; CREATE TABLE integrity_bad(v INTEGER CHECK(v>0)); INSERT INTO integrity_bad VALUES(-1);").unwrap();
+    let report = client
+        .check_integrity(
+            session,
+            connection,
+            IntegrityCheckRequest::Sqlite { quick: false },
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.outcome, IntegrityOutcome::IssuesReported);
+    assert!(report
+        .findings
+        .iter()
+        .any(|finding| finding.contains("integrity_bad")));
+    assert_eq!(
+        local
+            .query_row("SELECT v FROM integrity_bad", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        -1
+    );
+    local.execute_batch("DROP TABLE integrity_bad").unwrap();
+    drop(local);
+    assert!(client
+        .check_integrity(
+            session,
+            connection,
+            IntegrityCheckRequest::SqlServer {
+                physical_only: true
+            }
+        )
+        .await
+        .is_err());
     {
         use futures::StreamExt;
         let stream = store

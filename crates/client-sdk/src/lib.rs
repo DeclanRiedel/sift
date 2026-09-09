@@ -158,6 +158,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listMetadataHistory",
     "getQueryPerformance",
     "postgresMaintenance",
+    "checkIntegrity",
     "listMetadataRoomMembers",
     "listMetadataRooms",
     "listMetadataSavedQueries",
@@ -3779,6 +3780,19 @@ impl Client {
     ) -> Result<sift_protocol::PostgresMaintenanceReport> {
         self.post(
             &format!("/v1/sessions/{session}/connections/{connection}/maintenance/postgres"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn check_integrity(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::IntegrityCheckRequest,
+    ) -> Result<sift_protocol::IntegrityCheckReport> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/integrity"),
             &request,
         )
         .await

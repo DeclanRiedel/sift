@@ -1196,6 +1196,10 @@ pub fn app(state: AppState) -> Router {
             post_with(postgres_maintenance, doc("postgresMaintenance", "Preview or apply explicit-target PostgreSQL maintenance")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/integrity",
+            post_with(check_integrity, doc("checkIntegrity", "Run a scoped native integrity check without repair")),
+        )
+        .api_route(
             "/v1/sessions/:id/queries",
             post_with(execute_query, doc("executeQuery", "Execute query over synchronous HTTP")),
         )

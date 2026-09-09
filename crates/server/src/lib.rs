@@ -32,6 +32,7 @@ pub mod http;
 pub mod identity;
 pub mod instance_configuration;
 pub mod instance_runtime;
+pub mod integrity;
 pub mod keyed_lock;
 pub mod maintenance;
 pub mod metadata_inspection;
