@@ -71,6 +71,8 @@ pub enum OperationKind {
     SearchSchema,
     SearchData,
     Explain,
+    BenchmarkQuery,
+    CancelBenchmark,
     ListProcesses,
     KillProcess,
     ImportCsv,
@@ -110,7 +112,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 102] = [
+    pub const ALL: [Self; 104] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -177,6 +179,8 @@ impl OperationKind {
         Self::SearchSchema,
         Self::SearchData,
         Self::Explain,
+        Self::BenchmarkQuery,
+        Self::CancelBenchmark,
         Self::ListProcesses,
         Self::KillProcess,
         Self::ImportCsv,

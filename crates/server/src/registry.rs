@@ -575,6 +575,7 @@ impl RuntimeDriver {
             OperationKind::PingConnection
             | OperationKind::ExecuteQuery
             | OperationKind::ExportQuery
+            | OperationKind::BenchmarkQuery
             | OperationKind::CloseConnection => "driver.core@1",
             OperationKind::RefreshSchema => {
                 return self.supports("driver.schema.shallow@1")
@@ -596,7 +597,7 @@ impl RuntimeDriver {
             OperationKind::Savepoint
             | OperationKind::RollbackToSavepoint
             | OperationKind::ReleaseSavepoint => "driver.savepoints@1",
-            OperationKind::CancelQuery => "driver.cancel@1",
+            OperationKind::CancelQuery | OperationKind::CancelBenchmark => "driver.cancel@1",
             OperationKind::BulkInsert | OperationKind::ImportCsv => "driver.bulk@1",
             OperationKind::Listen => "driver.notifications@1",
             OperationKind::Explain => "driver.explain@1",

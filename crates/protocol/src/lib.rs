@@ -34,7 +34,9 @@ pub use integrity::{IntegrityCheckReport, IntegrityCheckRequest, IntegrityOutcom
 pub mod migration;
 pub mod operation;
 pub mod pagination;
+pub mod performance;
 pub mod plan;
+pub use performance::*;
 pub mod policy;
 pub mod process;
 pub mod provider;

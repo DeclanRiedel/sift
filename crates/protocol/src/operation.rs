@@ -551,6 +551,17 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
     },
+    /// Repeated read execution; SQL and bind values are never included in audit.
+    BenchmarkQuery {
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+    },
+    CancelBenchmark {
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+    },
     /// Capture a query's execution plan (EXPLAIN).
     Explain {
         session: SessionId,
@@ -787,6 +798,8 @@ impl Operation {
             Self::SearchSchema { .. } => OperationKind::SearchSchema,
             Self::SearchData { .. } => OperationKind::SearchData,
             Self::Explain { .. } => OperationKind::Explain,
+            Self::BenchmarkQuery { .. } => OperationKind::BenchmarkQuery,
+            Self::CancelBenchmark { .. } => OperationKind::CancelBenchmark,
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
             Self::KillProcess { .. } => OperationKind::KillProcess,
             Self::ImportCsv { .. } => OperationKind::ImportCsv,
@@ -1193,6 +1206,12 @@ impl Operation {
             }
             Operation::Explain { connection, .. } => {
                 summary("explain", "query", Some(connection.0 as i64))
+            }
+            Operation::BenchmarkQuery { connection, .. } => {
+                summary("benchmark", "query", Some(connection.0 as i64))
+            }
+            Operation::CancelBenchmark { connection, .. } => {
+                summary("cancel_benchmark", "query", Some(connection.0 as i64))
             }
             Operation::ListProcesses { connection, .. } => {
                 summary("list", "process", Some(connection.0 as i64))

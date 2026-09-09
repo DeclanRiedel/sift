@@ -98,6 +98,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "exchangeSshProxyCapability",
     "executeQuery",
     "explainQuery",
+    "benchmarkQuery",
+    "cancelBenchmark",
     "exportQuery",
     "extensionDiagnostics",
     "findSemanticUsages",
@@ -2298,6 +2300,36 @@ impl Client {
             &request,
         )
         .await
+    }
+
+    pub async fn benchmark(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::BenchmarkRequest,
+    ) -> Result<sift_protocol::BenchmarkReport> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/benchmark"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn cancel_benchmark(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .post(
+                &format!(
+                    "/v1/sessions/{session}/connections/{connection}/benchmark/{run_id}/cancel"
+                ),
+                &serde_json::json!({}),
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn bulk_insert(

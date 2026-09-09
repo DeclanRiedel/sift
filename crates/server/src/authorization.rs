@@ -218,6 +218,8 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | SearchSchema
             | SearchData
             | Explain
+            | BenchmarkQuery
+            | CancelBenchmark
             | ListProcesses
             | KillProcess
             | ImportCsv

@@ -1180,6 +1180,14 @@ pub fn app(state: AppState) -> Router {
             post_with(post_explain, doc("explainQuery", "Capture a typed execution plan")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/benchmark",
+            post_with(post_benchmark, doc("benchmarkQuery", "Run a bounded read-query benchmark on a dedicated connection")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/benchmark/:run_id/cancel",
+            post_with(post_cancel_benchmark, doc("cancelBenchmark", "Cancel a benchmark and retain partial samples")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/processes",
             get_with(list_processes, doc("listProcesses", "List database processes")),
         )
@@ -1642,6 +1650,7 @@ fn rate_limit_class(method: &axum::http::Method, path: &str) -> sift_protocol::R
     }
     if path.ends_with("/queries")
         || path.ends_with("/explain")
+        || path.contains("/benchmark")
         || path.ends_with("/search/data")
         || path.ends_with("/edits/apply")
         || path.ends_with("/processes/kill")
@@ -9300,6 +9309,50 @@ async fn post_explain(
         |_| None,
     )?;
     Ok(Json(resp))
+}
+
+async fn post_benchmark(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::BenchmarkRequest>,
+) -> ApiResult<Json<sift_protocol::BenchmarkReport>> {
+    let operation = Operation::BenchmarkQuery {
+        session,
+        connection,
+        run_id: request.run_id,
+    };
+    let response = tokio::spawn(async move {
+        finish_operation(
+            &state.sessions,
+            operation,
+            state.sessions.benchmark(session, connection, request).await,
+            |_| None,
+        )
+    })
+    .await
+    .map_err(|_| ApiError::Internal("benchmark supervisor failed".into()))??;
+    Ok(Json(response))
+}
+
+async fn post_cancel_benchmark(
+    State(state): State<AppState>,
+    Path((session, connection, run_id)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        uuid::Uuid,
+    )>,
+) -> ApiResult<Json<serde_json::Value>> {
+    finish_operation(
+        &state.sessions,
+        Operation::CancelBenchmark {
+            session,
+            connection,
+            run_id,
+        },
+        state.sessions.cancel_benchmark(session, connection, run_id),
+        |_| None,
+    )?;
+    Ok(Json(serde_json::json!({"cancel_requested": true})))
 }
 
 async fn get_schema(

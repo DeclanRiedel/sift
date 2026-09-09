@@ -119,6 +119,91 @@ fn pg_plan_pages() -> Vec<Page> {
     ]
 }
 
+#[tokio::test]
+async fn benchmark_drains_beyond_grid_limit_and_closes_only_its_connection() {
+    let pages = || {
+        vec![
+            Page::Rows {
+                rows: (0..6000).map(|n| Row::new(vec![Value::Int64(n)])).collect(),
+            },
+            Page::Done {
+                affected_rows: None,
+                warnings: vec![],
+            },
+        ]
+    };
+    let driver = base_builder(Engine::Postgres)
+        .execute_ok(pages())
+        .execute_ok(pages())
+        .execute_ok(pages())
+        .build();
+    let (router, sid, cid) = setup(driver, "sift/postgres", 5432).await;
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/connections/{cid}/benchmark"),
+            serde_json::json!({"run_id": uuid::Uuid::new_v4(), "sql": "SELECT * FROM users",
+            "warmups": 1, "iterations": 2, "query_timeout_ms": 1000,
+            "total_budget_ms": 5000, "workload_confirmed": true}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let report: sift_protocol::BenchmarkReport = body_json(response.into_body()).await;
+    assert!(report.completed);
+    assert_eq!(report.samples.len(), 3);
+    assert!(report.samples[0].warmup);
+    assert!(!report.samples[1].warmup);
+    assert!(report
+        .samples
+        .iter()
+        .all(|s| s.rows == Some(6000) && s.first_row_ns.is_some()));
+    assert!(report.median_ns.is_some());
+    assert!(report.p95_ns.is_none());
+    let response = router
+        .oneshot(
+            Request::get(format!("/v1/sessions/{sid}/connections"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let connections: Vec<sift_protocol::ConnectionInfo> = body_json(response.into_body()).await;
+    assert_eq!(connections.len(), 1);
+    assert_eq!(connections[0].id, cid);
+}
+
+#[tokio::test]
+async fn benchmark_timeout_keeps_partial_outcome_and_rejects_unconfirmed_work() {
+    let driver = base_builder(Engine::Postgres)
+        .execute_delay(std::time::Duration::from_secs(2))
+        .execute_ok(pg_plan_pages())
+        .build();
+    let (router, sid, cid) = setup(driver, "sift/postgres", 5432).await;
+    let mut request = serde_json::json!({"run_id": uuid::Uuid::new_v4(), "sql": "SELECT 1",
+        "warmups": 0, "iterations": 2, "query_timeout_ms": 10,
+        "total_budget_ms": 100, "workload_confirmed": false});
+    let path = format!("/v1/sessions/{sid}/connections/{cid}/benchmark");
+    let rejected = router
+        .clone()
+        .oneshot(post_json(path.clone(), request.clone()))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    request["workload_confirmed"] = true.into();
+    let response = router.oneshot(post_json(path, request)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let report: sift_protocol::BenchmarkReport = body_json(response.into_body()).await;
+    assert!(!report.completed);
+    assert_eq!(report.samples.len(), 1);
+    assert_eq!(
+        report.samples[0].outcome,
+        sift_protocol::BenchmarkOutcome::TimedOut
+    );
+    assert!(report.median_ns.is_none());
+}
+
 fn graph_snapshot() -> SchemaSnapshot {
     let trees = vec![CatalogTree {
         name: "mock".into(),

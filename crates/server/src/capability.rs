@@ -264,6 +264,8 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | SearchSchema
         | SearchData
         | Explain
+        | BenchmarkQuery
+        | CancelBenchmark
         | ListProcesses
         | KillProcess
         | ImportCsv
@@ -308,6 +310,8 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | SearchSchema
         | SearchData
         | Explain
+        | BenchmarkQuery
+        | CancelBenchmark
         | ListProcesses
         | KillProcess
         | ImportCsv

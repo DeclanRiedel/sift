@@ -68,6 +68,9 @@ pub struct SessionStore {
     inner: Arc<SessionStoreInner>,
 }
 
+#[path = "benchmark.rs"]
+mod benchmark;
+
 struct SessionStoreInner {
     sessions: DashMap<SessionId, Session>,
     /// Legacy request audit ring (`/v1/audit`).
@@ -159,6 +162,7 @@ struct SessionStoreInner {
         DashMap<sift_protocol::MigrationRunId, Arc<std::sync::atomic::AtomicBool>>,
     migration_locks: DashMap<(SessionId, ConnectionId), Arc<tokio::sync::Mutex<()>>>,
     retained_query_results: crate::comparison::RetainedQueryRegistry,
+    benchmarks: Arc<DashMap<(SessionId, ConnectionId), benchmark::ActiveBenchmark>>,
     comparisons: crate::comparison::ComparisonRegistry,
 }
 
@@ -337,6 +341,7 @@ impl SessionStore {
                 migration_cancellations: DashMap::new(),
                 migration_locks: DashMap::new(),
                 retained_query_results: Default::default(),
+                benchmarks: Default::default(),
                 comparisons: Default::default(),
             }),
         };
@@ -393,6 +398,7 @@ impl SessionStore {
                 migration_cancellations: DashMap::new(),
                 migration_locks: DashMap::new(),
                 retained_query_results: Default::default(),
+                benchmarks: Default::default(),
                 comparisons: Default::default(),
             }),
         };
@@ -1060,6 +1066,9 @@ impl SessionStore {
     }
 
     pub fn close_session(&self, id: SessionId) -> ApiResult<()> {
+        for run in self.inner.benchmarks.iter().filter(|run| run.key().0 == id) {
+            run.value().cancellation.cancel();
+        }
         let (_, session) = self
             .inner
             .sessions
@@ -1543,6 +1552,9 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<()> {
+        if let Some(run) = self.inner.benchmarks.get(&(session_id, conn_id)) {
+            run.value().cancellation.cancel();
+        }
         self.inner
             .semantic
             .close_scope(sift_semantic::DocumentScope {
