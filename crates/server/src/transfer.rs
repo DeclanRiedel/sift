@@ -11,6 +11,13 @@ use crate::session::SessionStore;
 
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableResume {
+    checkpoint_table: String,
+    run_id: String,
+}
+
 pub async fn execute_recipe(
     sessions: &SessionStore,
     metadata: &MetadataStore,
@@ -18,6 +25,19 @@ pub async fn execute_recipe(
     recipe: &TransferRecipe,
     request: sift_metadata::http::ExecuteTransferRecipeRequest,
 ) -> ApiResult<TransferExecutionResult> {
+    let durable_resume = recipe
+        .options
+        .get("durable_resume")
+        .map(|value| serde_json::from_value::<DurableResume>(value.clone()))
+        .transpose()
+        .map_err(|_| ApiError::BadRequest("invalid durable_resume options".into()))?;
+    if durable_resume.is_some()
+        && (recipe.format_id != "csv" || recipe.direction != TransferDirection::Import)
+    {
+        return Err(ApiError::BadRequest(
+            "durable resume is supported only for CSV imports".into(),
+        ));
+    }
     if sessions.session_owner(request.session_id)? != Some(actor) {
         return Err(ApiError::Forbidden(
             "session belongs to another principal".into(),
@@ -60,27 +80,51 @@ pub async fn execute_recipe(
         let table = request
             .table
             .ok_or_else(|| ApiError::BadRequest("import table is required".into()))?;
-        let table = table.schema.map_or(table.name.clone(), |schema| {
-            format!("{schema}.{}", table.name)
-        });
-        let result = crate::csv_import::import(
-            sessions,
-            request.session_id,
-            request.connection_id,
-            CsvImportRequest {
-                table,
-                data,
-                header: true,
-                delimiter: ',',
-                null_value: Some("NULL".into()),
-                create_table: request.create_table,
-                conflict_policy: request.conflict_policy.unwrap_or_default(),
-                dry_run: request.dry_run,
-                resume_from_row: request.resume_from_row,
-                type_mappings: request.type_mappings,
-            },
-        )
-        .await?;
+        let table = match (table.catalog, table.schema) {
+            (Some(catalog), Some(schema)) => format!("{catalog}.{schema}.{}", table.name),
+            (Some(_), None) => {
+                return Err(ApiError::BadRequest(
+                    "catalog-qualified imports require a schema".into(),
+                ))
+            }
+            (None, Some(schema)) => format!("{schema}.{}", table.name),
+            (None, None) => table.name,
+        };
+        let import_request = CsvImportRequest {
+            table,
+            data,
+            header: true,
+            delimiter: ',',
+            null_value: Some("NULL".into()),
+            create_table: request.create_table,
+            conflict_policy: request.conflict_policy.unwrap_or_default(),
+            dry_run: request.dry_run,
+            resume_from_row: request.resume_from_row,
+            type_mappings: request.type_mappings,
+        };
+        let result = if let Some(resume) = durable_resume {
+            crate::csv_import::import_with_checkpoint(
+                sessions,
+                request.session_id,
+                request.connection_id,
+                import_request,
+                &resume.checkpoint_table,
+                &resume.run_id,
+                &format!(
+                    "workspace:{}:recipe:{}:revision:{}:actor:{}",
+                    recipe.workspace_id.0, recipe.id.0, recipe.revision, actor.0
+                ),
+            )
+            .await?
+        } else {
+            crate::csv_import::import(
+                sessions,
+                request.session_id,
+                request.connection_id,
+                import_request,
+            )
+            .await?
+        };
         let quarantine_artifact = if result.quarantined_rows.is_empty() {
             None
         } else {

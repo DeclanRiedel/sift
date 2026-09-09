@@ -4,7 +4,13 @@ Status: in progress. User approved all ten features, with milestone commits.
 
 Milestone 1 complete: CSV quarantine reports and downloads, SQLite savepoint
 recovery, redacted row errors. Formatting, strict workspace Clippy and full
-workspace tests passed (2026-09-09). Durable resume remains in development.
+workspace tests passed (2026-09-09).
+
+Milestone 2 complete: durable CSV recipe resume with target-side checkpoints.
+Real SQLite tests cover failed chunks, persisted progress, reconnect/replay
+without unique keys, and changed source/owner rejection. Formatting and strict
+server Clippy passed. PostgreSQL and SQL Server paths compile but have not yet
+received live checkpoint acceptance tests; retain that validation gap explicitly.
 
 ## Order and acceptance
 

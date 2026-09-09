@@ -19,6 +19,36 @@ artifacts. These contain database data; do not publish them as logs. SQLite
 quarantine uses one transaction; PostgreSQL and SQL Server retain the existing
 row-at-a-time commit behavior. Parquet quarantine remains unsupported.
 
+## Durable CSV resume
+
+CSV upload-to-table recipes can opt into target-side checkpoints:
+
+```json
+{"durable_resume":{"checkpoint_table":"public.sift_transfer_checkpoint","run_id":"8433f24a-2465-4a26-a6f9-cb24012aee08"}}
+```
+
+The options belong to one immutable import job. Supply the same source bytes,
+recipe revision, actor and destination on retry; the server rejects fingerprint
+mismatches, including changed column types. Use a new UUID for a different job.
+The target must exist; use abort conflict policy, no type overrides, no manual
+`resume_from_row`, and no `create_table`. Dry run validates without creating a
+checkpoint table or writing rows. PostgreSQL, SQL Server and SQLite use the
+existing supervised transaction APIs.
+
+The explicitly named checkpoint table is created if missing. Each 100-row chunk
+commits imported rows and its next-row checkpoint together in the target
+database. Failed chunks roll back; committed chunks survive a lost response or
+server restart. Reupload the source to resume. Replaying a completed job inserts
+zero rows, even when the target lacks unique keys. Permission checks cover both
+the target and checkpoint table. Concurrent lock/serialization conflicts can
+require another retry.
+
+Checkpoint tables are application-owned state: do not edit, remove, restore
+independently, or reuse an unrelated table with that name. Such changes invalidate
+replay guarantees. Nontransactional external trigger effects are not covered.
+This is an API workflow, not a desktop resume button; quarantine-mode resume and
+Parquet resume are not supported.
+
 ## Parquet
 
 The query export endpoint accepts `"format":"parquet"`. Transfer recipes accept

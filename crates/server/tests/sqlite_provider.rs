@@ -339,6 +339,7 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
             .affected_rows,
         Some(0)
     );
+
     let edits = EditSet {
         table: ObjectPath::new("items"),
         edits: vec![RowEdit::Update {
@@ -415,7 +416,7 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         .await
         .unwrap();
     assert_eq!(refreshed.revision, graph.revision);
-    rusqlite::Connection::open(path)
+    rusqlite::Connection::open(&path)
         .unwrap()
         .execute_batch("ALTER TABLE items ADD COLUMN external TEXT")
         .unwrap();
@@ -449,6 +450,143 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         .await
         .is_err());
     drop(stream);
+    client.close_session(session).await.unwrap();
+    // Resume must be safe even without a unique constraint on imported rows.
+    let session = client.open_session(None).await.unwrap().id;
+    let connection = client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id: 1,
+                profile_id: profile.id.0,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    client.execute(session, connection, "CREATE TABLE resume_rows(value TEXT); CREATE TRIGGER pause_resume BEFORE INSERT ON resume_rows WHEN NEW.value = '100' BEGIN SELECT RAISE(ABORT, 'pause'); END;").await.unwrap();
+    let source = format!(
+        "value\n{}",
+        (0..150).map(|n| format!("{n}\n")).collect::<String>()
+    );
+    let mut resumable = request(&source);
+    resumable.table = "main.resume_rows".into();
+    let run_id = "8433f24a-2465-4a26-a6f9-cb24012aee08";
+    let ledger = "main.resume_checkpoint";
+    let authority = "workspace:1:recipe:1:actor:1";
+    let mut preview = resumable.clone();
+    preview.dry_run = true;
+    assert!(
+        sift_server::csv_import::import_with_checkpoint(
+            &store, session, connection, preview, ledger, run_id, authority
+        )
+        .await
+        .unwrap()
+        .dry_run
+    );
+    assert!(sift_server::csv_import::import_with_checkpoint(
+        &store,
+        session,
+        connection,
+        resumable.clone(),
+        ledger,
+        run_id,
+        authority
+    )
+    .await
+    .is_err());
+    let persisted = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        persisted
+            .query_row("SELECT count(*) FROM resume_rows", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        100
+    );
+    assert_eq!(
+        persisted
+            .query_row("SELECT next_row FROM resume_checkpoint", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        100
+    );
+    drop(persisted);
+    client
+        .execute(session, connection, "DROP TRIGGER pause_resume")
+        .await
+        .unwrap();
+    let other_connection = client
+        .open_connection_from_profile(
+            session,
+            OpenConnectionFromProfileRequest {
+                tenant_id: 1,
+                profile_id: profile.id.0,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    let resumed = sift_server::csv_import::import_with_checkpoint(
+        &store,
+        session,
+        other_connection,
+        resumable.clone(),
+        ledger,
+        run_id,
+        authority,
+    )
+    .await
+    .unwrap();
+    assert_eq!((resumed.rows_inserted, resumed.resume_from_row), (50, 150));
+    let replayed = sift_server::csv_import::import_with_checkpoint(
+        &store,
+        session,
+        other_connection,
+        resumable.clone(),
+        ledger,
+        run_id,
+        authority,
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed.rows_inserted, 0);
+    let mut changed = resumable.clone();
+    changed.data.extend_from_slice(b"151\n");
+    assert!(sift_server::csv_import::import_with_checkpoint(
+        &store,
+        session,
+        other_connection,
+        changed,
+        ledger,
+        run_id,
+        authority
+    )
+    .await
+    .is_err());
+    assert!(sift_server::csv_import::import_with_checkpoint(
+        &store,
+        session,
+        other_connection,
+        resumable,
+        ledger,
+        run_id,
+        "different actor"
+    )
+    .await
+    .is_err());
+    let persisted = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        persisted
+            .query_row("SELECT count(*) FROM resume_rows", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        150
+    );
+    drop(persisted);
+    client
+        .close_connection(session, other_connection)
+        .await
+        .unwrap();
     client.close_session(session).await.unwrap();
     server.abort();
 }

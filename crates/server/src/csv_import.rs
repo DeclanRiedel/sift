@@ -14,6 +14,9 @@ use crate::session::SessionStore;
 const MAX_CSV_BYTES: usize = 64 * 1024 * 1024;
 const INFERENCE_ROWS: usize = 1_000;
 
+mod resume;
+pub use resume::import_with_checkpoint;
+
 struct PreparedCsv {
     columns: Vec<InferredCsvColumn>,
     records: Vec<Vec<Option<String>>>,
