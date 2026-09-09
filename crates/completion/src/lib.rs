@@ -22,6 +22,32 @@ pub use fuzzy::{fuzzy_match, FuzzyMatch};
 pub use joins::join_candidates;
 pub use sift_semantic::CompletionAnalysis as ContextResult;
 
+/// Bounded, dialect-neutral keyword preview. This performs no SQL parsing or
+/// catalog access; callers must restrict it to an unquoted SQL token.
+pub fn keyword_preview(prefix: &str) -> Vec<sift_protocol::completion::CompletionCandidate> {
+    use sift_protocol::completion::{CompletionCandidate, CompletionKind};
+    let prefix = prefix.to_ascii_uppercase();
+    if prefix.len() < 2 || !prefix.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return Vec::new();
+    }
+    keywords::STATEMENT_LEADS
+        .iter()
+        .chain(keywords::COMMON_KEYWORDS)
+        .copied()
+        .filter(|keyword| {
+            keyword.starts_with(&prefix) && !matches!(*keyword, "EXPLAIN" | "LIMIT" | "RETURNING")
+        })
+        .map(|keyword| CompletionCandidate {
+            label: keyword.into(),
+            insert: keyword.into(),
+            kind: CompletionKind::Keyword,
+            detail: None,
+            qualified_name: None,
+            score: 0,
+        })
+        .collect()
+}
+
 /// Compatibility entry point. Stateful callers obtain this analysis from the
 /// revisioned semantic document instead of supplying SQL again.
 pub fn detect_context(sql: &str, cursor: usize, engine: Engine) -> ContextResult {

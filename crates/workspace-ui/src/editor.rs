@@ -108,6 +108,10 @@ fn identifier_character(character: char) -> bool {
 /// candidate correctness. Keeping this linear scan local prevents catalog or
 /// parser work for comments, string literals, and punctuation-heavy edits.
 fn should_auto_complete(text: &str, cursor: usize) -> bool {
+    completion_activation(text, cursor, false)
+}
+
+fn completion_activation(text: &str, cursor: usize, unquoted_only: bool) -> bool {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum ScanState {
         Sql,
@@ -121,6 +125,7 @@ fn should_auto_complete(text: &str, cursor: usize) -> bool {
     let cursor = cursor.min(text.len());
     let prefix = &text[..cursor];
     let mut state = ScanState::Sql;
+    let mut block_depth = 0usize;
     let mut chars = prefix.char_indices().peekable();
     while let Some((_, character)) = chars.next() {
         let next = chars.peek().map(|(_, next)| *next);
@@ -134,6 +139,12 @@ fn should_auto_complete(text: &str, cursor: usize) -> bool {
             }
             (ScanState::Sql, '/', Some('*')) => {
                 chars.next();
+                block_depth = 1;
+                ScanState::BlockComment
+            }
+            (ScanState::BlockComment, '/', Some('*')) => {
+                chars.next();
+                block_depth += 1;
                 ScanState::BlockComment
             }
             (ScanState::String, '\'', Some('\'')) => {
@@ -154,7 +165,12 @@ fn should_auto_complete(text: &str, cursor: usize) -> bool {
             (ScanState::LineComment, '\n', _) => ScanState::Sql,
             (ScanState::BlockComment, '*', Some('/')) => {
                 chars.next();
-                ScanState::Sql
+                block_depth = block_depth.saturating_sub(1);
+                if block_depth == 0 {
+                    ScanState::Sql
+                } else {
+                    ScanState::BlockComment
+                }
             }
             _ => state,
         };
@@ -163,6 +179,9 @@ fn should_auto_complete(text: &str, cursor: usize) -> bool {
         state,
         ScanState::String | ScanState::LineComment | ScanState::BlockComment
     ) {
+        return false;
+    }
+    if unquoted_only && state != ScanState::Sql {
         return false;
     }
 
@@ -1613,7 +1632,9 @@ impl QueryEditor {
                 replaced,
                 candidates,
             } => {
-                (self.language != EditorLanguage::Sql || self.vim_mode == VimMode::Insert)
+                let accept = self.semantic.take_pending_acceptance(revision, cursor);
+                let applied = (self.language != EditorLanguage::Sql
+                    || self.vim_mode == VimMode::Insert)
                     && cursor as usize == self.document.cursor()
                     && self.semantic.set_completions(
                         self.document.text(),
@@ -1621,7 +1642,14 @@ impl QueryEditor {
                         current,
                         replaced,
                         candidates,
-                    )
+                    );
+                if applied && accept {
+                    self.accept_active_completion(cx);
+                } else if accept && self.document.cursor() == cursor as usize {
+                    self.semantic
+                        .set_notice(Some("No completion available.".into()));
+                }
+                applied
             }
             SemanticOutcome::Hover(hover) => {
                 self.vim_mode == VimMode::Normal
@@ -1805,6 +1833,33 @@ impl QueryEditor {
         );
     }
 
+    /// Mirror a completion splice into both editing models without a full rebuild.
+    fn replace_completion_text(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        let line = self
+            .document
+            .line_starts
+            .partition_point(|offset| *offset <= range.start)
+            .saturating_sub(1);
+        let column = self.document.text()[self.document.line_starts[line]..range.start]
+            .chars()
+            .count();
+        let removed = self.document.text()[range.clone()].chars().count();
+        let incremental = self
+            .vim
+            .as_mut()
+            .is_some_and(|vim| vim.replace_completion((line, column), removed, text));
+        self.document.replace_range(range, text);
+        if incremental {
+            let (line, column) = self.document.cursor_position();
+            self.vim
+                .as_mut()
+                .expect("incremental Vim edit")
+                .set_indexed_cursor((line - 1, column - 1));
+        } else {
+            self.resync_keymap_after_external_change(cx);
+        }
+    }
+
     /// Returns whether a menu was open and consumed the keystroke.
     fn accept_active_completion(&mut self, cx: &mut Context<Self>) -> bool {
         if self.read_only {
@@ -1826,7 +1881,7 @@ impl QueryEditor {
         match snippet {
             Ok(Some(expansion)) => {
                 let base = replace.start;
-                self.document.replace_range(replace, &expansion.text);
+                self.replace_completion_text(replace, &expansion.text, cx);
                 self.snippet_tabstops = expansion
                     .tabstops
                     .into_iter()
@@ -1835,14 +1890,17 @@ impl QueryEditor {
                 self.snippet_tabstop_index = 0;
                 if let Some(range) = self.snippet_tabstops.first().cloned() {
                     self.document.set_selection(range, false);
+                    let (line, column) = self.document.cursor_position();
+                    if let Some(vim) = self.vim.as_mut() {
+                        vim.set_indexed_cursor((line - 1, column - 1));
+                    }
                 }
             }
             Ok(None) | Err(_) => {
-                self.document.replace_range(replace, &insert);
+                self.replace_completion_text(replace, &insert, cx);
                 self.snippet_tabstops.clear();
             }
         }
-        self.resync_keymap_after_external_change(cx);
         // Acceptance is terminal for this popup. Re-triggering automatic
         // completion here makes the accepted token immediately reappear.
         self.edited_with_auto_completion(false, cx);
@@ -1863,7 +1921,10 @@ impl QueryEditor {
             return false;
         };
         self.document.set_selection(range, false);
-        self.resync_keymap_after_external_change(cx);
+        let (line, column) = self.document.cursor_position();
+        if let Some(vim) = self.vim.as_mut() {
+            vim.set_indexed_cursor((line - 1, column - 1));
+        }
         self.selection_changed(cx);
         true
     }
@@ -2308,6 +2369,55 @@ impl QueryEditor {
         self.edited_with_auto_completion(true, cx);
     }
 
+    fn keyword_completion_preview(&self) -> Option<semantic::CompletionMenu> {
+        let cursor = self.document.cursor();
+        let text = self.document.text();
+        // Decline dialect-specific literal syntax this activation guard does
+        // not understand. The authoritative service still handles these.
+        if text[..cursor].contains(['$', '`', '\\'])
+            || !completion_activation(text, cursor, true)
+            || text[cursor..]
+                .chars()
+                .next()
+                .is_some_and(identifier_character)
+        {
+            return None;
+        }
+        let start = text[..cursor]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| c.is_ascii_alphabetic())
+            .last()
+            .map(|(i, _)| i)?;
+        let before = text[..start].trim_end();
+        if text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(identifier_character)
+        {
+            return None;
+        }
+        if before.ends_with(['.', '"', '[']) {
+            return None;
+        }
+        let previous = before
+            .split(|c: char| !identifier_character(c))
+            .next_back()
+            .unwrap_or("");
+        if ["FROM", "JOIN", "UPDATE", "INTO", "TABLE", "AS"]
+            .iter()
+            .any(|word| previous.eq_ignore_ascii_case(word))
+        {
+            return None;
+        }
+        let candidates = sift_completion::keyword_preview(&text[start..cursor]);
+        (!candidates.is_empty()).then_some(semantic::CompletionMenu {
+            replace: start..cursor,
+            candidates,
+            selected: 0,
+        })
+    }
+
     fn edited_with_auto_completion(&mut self, allow_auto_completion: bool, cx: &mut Context<Self>) {
         self.marked_range = None;
         self.folded_lines.clear();
@@ -2378,7 +2488,7 @@ impl QueryEditor {
                 let cursor = self.document.cursor() as u32;
                 self.semantic.expect_completion(self.revision, cursor);
                 self.request_semantic(SemanticRequestKind::AutoComplete { cursor }, cx);
-                if let Some(preview) = preview {
+                if let Some(preview) = preview.or_else(|| self.keyword_completion_preview()) {
                     self.semantic.show_completion_preview(preview);
                 }
             }
@@ -2832,6 +2942,15 @@ impl QueryEditor {
         }
         if self.accept_star_expansion(cx) {
             return;
+        }
+        if self.language == EditorLanguage::Sql && self.vim_mode == VimMode::Insert {
+            let cursor = self.document.cursor() as u32;
+            if self.semantic.accept_when_ready(self.revision, cursor) {
+                // Flush the debounce, but never block input or insert whitespace
+                // while a completion for this exact caret is outstanding.
+                self.request_semantic(SemanticRequestKind::Complete { cursor }, cx);
+                return;
+            }
         }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Tab, cx) {
             return;
@@ -5714,6 +5833,76 @@ mod tests {
             qualified_name: None,
             score: 1,
         }
+    }
+
+    #[gpui::test]
+    fn rapid_keyword_tabs_need_no_server_reply(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx);
+            for token in ["sel", " * fro"] {
+                for ch in token.chars() {
+                    editor.vim_text(&ch.to_string(), cx);
+                }
+                assert!(editor.semantic.completion().is_some());
+                editor.indent(&Indent, window, cx);
+                assert!(editor.semantic.completion().is_none());
+            }
+            assert_eq!(editor.document.text(), "SELECT * FROM");
+            editor.vim_text(" ", cx);
+            assert_eq!(editor.document.text(), "SELECT * FROM ");
+            editor.vim_undo(&VimUndo, window, cx);
+            editor.vim_undo(&VimUndo, window, cx);
+            assert_eq!(editor.document.text(), "SELECT * fro");
+        });
+    }
+
+    #[gpui::test]
+    fn pending_tab_accepts_only_its_unchanged_revision(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("SELECT * FROM us", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx);
+            editor.complete(&Complete, window, cx);
+            let revision = editor.revision;
+            editor.indent(&Indent, window, cx);
+            assert_eq!(editor.document.text(), "SELECT * FROM us");
+            let reply = SemanticOutcome::Completions {
+                context: sift_protocol::completion::CompletionContext::ExpectingTable,
+                cursor: 16,
+                replaced: sift_protocol::TextRange { start: 14, end: 16 },
+                candidates: vec![candidate("users")],
+            };
+            assert!(editor.apply_semantic_outcome(revision, reply.clone(), cx));
+            assert_eq!(editor.document.text(), "SELECT * FROM users");
+            editor.vim_undo(&VimUndo, window, cx);
+            editor.complete(&Complete, window, cx);
+            let revision = editor.revision;
+            editor.indent(&Indent, window, cx);
+            editor.vim_text("e", cx);
+            assert!(!editor.apply_semantic_outcome(revision, reply, cx));
+            assert_eq!(editor.document.text(), "SELECT * FROM use");
+        });
+    }
+
+    #[gpui::test]
+    fn keyword_preview_declines_literals_and_identifier_slots(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("", cx);
+        editor.update_in(&mut cx, |editor, _, _| {
+            for source in [
+                "SELECT 'fro",
+                "SELECT \"fro",
+                "SELECT [fro",
+                "-- sel",
+                "/* sel",
+                "SELECT $q$sel",
+                "SELECT t.sel",
+                "SELECT * FROM sel",
+                "SELECT * FROM users AS sel",
+            ] {
+                editor.document = QueryDocument::with_random_peer(source);
+                assert!(editor.keyword_completion_preview().is_none(), "{source}");
+            }
+        });
     }
 
     #[gpui::test]

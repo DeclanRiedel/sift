@@ -3,12 +3,15 @@
 //! Loro-backed `QueryDocument` remains the canonical text model.
 
 use modalkit::{
-    actions::{Action, Editable, EditorAction, HistoryAction, Jumpable, Searchable},
+    actions::{
+        Action, EditAction, Editable, EditorAction, HistoryAction, InsertTextAction, Jumpable,
+        Searchable,
+    },
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     editing::{
         application::EmptyInfo,
         buffer::{CursorGroupId, EditBuffer},
-        context::Resolve,
+        context::{EditContextBuilder, Resolve},
         cursor::{Cursor, CursorGroup},
         store::{RegisterCell, RegisterPutFlags, SharedStore},
     },
@@ -18,7 +21,9 @@ use modalkit::{
     },
     key::TerminalKey,
     keybindings::BindingMachine,
-    prelude::{EditTarget, MoveDir1D, MoveType, Register, TargetShape, ViewportContext},
+    prelude::{
+        Count, EditTarget, InsertStyle, MoveDir1D, MoveType, Register, TargetShape, ViewportContext,
+    },
 };
 
 use super::VimMode;
@@ -81,6 +86,67 @@ impl VimEngine {
 
     pub fn set_viewport_rows(&mut self, rows: usize) {
         self.viewport.dimensions.1 = rows.max(1);
+    }
+
+    /// Apply a completion splice without rebuilding the rope or key machine.
+    /// Coordinates/counts come from the canonical document's line index.
+    pub fn replace_completion(
+        &mut self,
+        start: (usize, usize),
+        removed_chars: usize,
+        inserted: &str,
+    ) -> bool {
+        if self.bindings.mode() != ModalVimMode::Insert
+            || !self.buffer.get_followers(self.cursor_group).is_empty()
+        {
+            return false;
+        }
+        self.empty_insert_origin = None;
+        self.buffer
+            .set_leader(self.cursor_group, Cursor::new(start.0, start.1));
+        let context = EditContextBuilder::default()
+            .insert_style(Some(InsertStyle::Insert))
+            .register(Some(Register::Blackhole))
+            .build();
+        let context = (self.cursor_group, &self.viewport, &context);
+        let store = self.store.clone();
+        let mut store = store
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if removed_chars > 0
+            && self
+                .buffer
+                .editor_command(
+                    &EditorAction::Edit(
+                        EditAction::Delete.into(),
+                        EditTarget::Motion(
+                            MoveType::Column(MoveDir1D::Next, true),
+                            Count::Exact(removed_chars),
+                        ),
+                    ),
+                    &context,
+                    &mut store,
+                )
+                .is_err()
+        {
+            return false;
+        }
+        self.buffer
+            .editor_command(
+                &EditorAction::InsertText(InsertTextAction::Transcribe(
+                    inserted.into(),
+                    MoveDir1D::Previous,
+                    Count::Exact(1),
+                )),
+                &context,
+                &mut store,
+            )
+            .is_ok()
+    }
+
+    pub fn set_indexed_cursor(&mut self, position: (usize, usize)) {
+        self.buffer
+            .set_leader(self.cursor_group, Cursor::new(position.0, position.1));
     }
 
     pub fn add_cursor_line(&mut self, direction: isize) -> VimSnapshot {
@@ -451,6 +517,29 @@ fn cursor_from_byte(text: &str, byte: usize) -> Cursor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn completion_splices_preserve_engine_and_handle_unicode_and_newlines() {
+        for (source, start, removed, insert, expected) in [
+            ("sel * fro", (0, 0), 3, "SELECT", "SELECT * fro"),
+            ("α\n\"la\" tail", (1, 0), 4, "\"lab\"", "α\n\"lab\" tail"),
+            ("ab\ncd", (0, 1), 3, "X\nY", "aX\nYd"),
+            ("", (0, 0), 0, "SELECT\n*", "SELECT\n*"),
+        ] {
+            let mut engine = super::VimEngine::new(source, 0);
+            engine.input_text("i");
+            engine.set_clipboard("keep me");
+            assert!(engine.replace_completion(start, removed, insert));
+            assert_eq!(
+                engine.snapshot(true, false, false).text.as_deref(),
+                Some(expected)
+            );
+            assert_eq!(engine.unnamed_register(), "keep me");
+            assert_eq!(
+                engine.snapshot(false, false, false).mode,
+                super::VimMode::Insert
+            );
+        }
+    }
     use super::*;
 
     #[test]

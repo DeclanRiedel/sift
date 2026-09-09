@@ -1,7 +1,7 @@
 //! Client-side projection of the shared SQL semantic service (ADR-032).
 //!
-//! The desktop never parses SQL itself. Every diagnostic, completion, format
-//! result, quick fix, and usage list comes from the server-owned semantic
+//! The desktop never parses SQL itself. Authoritative completions, diagnostics,
+//! format results, quick fixes, and usage lists come from the server-owned semantic
 //! document. This module holds the editor-local projection of those answers
 //! plus the offset arithmetic needed to map wire ranges onto client bytes.
 //!
@@ -186,6 +186,7 @@ pub struct SemanticState {
     /// Revision a completion request is outstanding for, used to keep the
     /// menu from flickering open on a stale answer.
     pending_completion: Option<(u64, u32)>,
+    accept_pending_completion: Option<(u64, u32)>,
     hover: Option<sift_protocol::SemanticHoverResponse>,
     pending_hover: Option<(u64, u32)>,
     star_expansion: Option<sift_protocol::StarExpansionPreview>,
@@ -309,6 +310,7 @@ impl SemanticState {
         self.diagnostics_incomplete = false;
         self.completion = None;
         self.pending_completion = None;
+        self.accept_pending_completion = None;
         self.hover = None;
         self.pending_hover = None;
         self.star_expansion = None;
@@ -322,7 +324,24 @@ impl SemanticState {
         let had_menu = self.completion.is_some() || self.pending_completion.is_some();
         self.completion = None;
         self.pending_completion = None;
+        self.accept_pending_completion = None;
         had_menu
+    }
+
+    pub fn accept_when_ready(&mut self, revision: u64, cursor: u32) -> bool {
+        if self.pending_completion != Some((revision, cursor)) {
+            return false;
+        }
+        self.accept_pending_completion = Some((revision, cursor));
+        true
+    }
+
+    pub fn take_pending_acceptance(&mut self, revision: u64, cursor: u32) -> bool {
+        if self.accept_pending_completion == Some((revision, cursor)) {
+            self.accept_pending_completion = None;
+            return true;
+        }
+        false
     }
 
     pub fn expect_completion(&mut self, revision: u64, cursor: u32) {
