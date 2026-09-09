@@ -332,6 +332,7 @@ async fn semantic_outcome(
                 .await
             {
                 Ok(response) => SemanticOutcome::Completions {
+                    context: response.context,
                     cursor,
                     replaced: sift_protocol::TextRange {
                         start: response.replaced_range.start,

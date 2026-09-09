@@ -288,6 +288,7 @@ struct Edit {
 struct DocumentChange {
     line: usize,
     structural: bool,
+    insertion: Option<(usize, usize)>,
 }
 
 /// A collaborative SQL document. Text lives in a Loro [`TextReplica`] so the
@@ -441,6 +442,21 @@ impl QueryDocument {
         self.cursor()
     }
 
+    fn offset_from_position(&self, (line, column): (usize, usize)) -> usize {
+        let Some(&start) = self.line_starts.get(line) else {
+            return self.text.len();
+        };
+        let end = self
+            .line_starts
+            .get(line + 1)
+            .map_or(self.text.len(), |next| next - 1);
+        start
+            + self.text[start..end]
+                .char_indices()
+                .nth(column)
+                .map_or(end - start, |(offset, _)| offset)
+    }
+
     /// Apply a text splice against the replica and refresh the cached text. Only
     /// touches CRDT state; selection and history are the caller's concern.
     fn splice(&mut self, start: usize, end: usize, new_text: &str) {
@@ -499,6 +515,8 @@ impl QueryDocument {
         self.last_change = Some(DocumentChange {
             line: self.line_of_offset(start),
             structural: removed.contains('\n') || new_text.contains('\n'),
+            insertion: (removed.is_empty() && self.last_change.is_none())
+                .then_some((start, new_text.len())),
         });
         let edit = Edit {
             at: start,
@@ -558,6 +576,7 @@ impl QueryDocument {
         self.last_change = Some(DocumentChange {
             line: self.line_of_offset(start),
             structural: edit.inserted.contains('\n') || edit.removed.contains('\n'),
+            insertion: None,
         });
         self.splice(start, end, &edit.removed);
         self.selection = edit.selection_before.clone();
@@ -576,6 +595,7 @@ impl QueryDocument {
         self.last_change = Some(DocumentChange {
             line: self.line_of_offset(start),
             structural: edit.inserted.contains('\n') || edit.removed.contains('\n'),
+            insertion: None,
         });
         self.splice(start, end, &edit.inserted);
         let cursor = start + edit.inserted.len();
@@ -1052,6 +1072,20 @@ struct WrapCache {
     width: f32,
     folds: Vec<Range<usize>>,
     rows: Arc<Vec<VisualRow>>,
+    style: Option<(
+        gpui::Font,
+        Pixels,
+        Theme,
+        EditorLanguage,
+        Option<EditorLanguage>,
+    )>,
+    lines: HashMap<usize, WrappedLine>,
+}
+
+struct WrappedLine {
+    text: String,
+    /// Relative offsets survive edits on preceding source lines.
+    ranges: Vec<Range<usize>>,
 }
 
 #[derive(Default)]
@@ -1302,6 +1336,19 @@ impl QueryEditor {
 
     pub fn vim_mode(&self) -> VimMode {
         self.vim_mode
+    }
+
+    /// Catalog/connection identity changed without a text edit. Advance the
+    /// semantic epoch so in-flight answers cannot revive the previous target.
+    pub(crate) fn invalidate_semantic_context(&mut self, cx: &mut Context<Self>) {
+        if self.language != EditorLanguage::Sql {
+            return;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        self.semantic.invalidate();
+        cx.emit(EditorEvent::DiagnosticsChanged);
+        self.request_semantic(SemanticRequestKind::Analyze, cx);
+        cx.notify();
     }
 
     pub fn vim_entered(&self) -> &str {
@@ -1561,6 +1608,7 @@ impl QueryEditor {
                 incomplete,
             ),
             SemanticOutcome::Completions {
+                context: _,
                 cursor,
                 replaced,
                 candidates,
@@ -1598,6 +1646,7 @@ impl QueryEditor {
             SemanticOutcome::RenamePreview { .. } => false,
             SemanticOutcome::Outline { .. } | SemanticOutcome::OutlineFailed(_) => false,
             SemanticOutcome::Failed(message) => {
+                self.semantic.cancel_completion();
                 self.semantic.clear_hover();
                 self.semantic.clear_star_expansion();
                 self.semantic.set_notice(Some(message));
@@ -1969,6 +2018,20 @@ impl QueryEditor {
     fn update_wraps(&self, width: Pixels, theme: Theme, window: &mut Window) -> bool {
         let available = (width - EDITOR_GUTTER_WIDTH - EDITOR_TEXT_INSET - px(32.)).max(px(20.));
         let mut cache = self.wraps.borrow_mut();
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let style_key = (
+            style.font(),
+            font_size,
+            theme,
+            self.language,
+            self.diff_language,
+        );
+        if cache.width != f32::from(available) || cache.style.as_ref() != Some(&style_key) {
+            cache.lines.clear();
+            cache.rows = Arc::default();
+            cache.style = Some(style_key);
+        }
         if cache.width == f32::from(available)
             && cache.revision == self.revision
             && cache.folds == self.folded_lines
@@ -1978,13 +2041,32 @@ impl QueryEditor {
         }
         let text = self.document.text();
         let starts = self.document.line_starts();
-        let style = window.text_style();
-        let font_size = style.font_size.to_pixels(window.rem_size());
+        cache.lines.retain(|source, _| *source < starts.len());
         let mut rows = Vec::new();
+        let mut reusable_paint = Vec::new();
         for source in self.display_line_sources() {
             let start = starts[source];
             let end = starts.get(source + 1).map_or(text.len(), |end| end - 1);
             let line = &text[start..end];
+            if let Some(cached) = cache
+                .lines
+                .get(&source)
+                .filter(|cached| cached.text == line)
+            {
+                let old_start = cache.rows.partition_point(|row| row.source < source);
+                let same_position = old_start == rows.len()
+                    && cache
+                        .rows
+                        .get(old_start)
+                        .is_some_and(|row| row.source == source);
+                rows.extend(cached.ranges.iter().map(|range| VisualRow {
+                    source,
+                    range: start + range.start..start + range.end,
+                }));
+                reusable_paint.resize(rows.len(), same_position);
+                continue;
+            }
+            let mut ranges = Vec::new();
             let runs =
                 editor_text_runs(line, style.font(), theme, self.language, self.diff_language);
             let shaped =
@@ -2024,6 +2106,7 @@ impl QueryEditor {
                     source,
                     range: start + offset..start + next,
                 });
+                ranges.push(offset..next);
                 offset = next;
             }
             if line.is_empty() {
@@ -2031,13 +2114,25 @@ impl QueryEditor {
                     source,
                     range: start..end,
                 });
+                ranges.push(0..0);
             }
+            cache.lines.insert(
+                source,
+                WrappedLine {
+                    text: line.to_owned(),
+                    ranges,
+                },
+            );
+            reusable_paint.resize(rows.len(), false);
         }
         cache.revision = self.revision;
         cache.width = available.into();
         cache.folds = self.folded_lines.clone();
         cache.rows = Arc::new(rows);
-        self.line_cache.borrow_mut().lines.clear();
+        self.line_cache
+            .borrow_mut()
+            .lines
+            .retain(|row, _| reusable_paint.get(*row).copied().unwrap_or(false));
         true
     }
 
@@ -2217,18 +2312,15 @@ impl QueryEditor {
         self.marked_range = None;
         self.folded_lines.clear();
         self.revision = self.revision.wrapping_add(1);
+        let change = self.document.last_change.take();
         let mut cache = self.line_cache.borrow_mut();
-        if let Some(change) = self
-            .document
-            .last_change
-            .filter(|change| !change.structural)
-        {
+        if let Some(change) = change.filter(|change| !change.structural) {
             let wraps = self.wraps.borrow();
             cache.lines.retain(|row, _| {
                 wraps
                     .rows
                     .get(*row)
-                    .is_some_and(|row| row.source < change.line)
+                    .is_some_and(|row| row.source != change.line)
             });
         } else {
             cache.lines.clear();
@@ -2239,10 +2331,27 @@ impl QueryEditor {
         if let Some(update) = self.document.take_room_update() {
             cx.emit(EditorEvent::DocumentChanged { update });
         }
-        // An open menu stays open across typing by re-requesting against the
-        // new revision; the server owns the filtering, the client never
-        // narrows a stale candidate list itself.
+        // Preserve a bounded preview for an exact identifier extension while
+        // requesting authoritative candidates for the new revision.
         let reopen_completion = self.semantic.completion().is_some();
+        let preview = if allow_auto_completion
+            && self.language == EditorLanguage::Sql
+            && self.vim_mode == VimMode::Insert
+            && self.secondary_cursors.is_empty()
+        {
+            change
+                .and_then(|change| change.insertion)
+                .and_then(|(start, inserted)| {
+                    (self.document.cursor() == start + inserted)
+                        .then(|| {
+                            self.semantic
+                                .extend_completion(self.document.text(), start, inserted)
+                        })
+                        .flatten()
+                })
+        } else {
+            None
+        };
         self.semantic.invalidate();
         if self.manifest_schema {
             self.schedule_manifest_diagnostics(cx);
@@ -2255,7 +2364,8 @@ impl QueryEditor {
             && self.secondary_cursors.is_empty()
             && self.keymap == EditorKeymap::Vim
             && self.vim_mode == VimMode::Insert
-            && (self.manifest_schema
+            && (reopen_completion
+                || self.manifest_schema
                 || should_auto_complete(self.document.text(), self.document.cursor()));
         if (reopen_completion || auto_complete)
             && (self.language != EditorLanguage::Sql || self.vim_mode == VimMode::Insert)
@@ -2268,6 +2378,9 @@ impl QueryEditor {
                 let cursor = self.document.cursor() as u32;
                 self.semantic.expect_completion(self.revision, cursor);
                 self.request_semantic(SemanticRequestKind::AutoComplete { cursor }, cx);
+                if let Some(preview) = preview {
+                    self.semantic.show_completion_preview(preview);
+                }
             }
         }
         cx.notify();
@@ -2431,12 +2544,21 @@ impl QueryEditor {
     }
 
     fn apply_vim_snapshot(&mut self, snapshot: VimSnapshot, cx: &mut Context<Self>) {
+        self.apply_vim_snapshot_with_edit(snapshot, false, cx);
+    }
+
+    fn apply_vim_snapshot_with_edit(
+        &mut self,
+        snapshot: VimSnapshot,
+        mirrored_edit: bool,
+        cx: &mut Context<Self>,
+    ) {
         let open_command_palette = snapshot.open_command_palette;
         let clipboard = snapshot.clipboard;
         let vim_state_changed =
             self.vim_mode != snapshot.mode || self.vim_entered != snapshot.entered;
         self.vim_entered = snapshot.entered;
-        let mut document_changed = false;
+        let mut document_changed = mirrored_edit;
         if let Some(snapshot_text) = snapshot
             .text
             .filter(|text| !self.read_only && text != self.document.text())
@@ -2485,21 +2607,21 @@ impl QueryEditor {
         self.secondary_cursors = snapshot
             .followers
             .iter()
-            .map(|cursor| byte_from_line_column(self.document.text(), *cursor))
+            .map(|cursor| self.document.offset_from_position(*cursor))
             .collect();
         self.secondary_selections = snapshot
             .follower_selections
             .iter()
             .map(|(start, end)| {
-                let start = byte_from_line_column(self.document.text(), *start);
-                let end = byte_from_line_column(self.document.text(), *end);
+                let start = self.document.offset_from_position(*start);
+                let end = self.document.offset_from_position(*end);
                 start.min(end)..start.max(end)
             })
             .collect();
-        let cursor = byte_from_line_column(self.document.text(), snapshot.cursor);
+        let cursor = self.document.offset_from_position(snapshot.cursor);
         if let Some((start, end)) = snapshot.selection {
-            let start = byte_from_line_column(self.document.text(), start);
-            let end = byte_from_line_column(self.document.text(), end);
+            let start = self.document.offset_from_position(start);
+            let end = self.document.offset_from_position(end);
             self.document
                 .set_selection(start.min(end)..start.max(end), cursor == start.min(end));
         } else {
@@ -2544,6 +2666,28 @@ impl QueryEditor {
     }
 
     fn vim_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if self.vim_mode == VimMode::Insert
+            && !self.read_only
+            && self.document.selection().is_empty()
+            && self.secondary_cursors.is_empty()
+            && text.chars().count() == 1
+            && !text.chars().any(char::is_control)
+        {
+            if let Some(vim) = self.vim.as_mut() {
+                let (snapshot, inserted) = vim.input_character(text.chars().next().unwrap());
+                if inserted {
+                    let range = self.document.selection();
+                    self.adjust_snippet_tabstops(range.clone(), text.len());
+                    self.document.replace_range(range, text);
+                    // The snapshot contains only cursor/mode state. Applying
+                    // it must not manufacture a second text edit or undo step.
+                    self.apply_vim_snapshot_with_edit(snapshot, true, cx);
+                } else {
+                    self.apply_vim_snapshot(snapshot, cx);
+                }
+                return true;
+            }
+        }
         let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(vim) = self.vim.as_mut() else {
             return false;
@@ -5359,6 +5503,7 @@ fn offset_from_utf16(text: &str, offset: usize) -> usize {
     utf8_offset
 }
 
+#[cfg(test)]
 fn byte_from_line_column(text: &str, (line, column): (usize, usize)) -> usize {
     let mut line_start = 0;
     for _ in 0..line {
@@ -5571,6 +5716,75 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn completion_preview_tracks_identifier_extensions_and_accepts_current_range(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut cx, editor, spy) = editor_with_spy("SELECT * FROM us", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx);
+            editor.complete(&Complete, window, cx);
+            let revision = editor.text_revision();
+            assert!(editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Completions {
+                    context: sift_protocol::completion::CompletionContext::Unknown,
+                    cursor: 16,
+                    replaced: sift_protocol::TextRange { start: 14, end: 16 },
+                    candidates: vec![candidate("users"), candidate("usage")],
+                },
+                cx
+            ));
+            editor.replace_text_in_range(None, "e", window, cx);
+            let menu = editor.semantic.completion().expect("immediate preview");
+            assert_eq!(menu.replace, 14..17);
+            assert_eq!(menu.candidates.len(), 1);
+            assert_eq!(menu.candidates[0].label, "users");
+            assert!(!editor.apply_semantic_outcome(
+                revision,
+                SemanticOutcome::Completions {
+                    context: sift_protocol::completion::CompletionContext::Unknown,
+                    cursor: 16,
+                    replaced: sift_protocol::TextRange { start: 14, end: 16 },
+                    candidates: vec![candidate("stale")],
+                },
+                cx
+            ));
+            assert!(editor.accept_active_completion(cx));
+            assert_eq!(editor.document.text(), "SELECT * FROM users");
+            assert_eq!(editor.document.replica.text(), editor.document.text());
+            assert!(editor.semantic.completion().is_none());
+        });
+        cx.run_until_parked();
+        assert!(
+            spy.read_with(&cx, |spy, _| spy.0.iter().any(|(_, request)| matches!(
+                request,
+                SemanticRequestKind::AutoComplete { cursor: 17 }
+            )))
+        );
+    }
+
+    #[gpui::test]
+    fn semantic_context_change_discards_completion_and_late_answers(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("us", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx);
+            editor.complete(&Complete, window, cx);
+            let revision = editor.text_revision();
+            let response = SemanticOutcome::Completions {
+                context: sift_protocol::completion::CompletionContext::ExpectingTable,
+                cursor: 2,
+                replaced: sift_protocol::TextRange { start: 0, end: 2 },
+                candidates: vec![candidate("users")],
+            };
+            assert!(editor.apply_semantic_outcome(revision, response.clone(), cx));
+            editor.invalidate_semantic_context(cx);
+            assert!(editor.semantic.completion().is_none());
+            assert!(!editor.apply_semantic_outcome(revision, response, cx));
+            assert_eq!(editor.document.text(), "us");
+        });
+    }
+
     #[test]
     fn hover_pointer_coalesces_to_identifier_start() {
         let sql = "select café.id";
@@ -5738,6 +5952,7 @@ mod tests {
             assert!(!editor.apply_semantic_outcome(
                 editor.revision,
                 SemanticOutcome::Completions {
+                    context: sift_protocol::completion::CompletionContext::Unknown,
                     cursor,
                     replaced: sift_protocol::TextRange {
                         start: cursor,
@@ -5793,6 +6008,7 @@ mod tests {
             assert!(editor.apply_semantic_outcome(
                 revision,
                 SemanticOutcome::Completions {
+                    context: sift_protocol::completion::CompletionContext::Unknown,
                     cursor: 16,
                     replaced: sift_protocol::TextRange { start: 14, end: 16 },
                     candidates: vec![candidate("users")],
@@ -5832,6 +6048,7 @@ mod tests {
             assert!(!editor.apply_semantic_outcome(
                 revision,
                 SemanticOutcome::Completions {
+                    context: sift_protocol::completion::CompletionContext::Unknown,
                     cursor: 11,
                     replaced: sift_protocol::TextRange { start: 7, end: 11 },
                     candidates: vec![candidate("names")],
@@ -5866,6 +6083,7 @@ mod tests {
             assert!(editor.apply_semantic_outcome(
                 revision,
                 SemanticOutcome::Completions {
+                    context: sift_protocol::completion::CompletionContext::Unknown,
                     cursor: 16,
                     replaced: sift_protocol::TextRange { start: 14, end: 16 },
                     candidates: vec![users],
@@ -5905,6 +6123,7 @@ mod tests {
             assert!(editor.apply_semantic_outcome(
                 editor.revision,
                 SemanticOutcome::Completions {
+                    context: sift_protocol::completion::CompletionContext::Unknown,
                     cursor,
                     replaced: sift_protocol::TextRange {
                         start: cursor,
@@ -6002,6 +6221,7 @@ mod tests {
             assert!(editor.apply_semantic_outcome(
                 revision,
                 SemanticOutcome::Completions {
+                    context: sift_protocol::completion::CompletionContext::Unknown,
                     cursor: 3,
                     replaced: sift_protocol::TextRange { start: 0, end: 3 },
                     candidates: vec![sift_protocol::completion::CompletionCandidate {
@@ -6782,6 +7002,21 @@ mod tests {
             assert_eq!(editor.revision, revision_before);
             assert_eq!(editor.line_cache.borrow().lines.len(), cached_before);
         });
+        editor.update(&mut cx, |editor, cx| {
+            editor.document.replace_range(0..0, "x");
+            editor.edited(cx);
+            assert!(
+                editor.line_cache.borrow().lines.contains_key(&1),
+                "typing on the first line must retain the next line's glyphs"
+            );
+        });
+        cx.run_until_parked();
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(
+                editor.line_cache.borrow().lines[&1].text.as_ref(),
+                "select 1;"
+            );
+        });
     }
 
     #[test]
@@ -6792,6 +7027,41 @@ mod tests {
         assert_eq!(document.text(), "select 1");
         assert_eq!(document.replica.text(), "select 1");
         assert_eq!(document.selection(), 8..8);
+    }
+
+    #[gpui::test]
+    fn wrap_cache_reuses_unchanged_lines_and_matches_a_fresh_layout(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy(
+            "select αβ;\nselect some_very_long_identifier, another_column from table_name;\nlast",
+            cx,
+        );
+        editor.update_in(&mut cx, |editor, window, cx| {
+            let width = px(240.);
+            editor.update_wraps(width, cx.theme(), window);
+            let unchanged = editor.wraps.borrow().lines[&1].ranges.as_ptr();
+            editor.document.replace_range(0..0, "-- ");
+            editor.edited(cx);
+            editor.update_wraps(width, cx.theme(), window);
+            assert_eq!(editor.wraps.borrow().lines[&1].ranges.as_ptr(), unchanged);
+            for (range, text) in [(0..0, "é"), (0..0, "\n"), (0..4, "")] {
+                editor.document.replace_range(range, text);
+                editor.edited(cx);
+                editor.update_wraps(width, cx.theme(), window);
+                let cached = editor.visual_rows();
+                *editor.wraps.borrow_mut() = WrapCache::default();
+                editor.update_wraps(width, cx.theme(), window);
+                let fresh = editor.visual_rows();
+                assert_eq!(cached.len(), fresh.len());
+                for (cached, fresh) in cached.iter().zip(fresh.iter()) {
+                    assert_eq!(cached.source, fresh.source);
+                    assert_eq!(cached.range, fresh.range);
+                }
+            }
+            editor.update_wraps(px(140.), cx.theme(), window);
+            let narrow = editor.visual_rows().len();
+            editor.update_wraps(px(600.), cx.theme(), window);
+            assert!(editor.visual_rows().len() < narrow);
+        });
     }
 
     #[test]
@@ -6810,6 +7080,14 @@ mod tests {
         assert_eq!(&*document.line_starts(), &[0, 6, 8, 10]);
         assert_eq!(document.line_char_starts, vec![0, 4, 6, 8]);
         assert_eq!(document.replica.text(), document.text());
+        for line in 0..6 {
+            for column in 0..8 {
+                assert_eq!(
+                    document.offset_from_position((line, column)),
+                    byte_from_line_column(document.text(), (line, column))
+                );
+            }
+        }
     }
 
     #[test]

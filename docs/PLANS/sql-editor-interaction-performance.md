@@ -80,5 +80,11 @@ Implementation order and constraints:
    exact text, invalidated by width/font/style changes. Avoid new parsing or
    database I/O on input.
 
+Implemented refinements also retain glyph layouts for unchanged visible lines
+whose visual row positions remain stable. Server completion context is forwarded
+to snippet enrichment instead of re-tokenizing SQL in the workspace. Connection
+retargeting, disconnect/failure, and schema refresh invalidate editor semantic
+epochs, previews, and pending requests without changing query text.
+
 References: [CodeMirror completion validity](https://codemirror.net/examples/autocompletion/)
 and [Zed text snapshots](https://zed.dev/blog/zed-decoded-rope-sumtree).

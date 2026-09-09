@@ -2072,12 +2072,20 @@ multiple visible relations provide it.
 The desktop owns activation policy, not completion correctness. In Vim insert
 mode it applies a bounded lexical guard, coalesces automatic requests for 180
 ms, and retains immediate Ctrl+Space completion. Diagnostics use an independent
-650 ms idle window and disappear when their document revision becomes stale.
+1200 ms idle window and disappear when their document revision becomes stale.
 Every live query tab records a credential-free instance, tenant, profile,
 provider, and database target; the executor rejects semantic work when that
 target does not match the opened connection. The shallow schema loaded during
 connection setup warms the spec-keyed, single-flight cache shared by metadata
 and semantic physical connections, so warm completion performs no driver I/O.
+
+An exact, unquoted identifier extension may immediately narrow the currently
+visible completion list while a revision-bound server refresh is pending. This
+is a bounded preview, not an exhaustive catalog cache; snippets, deletions,
+punctuation, cursor movement, external edits and connection changes invalidate
+reuse. The accepted replacement range is mapped to the current text. Server
+context travels with the completion reply so local snippet enrichment does not
+reparse SQL on the UI thread.
 
 Execution v2 uses an explicit ordered event lifecycle: execution start,
 statement start, result-set start, rows addressed to a result-set id,

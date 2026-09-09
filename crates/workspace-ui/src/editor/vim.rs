@@ -176,6 +176,26 @@ impl VimEngine {
         self.snapshot(text_changed, open_command_palette, clipboard_changed)
     }
 
+    /// Execute a plain Insert character through ModalKit, but omit the full
+    /// buffer snapshot when its actual length/cursor change proves a splice.
+    /// Replace mode shares ModalKit's Insert mode and must fall back.
+    pub fn input_character(&mut self, character: char) -> (VimSnapshot, bool) {
+        let before = self.buffer.get_leader(self.cursor_group);
+        let length = self.buffer.get().len();
+        let (changed, clipboard_changed) =
+            self.input_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        let after = self.buffer.get_leader(self.cursor_group);
+        let inserted = changed
+            && self.bindings.mode() == ModalVimMode::Insert
+            && self.buffer.get().len() == length + 1
+            && after.y == before.y
+            && after.x == before.x + 1;
+        (
+            self.snapshot(changed && !inserted, false, clipboard_changed),
+            inserted,
+        )
+    }
+
     pub fn input_key(&mut self, code: KeyCode) -> VimSnapshot {
         if code == KeyCode::Char(':') && self.bindings.mode() == ModalVimMode::Normal {
             self.entered.clear();
@@ -198,8 +218,11 @@ impl VimEngine {
 
     fn input_key_event(&mut self, event: KeyEvent) -> (bool, bool) {
         let mut text_changed = false;
-        let register_before = self.unnamed_register();
         let mode_before = self.bindings.mode();
+        // Plain Insert characters and Backspace cannot yank or paste. Avoid
+        // materializing a potentially huge unnamed register twice per key.
+        let register_before =
+            (mode_before != ModalVimMode::Insert).then(|| self.unnamed_register());
         if mode_before == ModalVimMode::Insert && event.code != KeyCode::Esc {
             self.empty_insert_origin = None;
         }
@@ -256,7 +279,10 @@ impl VimEngine {
             }
         }
         drop(store);
-        (text_changed, self.unnamed_register() != register_before)
+        (
+            text_changed,
+            register_before.is_some_and(|before| self.unnamed_register() != before),
+        )
     }
 
     /// ModalKit 0.0.25 maps these Vim keys but leaves paragraph movement as a
@@ -490,6 +516,29 @@ mod tests {
         assert_eq!(snapshot.text, None);
         assert_eq!(snapshot.cursor, (0, 2));
         assert_eq!(vim.input_text("x").text.as_deref(), Some("abx"));
+    }
+
+    #[test]
+    fn plain_insert_fast_path_preserves_unicode_undo_and_replace_mode() {
+        let mut fast = VimEngine::new("αβ\nlast", 0);
+        let mut reference = VimEngine::new("αβ\nlast", 0);
+        fast.input_text("i");
+        reference.input_text("i");
+        for character in "é中_".chars() {
+            let (snapshot, inserted) = fast.input_character(character);
+            let expected = reference.input_text(&character.to_string());
+            assert!(inserted);
+            assert!(snapshot.text.is_none());
+            assert_eq!(snapshot.cursor, expected.cursor);
+            assert_eq!(fast.buffer.get_text(), reference.buffer.get_text());
+        }
+        fast.input_key(KeyCode::Esc);
+        reference.input_key(KeyCode::Esc);
+        assert_eq!(fast.input_text("u").text, reference.input_text("u").text);
+        fast.input_text("R");
+        let (snapshot, inserted) = fast.input_character('x');
+        assert!(!inserted, "Replace must use the authoritative snapshot");
+        assert_eq!(snapshot.text.as_deref(), Some("xβ\nlast"));
     }
 
     #[test]

@@ -88,6 +88,7 @@ pub enum SemanticOutcome {
         incomplete: bool,
     },
     Completions {
+        context: sift_protocol::completion::CompletionContext,
         cursor: u32,
         replaced: TextRange,
         candidates: Vec<CompletionCandidate>,
@@ -208,6 +209,45 @@ impl SemanticState {
 
     pub fn completion(&self) -> Option<&CompletionMenu> {
         self.completion.as_ref()
+    }
+
+    /// Keep a bounded preview while the server refreshes a simple identifier
+    /// extension. This is not a complete catalog cache: punctuation, deletions,
+    /// quoted replacements and edits away from the old range end must requery.
+    pub fn extend_completion(
+        &mut self,
+        text: &str,
+        start: usize,
+        inserted: usize,
+    ) -> Option<CompletionMenu> {
+        let mut menu = self.completion.take()?;
+        let end = start.checked_add(inserted)?;
+        if inserted == 0 || start != menu.replace.end {
+            return None;
+        }
+        let prefix = text.get(menu.replace.start..end)?;
+        if prefix.is_empty()
+            || !prefix
+                .chars()
+                .all(|character| character.is_alphanumeric() || character == '_')
+        {
+            return None;
+        }
+        let prefix = prefix.to_ascii_lowercase();
+        menu.candidates.retain(|candidate| {
+            candidate.kind != CompletionKind::Snippet
+                && candidate.label.to_ascii_lowercase().contains(&prefix)
+        });
+        if menu.candidates.is_empty() {
+            return None;
+        }
+        menu.replace.end = end;
+        menu.selected = 0;
+        Some(menu)
+    }
+
+    pub fn show_completion_preview(&mut self, menu: CompletionMenu) {
+        self.completion = Some(menu);
     }
 
     pub fn hover(&self) -> Option<&sift_protocol::SemanticHoverResponse> {
@@ -698,6 +738,39 @@ mod tests {
             completion_candidate_metadata(&candidate).as_deref(),
             Some("app.public.users · int4 NOT NULL")
         );
+    }
+
+    #[test]
+    fn completion_preview_rejects_context_changes_and_snippets() {
+        for (text, start, inserted, kind) in [
+            ("us.", 2, 1, CompletionKind::Table),
+            ("us ", 2, 1, CompletionKind::Table),
+            ("uXs", 1, 1, CompletionKind::Table),
+            ("us", 2, 0, CompletionKind::Table),
+            ("use", 2, 1, CompletionKind::Snippet),
+            ("[use", 2, 2, CompletionKind::Table),
+        ] {
+            let mut state = SemanticState::default();
+            state.expect_completion(1, 2);
+            state.set_completions(
+                "us",
+                (1, 2),
+                1,
+                TextRange { start: 0, end: 2 },
+                vec![CompletionCandidate {
+                    label: "users".into(),
+                    insert: "users".into(),
+                    kind,
+                    detail: None,
+                    qualified_name: None,
+                    score: 1,
+                }],
+            );
+            assert!(
+                state.extend_completion(text, start, inserted).is_none(),
+                "{text}"
+            );
+        }
     }
 
     #[test]

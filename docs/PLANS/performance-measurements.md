@@ -61,3 +61,42 @@ resident set size 1,023,768 KiB (about 999.8 MiB), no swaps, and exit status 0.
 This is the peak of the complete benchmark process, including fixture data,
 Criterion and retained platform caches; it is not a steady-state desktop memory
 measurement or a per-window ceiling. Further memory acceptance remains open.
+
+## SQL editor refinement (2026-09-09)
+
+Repeated the existing 8,000-line `vim_typing_large_document` fixture using
+`--profile release-dev`, matching the demo launcher. Ten Criterion samples,
+one-second requested warmup and two-second requested measurement; Criterion
+extends collection when the workload cannot fit that duration. The workstation
+was not isolated, so these are diagnostic measurements, not portable gates.
+
+The pre-refinement fixture measured a 7.491-second mean insert/backspace pair
+and 8153.727 ms dirty-to-draw p95. Reusing unchanged wrap ranges and avoiding
+whole-buffer Vim snapshots reduced those to 60.329 ms and 58.294 ms respectively.
+This exposed another invalidation cost: every edit still discarded unchanged
+visible glyph layouts. Those layouts are now retained when text, styling and
+visual row placement remain valid.
+
+| Stage | Mean insert/backspace pair | Dirty-to-draw p95 |
+|---|---:|---:|
+| Pre-refinement | 7490.6 ms | 8153.727 ms |
+| Wrap reuse and Vim splice path | 60.329 ms | 58.294 ms |
+| Plus unchanged visible glyph reuse | 11.090 ms | 7.590 ms |
+
+The final run recorded 694 frames (including warmup/calibration), p50 4.502 ms,
+p99 8.139 ms, and maximum 10.772 ms. Two observed frames exceeded the 8.33 ms
+120 Hz CPU-frame budget. Both p95 and p99 fit that budget, but this does not
+guarantee 120 Hz presentation on a real display. Criterion reported two high
+outliers among ten samples; the final pair-time confidence interval was
+10.914–11.457 ms.
+
+The fixture has no live database or workspace shell. It does not measure server
+completion latency, the Problems projection savings, or physical key-to-display
+latency. First layout of a large document still requires wrapping the document;
+initial opening is not covered by the steady-edit improvement claim. Native
+profiling via `perf`/attach was unavailable under the host's security settings;
+no host settings were changed.
+
+```sh
+cargo bench -p sift-workspace-ui --features benchmark --profile release-dev --bench frame_budget -- vim_typing_large_document --sample-size 10 --warm-up-time 1 --measurement-time 2
+```

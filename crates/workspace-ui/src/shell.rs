@@ -12250,6 +12250,7 @@ impl WorkspaceShell {
                     status,
                     ConnectionStatus::Disconnected | ConnectionStatus::Failed { .. }
                 ) {
+                    self.invalidate_editor_semantic_contexts(cx);
                     self.transaction_state = TransactionUiState::Idle;
                     self.status.transaction = "TX: None".into();
                     self.connection_schema = ConnectionSchemaState::Unavailable;
@@ -12959,6 +12960,7 @@ impl WorkspaceShell {
                 profile_id,
                 snapshot,
             } => {
+                self.invalidate_editor_semantic_contexts(cx);
                 self.expanded_connections.insert(profile_id);
                 self.expanded_catalogs
                     .retain(|(expanded_profile, _)| *expanded_profile != profile_id);
@@ -15346,6 +15348,11 @@ impl WorkspaceShell {
             })
         });
         if let Some(item_id) = scratch_item {
+            if let Some(editor) = self.editor_for_item(item_id, cx) {
+                editor.update(cx, |editor, cx| editor.invalidate_semantic_context(cx));
+            }
+            self.semantic_completion_tasks.remove(&item_id);
+            self.semantic_analyze_tasks.remove(&item_id);
             let database = match &self.connection_schema {
                 ConnectionSchemaState::Ready {
                     profile_id,
@@ -16432,6 +16439,7 @@ impl WorkspaceShell {
             return;
         }
         if let SemanticOutcome::Completions {
+            context,
             cursor,
             replaced,
             candidates,
@@ -16446,33 +16454,40 @@ impl WorkspaceShell {
                 && document.is_char_boundary(range.start)
                 && document.is_char_boundary(range.end)
             {
-                let cursor = range.end;
                 let prefix = &document[range];
-                let engine = self.active_connection_provider_id().map_or(
-                    sift_protocol::Engine::Postgres,
-                    |provider| {
+                let engine = self
+                    .query_semantic_targets
+                    .get(&item_id)
+                    .map(|target| &target.provider_id)
+                    .map_or(sift_protocol::Engine::Postgres, |provider| {
                         if provider.as_str() == "sift/sql-server" {
                             sift_protocol::Engine::SqlServer
+                        } else if provider.as_str() == "sift/sqlite" {
+                            sift_protocol::Engine::Sqlite
                         } else {
                             sift_protocol::Engine::Postgres
                         }
-                    },
-                );
-                let analysis = sift_completion::detect_context(document, cursor, engine);
+                    });
                 *candidates = merge_sql_snippet_completions(
                     &self.snippet_index,
                     prefix,
                     &engine.dialect_id(),
-                    &analysis.context,
+                    context,
                     std::mem::take(candidates),
                 );
             }
         }
+        let editor_only = matches!(
+            &outcome,
+            SemanticOutcome::Completions { .. } | SemanticOutcome::Hover(_)
+        );
         editor.update(cx, |editor, cx| {
             editor.apply_semantic_outcome(text_revision, outcome, cx);
         });
-        self.sync_global_problems_editor(cx);
-        cx.notify();
+        if !editor_only {
+            self.sync_global_problems_editor(cx);
+            cx.notify();
+        }
     }
 
     fn cancel_execution(&mut self, _: &CancelExecution, _: &mut Window, cx: &mut Context<Self>) {
@@ -16518,6 +16533,7 @@ impl WorkspaceShell {
             return;
         };
         if sender.send(ExecutorCommand::RefreshSchema).is_ok() {
+            self.invalidate_editor_semantic_contexts(cx);
             self.connection_schema = ConnectionSchemaState::Loading { profile_id };
             self.invalidate_connection_projection();
             cx.notify();
@@ -16682,6 +16698,7 @@ impl WorkspaceShell {
     }
 
     fn disconnect_now(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_editor_semantic_contexts(cx);
         if let Some(sender) = &self.executor_sender {
             let _ = sender.send(ExecutorCommand::Disconnect);
         }
@@ -16707,6 +16724,17 @@ impl WorkspaceShell {
         self.status.transaction = "TX: None".into();
         self.sync_database_item_states(cx);
         cx.notify();
+    }
+
+    fn invalidate_editor_semantic_contexts(&mut self, cx: &mut Context<Self>) {
+        self.semantic_completion_tasks.clear();
+        self.semantic_analyze_tasks.clear();
+        for pane in &self.panes {
+            let editors = pane.read(cx).editors.values().cloned().collect::<Vec<_>>();
+            for editor in editors {
+                editor.update(cx, |editor, cx| editor.invalidate_semantic_context(cx));
+            }
+        }
     }
 
     fn reconnect(&mut self, cx: &mut Context<Self>) {
