@@ -2087,6 +2087,16 @@ reuse. The accepted replacement range is mapped to the current text. Server
 context travels with the completion reply so local snippet enrichment does not
 reparse SQL on the UI thread.
 
+Plain unquoted SQL tokens may also receive immediate, bounded shared-keyword
+previews without a round trip. These are lexical suggestions, not local semantic
+analysis; dialect-specific and catalog candidates remain server-owned. Tab
+pressed while a completion is pending requests an immediate reply and records
+acceptance only for that exact revision and caret. Text/cursor changes or
+cancellation discard the intent. Completion acceptance edits the existing Vim
+buffer instead of rebuilding its key machine. Queued completion takes priority
+over diagnostics; read-only analysis may yield to new controls, but semantic
+document updates remain serial and are never interrupted midway.
+
 Execution v2 uses an explicit ordered event lifecycle: execution start,
 statement start, result-set start, rows addressed to a result-set id,
 result-set completion, command completion, notices, progress, terminal error,

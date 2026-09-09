@@ -43,8 +43,14 @@ pub(super) async fn run_semantic_service(
 ) {
     let mut documents: HashMap<u64, SemanticDocument> = HashMap::new();
     let mut catalog_revision: Option<sift_protocol::CatalogRevision> = None;
-    while let Some(first) = controls.recv().await {
-        let mut batch = vec![first];
+    let mut batch = Vec::new();
+    loop {
+        if batch.is_empty() {
+            let Some(first) = controls.recv().await else {
+                break;
+            };
+            batch.push(first);
+        }
         while let Ok(next) = controls.try_recv() {
             batch.push(next);
         }
@@ -62,22 +68,64 @@ pub(super) async fn run_semantic_service(
                     .await;
             }
         }
-        let jobs = admissible_jobs(batch, &closed, &events);
-        for job in jobs {
-            if run_semantic_job(
-                &client,
-                session,
-                connection,
-                &mut documents,
-                &mut catalog_revision,
-                job,
-                &events,
-            )
-            .await
-            .is_err()
-            {
-                return;
+        let mut jobs = admissible_jobs(std::mem::take(&mut batch), &closed, &events).into_iter();
+        let Some(job) = jobs.next() else { continue };
+        batch.extend(jobs.map(SemanticControl::Run));
+        // Updates remain serial and are never interrupted: cancelling an HTTP
+        // update could leave its committed server revision unknown to us.
+        let outcome = match sync_semantic_document(
+            &client,
+            session,
+            connection,
+            &mut documents,
+            &job,
+        )
+        .await
+        {
+            Ok((document, revision)) => {
+                // Recheck the queue after synchronization as well as between
+                // jobs. Diagnostics are read-only and may yield to new input.
+                if job.request == SemanticRequestKind::Analyze {
+                    tokio::select! {
+                        biased;
+                        Some(control) = controls.recv() => {
+                            batch.insert(0, SemanticControl::Run(job));
+                            batch.push(control);
+                            continue;
+                        }
+                        outcome = semantic_outcome(&client, session, connection, document, revision, &mut catalog_revision, job.request.clone()) => outcome,
+                    }
+                } else {
+                    // New arrivals must be coalesced before another potentially
+                    // obsolete interactive request starts its read round trip.
+                    if let Ok(control) = controls.try_recv() {
+                        batch.insert(0, SemanticControl::Run(job));
+                        batch.push(control);
+                        continue;
+                    }
+                    semantic_outcome(
+                        &client,
+                        session,
+                        connection,
+                        document,
+                        revision,
+                        &mut catalog_revision,
+                        job.request.clone(),
+                    )
+                    .await
+                }
             }
+            Err(message) => SemanticOutcome::Failed(message),
+        };
+        if events
+            .send(ExecutorEvent::Semantic {
+                item_id: job.item_id,
+                text_revision: job.text_revision,
+                outcome: Box::new(outcome),
+            })
+            .is_err()
+        {
+            break;
         }
     }
     for (_, document) in documents.drain() {
@@ -143,6 +191,12 @@ fn admissible_jobs(
         }
     }
     kept.reverse();
+    // Stable within each class: completion never waits behind queued analysis.
+    kept.sort_by_key(|job| match job.request {
+        SemanticRequestKind::Complete { .. } | SemanticRequestKind::AutoComplete { .. } => 0,
+        SemanticRequestKind::Analyze => 2,
+        _ => 1,
+    });
     kept
 }
 
@@ -236,44 +290,7 @@ async fn current_catalog_revision(
     *cached
 }
 
-/// Run one job. `Err(())` means the UI channel closed and the service should
-/// stop; every other failure is reported to the editor as an outcome.
-#[allow(clippy::result_unit_err)]
-async fn run_semantic_job(
-    client: &Client,
-    session: SessionId,
-    connection: ConnectionId,
-    documents: &mut HashMap<u64, SemanticDocument>,
-    catalog_revision: &mut Option<sift_protocol::CatalogRevision>,
-    job: SemanticJob,
-    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
-) -> Result<(), ()> {
-    let item_id = job.item_id;
-    let text_revision = job.text_revision;
-    let outcome = match sync_semantic_document(client, session, connection, documents, &job).await {
-        Ok((document, revision)) => {
-            semantic_outcome(
-                client,
-                session,
-                connection,
-                document,
-                revision,
-                catalog_revision,
-                job.request,
-            )
-            .await
-        }
-        Err(message) => SemanticOutcome::Failed(message),
-    };
-    events
-        .send(ExecutorEvent::Semantic {
-            item_id,
-            text_revision,
-            outcome: Box::new(outcome),
-        })
-        .map_err(|_| ())
-}
-
+/// Read or transform one synchronized semantic document.
 async fn semantic_outcome(
     client: &Client,
     session: SessionId,
@@ -623,8 +640,9 @@ mod tests {
             &events,
         );
         assert_eq!(kept.len(), 3);
-        assert_eq!(kept[1].request, SemanticRequestKind::Complete { cursor: 7 });
-        assert_eq!(kept[2].item_id, 2);
+        assert_eq!(kept[0].request, SemanticRequestKind::Complete { cursor: 7 });
+        assert_eq!(kept[1].item_id, 2);
+        assert_eq!(kept[2].request, SemanticRequestKind::Analyze);
         assert!(received.try_recv().is_err());
     }
 
@@ -641,6 +659,30 @@ mod tests {
         );
 
         assert!(kept.is_empty());
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn interrupted_analysis_is_recoalesced_with_new_input() {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let kept = admissible_jobs(
+            vec![
+                job(1, 1, SemanticRequestKind::Analyze),
+                job(2, 1, SemanticRequestKind::Analyze),
+                job(1, 2, SemanticRequestKind::AutoComplete { cursor: 4 }),
+                job(1, 2, SemanticRequestKind::Analyze),
+            ],
+            &HashSet::new(),
+            &events,
+        );
+        assert_eq!(kept.len(), 3);
+        assert_eq!(
+            kept[0].request,
+            SemanticRequestKind::AutoComplete { cursor: 4 }
+        );
+        assert!(kept
+            .iter()
+            .all(|job| job.item_id != 1 || job.text_revision == 2));
         assert!(received.try_recv().is_err());
     }
 

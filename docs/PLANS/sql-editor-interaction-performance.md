@@ -88,3 +88,30 @@ epochs, previews, and pending requests without changing query text.
 
 References: [CodeMirror completion validity](https://codemirror.net/examples/autocompletion/)
 and [Zed text snapshots](https://zed.dev/blog/zed-decoded-rope-sumtree).
+
+## Rapid completion acceptance
+
+The ordinary typing/backspace benchmark does not cover repeated Tab acceptance.
+The additional `vim_rapid_completion_large_document` fixture replays
+`sel<Tab> * fro<Tab>` on an 8,000-line buffer, with fixture reset outside timing.
+It covers local keyword menus and acceptance, not network or compositor latency.
+
+- Completion acceptance splices the existing ModalKit buffer using a black-hole
+  deletion and literal transcription. It does not rebuild default bindings or
+  copy the whole document. The canonical document retains one undo edit per
+  completion. Snippet tabstop navigation only updates the existing cursor.
+- A bounded shared keyword table supplies immediate previews for plain SQL
+  tokens. Strings, comments, quoted/qualified identifiers and table/alias slots
+  decline these previews; dialect-specific literal syntax falls back to the
+  server. Server completion still refreshes after 180 ms and owns SQL context,
+  dialect-specific suggestions, catalog candidates and ranking.
+- Tab with an outstanding request flushes the debounce and records acceptance
+  for exactly that revision/caret. It does not insert indentation. Editing,
+  moving, Escape or semantic invalidation cancels that intent; an empty result
+  reports that no completion is available. With no pending completion, Tab
+  retains its existing indentation behaviour.
+- Completion takes priority over queued diagnostics. The worker re-coalesces
+  between jobs and after synchronization; read-only analysis yields to newly
+  arrived controls. Document synchronization remains serial and non-interruptible
+  so an HTTP update cannot leave an unknown committed server revision. Dropping
+  a read future does not promise cancellation of server-side computation.
