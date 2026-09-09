@@ -29,12 +29,12 @@ pub use settings::{
     QueryResultsPlacement, SettingsStore, UserSettings,
 };
 pub use shell::{
-    AutomationDetailsSnapshot, CancelExecution, CloseActiveItem, CloseActivePane,
-    CommandDefinition, CommandId, CommandRegistry, CommandSpec, ConnectionHealthFailure,
-    ConnectionHealthReport, ConnectionStatus, DismissModal, Dock, DockDefinition, DockId,
-    DockPlacement, DockRegistry, ExecutorCommand, ExecutorEvent, ExecutorSender, FocusNextPane,
-    InstanceCommand, InstanceConfigurationPresentation, InstanceCredentialKind,
-    InstanceCredentialPresentation, InstanceFieldChangePresentation,
+    AutomationDetailsSnapshot, BenchmarkLibraryAction, BenchmarkLibraryReply, CancelExecution,
+    CloseActiveItem, CloseActivePane, CommandDefinition, CommandId, CommandRegistry, CommandSpec,
+    ConnectionHealthFailure, ConnectionHealthReport, ConnectionStatus, DismissModal, Dock,
+    DockDefinition, DockId, DockPlacement, DockRegistry, ExecutorCommand, ExecutorEvent,
+    ExecutorSender, FocusNextPane, InstanceCommand, InstanceConfigurationPresentation,
+    InstanceCredentialKind, InstanceCredentialPresentation, InstanceFieldChangePresentation,
     InstanceGenerationPresentation, InstanceManagerEvent, InstancePlanPresentation,
     InstanceResourceChangePresentation, ItemDefinition, ItemRegistry, ItemRuntimeKind, Modal,
     OpenCommandPalette, OpenSchemaSearch, OpenServerConnection, PaletteConfirm, PaletteDown,

@@ -1,7 +1,7 @@
 # Query performance workbench
 
-Status: serial benchmark API and initial Performance panel implemented; the
-complete workbench, durable library and advanced tools remain in progress.
+Status: serial benchmarks, configurable Performance panel and private saved-run
+library implemented; profiling, definitions and advanced tools remain in progress.
 
 ## Design contract
 
@@ -36,7 +36,8 @@ complete workbench, durable library and advanced tools remain in progress.
 - [x] Freeze SQL, parameters and configuration for a serial benchmark.
 - [ ] Full profiling capability matrix and captured environment context.
 - [x] Versioned benchmark report and audited Benchmark/cancel API actions.
-- [ ] Dedicated Profile/save actions.
+- [x] Dedicated audited save/list/get/delete snapshot actions.
+- [ ] Dedicated Profile action.
 
 ## Milestone 2 — profile and Performance panel
 
@@ -79,9 +80,14 @@ complete workbench, durable library and advanced tools remain in progress.
 
 ## Milestone 4 — save and compare
 
-- [ ] Metadata migrations for definitions, immutable runs/samples and plans.
-- [ ] Names, notes, tags, workspace/Git context, private visibility and retention.
-- [ ] Saved browser independent of open query tabs; validate rerun connection.
+- [x] Immutable private saved-run snapshots, owner-scoped paginated browser,
+  reopen/copy, baseline reuse and confirmed deletion. Names, SQL and samples are
+  stored through SecretStore; SQLite holds only identifiers and opaque handles.
+- [x] Saved library command works independently of open query tabs and database
+  connections. Missing secret payloads remain browsable and deletable.
+- [ ] Metadata migrations for reusable definitions and attached profiling plans.
+- [ ] Notes, tags, workspace/Git context and editable retention policy.
+- [ ] Definition browser and validated parameter-aware rerun connection.
 - [ ] Baseline pinning, A/B variants and before/after comparisons.
 - [x] In-memory baseline pinning and observed median delta; incomplete runs,
   different engines and selected configuration mismatches suppress comparison.
@@ -149,3 +155,30 @@ complete workbench, durable library and advanced tools remain in progress.
   Verification: formatting, workspace check, strict workspace Clippy and the
   full workspace test suite pass (474 UI/editor tests). Regressions cover
   malformed/overflowing numbers, shared budget limits and invalid-run blocking.
+
+- Saved-run library milestone: V047 indexes private immutable benchmark snapshots.
+  POST/GET `.../metadata/tenants/:tenant/benchmark-runs` save and keyset-page runs;
+  GET/DELETE `.../benchmark-runs/:id` retrieve/delete owner-only snapshots. Save
+  recomputes summaries from bounded, validated samples. These are user-submitted
+  snapshots, not server attestations or rerunnable definitions; bind values are
+  absent. Limits: 4 MiB per snapshot, 500 snapshots / 64 MiB per tenant-owner,
+  no automatic expiry or eviction. Save writes the secret before indexing it and
+  compensates on rejected inserts. Delete removes secret bytes before the index;
+  an interrupted deletion can leave an unavailable index entry, which can be
+  deleted again. Backup/recovery must include both metadata and the secret store;
+  tenant restore rebinds benchmark secret handles. Backend crashes during save
+  can leave unindexed secret entries; automatic orphan collection is not added.
+  UI: `s` in Performance opens the private save form; command palette
+  `Query Performance: Browse Saved Runs` opens the independent browser. `j/k`
+  selects, Enter opens, `r` refreshes, `n` pages, `c` edits the save name, `s`
+  saves, `b` reuses the opened run as a query baseline, and `y` copies JSON
+  (including SQL). `d` requests deletion; Enter confirms; Escape cancels.
+  Definitions, parameter-aware reruns, sharing, tags/notes and instrumented plans
+  remain separate unchecked work.
+  Verification: formatting, workspace check, strict workspace Clippy and full
+  workspace tests pass (475 UI/editor tests, 78 API tests). New regressions cover
+  encrypted persistence/reopen, owner isolation, pagination, missing payloads,
+  duplicate saves, normalized summaries and keyboard deletion confirmation.
+  An initial full run hit the existing SQLite close/reopen PoolExhausted test;
+  it passed unchanged in isolation and on both subsequent workspace runs.
+  Backup fixtures were updated for schema V047; no driver code was changed.

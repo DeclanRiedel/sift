@@ -2351,3 +2351,29 @@ validates the full staged result with audit-only destination writes. Apply
 installs secrets before metadata using the existing recoverable journal.
 Cross-instance identity migration and external database DR orchestration remain
 separate work. Details and exclusions: [tenant recovery design](PLANS/tenant-selective-restore.md).
+
+## ADR-060 — Private Immutable Benchmark Snapshots
+
+Status: accepted. Date: 2026-09-09.
+
+Saved benchmark runs are immutable user-submitted snapshots, distinct from
+rerunnable benchmark definitions and server-attested execution records. The
+server bounds and validates samples, recomputes summaries and completion, and
+never executes SQL while saving, browsing or opening a snapshot. Bind values and
+result rows are absent. Ordinary execution timings remain separate from future
+instrumented profiling populations.
+
+Names, SQL, warnings and samples may be sensitive. ADR-008's SecretStore holds
+the complete payload; SQLite holds owner/tenant/run IDs, timestamp, byte count
+and an opaque handle. Every API operation is audited and membership plus owner
+identity restricts access; tenant membership alone does not expose peer runs.
+Private storage is capped without automatic expiry or silent eviction.
+
+Secret publication precedes index insertion, with compensation on rejected
+inserts. Secret deletion precedes index deletion so failed deletion can be
+retried. These two stores are not one transaction: process failure can leave an
+unindexed secret or an unavailable index entry. Unavailable entries remain
+browsable and deletable. Full recovery needs both stores; tenant-selective
+recovery copies benchmark payloads under fresh opaque handles. Definition
+storage, parameter-aware reruns, sharing and orphan collection remain separate
+work. See the [workbench checklist](PLANS/query-performance.md).

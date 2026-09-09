@@ -5830,6 +5830,51 @@ async fn run_query_executor(
             ExecutorCommand::CancelResultExport { item_id } => {
                 active_exports.remove(&item_id);
             }
+            ExecutorCommand::BenchmarkLibrary {
+                instance_id,
+                tenant_id,
+                request_id,
+                action,
+            } => {
+                let server = targets.borrow().clone();
+                let events = events.clone();
+                tokio::spawn(async move {
+                    use sift_workspace_ui::{
+                        BenchmarkLibraryAction as Action, BenchmarkLibraryReply as Reply,
+                    };
+                    let result = async {
+                        if server.instance().id != instance_id {
+                            return Err("Sift server changed; reopen the saved-run browser".into());
+                        }
+                        let client = server.client().await?;
+                        let tenant = sift_api_types::TenantId(tenant_id);
+                        match action {
+                            Action::List { cursor } => {
+                                client.benchmark_runs(tenant, cursor).await.map(Reply::Page)
+                            }
+                            Action::Save(request) => client
+                                .save_benchmark_run(tenant, &request)
+                                .await
+                                .map(|saved| Reply::Saved(Box::new(saved))),
+                            Action::Get(id) => client
+                                .saved_benchmark_run(tenant, id)
+                                .await
+                                .map(|saved| Reply::Loaded(Box::new(saved))),
+                            Action::Delete(id) => client
+                                .delete_benchmark_run(tenant, id)
+                                .await
+                                .map(|_| Reply::Deleted(id)),
+                        }
+                        .map_err(|error| format!("Saved benchmark operation failed: {error}"))
+                    }
+                    .await;
+                    let _ = events.send(ExecutorEvent::BenchmarkLibrary {
+                        instance_id,
+                        request_id,
+                        result,
+                    });
+                });
+            }
             ExecutorCommand::CapturePlan {
                 item_id,
                 profile_id,

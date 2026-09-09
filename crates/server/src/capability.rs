@@ -178,6 +178,10 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | GetCatalogSnapshot
         | DeleteCatalogSnapshot
         | ListPlanCaptures
+        | SaveBenchmarkRun
+        | ListBenchmarkRuns
+        | GetBenchmarkRun
+        | DeleteBenchmarkRun
         | GetPlanCapture
         | ComparePlanCaptures
         | DeletePlanCapture

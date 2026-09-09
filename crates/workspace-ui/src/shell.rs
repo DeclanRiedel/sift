@@ -54,12 +54,14 @@ mod commands;
 mod data_window;
 mod dispatch;
 pub use dispatch::ExecutorSender;
+mod benchmark_library;
 mod database_monitor;
 mod dock_layout;
 mod docks;
 mod items;
 mod modal_layout;
 mod modals;
+pub use benchmark_library::{BenchmarkLibraryAction, BenchmarkLibraryReply};
 mod pane_layout;
 mod result_editing;
 mod sql_drafts;
@@ -1676,6 +1678,7 @@ pub enum Modal {
     QueryParameters,
     EditResultCell,
     PlanCaptures,
+    BenchmarkLibrary,
     ConfirmTransactionDisconnect,
     ConfirmProductionExecution,
     ConfirmOutcomeUnknownRerun(u64, String),
@@ -2342,6 +2345,9 @@ pub enum PaneEvent {
         sql: String,
         run_id: uuid::Uuid,
         limits: sift_protocol::BenchmarkLimits,
+    },
+    SaveBenchmarkRequested {
+        item_id: u64,
     },
     CancelBenchmarkRequested {
         item_id: u64,
@@ -3596,6 +3602,12 @@ pub enum ExecutorCommand {
         params: Vec<sift_protocol::Value>,
         source: Option<sift_protocol::VersionedExecutionContext>,
     },
+    BenchmarkLibrary {
+        instance_id: String,
+        tenant_id: i64,
+        request_id: uuid::Uuid,
+        action: BenchmarkLibraryAction,
+    },
     LoadPlanCaptures {
         item_id: u64,
         tenant_id: i64,
@@ -3738,6 +3750,11 @@ pub enum ExecutorEvent {
     BenchmarkCancelFailed {
         run_id: uuid::Uuid,
         message: String,
+    },
+    BenchmarkLibrary {
+        instance_id: String,
+        request_id: uuid::Uuid,
+        result: Result<BenchmarkLibraryReply, String>,
     },
     ProfileCreated {
         entry: ConnectionNavEntry,
@@ -4546,6 +4563,9 @@ impl Pane {
                     item_id,
                     run_id: *run_id,
                 })
+            }
+            ResultsEvent::SaveBenchmarkRequested => {
+                cx.emit(PaneEvent::SaveBenchmarkRequested { item_id });
             }
             ResultsEvent::CapturePlanRequested => {
                 let sql = self.targeted_query_sql(item_id, cx);
@@ -9791,6 +9811,7 @@ pub struct WorkspaceShell {
     selected_plan_captures: Vec<sift_protocol::PlanCaptureId>,
     plan_capture_comparison: Option<sift_protocol::PlanCaptureComparison>,
     plan_capture_error: Option<String>,
+    benchmark_library: benchmark_library::BenchmarkLibraryState,
     pending_parameter_run: Option<PendingParameterRun>,
     parameter_binding_inputs: Vec<ParameterBindingInput>,
     remembered_parameter_bindings: HashMap<String, Vec<String>>,
@@ -11034,6 +11055,7 @@ impl WorkspaceShell {
             selected_plan_captures: Vec::new(),
             plan_capture_comparison: None,
             plan_capture_error: None,
+            benchmark_library: benchmark_library::BenchmarkLibraryState::new(cx),
             pending_parameter_run: None,
             parameter_binding_inputs: Vec::new(),
             remembered_parameter_bindings,
@@ -13206,6 +13228,13 @@ impl WorkspaceShell {
                     self.running_benchmarks.remove(&item_id);
                 }
                 self.route_benchmark(item_id, run_id, response, cx);
+            }
+            ExecutorEvent::BenchmarkLibrary {
+                instance_id,
+                request_id,
+                result,
+            } => {
+                self.receive_benchmark_library(instance_id, request_id, result, cx);
             }
             ExecutorEvent::BenchmarkCancelFailed { run_id, message } => {
                 if self
@@ -27719,6 +27748,35 @@ impl WorkspaceShell {
                     self.show_toast("Saving estimated plan capture…".into(), cx);
                 }
             }
+            PaneEvent::SaveBenchmarkRequested { item_id } => {
+                let instance = self
+                    .database_source(*item_id, cx)
+                    .map(|s| s.instance_id)
+                    .or_else(|| {
+                        self.query_semantic_targets
+                            .get(item_id)
+                            .map(|t| t.instance_id.clone())
+                    });
+                if instance
+                    .is_some_and(|id| self.selected_instance_id.as_deref() != Some(id.as_str()))
+                {
+                    self.show_error_toast(
+                        "Select this query's Sift server before saving its benchmark".into(),
+                        cx,
+                    );
+                    return;
+                }
+                let report = self.panes.iter().find_map(|pane| {
+                    pane.read(cx)
+                        .results
+                        .get(item_id)
+                        .and_then(|results| results.read(cx).benchmark_report())
+                });
+                if let Some(report) = report {
+                    self.open_benchmark_library(Some(report), cx);
+                    self.focus_handle.focus(window, cx);
+                }
+            }
             PaneEvent::OpenPlanCapturesRequested { item_id, sql } => {
                 let Some(source) = self.database_source(*item_id, cx) else {
                     return;
@@ -33599,6 +33657,10 @@ impl WorkspaceShell {
             }
             CommandId::PickForeignKeyValue => self.open_foreign_key_picker(window, cx),
             CommandId::FocusResults => self.focus_results(window, cx),
+            CommandId::ShowBenchmarkLibrary => {
+                self.open_benchmark_library(None, cx);
+                self.focus_handle.focus(window, cx);
+            }
             CommandId::ShowPerformance => {
                 self.focus_results(window, cx);
                 if let Some(results) = self.focused_pane_results(cx) {
@@ -40186,6 +40248,7 @@ impl gpui::Render for WorkspaceShell {
         });
         div()
             .id("sift-shell")
+            .on_key_down(cx.listener(Self::handle_benchmark_library_key))
             .key_context(keymap_context)
             .role(Role::Application)
             .aria_label("Sift database workspace")

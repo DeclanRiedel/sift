@@ -177,6 +177,7 @@ impl ApiError {
                 | MetadataError::CatalogSnapshotNotFound
                 | MetadataError::MigrationRunNotFound
                 | MetadataError::PlanCaptureNotFound
+                | MetadataError::BenchmarkRunNotFound
                 | MetadataError::PrincipalNotFound(_)
                 | MetadataError::AuthIdentityNotFound(_)
                 | MetadataError::AuthSessionNotFound(_)
@@ -295,6 +296,7 @@ impl ApiError {
                     (StatusCode::UNPROCESSABLE_ENTITY, "credential_mode_mismatch")
                 }
                 MetadataError::InvalidEnum { .. }
+                | MetadataError::InvalidBenchmarkRun(_)
                 | MetadataError::InvalidTenantRestore(_)
                 | MetadataError::InvalidPlanCaptureRetention
                 | MetadataError::InvalidCredentialObject

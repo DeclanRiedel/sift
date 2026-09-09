@@ -980,6 +980,14 @@ pub fn app(state: AppState) -> Router {
             get_with(get_durable_migration_run, doc("getDurableMigrationRun", "Get a durable redacted migration run outcome")),
         )
         .api_route(
+            "/v1/metadata/tenants/:tenant/benchmark-runs",
+            get_with(list_benchmark_runs, doc("listBenchmarkRuns", "List your private saved benchmark runs")).post_with(save_benchmark_run, doc("saveBenchmarkRun", "Save an immutable private benchmark snapshot")).layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
+        .api_route(
+            "/v1/metadata/tenants/:tenant/benchmark-runs/:run",
+            get_with(get_benchmark_run, doc("getBenchmarkRun", "Get your private benchmark snapshot")).delete_with(delete_benchmark_run, doc("deleteBenchmarkRun", "Delete your private benchmark snapshot")),
+        )
+        .api_route(
             "/v1/metadata/tenants/:tenant/plan-captures",
             get_with(list_plan_captures, doc("listPlanCaptures", "Keyset-page durable normalized plan captures")),
         )
@@ -8278,6 +8286,12 @@ async fn get_durable_migration_run(
         |_| Some(1),
     )?))
 }
+
+#[path = "benchmark_library.rs"]
+mod benchmark_library;
+use benchmark_library::{
+    delete_benchmark_run, get_benchmark_run, list_benchmark_runs, save_benchmark_run,
+};
 
 async fn list_plan_captures(
     State(state): State<AppState>,

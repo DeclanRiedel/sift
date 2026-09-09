@@ -896,7 +896,8 @@ actions!(
         CycleBenchmarkIterations,
         ConfigureBenchmark,
         PinBenchmarkBaseline,
-        CopyBenchmarkReport
+        CopyBenchmarkReport,
+        SaveBenchmarkReport
     ]
 );
 
@@ -1004,6 +1005,7 @@ pub enum ResultsEvent {
         run_id: uuid::Uuid,
         limits: sift_protocol::BenchmarkLimits,
     },
+    SaveBenchmarkRequested,
     CancelBenchmarkRequested {
         run_id: uuid::Uuid,
     },
@@ -5962,6 +5964,30 @@ impl ResultsView {
         }
     }
 
+    pub(crate) fn use_saved_benchmark_baseline(
+        &mut self,
+        report: sift_protocol::BenchmarkReport,
+        cx: &mut Context<Self>,
+    ) {
+        self.benchmark_baseline = Some(report);
+        self.show_performance(cx);
+    }
+
+    pub(crate) fn benchmark_report(&self) -> Option<sift_protocol::BenchmarkReport> {
+        self.benchmark_report.clone()
+    }
+
+    fn save_benchmark_report(
+        &mut self,
+        _: &SaveBenchmarkReport,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.benchmark_pending.is_none() && self.benchmark_report.is_some() {
+            cx.emit(ResultsEvent::SaveBenchmarkRequested);
+        }
+    }
+
     fn render_performance(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = cx.theme().colors;
         let pending = self.benchmark_pending.is_some();
@@ -6016,7 +6042,9 @@ impl ResultsView {
                 .child(Button::new("benchmark-baseline", "[b] Pin baseline").disabled(self.benchmark_report.is_none() || pending)
                     .on_click(cx.listener(|view, _, window, cx| view.pin_benchmark_baseline(&PinBenchmarkBaseline, window, cx))))
                 .child(Button::new("benchmark-copy", "[y] Copy JSON (includes SQL)").disabled(self.benchmark_report.is_none())
-                    .on_click(cx.listener(|view, _, window, cx| view.copy_benchmark_report(&CopyBenchmarkReport, window, cx)))))
+                    .on_click(cx.listener(|view, _, window, cx| view.copy_benchmark_report(&CopyBenchmarkReport, window, cx))))
+                .child(Button::new("benchmark-save", "[s] Save privately").disabled(self.benchmark_report.is_none() || pending)
+                    .on_click(cx.listener(|view, _, window, cx| view.save_benchmark_report(&SaveBenchmarkReport, window, cx)))))
             .children((!pending).then(|| div().flex().flex_wrap().gap_2().children(
                 self.benchmark_inputs.iter().zip(["Warm-ups", "Measured runs", "Timeout (ms)", "Total budget (ms)", "Delay (ms)"]).map(|(input, label)|
                     div().w(px(145.)).flex().flex_col().gap_1().child(div().text_xs().child(label)).child(input.clone())))))
@@ -6528,6 +6556,7 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::configure_benchmark))
             .on_action(cx.listener(Self::pin_benchmark_baseline))
             .on_action(cx.listener(Self::copy_benchmark_report))
+            .on_action(cx.listener(Self::save_benchmark_report))
             .track_focus(&self.focus_handle)
             .on_mouse_down(
                 MouseButton::Left,

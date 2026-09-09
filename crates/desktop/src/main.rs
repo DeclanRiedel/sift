@@ -107,6 +107,11 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
         gpui::KeyBinding::new("shift-h", res::PreviousResultTab, results_ctx),
         gpui::KeyBinding::new("shift-l", res::NextResultTab, results_ctx),
         gpui::KeyBinding::new(
+            "s",
+            res::SaveBenchmarkReport,
+            Some("SiftPerformance && !SiftTextInput"),
+        ),
+        gpui::KeyBinding::new(
             "r",
             res::RunBenchmark,
             Some("SiftPerformance && !SiftTextInput"),

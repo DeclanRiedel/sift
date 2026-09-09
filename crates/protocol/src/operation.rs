@@ -405,6 +405,18 @@ pub enum Operation {
         source_bound: bool,
         limit: u32,
     },
+    SaveBenchmarkRun {
+        tenant_id: i64,
+    },
+    ListBenchmarkRuns {
+        tenant_id: i64,
+    },
+    GetBenchmarkRun {
+        tenant_id: i64,
+    },
+    DeleteBenchmarkRun {
+        tenant_id: i64,
+    },
     GetPlanCapture {
         tenant_id: i64,
         capture_id: crate::PlanCaptureId,
@@ -768,6 +780,10 @@ impl Operation {
             Self::PrepareComparisonPatch { .. } => OperationKind::PrepareComparisonPatch,
             Self::CaptureSemanticPlan { .. } => OperationKind::CaptureSemanticPlan,
             Self::ListPlanCaptures { .. } => OperationKind::ListPlanCaptures,
+            Self::SaveBenchmarkRun { .. } => OperationKind::SaveBenchmarkRun,
+            Self::ListBenchmarkRuns { .. } => OperationKind::ListBenchmarkRuns,
+            Self::GetBenchmarkRun { .. } => OperationKind::GetBenchmarkRun,
+            Self::DeleteBenchmarkRun { .. } => OperationKind::DeleteBenchmarkRun,
             Self::GetPlanCapture { .. } => OperationKind::GetPlanCapture,
             Self::ComparePlanCaptures { .. } => OperationKind::ComparePlanCaptures,
             Self::DeletePlanCapture { .. } => OperationKind::DeletePlanCapture,
@@ -1094,6 +1110,18 @@ impl Operation {
             }
             Operation::ListPlanCaptures { tenant_id, .. } => {
                 summary("list", "plan_capture", Some(*tenant_id))
+            }
+            Operation::SaveBenchmarkRun { tenant_id } => {
+                summary("save", "benchmark_run", Some(*tenant_id))
+            }
+            Operation::ListBenchmarkRuns { tenant_id } => {
+                summary("list", "benchmark_run", Some(*tenant_id))
+            }
+            Operation::GetBenchmarkRun { tenant_id } => {
+                summary("get", "benchmark_run", Some(*tenant_id))
+            }
+            Operation::DeleteBenchmarkRun { tenant_id } => {
+                summary("delete", "benchmark_run", Some(*tenant_id))
             }
             Operation::GetPlanCapture { tenant_id, .. } => {
                 summary("get", "plan_capture", Some(*tenant_id))

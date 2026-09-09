@@ -1121,6 +1121,126 @@ async fn client_sdk_consumes_metadata_api() {
 }
 
 #[tokio::test]
+async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_reports() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app(test_state_with_metadata(true)).into_make_service(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = sift_client_sdk::Client::new(format!("http://{addr}"));
+    let mut request = sift_protocol::SaveBenchmarkRunRequest {
+        name: "Before index".into(),
+        report: sift_protocol::BenchmarkReport {
+            version: 1,
+            run_id: uuid::Uuid::new_v4(),
+            engine: Engine::Postgres,
+            sql: "SELECT 'sensitive literal'".into(),
+            captured_at: chrono::Utc::now(),
+            warmups: 1,
+            requested_iterations: 2,
+            query_timeout_ms: 1000,
+            total_budget_ms: 5000,
+            delay_ms: 0,
+            parameter_count: 0,
+            samples: vec![
+                sift_protocol::BenchmarkSample {
+                    ordinal: 0,
+                    warmup: true,
+                    outcome: sift_protocol::BenchmarkOutcome::Success,
+                    elapsed_ns: 1000,
+                    first_row_ns: Some(10),
+                    rows: Some(1),
+                },
+                sift_protocol::BenchmarkSample {
+                    ordinal: 1,
+                    warmup: false,
+                    outcome: sift_protocol::BenchmarkOutcome::Success,
+                    elapsed_ns: 100,
+                    first_row_ns: Some(10),
+                    rows: Some(1),
+                },
+                sift_protocol::BenchmarkSample {
+                    ordinal: 2,
+                    warmup: false,
+                    outcome: sift_protocol::BenchmarkOutcome::Success,
+                    elapsed_ns: 200,
+                    first_row_ns: Some(10),
+                    rows: Some(1),
+                },
+            ],
+            completed: false,
+            warnings: vec![],
+            median_ns: Some(999.),
+            mean_ns: Some(999.),
+            min_ns: None,
+            max_ns: None,
+            standard_deviation_ns: None,
+            p95_ns: Some(999),
+            p99_ns: Some(999),
+        },
+    };
+    let saved = client
+        .save_benchmark_run(ApiTenantId(1), &request)
+        .await
+        .unwrap();
+    assert_eq!(saved.report.median_ns, Some(150.));
+    assert_eq!(saved.report.p95_ns, None);
+    assert!(saved.report.completed);
+    assert!(client
+        .save_benchmark_run(ApiTenantId(1), &request)
+        .await
+        .is_err());
+    let page = client.benchmark_runs(ApiTenantId(1), None).await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, saved.id);
+    assert_eq!(
+        client
+            .saved_benchmark_run(ApiTenantId(1), saved.id)
+            .await
+            .unwrap()
+            .report
+            .sql,
+        request.report.sql
+    );
+    assert!(client
+        .saved_benchmark_run(ApiTenantId(2), saved.id)
+        .await
+        .is_err());
+    request.report.run_id = uuid::Uuid::new_v4();
+    request.report.samples[1].ordinal = 99;
+    assert!(client
+        .save_benchmark_run(ApiTenantId(1), &request)
+        .await
+        .is_err());
+    request.report.samples[1].ordinal = 1;
+    request.report.version = 999;
+    assert!(client
+        .save_benchmark_run(ApiTenantId(1), &request)
+        .await
+        .is_err());
+    client
+        .delete_benchmark_run(ApiTenantId(1), saved.id)
+        .await
+        .unwrap();
+    assert!(client
+        .saved_benchmark_run(ApiTenantId(1), saved.id)
+        .await
+        .is_err());
+    assert!(client
+        .benchmark_runs(ApiTenantId(1), None)
+        .await
+        .unwrap()
+        .items
+        .is_empty());
+    server.abort();
+}
+
+#[tokio::test]
 async fn client_sdk_consumes_public_websocket_api() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

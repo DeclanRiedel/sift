@@ -37,6 +37,7 @@ const OWNED: &[&str] = &[
     "catalog_snapshot",
     "migration_run",
     "plan_capture",
+    "benchmark_run",
     "workspace",
     "workspace_node",
     "workspace_checkpoint",
@@ -133,7 +134,7 @@ fn scope(table: &str, db: &str, tenant: i64) -> String {
     match table {
         "tenant" => format!("id={tenant}"),
         "membership" | "connection_profile" | "room" | "saved_query" | "catalog_snapshot"
-        | "migration_run" | "plan_capture" | "vault" | "sql_snippet" => {
+        | "migration_run" | "plan_capture" | "benchmark_run" | "vault" | "sql_snippet" => {
             format!("tenant_id={tenant}")
         }
         "connection_credential" => child("connection_profile_id", "connection_profile", "id"),
@@ -322,6 +323,11 @@ pub fn merge_tenant_snapshot(
     )?;
     let mut secret_map = BTreeMap::new();
     for (table, column, namespace) in [
+        (
+            "benchmark_run",
+            "secret_handle",
+            crate::benchmark_run::BENCHMARK_SECRET_NAMESPACE,
+        ),
         (
             "connection_profile",
             "shared_secret_handle",

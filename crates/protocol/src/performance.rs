@@ -2,6 +2,41 @@
 //! not database CPU time, network-to-desktop time or UI rendering time.
 use serde::{Deserialize, Serialize};
 
+/// User-saved snapshot, not a server attestation or a rerunnable definition.
+/// Bind values are deliberately absent. SQL and names may be sensitive.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveBenchmarkRunRequest {
+    pub name: String,
+    pub report: BenchmarkReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SavedBenchmarkRun {
+    pub id: uuid::Uuid,
+    pub saved_at: chrono::DateTime<chrono::Utc>,
+    pub name: String,
+    pub report: BenchmarkReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SavedBenchmarkRunSummary {
+    pub id: uuid::Uuid,
+    pub saved_at: chrono::DateTime<chrono::Utc>,
+    pub name: String,
+    pub engine: Option<crate::Engine>,
+    pub payload_available: bool,
+    pub completed: bool,
+    pub median_ns: Option<f64>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListBenchmarkRunsRequest {
+    pub cursor: Option<uuid::Uuid>,
+    pub limit: Option<u32>,
+}
+
 /// Serial-run budgets. Execution must additionally enforce deployment policy,
 /// query permissions and read-only protections; these limits are not a sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
