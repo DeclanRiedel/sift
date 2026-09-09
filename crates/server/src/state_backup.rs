@@ -20,6 +20,7 @@ use zip::{AesMode, CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::config::Config;
 pub mod policy;
+pub mod tenant;
 
 const FORMAT_VERSION: u32 = 1;
 const MANIFEST_ENTRY: &str = "manifest.json";
@@ -1104,6 +1105,222 @@ mod tests {
             .unwrap();
         store.ensure_auth_system_keys().await.unwrap();
         (api_token, secret)
+    }
+
+    #[tokio::test]
+    async fn tenant_restore_preserves_other_tenant_auth_and_remaps_only_selected_credentials() {
+        use sift_metadata::{
+            CredentialMode, MembershipRole, NewConnectionProfile, NewDocument, TenantKind,
+        };
+        use sift_protocol::Engine;
+        let root = tempfile::tempdir().unwrap();
+        let config = file_config(&root.path().join("instance"), "31");
+        let archive_key = root.path().join("archive.key");
+        write_private_key(&archive_key, "42");
+        seed_file_state(&config).await;
+        let db = metadata_path(&config);
+        let secret_path = secret_file_path(&db);
+        let key = configured_secret_key_path(&config).unwrap();
+        let secrets = Arc::new(FileSecretStore::open(&secret_path, &key).unwrap());
+        let store = MetadataStore::open(&db, secrets.clone()).unwrap();
+        let other = store
+            .create_tenant("unrelated", TenantKind::Team)
+            .unwrap()
+            .id;
+        store
+            .upsert_tenant_membership(other, PrincipalId(1), MembershipRole::Owner)
+            .unwrap();
+        let profile = |name: &str, password: &str| NewConnectionProfile {
+            name: name.into(),
+            provider_id: Engine::Postgres.provider_id(),
+            configuration: serde_json::json!({"host":"fixture.invalid","port":5432,"database":"fixture","user":"fixture","ssl_mode":"disable"}),
+            semantic_engine: Some(Engine::Postgres),
+            credentials: Some(serde_json::json!({"password":password})),
+            credential_mode: CredentialMode::Shared,
+            tags: vec![],
+        };
+        let selected = store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                profile("selected", "before-credential"),
+            )
+            .await
+            .unwrap();
+        let unrelated = store
+            .upsert_connection_profile(other, PrincipalId(1), profile("unrelated", "old-other"))
+            .await
+            .unwrap();
+        let selected_room = store
+            .create_room(
+                TenantId(1),
+                PrincipalId(1),
+                NewRoom {
+                    name: "selected documents".into(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let other_room = store
+            .create_room(
+                other,
+                PrincipalId(1),
+                NewRoom {
+                    name: "other documents".into(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let document = |text: &str| {
+            let replica = sift_doc::TextReplica::new(sift_doc::random_peer_id()).unwrap();
+            replica.insert(0, text).unwrap();
+            NewDocument {
+                kind: "sql".into(),
+                title: "query".into(),
+                crdt_state: replica.export_snapshot().unwrap(),
+                snapshot_version: replica.version_vector(),
+                position: 0,
+                connection_profile_id: None,
+            }
+        };
+        let selected_doc = store
+            .create_document(selected_room.id, document("SELECT 1"))
+            .unwrap();
+        let other_doc = store
+            .create_document(other_room.id, document("SELECT 2"))
+            .unwrap();
+        drop(store);
+        drop(secrets);
+        let archive = root.path().join("source.sift-backup");
+        create(&config, &archive, &archive_key).unwrap();
+        let secrets = Arc::new(FileSecretStore::open(&secret_path, &key).unwrap());
+        let store = MetadataStore::open(&db, secrets.clone()).unwrap();
+        store
+            .upsert_connection_profile(
+                TenantId(1),
+                PrincipalId(1),
+                profile("selected", "after-credential"),
+            )
+            .await
+            .unwrap();
+        let other_current = store
+            .upsert_connection_profile(other, PrincipalId(1), profile("unrelated", "current-other"))
+            .await
+            .unwrap();
+        store
+            .update_document_snapshot(selected_doc.id, document("SELECT 99").crdt_state)
+            .unwrap();
+        let current_other_doc = store
+            .update_document_snapshot(other_doc.id, document("SELECT 88").crdt_state)
+            .unwrap();
+        store.rotate_auth_system_keys().await.unwrap();
+        store.ensure_auth_system_keys().await.unwrap();
+        let current_auth = secrets
+            .get("sift.auth.system", "token-mac-v1")
+            .await
+            .unwrap();
+        let (_, global_token) = store
+            .issue_api_token(PrincipalId(1), None, "destination global", None)
+            .unwrap();
+        let (_, scoped_token) = store
+            .issue_api_token(PrincipalId(1), Some(TenantId(1)), "selected scoped", None)
+            .unwrap();
+        drop(store);
+        drop(secrets);
+        let encrypted_before = std::fs::read(&secret_path).unwrap();
+        let preview = tenant::restore_tenant(&config, &archive, &archive_key, 1, false)
+            .await
+            .unwrap();
+        assert!(!preview.applied);
+        assert_eq!(preview.merge.copied_secrets, 1);
+        assert!(std::fs::read(&secret_path).unwrap() == encrypted_before);
+        {
+            let store = MetadataStore::open(&db, Arc::new(MemorySecretStore::new())).unwrap();
+            assert!(
+                store.get_document(selected_doc.id).unwrap().crdt_state != selected_doc.crdt_state
+            );
+            assert!(store.verify_api_token(&global_token).unwrap().is_some());
+            assert!(store.verify_api_token(&scoped_token).unwrap().is_some());
+        }
+        let applied = tenant::restore_tenant(&config, &archive, &archive_key, 1, true)
+            .await
+            .unwrap();
+        assert!(applied.applied);
+        assert!(applied.rescue_archive.as_ref().unwrap().is_file());
+        assert!(!serde_json::to_string(&applied)
+            .unwrap()
+            .contains("before-credential"));
+        assert!(read_restore_journal(&config).unwrap().is_none());
+        let secrets = Arc::new(FileSecretStore::open(&secret_path, &key).unwrap());
+        let store = MetadataStore::open(&db, secrets.clone()).unwrap();
+        let recovered = store
+            .get_connection_profile(TenantId(1), selected.id)
+            .unwrap();
+        assert!(recovered.shared_secret_handle != selected.shared_secret_handle);
+        let value = secrets
+            .get(
+                "sift.local",
+                recovered.shared_secret_handle.as_deref().unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&value).unwrap()["password"]
+                == "before-credential"
+        );
+        assert!(
+            store
+                .get_connection_profile(other, unrelated.id)
+                .unwrap()
+                .shared_secret_handle
+                == other_current.shared_secret_handle
+        );
+        let other_value = secrets
+            .get(
+                "sift.local",
+                other_current.shared_secret_handle.as_deref().unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&other_value).unwrap()["password"]
+                == "current-other"
+        );
+        assert!(
+            secrets
+                .get("sift.auth.system", "token-mac-v1")
+                .await
+                .unwrap()
+                == current_auth
+        );
+        assert!(store.get_document(selected_doc.id).unwrap().crdt_state == selected_doc.crdt_state);
+        assert!(
+            store.get_document(other_doc.id).unwrap().crdt_state == current_other_doc.crdt_state
+        );
+        assert!(store.verify_api_token(&global_token).unwrap().is_some());
+        assert!(store.verify_api_token(&scoped_token).unwrap().is_none());
+        assert_eq!(
+            store
+                .projection_binding_for_workspace(WorkspaceId(1), PrincipalId(1))
+                .unwrap()
+                .unwrap()
+                .binding
+                .health,
+            ProjectionHealth::Disabled
+        );
+        let repository = store
+            .repository_binding_for_workspace(WorkspaceId(1), PrincipalId(1))
+            .unwrap()
+            .unwrap();
+        assert!(!repository.binding.network_enabled);
+        assert!(repository.credential_handle.is_none());
+        assert!(matches!(
+            store.workspace_artifact_for_principal(WorkspaceArtifactId(1), PrincipalId(1)),
+            Err(MetadataError::WorkspaceArtifactNotFound(_))
+        ));
+        store.integrity_check().unwrap();
     }
 
     fn seed_memory_state(config: &Config) -> (MetadataStore, String) {

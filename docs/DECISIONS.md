@@ -2307,3 +2307,29 @@ bounded, with allowlisted method/status/timing fields, no raw paths, SQL, creden
 or result data. This is best-effort request-span observability, not full distributed
 driver tracing. Usage, safety boundaries and automated acceptance are recorded in
 [backend operations](BACKEND-OPERATIONS.md).
+
+## ADR-059 — Same-Installation Tenant Recovery
+
+Status: accepted. Date: 2026-09-09.
+
+Tenant-selective recovery extends ADR-039's stopped-server maintenance lock,
+private staging, encrypted rescue archive and durable replacement journal. It
+preserves original IDs because CRDT snapshots, checkpoint history and stored run
+definitions contain references that cannot safely be rewritten generically.
+Installation identities and schemas must match; referenced principals must
+already match destination IDs and external identities. Explicit table ownership
+and foreign-key boundary checks refuse ambiguous merges and unknown tables.
+
+Only the selected tenant subtree is replaced. Destination principal/auth state,
+unrelated tenants, instance configuration and append-only ledgers remain intact.
+Selected invitations and scoped API tokens are revoked; pending approvals block
+recovery because their context cannot be isolated by tenant. Imported schedules
+and projections are disabled, repository credentials removed and active work
+made terminal. Opaque extension storage requires a future migration contract.
+
+Portable connection/vault secrets are copied into a staged destination store
+under fresh handles; source authentication keys are never imported. Preview
+validates the full staged result with audit-only destination writes. Apply
+installs secrets before metadata using the existing recoverable journal.
+Cross-instance identity migration and external database DR orchestration remain
+separate work. Details and exclusions: [tenant recovery design](PLANS/tenant-selective-restore.md).

@@ -288,7 +288,7 @@ Parquet has bounded typed API export and transactional flat-type import; see
 - [x] Metadata migration lifecycle
 - [x] Sift backup scheduling and retention
 - [x] Sift backup remote/object-store destinations
-- [ ] Tenant-selective Sift restore and disaster-recovery orchestration
+- [~] Tenant-selective Sift restore and disaster-recovery orchestration — offline same-installation/same-ID tenant recovery delivered; cross-instance identity migration and external DR orchestration remain.
 - [x] Scheduled runs
 - [x] Durable task history
 - [x] Task cancellation and recovery

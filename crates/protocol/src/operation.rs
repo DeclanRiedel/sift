@@ -685,6 +685,10 @@ pub enum Operation {
     RestorePostgres {
         applied: bool,
     },
+    RestoreTenant {
+        tenant_id: i64,
+        applied: bool,
+    },
     BackupPolicy {
         uploaded: bool,
         pruned: u64,
@@ -898,6 +902,7 @@ impl Operation {
             Self::BackupState => OperationKind::BackupState,
             Self::DumpPostgres => OperationKind::BackupState,
             Self::RestorePostgres { .. } => OperationKind::RestoreState,
+            Self::RestoreTenant { .. } => OperationKind::RestoreState,
             Self::BackupPolicy { .. } => OperationKind::BackupState,
             Self::InspectMetadata => OperationKind::InspectMetadata,
             Self::ReadMetrics => OperationKind::ReadMetrics,
@@ -1313,6 +1318,15 @@ impl Operation {
             Operation::BackupState => summary("backup", "instance_state", None),
             Operation::DumpPostgres => summary("dump", "postgres_database", None),
             Operation::RestorePostgres { .. } => summary("restore", "postgres_database", None),
+            Operation::RestoreTenant { tenant_id, applied } => summary(
+                if *applied {
+                    "restore_tenant"
+                } else {
+                    "validate_tenant_restore"
+                },
+                "tenant_state",
+                Some(*tenant_id),
+            ),
             Operation::BackupPolicy { .. } => summary("backup.policy", "instance_state", None),
             Operation::InspectMetadata => summary("inspect", "metadata_snapshot", None),
             Operation::ReadMetrics => summary("read", "metrics", None),

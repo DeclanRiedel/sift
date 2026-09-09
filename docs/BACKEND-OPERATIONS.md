@@ -323,6 +323,47 @@ arguments or Sift metadata; raw subprocess output is suppressed because it can
 contain credentials or SQL. Reports expose action, apply status, archive size
 and validated destination metadata for restores.
 
+## Tenant-selective Sift recovery
+
+Stop the server and select the original tenant ID from a trusted encrypted
+Sift-state archive. Both commands require the offline maintenance lock:
+
+```text
+sift-server backup restore-tenant --archive /path/state.sift-backup --key-file /path/archive.key --tenant-id 2
+sift-server backup restore-tenant --archive /path/state.sift-backup --key-file /path/archive.key --tenant-id 2 --apply
+```
+
+Preview builds and validates a private staged merge, then removes it. Its only
+destination writes are audit records; it does not change tenant data or secrets.
+Apply replaces that tenant's subtree and reports row counts and an encrypted
+pre-restore rescue archive. The existing durable restore journal installs
+secrets before metadata and rolls back incomplete installation.
+
+This is same-installation, same-ID recovery, not cross-instance migration:
+installation identities must match (including both absent), schemas must match,
+and all referenced principals must already have matching IDs/external identities.
+An existing tenant must have the same name and kind. Unknown tables, ID conflicts,
+cross-tenant ownership references, selected extension storage and pending approvals
+for selected members refuse recovery. Existing unrelated tenants, principal/auth
+state, global API tokens, instance manifests and append-only ledgers are preserved.
+Selected tenant invitations and tenant-scoped API tokens are revoked.
+
+Restored definitions include rooms/documents, workspaces/checkpoints, queries,
+connection profiles/credentials, vaults, DDL, run history and transfer recipes.
+Schedules and filesystem projections are disabled; repository network access and
+credentials are cleared. Artifacts and projection reconciliation state are not
+restored. Interrupted work becomes terminal; no connected database or checkout
+is modified. Review these definitions before explicitly re-enabling execution.
+
+Portable file-secret recovery copies only selected connection/vault values to
+new opaque handles in a staged copy of the destination secret store. Destination
+authentication keys and unrelated credentials remain intact. Old unreferenced
+secrets are retained, not garbage-collected. At most 10,000 distinct selected
+secret handles (1,024 bytes each) are accepted. Memory-secret mode requires no
+selected secret references; keychain-backed selective recovery is unsupported.
+This command does not provide failover, cross-instance identity remapping or
+external database disaster-recovery orchestration.
+
 ## Automated acceptance
 
 - Parquet type/null/empty/malformed tests and a real SQLite export/import,
@@ -330,6 +371,9 @@ and validated destination metadata for restores.
 - Policy due-time, retention, failed-upload checkpoint/recovery and conditional
   HTTP upload tests.
 - Metrics encoding, authenticated scrape and local OTLP collector delivery tests.
+- Tenant recovery: two-tenant encrypted preview/apply with credential remapping,
+  preserved global authentication/unrelated data, scoped-token revocation,
+  checkpoint blobs/ID high-water marks and identity/ID/FK/schema refusal.
 - Disposable real PostgreSQL dump/restore, dry-run and rollback test:
   `cargo test -p sift-server --lib --features live-pg postgres_backup::tests::real_postgres`.
   It creates its own private cluster; it does not use your configured database.

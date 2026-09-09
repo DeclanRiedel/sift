@@ -44,7 +44,9 @@ pub mod schema;
 pub mod secrets;
 mod snippet;
 pub use snippet::SnippetWriteAuthorization;
+mod tenant_restore;
 mod transfer_recipe;
+pub use tenant_restore::{merge_tenant_snapshot, TenantMerge, TenantMergeReport, TenantSecretCopy};
 mod vault;
 pub use vault::VaultPolicy;
 mod workspace;
@@ -136,6 +138,8 @@ pub enum MetadataError {
     PasswordHash(String),
     #[error("invalid {field} value: {value}")]
     InvalidEnum { field: &'static str, value: String },
+    #[error("invalid tenant restore: {0}")]
+    InvalidTenantRestore(String),
     #[error("invalid timestamp {value}: {source}")]
     InvalidTimestamp {
         value: String,

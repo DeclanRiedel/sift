@@ -295,6 +295,7 @@ impl ApiError {
                     (StatusCode::UNPROCESSABLE_ENTITY, "credential_mode_mismatch")
                 }
                 MetadataError::InvalidEnum { .. }
+                | MetadataError::InvalidTenantRestore(_)
                 | MetadataError::InvalidPlanCaptureRetention
                 | MetadataError::InvalidCredentialObject
                 | MetadataError::InlineCredentialsRequireSharedMode

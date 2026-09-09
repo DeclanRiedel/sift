@@ -22,6 +22,21 @@ async fn main() -> anyhow::Result<()> {
     let mut instance_selection = None;
     let mut configured_instance_root = None;
     let mut cfg = match command {
+        ServerCommand::BackupRestoreTenant {
+            archive,
+            key_file,
+            tenant_id,
+            apply,
+        } => {
+            let config = load_config().context("loading config")?;
+            config.validate().context("validating config")?;
+            let report = sift_server::state_backup::tenant::restore_tenant(
+                &config, &archive, &key_file, tenant_id, apply,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
         ServerCommand::PostgresBackup {
             spec,
             archive,
@@ -450,6 +465,12 @@ async fn main() -> anyhow::Result<()> {
 
 #[derive(Debug, PartialEq, Eq)]
 enum ServerCommand {
+    BackupRestoreTenant {
+        archive: PathBuf,
+        key_file: PathBuf,
+        tenant_id: i64,
+        apply: bool,
+    },
     PostgresBackup {
         spec: PathBuf,
         archive: PathBuf,
@@ -553,7 +574,7 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
     if first == "backup" {
         let action = args
             .next()
-            .context("backup requires one of: create, inspect, restore")?;
+            .context("backup requires one of: create, inspect, restore, restore-tenant")?;
         if action == "run-policy" {
             anyhow::ensure!(
                 args.next().as_deref() == Some("--policy"),
@@ -568,8 +589,18 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
         let mut key_file = None;
         let mut apply = false;
         let mut allow_external_secrets = false;
+        let mut tenant_id = None;
         while let Some(argument) = args.next() {
             match argument.as_str() {
+                "--tenant-id" if action == "restore-tenant" && tenant_id.is_none() => {
+                    let id: i64 = args
+                        .next()
+                        .context("--tenant-id requires a positive integer")?
+                        .parse()
+                        .context("invalid tenant ID")?;
+                    anyhow::ensure!(id > 0, "tenant ID must be positive");
+                    tenant_id = Some(id);
+                }
                 "--output" | "--archive" | "--key-file" => {
                     let value = args
                         .next()
@@ -592,6 +623,14 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
             }
         }
         return match action.as_str() {
+            "restore-tenant" if output.is_none() && !allow_external_secrets => {
+                Ok(ServerCommand::BackupRestoreTenant {
+                    archive: archive.context("backup restore-tenant requires --archive")?,
+                    key_file: key_file.context("backup restore-tenant requires --key-file")?,
+                    tenant_id: tenant_id.context("backup restore-tenant requires --tenant-id")?,
+                    apply,
+                })
+            }
             "create" if archive.is_none() && !apply && !allow_external_secrets => {
                 Ok(ServerCommand::BackupCreate {
                     output: output.context("backup create requires --output")?,
@@ -610,7 +649,7 @@ fn parse_command(args: impl IntoIterator<Item = String>) -> anyhow::Result<Serve
                 apply,
                 allow_external_secrets,
             }),
-            "create" | "inspect" | "restore" => {
+            "create" | "inspect" | "restore" | "restore-tenant" => {
                 anyhow::bail!("backup arguments are not valid for `{action}`")
             }
             _ => anyhow::bail!("unknown backup action `{action}`"),
@@ -1011,6 +1050,49 @@ mod command_tests {
             parse_command(args(&["migrate", "status"])).unwrap(),
             ServerCommand::MigrateStatus
         );
+        assert_eq!(
+            parse_command(args(&[
+                "backup",
+                "restore-tenant",
+                "--archive",
+                "tenant.backup",
+                "--key-file",
+                "archive.key",
+                "--tenant-id",
+                "2"
+            ]))
+            .unwrap(),
+            ServerCommand::BackupRestoreTenant {
+                archive: "tenant.backup".into(),
+                key_file: "archive.key".into(),
+                tenant_id: 2,
+                apply: false
+            }
+        );
+        for id in ["0", "-1", "not-an-id"] {
+            assert!(parse_command(args(&[
+                "backup",
+                "restore-tenant",
+                "--archive",
+                "tenant.backup",
+                "--key-file",
+                "archive.key",
+                "--tenant-id",
+                id
+            ]))
+            .is_err());
+        }
+        assert!(parse_command(args(&[
+            "backup",
+            "restore",
+            "--archive",
+            "tenant.backup",
+            "--key-file",
+            "archive.key",
+            "--tenant-id",
+            "2"
+        ]))
+        .is_err());
         assert_eq!(
             parse_command(args(&["migrate", "apply", "--automatic"])).unwrap(),
             ServerCommand::MigrateApply { automatic: true }

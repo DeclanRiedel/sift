@@ -1,6 +1,8 @@
 # Backend workbench batch
 
-Status: in progress. User approved all ten features, with milestone commits.
+Status: complete for the ten scoped backend/operator workflows. User approved
+all ten features, with milestone commits. Broader desktop and cross-instance DR
+inventory items remain explicitly partial.
 
 Milestone 1 complete: CSV quarantine reports and downloads, SQLite savepoint
 recovery, redacted row errors. Formatting, strict workspace Clippy and full
@@ -50,6 +52,15 @@ place. Unit tests and disposable SQL Server 2022 backup/append/restore/refusal,
 CHECKDB/process sampling and checkpoint acceptance passed. Strict server/SDK
 Clippy with both live feature gates passed. No user databases or host volumes
 were used; the fixture container was removed.
+
+Milestone 10 complete: offline same-installation/same-ID tenant restore, preview
+by default, private validated merge, selected credential remapping, preserved
+unrelated tenant/auth state, rescue archive and durable journal apply. Tests
+cover encrypted two-tenant preview/apply, scoped revocation, disabled projections,
+repository credential/artifact exclusion, checkpoint blobs and historical ID
+counters, identity/ID/FK/schema refusals and CLI arguments. Full workspace
+formatting, strict Clippy and tests (including doc tests) passed on 2026-09-09.
+No manual UI verification is required for this backend batch.
 
 ## Order and acceptance
 
