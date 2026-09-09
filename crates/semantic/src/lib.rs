@@ -41,6 +41,10 @@ pub struct CompletionAnalysis {
     pub context: CompletionContext,
     pub cursor: usize,
     pub prefix_start: usize,
+    /// End of the identifier being replaced, including an existing closing quote.
+    pub replacement_end: usize,
+    /// Opening delimiter of a quoted identifier, excluded from the match prefix.
+    pub identifier_quote: Option<char>,
     pub prefix: String,
     pub prefix_lower: String,
     pub relations: Vec<CompletionRelation>,
@@ -3409,7 +3413,8 @@ pub fn detect_completion_context(
         "sift/sqlite" => Flavor::Sqlite,
         other => return Err(Error::DialectUnavailable(other.to_string())),
     };
-    let (prefix_start, prefix) = extract_prefix(sql, cursor, flavor);
+    let (prefix_start, replacement_end, prefix, identifier_quote) =
+        extract_prefix(sql, cursor, flavor);
     let dialect: Box<dyn Dialect> = match flavor {
         Flavor::Postgres => Box::new(PostgreSqlDialect {}),
         Flavor::Tsql => Box::new(MsSqlDialect {}),
@@ -3449,13 +3454,15 @@ pub fn detect_completion_context(
         relations = completion_relations(&binding_tokens);
     }
     Ok(CompletionAnalysis {
-        join_slot,
+        join_slot: join_slot && identifier_quote.is_none(),
         join_max_hops: if statement_tokens.iter().rev().skip(1).take(2).any(|token| {
             matches!(token, Token::Word(word) if word.quote_style.is_none() && matches_ci(&word.value, &["LEFT", "RIGHT", "FULL", "OUTER"]))
         }) { 1 } else { 3 },
         context: classify_completion(&tokens),
         cursor,
         prefix_start,
+        replacement_end,
+        identifier_quote,
         prefix_lower: prefix.to_ascii_lowercase(),
         prefix,
         relations,
@@ -3784,8 +3791,57 @@ fn classify_completion(tokens: &[Token]) -> CompletionContext {
     }
 }
 
-fn extract_prefix(sql: &str, cursor: usize, flavor: Flavor) -> (usize, String) {
+fn extract_prefix(
+    sql: &str,
+    cursor: usize,
+    flavor: Flavor,
+) -> (usize, usize, String, Option<char>) {
     let bytes = sql.as_bytes();
+    // The tolerant binding lexer skips strings and comments and understands
+    // escaped delimiters, spaces, and incomplete quoted identifiers.
+    let quoted_tokens = if sql[..cursor].contains(['"', '[']) {
+        binding_tokens(&sql[..cursor])
+    } else {
+        Vec::new()
+    };
+    if let Some(token) = quoted_tokens
+        .last()
+        .filter(|token| token.quoted && token.range.end as usize == cursor)
+    {
+        let start = token.range.start as usize;
+        let opening = bytes[start] as char;
+        let closing = if opening == '[' { ']' } else { opening };
+        let closed = sql[start + 1..cursor]
+            .chars()
+            .rev()
+            .take_while(|character| *character == closing)
+            .count()
+            % 2
+            == 1;
+        let subscript = opening == '[' && start > 0 && {
+            let previous = bytes[start - 1];
+            previous.is_ascii_alphanumeric()
+                || previous == b'_'
+                || previous >= 0x80
+                || matches!(previous, b']' | b')')
+        };
+        if !closed && !subscript && (opening == '"' || flavor != Flavor::Postgres) {
+            let end = binding_tokens(sql)
+                .into_iter()
+                .find(|candidate| candidate.range.start == token.range.start)
+                .filter(|candidate| {
+                    sql[start + 1..candidate.range.end as usize]
+                        .chars()
+                        .rev()
+                        .take_while(|character| *character == closing)
+                        .count()
+                        % 2
+                        == 1
+                })
+                .map_or(cursor, |candidate| candidate.range.end as usize);
+            return (start, end, token.text.clone(), Some(opening));
+        }
+    }
     let mut start = cursor;
     while start > 0 {
         let byte = bytes[start - 1];
@@ -3799,15 +3855,7 @@ fn extract_prefix(sql: &str, cursor: usize, flavor: Flavor) -> (usize, String) {
             break;
         }
     }
-    let quoted = start > 0 && bytes[start - 1] == b'"';
-    let bracketed = flavor == Flavor::Tsql
-        && start > 0
-        && bytes[start - 1] == b'['
-        && !sql[cursor..].starts_with(']');
-    if quoted || bracketed {
-        start -= 1;
-    }
-    (start, sql[start..cursor].to_string())
+    (start, cursor, sql[start..cursor].to_string(), None)
 }
 
 fn is_ignorable(token: &Token) -> bool {

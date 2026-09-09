@@ -103,6 +103,39 @@ pub fn rank(
         }
     }
 
+    if let Some(opening) = ctx.identifier_quote {
+        out.retain(|candidate| {
+            !matches!(
+                candidate.kind,
+                CompletionKind::Keyword | CompletionKind::Function | CompletionKind::Snippet
+            )
+        });
+        let closing = if opening == '[' { ']' } else { opening };
+        for candidate in &mut out {
+            let quoted = format!(
+                "{opening}{}{closing}",
+                candidate
+                    .label
+                    .replace(closing, &format!("{closing}{closing}"))
+            );
+            // Preserve catalog/schema qualification; only the final object
+            // identifier adopts the user's delimiter. Other names are raw.
+            let insert = if matches!(
+                candidate.kind,
+                CompletionKind::Table | CompletionKind::View | CompletionKind::MaterializedView
+            ) {
+                let suffix = quote_ident_if_needed(&candidate.label, engine);
+                candidate.insert.strip_suffix(&suffix).map_or_else(
+                    || quoted.clone(),
+                    |qualifier| format!("{qualifier}{quoted}"),
+                )
+            } else {
+                quoted
+            };
+            candidate.insert = insert.into();
+        }
+    }
+
     // Syntax relevance is categorical, not a tiny score bonus. In a FROM
     // slot, an imperfect table-name match must still beat a perfect keyword;
     // match quality only orders candidates inside the relevant category.

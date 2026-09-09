@@ -625,3 +625,118 @@ fn mssql_array_subscript_does_not_become_a_bracketed_identifier_prefix() {
     let analysis = detect_context(sql, cursor, Engine::SqlServer);
     assert_eq!(&sql[analysis.prefix_start..cursor], "0");
 }
+
+#[test]
+fn delimited_completion_matches_names_and_replaces_the_whole_identifier() {
+    let mut catalog = snapshot();
+    catalog.trees[0].schemas[0].name = "lab".into();
+    for (engine, marked, label, insert, expected) in [
+        (
+            Engine::Postgres,
+            "SELECT * FROM \"la|",
+            "lab",
+            "\"lab\"",
+            "SELECT * FROM \"lab\"",
+        ),
+        (
+            Engine::Postgres,
+            "SELECT * FROM \"la|ter\".orders",
+            "lab",
+            "\"lab\"",
+            "SELECT * FROM \"lab\".orders",
+        ),
+        (
+            Engine::SqlServer,
+            "SELECT * FROM [la|]",
+            "lab",
+            "[lab]",
+            "SELECT * FROM [lab]",
+        ),
+        (
+            Engine::SqlServer,
+            "SELECT * FROM [la|",
+            "lab",
+            "[lab]",
+            "SELECT * FROM [lab]",
+        ),
+        (
+            Engine::Sqlite,
+            "SELECT * FROM [la|]",
+            "lab",
+            "[lab]",
+            "SELECT * FROM [lab]",
+        ),
+        (
+            Engine::Postgres,
+            "SELECT * FROM \"lab\".\"or|ders\" LIMIT 10",
+            "orders",
+            "\"orders\"",
+            "SELECT * FROM \"lab\".\"orders\" LIMIT 10",
+        ),
+        (
+            Engine::SqlServer,
+            "SELECT * FROM [or|]",
+            "orders",
+            "lab.[orders]",
+            "SELECT * FROM lab.[orders]",
+        ),
+        (
+            Engine::Postgres,
+            "SELECT * FROM \"or| LIMIT 10",
+            "orders",
+            "lab.\"orders\"",
+            "SELECT * FROM lab.\"orders\" LIMIT 10",
+        ),
+    ] {
+        let cursor = marked.find('|').unwrap();
+        let sql = marked.replace('|', "");
+        let response = complete(
+            &CompletionRequest {
+                sql: sql.clone(),
+                cursor: cursor as u32,
+                limit: None,
+            },
+            &catalog,
+            engine,
+        );
+        let candidate = response
+            .candidates
+            .iter()
+            .find(|candidate| candidate.label == label)
+            .unwrap_or_else(|| panic!("missing {label} for {marked}: {:?}", response.candidates));
+        assert_eq!(candidate.insert, insert, "{marked}");
+        let mut applied = sql;
+        applied.replace_range(
+            response.replaced_range.start as usize..response.replaced_range.end as usize,
+            &candidate.insert,
+        );
+        assert_eq!(applied, expected, "{marked}");
+    }
+}
+
+#[test]
+fn quoted_prefix_decodes_escaped_delimiters_and_spaces() {
+    for (engine, marked, prefix, quote) in [
+        (
+            Engine::Postgres,
+            "SELECT * FROM \"la\"\" bel|\"",
+            "la\" bel",
+            Some('"'),
+        ),
+        (
+            Engine::SqlServer,
+            "SELECT * FROM [la]] bel|]",
+            "la] bel",
+            Some('['),
+        ),
+        (Engine::Postgres, "SELECT arr[la|]", "la", None),
+        (Engine::Postgres, "SELECT '\"la|'", "la", None),
+        (Engine::SqlServer, "SELECT 1 -- [la|", "la", None),
+    ] {
+        let cursor = marked.find('|').unwrap();
+        let sql = marked.replace('|', "");
+        let analysis = detect_context(&sql, cursor, engine);
+        assert_eq!(analysis.prefix, prefix, "{marked}");
+        assert_eq!(analysis.identifier_quote, quote, "{marked}");
+    }
+}

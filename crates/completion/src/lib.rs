@@ -81,7 +81,7 @@ pub fn complete_with_analysis(
         candidates,
         replaced_range: sift_protocol::completion::Range {
             start: u32::try_from(ctx.prefix_start).unwrap_or(u32::MAX),
-            end: u32::try_from(ctx.cursor).unwrap_or(u32::MAX),
+            end: u32::try_from(ctx.replacement_end).unwrap_or(u32::MAX),
         },
         context: ctx.context.clone(),
     }
