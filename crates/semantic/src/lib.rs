@@ -1794,12 +1794,12 @@ fn binding_tokens(source: &str) -> Vec<BindingToken> {
                     index += 1;
                 }
             }
-        } else if bytes[index] == b'"' || bytes[index] == b'[' {
+        } else if matches!(bytes[index], b'"' | b'[' | b'`') {
             let start = index;
-            let (closing, escaped) = if bytes[index] == b'"' {
-                (b'"', b'"')
-            } else {
+            let (closing, escaped) = if bytes[index] == b'[' {
                 (b']', b']')
+            } else {
+                (bytes[index], bytes[index])
             };
             index += 1;
             let content_start = index;
@@ -3799,7 +3799,7 @@ fn extract_prefix(
     let bytes = sql.as_bytes();
     // The tolerant binding lexer skips strings and comments and understands
     // escaped delimiters, spaces, and incomplete quoted identifiers.
-    let quoted_tokens = if sql[..cursor].contains(['"', '[']) {
+    let quoted_tokens = if sql[..cursor].contains(['"', '[', '`']) {
         binding_tokens(&sql[..cursor])
     } else {
         Vec::new()
@@ -3825,20 +3825,27 @@ fn extract_prefix(
                 || previous >= 0x80
                 || matches!(previous, b']' | b')')
         };
-        if !closed && !subscript && (opening == '"' || flavor != Flavor::Postgres) {
-            let end = binding_tokens(sql)
-                .into_iter()
-                .find(|candidate| candidate.range.start == token.range.start)
-                .filter(|candidate| {
-                    sql[start + 1..candidate.range.end as usize]
-                        .chars()
-                        .rev()
-                        .take_while(|character| *character == closing)
-                        .count()
-                        % 2
-                        == 1
-                })
-                .map_or(cursor, |candidate| candidate.range.end as usize);
+        let valid_quote = opening == '"'
+            || (opening == '[' && flavor != Flavor::Postgres)
+            || (opening == '`' && flavor == Flavor::Sqlite);
+        if !subscript && valid_quote {
+            let end = if closed {
+                cursor
+            } else {
+                binding_tokens(sql)
+                    .into_iter()
+                    .find(|candidate| candidate.range.start == token.range.start)
+                    .filter(|candidate| {
+                        sql[start + 1..candidate.range.end as usize]
+                            .chars()
+                            .rev()
+                            .take_while(|character| *character == closing)
+                            .count()
+                            % 2
+                            == 1
+                    })
+                    .map_or(cursor, |candidate| candidate.range.end as usize)
+            };
             return (start, end, token.text.clone(), Some(opening));
         }
     }

@@ -118,6 +118,7 @@ fn completion_activation(text: &str, cursor: usize, unquoted_only: bool) -> bool
         String,
         QuotedIdentifier,
         BracketIdentifier,
+        BacktickIdentifier,
         LineComment,
         BlockComment,
     }
@@ -133,6 +134,7 @@ fn completion_activation(text: &str, cursor: usize, unquoted_only: bool) -> bool
             (ScanState::Sql, '\'', _) => ScanState::String,
             (ScanState::Sql, '"', _) => ScanState::QuotedIdentifier,
             (ScanState::Sql, '[', _) => ScanState::BracketIdentifier,
+            (ScanState::Sql, '`', _) => ScanState::BacktickIdentifier,
             (ScanState::Sql, '-', Some('-')) => {
                 chars.next();
                 ScanState::LineComment
@@ -162,6 +164,11 @@ fn completion_activation(text: &str, cursor: usize, unquoted_only: bool) -> bool
                 ScanState::BracketIdentifier
             }
             (ScanState::BracketIdentifier, ']', _) => ScanState::Sql,
+            (ScanState::BacktickIdentifier, '`', Some('`')) => {
+                chars.next();
+                ScanState::BacktickIdentifier
+            }
+            (ScanState::BacktickIdentifier, '`', _) => ScanState::Sql,
             (ScanState::LineComment, '\n', _) => ScanState::Sql,
             (ScanState::BlockComment, '*', Some('/')) => {
                 chars.next();
@@ -189,6 +196,9 @@ fn completion_activation(text: &str, cursor: usize, unquoted_only: bool) -> bool
         return false;
     };
     if last == '.' {
+        return true;
+    }
+    if !unquoted_only && matches!(last, '"' | ']' | '`') && state == ScanState::Sql {
         return true;
     }
     if identifier_character(last) {
@@ -4996,12 +5006,14 @@ fn sql_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
     while start < bytes.len() {
         let (end, color) = if bytes[start..].starts_with(b"--") {
             (bytes.len(), theme.colors.syntax_comment)
-        } else if bytes[start] == b'\'' {
+        } else if matches!(bytes[start], b'\'' | b'"' | b'[' | b'`') {
+            let opening = bytes[start];
+            let closing = if opening == b'[' { b']' } else { opening };
             let mut end = start + 1;
             while end < bytes.len() {
-                if bytes[end] == b'\'' {
+                if bytes[end] == closing {
                     end += 1;
-                    if end < bytes.len() && bytes[end] == b'\'' {
+                    if end < bytes.len() && bytes[end] == closing {
                         end += 1;
                         continue;
                     }
@@ -5009,20 +5021,33 @@ fn sql_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
                 }
                 end += line[end..].chars().next().map_or(1, char::len_utf8);
             }
-            (end, theme.colors.syntax_string)
+            (
+                end,
+                if opening == b'\'' {
+                    theme.colors.syntax_string
+                } else {
+                    theme.colors.text
+                },
+            )
         } else if bytes[start].is_ascii_digit() {
             let end = bytes[start..]
                 .iter()
                 .position(|byte| !byte.is_ascii_digit() && *byte != b'.' && *byte != b'_')
                 .map_or(bytes.len(), |offset| start + offset);
             (end, theme.colors.syntax_number)
-        } else if bytes[start].is_ascii_alphabetic() || bytes[start] == b'_' {
-            let end = bytes[start..]
-                .iter()
-                .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
-                .map_or(bytes.len(), |offset| start + offset);
+        } else if line[start..]
+            .chars()
+            .next()
+            .is_some_and(identifier_character)
+        {
+            let end = line[start..]
+                .char_indices()
+                .find(|(_, character)| !identifier_character(*character) && *character != '$')
+                .map_or(bytes.len(), |(offset, _)| start + offset);
             let word = &line[start..end];
-            let color = if is_sql_keyword(word) {
+            let qualified = line[..start].trim_end().ends_with('.')
+                || line[end..].trim_start().starts_with('.');
+            let color = if !qualified && is_sql_keyword(word) {
                 theme.colors.syntax_keyword
             } else {
                 theme.colors.text
@@ -7533,6 +7558,54 @@ fn sql_presentation_runs_cover_text_and_classify_keywords() {
     assert!(runs
         .iter()
         .any(|run| run.color == theme.colors.syntax_comment));
+}
+
+#[test]
+fn sql_keywords_inside_identifiers_keep_identifier_color() {
+    let theme = Theme::dark();
+    for text in [
+        "lab.or",
+        "lab.order",
+        "lab . or",
+        "or.orders",
+        "\"or\"",
+        "[order]",
+        "`or`",
+        "\"la\"\"b\".or",
+        "orα",
+        "or$part",
+    ] {
+        let runs = sql_text_runs(text, gpui::font("monospace"), theme);
+        assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
+        assert!(
+            runs.iter().all(|run| run.color == theme.colors.text),
+            "{text}"
+        );
+    }
+    let runs = sql_text_runs("ORDER BY x OR y", gpui::font("monospace"), theme);
+    assert_eq!(
+        runs.iter()
+            .filter(|run| run.color == theme.colors.syntax_keyword)
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn mixed_identifier_delimiters_activate_server_completion() {
+    for text in [
+        "SELECT * FROM \"lab\".or",
+        "SELECT * FROM [lab].\"or",
+        "SELECT * FROM \"lab\".[or]",
+        "SELECT * FROM [lab].`or`",
+        "SELECT * FROM [lab].`odd--or`",
+        "SELECT * FROM lab.\"or\"",
+    ] {
+        assert!(should_auto_complete(text, text.len()), "{text}");
+    }
+    for text in ["SELECT '\"lab\".or", "-- [lab].or"] {
+        assert!(!should_auto_complete(text, text.len()), "{text}");
+    }
 }
 
 #[test]
