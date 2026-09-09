@@ -114,17 +114,77 @@ fn vim_typing_large_document(cx: &mut BenchAppContext) {
         .unwrap();
     window.focus(&editor).unwrap();
     window.update(|window, cx| {
+        cx.bind_keys([gpui::KeyBinding::new(
+            "backspace",
+            sift_workspace_ui::editor::Backspace,
+            Some("SiftEditor && vim_mode == insert"),
+        )]);
         window.dispatch_keystroke(Keystroke::parse("i").unwrap(), cx);
     });
 
     let insert = Keystroke::parse("x").unwrap();
     let backspace = Keystroke::parse("backspace").unwrap();
+    let original_len = window.update(|_, cx| editor.read(cx).document().text().len());
     cx.bench_iter(|_| {
         window.update(|window, cx| {
             window.dispatch_keystroke(insert.clone(), cx);
             window.dispatch_keystroke(backspace.clone(), cx);
+            assert_eq!(editor.read(cx).document().text().len(), original_len);
         });
     });
+}
+
+/// Replay rapid keyword acceptance, not just ordinary Insert/backspace.
+/// Resetting the fixture is outside the measured interval.
+#[gpui::bench(fps = 120)]
+fn vim_rapid_completion_large_document(cx: &mut BenchAppContext) {
+    let source = format!("\n{}", large_sql());
+    let mut window = cx.add_empty_window();
+    let editor = window
+        .replace_root_view(|_, cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
+                .with_keymap(EditorKeymap::Vim)
+        })
+        .unwrap();
+    window.focus(&editor).unwrap();
+    window.update(|window, cx| {
+        cx.bind_keys([gpui::KeyBinding::new(
+            "tab",
+            sift_workspace_ui::editor::Indent,
+            Some("SiftEditor && vim_mode == insert"),
+        )]);
+        window.dispatch_keystroke(Keystroke::parse("i").unwrap(), cx);
+    });
+    let keys = [
+        "s", "e", "l", "tab", "space", "*", "space", "f", "r", "o", "tab",
+    ]
+    .map(|key| Keystroke::parse(key).unwrap());
+    cx.bench_batched_task(
+        |_| {
+            window.update(|_, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.replace_text_from_owner(&source, cx);
+                    editor.set_cursor_offset(0, cx);
+                });
+            });
+            window.clone()
+        },
+        |window, _| {
+            for key in &keys {
+                window.update(|window, cx| window.dispatch_keystroke(key.clone(), cx));
+            }
+            window.update(|_, cx| {
+                let editor = editor.read(cx);
+                assert!(
+                    editor.document().text().starts_with("SELECT * FROM\n"),
+                    "mode {:?}, prefix {:?}",
+                    editor.vim_mode(),
+                    &editor.document().text()[..60]
+                );
+            });
+            gpui::Task::ready(())
+        },
+    );
 }
 
 fn outline_statements() -> Vec<sift_protocol::SemanticStatement> {
@@ -532,6 +592,7 @@ fn git_panel_steady_refresh(cx: &mut BenchAppContext) {
 gpui::bench_group!(
     benches,
     vim_typing_large_document,
+    vim_rapid_completion_large_document,
     first_result_page,
     retained_grid_navigation,
     result_set_tab_navigation,

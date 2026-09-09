@@ -1,5 +1,13 @@
 # Desktop performance measurements
 
+Correction (2026-09-09): the historical `vim_typing_large_document` runs below
+did not install the desktop Backspace binding in the standalone GPUI fixture.
+They measured insertion with a non-editing Backspace event, not a stable-length
+insert/backspace pair. Keep them as historical observations only, not validated
+pair timings or an apples-to-apples speedup claim. The fixture now binds Backspace
+explicitly and asserts unchanged document length after each pair. The new rapid
+completion fixture similarly binds Tab and asserts the resulting SQL text.
+
 Measured 2026-09-06 on Linux x86_64, Intel Core i7-13620H, Rust 1.96.1.
 Release profile; existing `frame_budget` harness, 10 Criterion samples per case,
 one-second warmup and two-second measurement. GPUI histograms include warmup
@@ -70,14 +78,14 @@ one-second requested warmup and two-second requested measurement; Criterion
 extends collection when the workload cannot fit that duration. The workstation
 was not isolated, so these are diagnostic measurements, not portable gates.
 
-The pre-refinement fixture measured a 7.491-second mean insert/backspace pair
+The historical pre-refinement fixture measured a 7.491-second mean iteration
 and 8153.727 ms dirty-to-draw p95. Reusing unchanged wrap ranges and avoiding
 whole-buffer Vim snapshots reduced those to 60.329 ms and 58.294 ms respectively.
 This exposed another invalidation cost: every edit still discarded unchanged
 visible glyph layouts. Those layouts are now retained when text, styling and
 visual row placement remain valid.
 
-| Stage | Mean insert/backspace pair | Dirty-to-draw p95 |
+| Stage | Historical mean iteration (see correction above) | Dirty-to-draw p95 |
 |---|---:|---:|
 | Pre-refinement | 7490.6 ms | 8153.727 ms |
 | Wrap reuse and Vim splice path | 60.329 ms | 58.294 ms |
@@ -87,7 +95,7 @@ The final run recorded 694 frames (including warmup/calibration), p50 4.502 ms,
 p99 8.139 ms, and maximum 10.772 ms. Two observed frames exceeded the 8.33 ms
 120 Hz CPU-frame budget. Both p95 and p99 fit that budget, but this does not
 guarantee 120 Hz presentation on a real display. Criterion reported two high
-outliers among ten samples; the final pair-time confidence interval was
+outliers among ten samples; the final iteration-time confidence interval was
 10.914–11.457 ms.
 
 The fixture has no live database or workspace shell. It does not measure server
@@ -99,4 +107,24 @@ no host settings were changed.
 
 ```sh
 cargo bench -p sift-workspace-ui --features benchmark --profile release-dev --bench frame_budget -- vim_typing_large_document --sample-size 10 --warm-up-time 1 --measurement-time 2
+```
+
+## Verified rapid completion (2026-09-09)
+
+`vim_rapid_completion_large_document` installs the desktop Tab binding and
+asserts that `sel<Tab> * fro<Tab>` produces `SELECT * FROM` before recording a
+successful iteration. The fixture has 8,000 SQL lines plus an empty editing line.
+Resetting the document occurs outside the measured interval. This measures local
+keyword previews and incremental acceptance, without a server or workspace shell.
+
+Under `release-dev`, ten samples measured the complete 11-key sequence at a mean
+59.668 ms (95% confidence interval 58.045–61.883 ms). Across 385 observed frames,
+dirty-to-draw p50 was 5.435 ms, p95 6.545 ms, p99 7.016 ms and maximum 9.929 ms.
+One frame exceeded the 8.33 ms CPU-frame budget. This is an absolute measurement,
+not a before/after speedup claim; compositor, GPU and physical display latency
+remain excluded. Other desktop applications were running; some checking work
+overlapped the run, so these are diagnostic observations, not a portable gate.
+
+```sh
+cargo bench -p sift-workspace-ui --features benchmark --profile release-dev --bench frame_budget -- vim_rapid_completion_large_document --sample-size 10 --warm-up-time 1 --measurement-time 2
 ```
