@@ -1313,6 +1313,7 @@ impl QueryEditor {
             return;
         }
         self.apply_keymap(keymap);
+        self.sync_mode_semantics();
         cx.emit(EditorEvent::VimStateChanged);
         self.selection_changed(cx);
     }
@@ -1503,8 +1504,32 @@ impl QueryEditor {
         self.language == EditorLanguage::Sql && !self.read_only
     }
 
+    pub fn allows_semantic_request(&self, request: &SemanticRequestKind) -> bool {
+        self.semantic_enabled()
+            && match request {
+                SemanticRequestKind::Complete { .. } | SemanticRequestKind::AutoComplete { .. } => {
+                    self.vim_mode == VimMode::Insert
+                }
+                SemanticRequestKind::Hover { .. } => self.vim_mode == VimMode::Normal,
+                _ => true,
+            }
+    }
+
+    fn sync_mode_semantics(&mut self) {
+        if self.language != EditorLanguage::Sql {
+            return;
+        }
+        if self.vim_mode != VimMode::Insert {
+            self.semantic.cancel_completion();
+        }
+        if self.vim_mode != VimMode::Normal {
+            self.semantic.clear_hover();
+            self.hover_anchor = None;
+        }
+    }
+
     fn request_semantic(&mut self, request: SemanticRequestKind, cx: &mut Context<Self>) {
-        if !self.semantic_enabled() {
+        if !self.allows_semantic_request(&request) {
             return;
         }
         cx.emit(EditorEvent::SemanticRequest {
@@ -1540,7 +1565,8 @@ impl QueryEditor {
                 replaced,
                 candidates,
             } => {
-                cursor as usize == self.document.cursor()
+                (self.language != EditorLanguage::Sql || self.vim_mode == VimMode::Insert)
+                    && cursor as usize == self.document.cursor()
                     && self.semantic.set_completions(
                         self.document.text(),
                         (revision, cursor),
@@ -1549,7 +1575,10 @@ impl QueryEditor {
                         candidates,
                     )
             }
-            SemanticOutcome::Hover(hover) => self.semantic.set_hover(revision, current, hover),
+            SemanticOutcome::Hover(hover) => {
+                self.vim_mode == VimMode::Normal
+                    && self.semantic.set_hover(revision, current, hover)
+            }
             SemanticOutcome::StarExpansion(preview) => {
                 self.semantic.set_star_expansion(revision, current, preview)
             }
@@ -1629,6 +1658,9 @@ impl QueryEditor {
     }
 
     fn complete(&mut self, _: &Complete, _: &mut Window, cx: &mut Context<Self>) {
+        if self.language == EditorLanguage::Sql && self.vim_mode != VimMode::Insert {
+            return;
+        }
         if !self.secondary_cursors.is_empty() {
             return;
         }
@@ -1669,6 +1701,10 @@ impl QueryEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Skip pointer-to-text hit testing as well as server work while typing.
+        if self.language == EditorLanguage::Sql && self.vim_mode != VimMode::Normal {
+            return;
+        }
         if !self.semantic_enabled() && !self.manifest_schema {
             return;
         }
@@ -2221,7 +2257,9 @@ impl QueryEditor {
             && self.vim_mode == VimMode::Insert
             && (self.manifest_schema
                 || should_auto_complete(self.document.text(), self.document.cursor()));
-        if reopen_completion || auto_complete {
+        if (reopen_completion || auto_complete)
+            && (self.language != EditorLanguage::Sql || self.vim_mode == VimMode::Insert)
+        {
             if self.manifest_schema {
                 self.open_manifest_completion(cx);
             } else if self.language == EditorLanguage::Json {
@@ -2469,6 +2507,7 @@ impl QueryEditor {
         }
         self.vim_mode = snapshot.mode;
         if vim_state_changed {
+            self.sync_mode_semantics();
             cx.emit(EditorEvent::VimStateChanged);
         }
         if open_command_palette {
@@ -5674,6 +5713,69 @@ mod tests {
     }
 
     #[gpui::test]
+    fn vim_modes_gate_interactive_semantics_and_invalidate_late_answers(cx: &mut TestAppContext) {
+        use modalkit::crossterm::event::KeyCode;
+        let (mut cx, editor, spy) = editor_with_spy("select users", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            let hover = SemanticRequestKind::Hover { position: 7 };
+            editor.complete(&Complete, window, cx);
+            assert!(editor.semantic.completion().is_none());
+            assert!(editor.semantic.expect_hover(editor.revision, 7));
+            editor.request_semantic(hover.clone(), cx);
+            assert!(editor.vim_key(KeyCode::Char('i'), cx));
+            assert!(
+                !editor.semantic.clear_hover(),
+                "entering Insert clears the pending hover"
+            );
+            editor.request_semantic(hover.clone(), cx);
+            let cursor = editor.document.cursor() as u32;
+            editor.complete(&Complete, window, cx);
+            assert!(editor.vim_key(KeyCode::Esc, cx));
+            assert!(
+                !editor.semantic.cancel_completion(),
+                "leaving Insert clears pending completion"
+            );
+            assert!(!editor.apply_semantic_outcome(
+                editor.revision,
+                SemanticOutcome::Completions {
+                    cursor,
+                    replaced: sift_protocol::TextRange {
+                        start: cursor,
+                        end: cursor
+                    },
+                    candidates: vec![candidate("users")],
+                },
+                cx
+            ));
+            assert!(editor.vim_key(KeyCode::Char('v'), cx));
+            assert!(!editor.allows_semantic_request(&hover));
+            assert!(!editor.allows_semantic_request(&SemanticRequestKind::Complete { cursor }));
+            assert!(
+                editor.allows_semantic_request(&SemanticRequestKind::Analyze),
+                "diagnostics stay available in every mode"
+            );
+            assert!(editor.vim_key(KeyCode::Esc, cx));
+            assert!(editor.allows_semantic_request(&hover));
+        });
+        cx.run_until_parked();
+        let requests = spy.read_with(&cx, |spy, _| spy.0.clone());
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(_, request)| matches!(request, SemanticRequestKind::Hover { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(_, request)| matches!(request, SemanticRequestKind::Complete { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[gpui::test]
     fn accepting_a_completion_replaces_the_server_reported_range(cx: &mut TestAppContext) {
         let (mut cx, editor, spy) = editor_with_spy("select * from us", cx);
         editor.update_in(&mut cx, |editor, window, cx| {
@@ -5718,6 +5820,7 @@ mod tests {
     fn caret_motion_cancels_completion_and_stale_failures_are_ignored(cx: &mut TestAppContext) {
         let (mut cx, editor, _) = editor_with_spy("select name", cx);
         editor.update_in(&mut cx, |editor, window, cx| {
+            assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
             editor.document.set_selection(11..11, false);
             editor.complete(&Complete, window, cx);
             let revision = editor.revision;
@@ -5749,6 +5852,7 @@ mod tests {
     fn completion_row_text_and_kind_share_one_vertical_track(cx: &mut TestAppContext) {
         let (mut cx, editor, spy) = editor_with_spy("select * from us", cx);
         editor.update_in(&mut cx, |editor, window, cx| {
+            assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
             editor.document.set_selection(16..16, false);
             editor.complete(&Complete, window, cx);
         });
@@ -5789,6 +5893,7 @@ mod tests {
         let (mut cx, editor, _) = editor_with_spy(&text, cx);
         cx.simulate_resize(size(px(320.), px(180.)));
         editor.update(&mut cx, |editor, cx| {
+            assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
             let cursor = editor.document.text().len() - 2;
             editor.document.set_selection(cursor..cursor, false);
             editor.selection_changed(cx);
@@ -5884,6 +5989,7 @@ mod tests {
         let (mut cx, editor, spy) = editor_with_spy(source, cx);
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.set_keymap(EditorKeymap::Vim, cx);
+            assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
             editor.document.set_selection(3..3, false);
             editor.complete(&Complete, window, cx);
         });

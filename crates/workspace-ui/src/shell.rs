@@ -16282,7 +16282,7 @@ impl WorkspaceShell {
         };
         let text = {
             let editor = editor.read(cx);
-            if !editor.semantic_enabled() || editor.text_revision() != revision {
+            if !editor.allows_semantic_request(&request) || editor.text_revision() != revision {
                 return;
             }
             if let SemanticRequestKind::Complete { cursor } = &request {
@@ -27372,6 +27372,12 @@ impl WorkspaceShell {
                 });
             }
             PaneEvent::EditorStateChanged { item_id, dirty } => {
+                if self
+                    .editor_for_item(*item_id, cx)
+                    .is_some_and(|editor| editor.read(cx).vim_mode() != VimMode::Insert)
+                {
+                    self.semantic_completion_tasks.remove(item_id);
+                }
                 if dirty == &Some(true) {
                     self.dismissed_problems.retain(|(id, _)| id != item_id);
                 }
