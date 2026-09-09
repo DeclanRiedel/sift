@@ -112,7 +112,10 @@ pub use policy::{
     SchemaSelector, TenantResource, TenantResourceLimits, TenantResourceUsage, TenantRole,
     TenantUsageSnapshot, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest,
 };
-pub use process::{DatabaseProcess, KillProcessRequest, KillProcessResponse};
+pub use process::{
+    DatabaseProcess, KillProcessRequest, KillProcessResponse, ProcessAlert, ProcessAlertKind,
+    ProcessAlertSample,
+};
 pub use provider::*;
 pub use remote::{
     RemoteCapabilityResponse, RemoteDaemonDescriptor, RemoteKeyChallenge, RemoteProbeResponse,

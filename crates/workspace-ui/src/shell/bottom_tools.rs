@@ -1189,6 +1189,8 @@ mod tests {
             state: None,
             statement: None,
             started_at: None,
+            transaction_started_at: None,
+            state_changed_at: None,
             wait: None,
             blocked_by,
         }

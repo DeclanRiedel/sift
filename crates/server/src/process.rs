@@ -6,8 +6,8 @@ use sift_protocol::{
 use crate::error::{ApiError, ApiResult};
 use crate::session::SessionStore;
 
-const PG_LIST: &str = "SELECT pid::bigint, usename, datname, state, query, query_start, concat_ws(':', wait_event_type, wait_event), array_to_string(pg_blocking_pids(pid), ',') FROM pg_stat_activity WHERE pid <> pg_backend_pid() ORDER BY (state = 'active') DESC, query_start NULLS LAST LIMIT 500";
-const MSSQL_LIST: &str = "SELECT TOP (500) CONVERT(bigint, r.session_id), s.login_name, DB_NAME(r.database_id), r.status, t.text, r.start_time, r.wait_type, CONVERT(varchar(20), NULLIF(r.blocking_session_id, 0)) FROM sys.dm_exec_requests r JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t WHERE r.session_id <> @@SPID ORDER BY CASE WHEN r.status = 'running' THEN 0 ELSE 1 END, r.start_time";
+const PG_LIST: &str = "SELECT pid::bigint, usename, datname, state, query, query_start, concat_ws(':', wait_event_type, wait_event), array_to_string(pg_blocking_pids(pid), ','), xact_start, state_change FROM pg_stat_activity WHERE pid <> pg_backend_pid() ORDER BY (state = 'active') DESC, query_start NULLS LAST LIMIT 500";
+const MSSQL_LIST: &str = "SELECT TOP (500) CONVERT(bigint, s.session_id), s.login_name, DB_NAME(COALESCE(r.database_id, s.database_id)), CASE WHEN r.session_id IS NULL AND s.open_transaction_count > 0 THEN 'idle in transaction' ELSE COALESCE(r.status, s.status) END, t.text, DATEADD(second, DATEDIFF(second, SYSDATETIME(), r.start_time), SYSUTCDATETIME()), r.wait_type, CONVERT(varchar(20), NULLIF(r.blocking_session_id, 0)), DATEADD(second, DATEDIFF(second, SYSDATETIME(), tx.started_at), SYSUTCDATETIME()), DATEADD(second, DATEDIFF(second, SYSDATETIME(), COALESCE(r.start_time, s.last_request_end_time)), SYSUTCDATETIME()) FROM sys.dm_exec_sessions s LEFT JOIN sys.dm_exec_requests r ON s.session_id = r.session_id OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) t OUTER APPLY (SELECT MIN(a.transaction_begin_time) AS started_at FROM sys.dm_tran_session_transactions st JOIN sys.dm_tran_active_transactions a ON a.transaction_id = st.transaction_id WHERE st.session_id = s.session_id AND st.is_user_transaction = 1) tx WHERE s.session_id <> @@SPID AND s.is_user_process = 1 ORDER BY CASE WHEN r.session_id IS NOT NULL THEN 0 ELSE 1 END, COALESCE(r.start_time, tx.started_at)";
 
 pub async fn list(
     store: &SessionStore,
@@ -121,6 +121,8 @@ fn parse_row(engine: Engine, values: &[Value]) -> ApiResult<DatabaseProcess> {
         state: value_string(&values[3]),
         statement: value_string(&values[4]),
         started_at: value_timestamp(&values[5]),
+        transaction_started_at: values.get(8).and_then(value_timestamp),
+        state_changed_at: values.get(9).and_then(value_timestamp),
         wait: value_string(&values[6]).filter(|value| !value.is_empty()),
         blocked_by: value_string(&values[7])
             .map(|value| {

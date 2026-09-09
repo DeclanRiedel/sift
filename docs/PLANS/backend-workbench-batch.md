@@ -12,6 +12,11 @@ without unique keys, and changed source/owner rejection. Formatting and strict
 server Clippy passed. PostgreSQL and SQL Server paths compile but have not yet
 received live checkpoint acceptance tests; retain that validation gap explicitly.
 
+Milestones 3/4 complete: bounded NDJSON subscriptions over audited process
+sampling, configurable thresholds, deduplicated/resolved transitions and
+incomplete-snapshot handling. Tracker and HTTP tests plus strict workspace
+Clippy passed. Native monitoring visibility still depends on database grants.
+
 ## Order and acceptance
 
 1. Transfer quarantine: authorized report download containing source row numbers,

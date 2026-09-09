@@ -172,6 +172,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listPlanCaptures",
     "listPrincipalKeys",
     "listProcesses",
+    "watchProcessAlerts",
     "listProviders",
     "listRoomResults",
     "listRoomWorkspaces",
@@ -1540,6 +1541,36 @@ impl Client {
             "/v1/sessions/{session}/connections/{connection}/ping"
         ))
         .await
+    }
+
+    /// NDJSON alert transitions. Reconnect after the bounded one-hour stream.
+    pub async fn watch_process_alerts(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        long_query_seconds: u64,
+        idle_transaction_seconds: u64,
+    ) -> Result<ExportStream> {
+        let response = self
+            .send_response(
+                self.http
+                    .get(self.url(&format!(
+                        "/v1/sessions/{session}/connections/{connection}/processes/alerts"
+                    )))
+                    .query(&[
+                        ("long_query_seconds", long_query_seconds),
+                        ("idle_transaction_seconds", idle_transaction_seconds),
+                    ]),
+            )
+            .await?;
+        if !response.status().is_success() {
+            return Err(server_error(response).await);
+        }
+        Ok(ExportStream {
+            content_type: Some("application/x-ndjson".into()),
+            content_disposition: None,
+            body: Box::pin(response.bytes_stream()),
+        })
     }
 
     pub async fn list_processes(

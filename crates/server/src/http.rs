@@ -1184,6 +1184,10 @@ pub fn app(state: AppState) -> Router {
             post_with(kill_process, doc("killProcess", "Terminate a database process")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/processes/alerts",
+            get_with(watch_process_alerts, doc("watchProcessAlerts", "Watch bounded, deduplicated process alerts as NDJSON")),
+        )
+        .api_route(
             "/v1/sessions/:id/queries",
             post_with(execute_query, doc("executeQuery", "Execute query over synchronous HTTP")),
         )

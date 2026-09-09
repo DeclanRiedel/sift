@@ -2,6 +2,36 @@
 
 These features are API/operator workflows; no desktop interaction is required.
 
+## Process alerts
+
+`GET /v1/sessions/{session}/connections/{connection}/processes/alerts` streams
+NDJSON `ProcessAlertSample` values. The SDK exposes `watch_process_alerts` as a
+bounded byte stream. Each line contains the sample time, observed process count,
+an `incomplete` flag and alert transitions. SQL text, usernames and credentials
+are excluded. Each poll is an authorized, supervised and audited `ListProcesses`
+operation; SQLite process monitoring remains unsupported.
+
+Query parameters: `long_query_seconds` (default 60), `idle_transaction_seconds`
+(300), `poll_seconds` (5, allowed 2..300), and `duration_seconds` (3600, allowed
+1..3600). A threshold of zero disables that rule; both cannot be disabled.
+Thresholds are capped at one day. Clients reconnect after stream expiry and
+receive current conditions again. Monitoring runs only while subscribed; this
+is not an installation-wide daemon or external notification delivery service.
+
+Active conditions fire once per process/start-time/rule and emit `active: false`
+when a complete subsequent sample resolves them. Samples reaching the 500-row
+cap are marked incomplete and cannot clear previous alerts. Missing timestamp
+or engine visibility does not prove health. Shutdown, connection closure or
+sampling failures end the stream.
+
+Idle time starts when the connection becomes idle within its open transaction,
+not when its last query started. PostgreSQL uses `xact_start` and `state_change`
+from [pg_stat_activity](https://www.postgresql.org/docs/16/monitoring-stats.html).
+SQL Server includes sleeping sessions with open transactions and uses
+[session request times](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-exec-sessions-transact-sql?view=sql-server-ver17)
+plus transaction metadata. Native SQL Server timestamps are normalized using
+the server's current UTC offset; clock/time-zone changes can affect age estimates.
+
 ## Transfer quarantine
 
 CSV imports accept `conflict_policy: "quarantine"` for PostgreSQL, SQL Server

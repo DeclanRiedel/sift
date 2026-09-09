@@ -253,6 +253,73 @@ pub(super) async fn kill_process(
     Ok(Json(response))
 }
 
+pub(super) async fn watch_process_alerts(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Query(options): Query<crate::process_alerts::AlertOptions>,
+) -> ApiResult<Response> {
+    use axum::{body::Body, response::IntoResponse};
+    options.validate()?;
+    if state.shutdown.is_draining() {
+        return Err(ApiError::ServiceDraining);
+    }
+    // Streaming is a projection of the existing ListProcesses operation. Every
+    // sample repeats its normal authorization, supervision and audit path.
+    let first = finish_operation(
+        &state.sessions,
+        Operation::ListProcesses {
+            session,
+            connection,
+        },
+        crate::process::list(&state.sessions, session, connection).await,
+        |rows| Some(rows.len() as i64),
+    )?;
+    let guard = state.shutdown.track_query();
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(options.duration_seconds);
+    let stream = async_stream::stream! {
+        let _guard = guard;
+        let mut tracker = crate::process_alerts::AlertTracker::default();
+        let mut processes = first;
+        loop {
+            let sample = tracker.sample(&processes, &options, chrono::Utc::now());
+            match serde_json::to_vec(&sample) {
+                Ok(mut bytes) => {
+                    bytes.push(b'\n');
+                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(bytes));
+                }
+                Err(_) => {
+                    yield Err(std::io::Error::other("alert encoding failed"));
+                    break;
+                }
+            }
+            tokio::select! {
+                _ = state.shutdown.wait_for_drain_start() => break,
+                _ = tokio::time::sleep_until(deadline) => break,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(options.poll_seconds)) => {}
+            }
+            match finish_operation(&state.sessions, Operation::ListProcesses { session, connection },
+                crate::process::list(&state.sessions, session, connection).await, |rows| Some(rows.len() as i64)) {
+                Ok(rows) => processes = rows,
+                Err(_) => {
+                    yield Err(std::io::Error::other("process alert sampling stopped"));
+                    break;
+                }
+            }
+        }
+    };
+    let mut response = Body::from_stream(stream).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/x-ndjson".parse().unwrap(),
+    );
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        "no-store".parse().unwrap(),
+    );
+    Ok(response)
+}
+
 pub(super) async fn list_transactions(
     State(state): State<AppState>,
     Path(id): Path<sift_protocol::SessionId>,

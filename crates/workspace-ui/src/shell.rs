@@ -50242,6 +50242,8 @@ mod tests {
                     state: Some("active".into()),
                     statement: Some("select * from events".into()),
                     started_at: None,
+                    transaction_started_at: None,
+                    state_changed_at: None,
                     wait: Some("Lock".into()),
                     blocked_by: vec![7],
                 }])),

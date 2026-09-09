@@ -27,7 +27,7 @@ fn process_pages() -> Vec<Page> {
                 Value::Text("app".into()),
                 Value::Text("active".into()),
                 Value::Text("select * from jobs".into()),
-                Value::Null,
+                Value::TimestampTz(chrono::Utc::now() - chrono::Duration::minutes(2)),
                 Value::Text("Lock:relation".into()),
                 Value::Text("41,42".into()),
             ])],
@@ -49,6 +49,7 @@ fn state() -> AppState {
             current_user: "alice".into(),
             pool_warm_slots: None,
         })
+        .execute_ok(process_pages())
         .execute_ok(process_pages())
         .execute_ok(vec![
             Page::NextResult {
@@ -129,6 +130,41 @@ async fn process_routes_list_and_kill() {
     let processes: Vec<DatabaseProcess> = json(response.into_body()).await;
     assert_eq!(processes[0].process_id, 73);
     assert_eq!(processes[0].blocked_by, vec![41, 42]);
+
+    let invalid = router
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/v1/sessions/{}/connections/{}/processes/alerts?poll_seconds=0",
+                session.id, connection.id
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let alerts = router
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/v1/sessions/{}/connections/{}/processes/alerts?duration_seconds=1",
+                session.id, connection.id
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alerts.status(), StatusCode::OK);
+    assert_eq!(alerts.headers()["content-type"], "application/x-ndjson");
+    let sample: sift_protocol::ProcessAlertSample = json(alerts.into_body()).await;
+    assert_eq!(sample.observed_processes, 1);
+    assert_eq!(
+        sample.changes[0].kind,
+        sift_protocol::ProcessAlertKind::LongRunningQuery
+    );
+    assert!(sample.changes[0].active);
 
     let response = router
         .oneshot(

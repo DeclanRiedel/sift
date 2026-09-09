@@ -236,8 +236,8 @@ and open the live collaborative document, reusing existing tabs.
 - [ ] Lock manager UI
 - [x] Blocking-chain visualization
 - [ ] Deadlock inspection
-- [ ] Long-running-query alerts
-- [ ] Idle-in-transaction alerts
+- [x] Long-running-query alerts (bounded API subscriptions)
+- [x] Idle-in-transaction alerts (bounded API subscriptions)
 - [ ] Server dashboard
 - [ ] Query-performance history
 
