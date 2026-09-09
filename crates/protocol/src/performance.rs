@@ -2,6 +2,53 @@
 //! not database CPU time, network-to-desktop time or UI rendering time.
 use serde::{Deserialize, Serialize};
 
+/// Serial-run budgets. Execution must additionally enforce deployment policy,
+/// query permissions and read-only protections; these limits are not a sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BenchmarkLimits {
+    pub warmups: u32,
+    pub iterations: u32,
+    pub query_timeout_ms: u64,
+    pub total_budget_ms: u64,
+    pub delay_ms: u64,
+}
+
+impl Default for BenchmarkLimits {
+    fn default() -> Self {
+        Self {
+            warmups: 2,
+            iterations: 10,
+            query_timeout_ms: 30_000,
+            total_budget_ms: 120_000,
+            delay_ms: 0,
+        }
+    }
+}
+
+impl BenchmarkLimits {
+    /// Hard ceilings bound the future runner's sample count and wall time.
+    /// The total budget may intentionally stop a run before all iterations.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.warmups > 100 {
+            return Err("warm-ups must not exceed 100");
+        }
+        if !(1..=10_000).contains(&self.iterations) {
+            return Err("measured iterations must be between 1 and 10000");
+        }
+        if !(1..=3_600_000).contains(&self.total_budget_ms) {
+            return Err("total budget must be between 1 ms and one hour");
+        }
+        if self.query_timeout_ms == 0 || self.query_timeout_ms > self.total_budget_ms {
+            return Err("query timeout must be positive and no greater than the total budget");
+        }
+        if self.delay_ms >= self.total_budget_ms {
+            return Err("inter-query delay must be smaller than the total budget");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkRequest {

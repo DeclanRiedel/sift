@@ -32,6 +32,40 @@ mod filter;
 use filter::PreparedFilters;
 
 const MIN_COLUMN_WIDTH: f32 = 144.0;
+fn parse_benchmark_limits(values: [&str; 5]) -> Result<sift_protocol::BenchmarkLimits, String> {
+    let labels = [
+        "Warm-ups",
+        "Measured runs",
+        "Timeout",
+        "Total budget",
+        "Delay",
+    ];
+    let mut numbers = [0_u64; 5];
+    for (index, value) in values.iter().enumerate() {
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(format!(
+                "{} must be a non-negative whole number",
+                labels[index]
+            ));
+        }
+        numbers[index] = value
+            .parse()
+            .map_err(|_| format!("{} is too large", labels[index]))?;
+    }
+    let limits = sift_protocol::BenchmarkLimits {
+        warmups: numbers[0].try_into().map_err(|_| "Warm-ups is too large")?,
+        iterations: numbers[1]
+            .try_into()
+            .map_err(|_| "Measured runs is too large")?,
+        query_timeout_ms: numbers[2],
+        total_budget_ms: numbers[3],
+        delay_ms: numbers[4],
+    };
+    limits.validate().map_err(str::to_string)?;
+    Ok(limits)
+}
+
 fn benchmark_ms(ns: Option<f64>) -> String {
     ns.map_or_else(
         || "unavailable".into(),
@@ -860,6 +894,7 @@ actions!(
         RunBenchmark,
         StopBenchmark,
         CycleBenchmarkIterations,
+        ConfigureBenchmark,
         PinBenchmarkBaseline,
         CopyBenchmarkReport
     ]
@@ -967,7 +1002,7 @@ pub enum ResultsEvent {
     },
     BenchmarkRequested {
         run_id: uuid::Uuid,
-        iterations: u32,
+        limits: sift_protocol::BenchmarkLimits,
     },
     CancelBenchmarkRequested {
         run_id: uuid::Uuid,
@@ -1210,7 +1245,8 @@ pub struct ResultsView {
     benchmark_report: Option<sift_protocol::BenchmarkReport>,
     benchmark_baseline: Option<sift_protocol::BenchmarkReport>,
     benchmark_error: Option<String>,
-    benchmark_iterations: u32,
+    benchmark_inputs: [Entity<TextInput>; 5],
+    _benchmark_subscriptions: Vec<Subscription>,
     rendered_plan_nodes: Vec<RenderedPlanNode>,
     plan_scroll_handle: UniformListScrollHandle,
     large_view: bool,
@@ -1219,6 +1255,32 @@ pub struct ResultsView {
 
 impl ResultsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let benchmark_inputs = [
+            ("2", "Warm-ups"),
+            ("10", "Measured runs"),
+            ("30000", "Timeout (ms)"),
+            ("120000", "Total budget (ms)"),
+            ("0", "Delay (ms)"),
+        ]
+        .map(|(value, label)| cx.new(|cx| TextInput::new(value, label, cx).aria_label(label)));
+        let benchmark_subscriptions = benchmark_inputs
+            .iter()
+            .map(|input| cx.subscribe(input, |_, _, _: &TextInputEvent, cx| cx.notify()))
+            .collect();
+        let focus_handle = cx.focus_handle();
+        for (index, input) in benchmark_inputs.iter().enumerate() {
+            let previous = index
+                .checked_sub(1)
+                .map(|i| benchmark_inputs[i].read(cx).focus_handle(cx))
+                .unwrap_or_else(|| focus_handle.clone());
+            let next = benchmark_inputs
+                .get(index + 1)
+                .map(|input| input.read(cx).focus_handle(cx))
+                .unwrap_or_else(|| focus_handle.clone());
+            input.update(cx, |input, cx| {
+                input.set_tab_targets(Some(previous), Some(next), cx)
+            });
+        }
         let row_json_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter keys or /regex/", cx).aria_label("Filter selected row JSON")
         });
@@ -1260,7 +1322,7 @@ impl ResultsView {
                 }
             });
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             state: ResultState::Idle,
             rendered_columns: Vec::new(),
             rendered_rows: Vec::new(),
@@ -1323,7 +1385,8 @@ impl ResultsView {
             benchmark_report: None,
             benchmark_baseline: None,
             benchmark_error: None,
-            benchmark_iterations: 10,
+            benchmark_inputs,
+            _benchmark_subscriptions: benchmark_subscriptions,
             rendered_plan_nodes: Vec::new(),
             plan_scroll_handle: UniformListScrollHandle::new(),
             large_view: false,
@@ -5814,17 +5877,23 @@ impl ResultsView {
         self.select_tab(ResultTab::Performance, cx);
     }
 
-    fn run_benchmark(&mut self, _: &RunBenchmark, _: &mut Window, cx: &mut Context<Self>) {
+    fn run_benchmark(&mut self, _: &RunBenchmark, window: &mut Window, cx: &mut Context<Self>) {
         if self.tab != ResultTab::Performance || self.benchmark_pending.is_some() {
             return;
         }
+        let limits = match self.benchmark_limits(cx) {
+            Ok(limits) => limits,
+            Err(error) => {
+                self.benchmark_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
         let run_id = uuid::Uuid::new_v4();
         self.benchmark_pending = Some(run_id);
         self.benchmark_error = None;
-        cx.emit(ResultsEvent::BenchmarkRequested {
-            run_id,
-            iterations: self.benchmark_iterations,
-        });
+        self.focus_handle.focus(window, cx);
+        cx.emit(ResultsEvent::BenchmarkRequested { run_id, limits });
         cx.notify();
     }
     fn stop_benchmark(&mut self, _: &StopBenchmark, _: &mut Window, cx: &mut Context<Self>) {
@@ -5839,12 +5908,34 @@ impl ResultsView {
         cx: &mut Context<Self>,
     ) {
         if self.benchmark_pending.is_none() {
-            self.benchmark_iterations = match self.benchmark_iterations {
-                1 => 10,
-                10 => 100,
-                _ => 1,
+            let next = match self.benchmark_inputs[1].read(cx).text() {
+                "1" => "10",
+                "10" => "100",
+                _ => "1",
             };
+            self.benchmark_inputs[1].update(cx, |input, cx| input.set_text(next, cx));
             cx.notify();
+        }
+    }
+    fn benchmark_limits(&self, cx: &App) -> Result<sift_protocol::BenchmarkLimits, String> {
+        let values = self
+            .benchmark_inputs
+            .each_ref()
+            .map(|input| input.read(cx).text());
+        parse_benchmark_limits(values)
+    }
+
+    fn configure_benchmark(
+        &mut self,
+        _: &ConfigureBenchmark,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.benchmark_pending.is_none() {
+            self.benchmark_inputs[0]
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx);
         }
     }
     fn pin_benchmark_baseline(
@@ -5881,7 +5972,7 @@ impl ResultsView {
                 .filter(|s| !s.warmup && s.outcome == sift_protocol::BenchmarkOutcome::Success)
                 .count();
             format!(
-                "{} · {measured} measured reads · median {} · mean {} · range {}–{} · deviation {}",
+                "{} · {measured} measured reads · median {} · mean {} · range {}–{} · deviation {} · p95 {} · p99 {}",
                 if report.completed {
                     "Complete"
                 } else {
@@ -5891,13 +5982,15 @@ impl ResultsView {
                 benchmark_ms(report.mean_ns),
                 benchmark_ms(report.min_ns.map(|v| v as f64)),
                 benchmark_ms(report.max_ns.map(|v| v as f64)),
-                benchmark_ms(report.standard_deviation_ns)
+                benchmark_ms(report.standard_deviation_ns),
+                benchmark_ms(report.p95_ns.map(|v| v as f64)),
+                benchmark_ms(report.p99_ns.map(|v| v as f64))
             )
         });
         let comparison = self.benchmark_baseline.as_ref().zip(self.benchmark_report.as_ref()).map(|(base, current)| {
             if base.engine != current.engine { return "Baseline uses a different engine; timing comparison unavailable".to_string(); }
             if !base.completed || !current.completed { return "Comparison is inconclusive: at least one run is incomplete".into(); }
-            if base.query_timeout_ms != current.query_timeout_ms || base.delay_ms != current.delay_ms || base.warmups != current.warmups || base.parameter_count != current.parameter_count {
+            if base.query_timeout_ms != current.query_timeout_ms || base.total_budget_ms != current.total_budget_ms || base.requested_iterations != current.requested_iterations || base.delay_ms != current.delay_ms || base.warmups != current.warmups || base.parameter_count != current.parameter_count {
                 return "Benchmark configurations differ; rerun with matching settings before comparing".into();
             }
             match base.median_ns.zip(current.median_ns) {
@@ -5912,9 +6005,11 @@ impl ResultsView {
             .map_or(0, |r| r.samples.len());
         div().flex().flex_col().size_full().gap_2().p_3()
             .child(div().flex().flex_wrap().items_center().gap_2()
-                .child(Button::new("benchmark-iterations", format!("[i] {} measured runs", self.benchmark_iterations))
+                .child(Button::new("benchmark-configure", "[c] Configure").disabled(pending)
+                    .on_click(cx.listener(|view, _, window, cx| view.configure_benchmark(&ConfigureBenchmark, window, cx))))
+                .child(Button::new("benchmark-iterations", "[i] Cycle 1/10/100 runs")
                     .disabled(pending).on_click(cx.listener(|view, _, window, cx| view.cycle_benchmark_iterations(&CycleBenchmarkIterations, window, cx))))
-                .child(div().debug_selector(|| "benchmark-run".into()).child(Button::new("benchmark-run", format!("[r] Confirm & run {} reads", self.benchmark_iterations + 2))
+                .child(div().debug_selector(|| "benchmark-run".into()).child(Button::new("benchmark-run", self.benchmark_limits(cx).map_or_else(|_| "[r] Check configuration".into(), |limits| format!("[r] Confirm & run {} reads", limits.iterations + limits.warmups)))
                     .disabled(pending).on_click(cx.listener(|view, _, window, cx| view.run_benchmark(&RunBenchmark, window, cx)))))
                 .child(Button::new("benchmark-cancel", "[Esc] Cancel").disabled(!pending)
                     .on_click(cx.listener(|view, _, window, cx| view.stop_benchmark(&StopBenchmark, window, cx))))
@@ -5922,8 +6017,11 @@ impl ResultsView {
                     .on_click(cx.listener(|view, _, window, cx| view.pin_benchmark_baseline(&PinBenchmarkBaseline, window, cx))))
                 .child(Button::new("benchmark-copy", "[y] Copy JSON (includes SQL)").disabled(self.benchmark_report.is_none())
                     .on_click(cx.listener(|view, _, window, cx| view.copy_benchmark_report(&CopyBenchmarkReport, window, cx)))))
+            .children((!pending).then(|| div().flex().flex_wrap().gap_2().children(
+                self.benchmark_inputs.iter().zip(["Warm-ups", "Measured runs", "Timeout (ms)", "Total budget (ms)", "Delay (ms)"]).map(|(input, label)|
+                    div().w(px(145.)).flex().flex_col().gap_1().child(div().text_xs().child(label)).child(input.clone())))))
             .child(div().text_sm().text_color(colors.muted_text).child(
-                "Current statement or selection · 2 warm-ups excluded · 30s/query · 2min total · full result drain, no retained rows. Repeated reads can load production databases and invoke side effects. Use a read-only account."))
+                "Current statement or selection · warm-ups excluded · full result drain, no retained rows. Total budget may stop a run early. Repeated reads can load production databases and invoke side effects. Use a read-only account. Tab/Shift-Tab navigates settings; Tab after delay returns to run controls. p95 needs 100 successful samples; p99 needs 1,000."))
             .children(pending.then(|| div().text_sm().child("Benchmark running on a dedicated connection… Results arrive when the run finishes or is cancelled.")))
             .children(self.benchmark_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
             .children(summary.map(|s| div().text_sm().child(s)))
@@ -6427,6 +6525,7 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::run_benchmark))
             .on_action(cx.listener(Self::stop_benchmark))
             .on_action(cx.listener(Self::cycle_benchmark_iterations))
+            .on_action(cx.listener(Self::configure_benchmark))
             .on_action(cx.listener(Self::pin_benchmark_baseline))
             .on_action(cx.listener(Self::copy_benchmark_report))
             .track_focus(&self.focus_handle)
@@ -8018,6 +8117,31 @@ mod tests {
         });
     }
 
+    #[test]
+    fn benchmark_configuration_validates_numbers_and_shared_budgets() {
+        assert_eq!(
+            parse_benchmark_limits(["2", "10", "30000", "120000", "0"]).unwrap(),
+            sift_protocol::BenchmarkLimits::default()
+        );
+        let custom = parse_benchmark_limits([" 0 ", "1000", "500", "60000", "25"]).unwrap();
+        assert_eq!(
+            (custom.warmups, custom.iterations, custom.delay_ms),
+            (0, 1000, 25)
+        );
+        for invalid in ["", "-1", "1.5", "+2", "18446744073709551616"] {
+            assert!(parse_benchmark_limits([invalid, "10", "500", "1000", "0"]).is_err());
+        }
+        for invalid in [
+            ["101", "10", "500", "1000", "0"],
+            ["0", "0", "500", "1000", "0"],
+            ["0", "10001", "500", "1000", "0"],
+            ["0", "10", "1001", "1000", "0"],
+            ["0", "10", "500", "1000", "1000"],
+        ] {
+            assert!(parse_benchmark_limits(invalid).is_err());
+        }
+    }
+
     #[gpui::test]
     fn performance_opens_explicitly_and_rejects_stale_completions(cx: &mut TestAppContext) {
         let window = cx
@@ -8036,11 +8160,24 @@ mod tests {
             view.show_performance(cx);
             assert!(!view.collapsed);
             assert_eq!(view.active_tab(), ResultTab::Performance);
+            view.benchmark_inputs[1].update(cx, |input, cx| input.set_text("0", cx));
         });
         cx.run_until_parked();
         let run = cx
             .debug_bounds("benchmark-run")
             .expect("benchmark run button");
+        cx.simulate_click(run.center(), Modifiers::default());
+        cx.run_until_parked();
+        view.update(&mut cx, |view, cx| {
+            assert!(view.benchmark_pending.is_none());
+            assert!(view.benchmark_error.is_some());
+            view.benchmark_inputs[1].update(cx, |input, cx| input.set_text("37", cx));
+            view.benchmark_inputs[0].update(cx, |input, cx| input.set_text("5", cx));
+            let limits = view.benchmark_limits(cx).unwrap();
+            assert_eq!((limits.warmups, limits.iterations), (5, 37));
+        });
+        cx.run_until_parked();
+        let run = cx.debug_bounds("benchmark-run").unwrap();
         cx.simulate_click(run.center(), Modifiers::default());
         cx.run_until_parked();
         view.update(&mut cx, |view, cx| {

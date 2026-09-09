@@ -62,7 +62,8 @@ complete workbench, durable library and advanced tools remain in progress.
   read-only transaction mode. Neither mechanism sandboxes external functions.
 - [x] Preset: two warm-ups, ten measured runs, one connection. UI cycles 1/10/100
   measured runs; API exposes all validated limits.
-- [ ] UI editors for warm-ups, timeouts, total budget and inter-query delay.
+- [x] UI editors for measured runs, warm-ups, timeouts, total budget and
+  inter-query delay. Shared validation with the server; frozen settings per run.
 - [x] Per-statement timeout, sampling deadline, delay, cancellation and partial
   reports. Setup/cleanup are separately bounded and may outlast sampling budget.
 - [x] Fully drain without retaining result rows. Server-observed execution/drain
@@ -135,3 +136,16 @@ complete workbench, durable library and advanced tools remain in progress.
   and workspace tests pass, including 473 UI/editor tests. Focused regressions
   cover draining beyond the grid limit, timeout/partial reports, cancellation
   cleanup, SQL write/batch rejection and stale UI completion responses.
+
+- Configuration milestone: Performance now has editable warm-ups, measured
+  iterations, per-query timeout, sampling budget and inter-query delay. `c`
+  focuses configuration; Tab/Shift-Tab navigates fields and returns to panel
+  controls. Existing `i` presets remain available. Inputs use the same pure
+  `BenchmarkLimits` validation as the server, and invalid settings cannot start
+  a run. Run count confirmation includes warm-ups; active runs freeze settings.
+  Summary exposes p95/p99 availability, and baseline comparisons also reject
+  differing iteration counts or total budgets. Saved runs, profiling and the
+  remaining advanced workbench checklist are still outstanding.
+  Verification: formatting, workspace check, strict workspace Clippy and the
+  full workspace test suite pass (474 UI/editor tests). Regressions cover
+  malformed/overflowing numbers, shared budget limits and invalid-run blocking.

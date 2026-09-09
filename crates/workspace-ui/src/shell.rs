@@ -2341,7 +2341,7 @@ pub enum PaneEvent {
         item_id: u64,
         sql: String,
         run_id: uuid::Uuid,
-        iterations: u32,
+        limits: sift_protocol::BenchmarkLimits,
     },
     CancelBenchmarkRequested {
         item_id: u64,
@@ -4533,12 +4533,12 @@ impl Pane {
                     analyze: *analyze,
                 });
             }
-            ResultsEvent::BenchmarkRequested { run_id, iterations } => {
+            ResultsEvent::BenchmarkRequested { run_id, limits } => {
                 cx.emit(PaneEvent::BenchmarkRequested {
                     item_id,
                     sql: self.targeted_query_sql(item_id, cx),
                     run_id: *run_id,
-                    iterations: *iterations,
+                    limits: *limits,
                 });
             }
             ResultsEvent::CancelBenchmarkRequested { run_id } => {
@@ -27746,7 +27746,7 @@ impl WorkspaceShell {
                 item_id,
                 sql,
                 run_id,
-                iterations,
+                limits,
             } => {
                 let instance = self
                     .database_source(*item_id, cx)
@@ -27792,11 +27792,11 @@ impl WorkspaceShell {
                         run_id: *run_id,
                         sql: sql.clone(),
                         params,
-                        warmups: 2,
-                        iterations: *iterations,
-                        query_timeout_ms: 30_000,
-                        total_budget_ms: 120_000,
-                        delay_ms: 0,
+                        warmups: limits.warmups,
+                        iterations: limits.iterations,
+                        query_timeout_ms: limits.query_timeout_ms,
+                        total_budget_ms: limits.total_budget_ms,
+                        delay_ms: limits.delay_ms,
                         workload_confirmed: true,
                     },
                 };
