@@ -2,6 +2,22 @@
 
 These features are API/operator workflows; no desktop interaction is required.
 
+## Query-performance history
+
+`GET /v1/metadata/history/performance?days=7&profile_id=123` returns hourly
+execution counts, error/canceled counts and mean/p95/maximum durations for the
+authenticated principal only. `profile_id` is optional; `days` defaults to seven
+and must be 1–30. The SDK exposes `query_performance`.
+
+Summaries read existing durable query history without duplicating SQL or
+parameter storage and do not delete history. They include at most the newest
+10,000 matching executions and explicitly report `truncated` when capped.
+Unknown durations contribute to execution counts but not timing statistics;
+p95 is nearest-rank over known durations, including failed/canceled executions
+when timed. Empty hours are omitted. No SQL, binds, error messages or other
+principals' history are returned. This measures Sift-recorded executions, not
+all activity on the database. Reads are audited as metadata operations.
+
 ## Process alerts
 
 `GET /v1/sessions/{session}/connections/{connection}/processes/alerts` streams

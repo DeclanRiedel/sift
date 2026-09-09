@@ -892,6 +892,10 @@ pub fn app(state: AppState) -> Router {
             get_with(page_metadata_history, doc("pageMetadataHistory", "Keyset-page query history by room or current principal")),
         )
         .api_route(
+            "/v1/metadata/history/performance",
+            get_with(get_query_performance, doc("getQueryPerformance", "Summarize the current principal's query timings without SQL payloads")),
+        )
+        .api_route(
             "/v1/metadata/saved-queries",
             get_with(list_metadata_saved_queries, doc("listMetadataSavedQueries", "List visible personal and tenant-shared saved queries")).post_with(create_metadata_saved_query, doc("createMetadataSavedQuery", "Create a personal or tenant-shared saved query")),
         )
@@ -7524,6 +7528,31 @@ async fn clear_tenant_limits(
         None,
     );
     Ok(Json(json!({"cleared": cleared})))
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PerformanceQuery {
+    days: Option<u32>,
+    profile_id: Option<i64>,
+}
+
+async fn get_query_performance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PerformanceQuery>,
+) -> ApiResult<Json<sift_api_types::QueryPerformanceSummary>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let actor = auth.principal_id;
+    let report = metadata_blocking(move || {
+        metadata
+            .query_performance(actor, query.days.unwrap_or(7), query.profile_id)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_metadata_operation(&state, actor, "read", "query_performance", None);
+    Ok(Json(report))
 }
 
 async fn list_metadata_history(

@@ -239,7 +239,7 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Long-running-query alerts (bounded API subscriptions)
 - [x] Idle-in-transaction alerts (bounded API subscriptions)
 - [ ] Server dashboard
-- [ ] Query-performance history
+- [x] Query-performance history (scoped hourly API summaries)
 
 ### Security and administration
 

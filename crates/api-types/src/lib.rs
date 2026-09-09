@@ -342,6 +342,27 @@ pub struct QueryHistory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct QueryPerformanceBucket {
+    pub hour: DateTime<Utc>,
+    pub executions: u64,
+    pub errors: u64,
+    pub canceled: u64,
+    pub timed_executions: u64,
+    pub mean_duration_ms: Option<f64>,
+    pub p95_duration_ms: Option<u64>,
+    pub max_duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct QueryPerformanceSummary {
+    pub generated_at: DateTime<Utc>,
+    pub lookback_days: u32,
+    pub sampled_executions: usize,
+    pub truncated: bool,
+    pub buckets: Vec<QueryPerformanceBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct OperationAudit {
     pub id: OperationAuditId,
     pub at: DateTime<Utc>,

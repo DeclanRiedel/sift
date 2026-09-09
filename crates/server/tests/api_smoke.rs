@@ -2867,6 +2867,46 @@ async fn http_execute_records_room_scoped_query_history() {
     assert_eq!(history[0]["sql_text"], "SELECT id, name FROM users");
     assert_eq!(history[0]["status"], "ok");
     assert_eq!(history[0]["row_count"], 2);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/metadata/history/performance?days=7")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let performance: sift_api_types::QueryPerformanceSummary =
+        body_json(response.into_body()).await;
+    assert_eq!(performance.sampled_executions, 1);
+    assert_eq!(performance.buckets[0].executions, 1);
+    assert!(!serde_json::to_string(&performance)
+        .unwrap()
+        .contains("SELECT"));
+    for query in ["days=31", "profile_id=0", "principal_id=1"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/metadata/history/performance?{query}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let response = app
+        .oneshot(
+            Request::get("/v1/metadata/history/performance")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

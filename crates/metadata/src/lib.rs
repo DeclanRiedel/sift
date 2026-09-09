@@ -36,6 +36,7 @@ mod plan_capture;
 mod pool;
 use pool::{ConnectionPool, PooledConn};
 mod projection;
+mod query_performance;
 mod repository;
 mod run_configuration;
 mod run_schedule;

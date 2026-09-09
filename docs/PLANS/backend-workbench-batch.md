@@ -17,6 +17,11 @@ sampling, configurable thresholds, deduplicated/resolved transitions and
 incomplete-snapshot handling. Tracker and HTTP tests plus strict workspace
 Clippy passed. Native monitoring visibility still depends on database grants.
 
+Milestone 5 complete: caller-only hourly timing/outcome summaries over existing
+durable history, bounded to 30 days and 10,000 executions with explicit cap
+reporting. No duplicate SQL storage or automatic history deletion. Metadata and
+authenticated HTTP tests plus strict server/SDK Clippy passed.
+
 ## Order and acceptance
 
 1. Transfer quarantine: authorized report download containing source row numbers,
@@ -26,7 +31,7 @@ Clippy passed. Native monitoring visibility still depends on database grants.
 3. Long-running-query alerts: configurable thresholds, deduplication and audited
    access; no SQL or credentials in external telemetry.
 4. Idle-in-transaction alerts: transaction-age detection, separate from query age.
-5. Query-performance history: bounded retention and scoped reads of timings and
+5. Query-performance history: bounded lookback and scoped reads of timings and
    outcomes; do not persist query parameter values.
 6. PostgreSQL maintenance: typed VACUUM, ANALYZE and REINDEX requests, quoted
    targets, authorization, audit and supervised execution.

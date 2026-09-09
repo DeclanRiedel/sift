@@ -156,6 +156,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listMetadataConnectionProfiles",
     "listMetadataDocuments",
     "listMetadataHistory",
+    "getQueryPerformance",
     "listMetadataRoomMembers",
     "listMetadataRooms",
     "listMetadataSavedQueries",
@@ -3752,6 +3753,21 @@ impl Client {
             format!("?{}", query.join("&"))
         };
         self.get(&format!("/v1/metadata/history{suffix}")).await
+    }
+
+    /// Hourly timing aggregates for this principal only; no SQL or parameters.
+    pub async fn query_performance(
+        &self,
+        days: u32,
+        profile_id: Option<i64>,
+    ) -> Result<sift_api_types::QueryPerformanceSummary> {
+        let profile = profile_id
+            .map(|id| format!("&profile_id={id}"))
+            .unwrap_or_default();
+        self.get(&format!(
+            "/v1/metadata/history/performance?days={days}{profile}"
+        ))
+        .await
     }
 
     pub async fn history_page(
