@@ -17,6 +17,7 @@
 ## Features
 
 - PostgreSQL, SQL Server, and SQLite connections
+- [Tailnet discovery, managed SSH tunnels, and opt-in Tailscale Serve](docs/TAILNET.md)
 - Keyboard first IDE
 - Schema browsing and search
 - Query results, table editing, and export

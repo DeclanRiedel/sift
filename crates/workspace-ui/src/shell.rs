@@ -61,6 +61,7 @@ mod docks;
 mod items;
 mod modal_layout;
 mod modals;
+mod tailnet;
 pub use benchmark_library::{BenchmarkLibraryAction, BenchmarkLibraryReply};
 mod pane_layout;
 mod result_editing;
@@ -949,6 +950,7 @@ fn shell_connection_row_menu(
     cx: &mut Context<WorkspaceShell>,
 ) -> impl IntoElement {
     let edit_entry = entry.clone();
+    let settings_entry = entry.clone();
     let disconnect_entry = entry.clone();
     let delete_entry = entry;
     div()
@@ -1005,6 +1007,20 @@ fn shell_connection_row_menu(
                 }))
                 .child(icon(IconName::Edit, colors.muted_text, 11.))
                 .child("Edit in sift.toml"),
+        )
+        .child(
+            div()
+                .id("connection-row-settings")
+                .role(Role::MenuItem)
+                .h(px(28.))
+                .px_2()
+                .flex()
+                .items_center()
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.connection_row_menu = None;
+                    shell.request_profile_settings(&settings_entry, cx);
+                }))
+                .child("Connection settings…"),
         )
         .child(
             div()
@@ -2801,6 +2817,10 @@ impl TransactionUiState {
 /// the shell only reports intent (connect / disconnect / run).
 #[derive(Clone)]
 pub enum ExecutorCommand {
+    TailnetHostKey(sift_api_types::TailnetProbeRequest),
+    TailnetStatus,
+    TailnetProbe(sift_api_types::TailnetProbeRequest),
+    TailnetServe(sift_api_types::TailnetServeRequest),
     Connect {
         tenant_id: i64,
         profile_id: i64,
@@ -2978,6 +2998,7 @@ pub enum ExecutorCommand {
     },
     TestConnectionProfile {
         tenant_id: i64,
+        name: String,
         provider_id: sift_protocol::ProviderId,
         configuration: serde_json::Value,
         credentials: Option<serde_json::Value>,
@@ -3645,6 +3666,13 @@ pub enum ExecutorCommand {
 /// channel so ordering (connect before its run's result) is preserved.
 #[derive(Debug)]
 pub enum ExecutorEvent {
+    TailnetHostKey(Result<sift_api_types::TailnetHostKey, String>),
+    TailnetStatus(Result<sift_api_types::TailnetStatus, String>),
+    TailnetProbe(Result<sift_api_types::TailnetProbeReport, String>),
+    TailnetServe {
+        request: sift_api_types::TailnetServeRequest,
+        result: Result<sift_api_types::TailnetServeReport, String>,
+    },
     Connection(ConnectionStatus),
     SessionsLoaded(Result<Vec<sift_protocol::SessionInfo>, String>),
     ApiTokensLoaded(Result<Vec<sift_api_types::ApiTokenRow>, String>),
@@ -9554,6 +9582,7 @@ pub struct WorkspaceShell {
     ddl_source_inputs: Vec<Entity<TextInput>>,
     room_admin_inputs: Vec<Entity<TextInput>>,
     connection_url_input: Entity<TextInput>,
+    tailnet: tailnet::TailnetUi,
     database_name_input: Entity<TextInput>,
     database_host_input: Entity<TextInput>,
     database_port_input: Entity<TextInput>,
@@ -10792,6 +10821,7 @@ impl WorkspaceShell {
             ddl_source_inputs,
             room_admin_inputs,
             connection_url_input,
+            tailnet: tailnet::TailnetUi::new(cx),
             database_name_input,
             database_host_input,
             database_port_input,
@@ -11597,6 +11627,9 @@ impl WorkspaceShell {
             return;
         }
         self.fail_running_explains("Explain interrupted by server switch", cx);
+        self.tailnet.load(&serde_json::json!({}), cx);
+        self.tailnet.peers.clear();
+        self.tailnet.pending = false;
 
         let target = self
             .workspace_sessions
@@ -12286,6 +12319,60 @@ impl WorkspaceShell {
 
     fn on_executor_event(&mut self, event: ExecutorEvent, cx: &mut Context<Self>) {
         match event {
+            ExecutorEvent::TailnetStatus(result) => {
+                self.tailnet.pending = false;
+                match result {
+                    Ok(status) => {
+                        self.tailnet.message = Some(format!(
+                            "Backend {} · Tailscale {}",
+                            status.backend_name, status.backend_state
+                        ));
+                        self.tailnet.peers = status.peers;
+                    }
+                    Err(message) => self.tailnet.message = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TailnetHostKey(result) => {
+                self.tailnet.pending = false;
+                match result {
+                    Ok(key) => {
+                        self.tailnet.message = Some(format!(
+                            "Unverified SSH host fingerprint: {}",
+                            key.fingerprint
+                        ));
+                        self.tailnet.scanned_key = Some(key);
+                    }
+                    Err(message) => self.tailnet.message = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::TailnetProbe(result) => {
+                self.tailnet.pending = false;
+                self.tailnet.message = Some(match result {
+                    Ok(report) => format!("{} · {}", report.stage, report.message),
+                    Err(message) => message,
+                });
+                cx.notify();
+            }
+            ExecutorEvent::TailnetServe { request, result } => {
+                self.tailnet.pending = false;
+                self.tailnet.preview = None;
+                match result {
+                    Ok(report) => {
+                        self.tailnet.message = Some(report.message.clone());
+                        if matches!(
+                            request.action,
+                            sift_api_types::TailnetServeAction::Preview
+                                | sift_api_types::TailnetServeAction::Inspect
+                        ) {
+                            self.tailnet.preview = Some((request, report));
+                        }
+                    }
+                    Err(message) => self.tailnet.message = Some(message),
+                }
+                cx.notify();
+            }
             ExecutorEvent::Connection(status) => {
                 let previous_profile = match self.connection_status {
                     ConnectionStatus::Connected { profile_id, .. }
@@ -13731,6 +13818,8 @@ impl WorkspaceShell {
                 entry,
                 connection_error,
             } => {
+                self.tailnet.preview = None;
+                self.tailnet.load(&serde_json::json!({}), cx);
                 if let Some(tenant) = self
                     .lifecycle
                     .tenants
@@ -20522,12 +20611,35 @@ impl WorkspaceShell {
         self.edit_manifest_section("connections", cx);
     }
 
+    fn request_profile_settings(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
+        if self.database_connection_pending || self.tailnet.pending {
+            return;
+        }
+        self.editing_connection_profile = Some(entry.id);
+        self.database_connection_vault_id = None;
+        self.modal = Some(Modal::DatabaseConnection);
+        self.database_connection_pending = true;
+        if !self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::LoadConnectionProfile {
+                    tenant_id: entry.tenant_id,
+                    profile_id: entry.id,
+                })
+                .is_ok()
+        }) {
+            self.database_connection_pending = false;
+            self.database_connection_error = Some("Connection manager unavailable".into());
+        }
+        cx.notify();
+    }
+
     fn populate_connection_profile(
         &mut self,
         profile: sift_api_types::ConnectionProfile,
         cx: &mut Context<Self>,
     ) {
         let config = profile.configuration.as_object();
+        self.tailnet.load(&profile.configuration, cx);
         let text = |key: &str| {
             config
                 .and_then(|config| config.get(key))
@@ -20703,7 +20815,7 @@ impl WorkspaceShell {
     }
 
     fn dispatch_connection_url(&mut self, save_profile: bool, cx: &mut Context<Self>) {
-        if self.database_connection_pending {
+        if self.database_connection_pending || self.tailnet.pending {
             return;
         }
         let Some(sender) = &self.executor_sender else {
@@ -20717,7 +20829,7 @@ impl WorkspaceShell {
             cx.notify();
             return;
         };
-        let parsed = match parse_connection_url(self.connection_url_input.read(cx).text()) {
+        let mut parsed = match parse_connection_url(self.connection_url_input.read(cx).text()) {
             Ok(parsed) => parsed,
             Err(error) => {
                 self.database_connection_error = Some(error.clone());
@@ -20726,6 +20838,9 @@ impl WorkspaceShell {
                 return;
             }
         };
+        if let Some(settings) = self.tailnet.settings(cx) {
+            parsed.configuration["sift_network"] = serde_json::to_value(settings).unwrap();
+        }
         let command = if save_profile {
             ExecutorCommand::CreateConnectionProfile {
                 tenant_id,
@@ -21027,7 +21142,7 @@ impl WorkspaceShell {
     }
 
     fn submit_database_connection_action(&mut self, test_only: bool, cx: &mut Context<Self>) {
-        if self.database_connection_pending {
+        if self.database_connection_pending || self.tailnet.pending {
             return;
         }
         let Some(sender) = &self.executor_sender else {
@@ -21253,9 +21368,18 @@ impl WorkspaceShell {
         if self.editing_connection_favorite {
             tags.push(CONNECTION_FAVORITE_TAG.to_owned());
         }
+        if provider_id.as_str() != "sift/sqlite" {
+            if let Some(settings) = self.tailnet.settings(cx) {
+                configuration.insert(
+                    "sift_network".into(),
+                    serde_json::to_value(settings).unwrap(),
+                );
+            }
+        }
         let command = if test_only {
             ExecutorCommand::TestConnectionProfile {
                 tenant_id,
+                name,
                 provider_id,
                 configuration: serde_json::Value::Object(configuration),
                 credentials,
@@ -41436,7 +41560,7 @@ mod tests {
         graph
     }
 
-    fn shell(cx: &mut TestAppContext) -> gpui::WindowHandle<WorkspaceShell> {
+    pub(super) fn shell(cx: &mut TestAppContext) -> gpui::WindowHandle<WorkspaceShell> {
         cx.update(|cx| {
             cx.bind_keys([
                 gpui::KeyBinding::new("enter", sift_ui::Submit, Some("SiftTextInput")),

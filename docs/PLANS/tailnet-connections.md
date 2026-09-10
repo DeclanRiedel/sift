@@ -28,13 +28,13 @@ closed. No remote setup is performed during development/testing.
 ## Milestones
 
 - [x] Record architecture, security boundaries, and acceptance checklist.
-- [ ] Backend device discovery and direct TCP diagnostics.
-- [ ] Managed SSH tunnel setup, failure cleanup, reconnect and disconnect.
-- [ ] Persist non-secret transport settings; enforce administration boundary.
-- [ ] Desktop device picker, transport controls, tests and staged diagnostics.
-- [ ] Validate existing-profile replacements before writes.
-- [ ] Opt-in remote Serve preview/apply/inspect/remove with durable ownership.
-- [ ] Document setup, hosted-backend limitations, authentication and recovery.
+- [x] Backend device discovery and direct TCP diagnostics.
+- [x] Managed SSH tunnel setup, failure cleanup, reconnect and disconnect.
+- [x] Persist non-secret transport settings; enforce administration boundary.
+- [x] Desktop device picker, transport controls, tests and staged diagnostics.
+- [x] Validate existing-profile replacements before writes.
+- [x] Opt-in remote Serve preview/apply/inspect/remove with durable ownership.
+- [x] Document setup, hosted-backend limitations, authentication and recovery.
 - [ ] Run formatting, strict workspace Clippy and workspace tests.
 
 ## Acceptance
@@ -42,10 +42,20 @@ closed. No remote setup is performed during development/testing.
 - [ ] No Tailscale daemon, offline peer, TCP refusal/timeout, SSH failure and
       database authentication failure are distinguishable.
 - [ ] Tailnet-direct and tunnel profiles reopen without manual terminals.
-- [ ] Unknown/changed SSH keys fail closed; no auto-accept or password logging.
-- [ ] Failed new save leaves no requested profile; failed replacement preserves
+- [x] Unknown/changed SSH keys fail closed; no auto-accept or password logging.
+- [x] Failed new save leaves no requested profile; failed replacement preserves
       prior settings and credentials.
 - [ ] Disconnect/failure/cancellation releases local listeners and child processes.
-- [ ] Serve apply requires explicit exposure acknowledgement; existing rules and
+- [x] Serve apply requires explicit exposure acknowledgement; existing rules and
       externally changed rules cannot be overwritten or deleted.
 - [ ] UI supports Vim and presents backend location and selected network method.
+
+Implementation includes Alt-key controls alongside the existing Vim workspace,
+backend location labels, bounded forwarding tasks, and connection-lifetime
+cancellation. Five isolated Python tests cover remote Serve ownership and
+interruption; Rust/GPUI tests cover pins, listener cleanup, replacement
+preservation, target changes, and administrative access. Full workspace tests
+passed, including 478 UI and 79 API tests. Live SSH/Serve acceptance on a user's
+tailnet is intentionally not marked complete: no remote configuration was
+changed during implementation. Verify the real SSH identity and remote
+prerequisites using [the setup guide](../TAILNET.md).

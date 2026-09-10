@@ -2182,6 +2182,7 @@ async fn run_query_executor(
             }
             ExecutorCommand::TestConnectionProfile {
                 tenant_id,
+                name,
                 provider_id,
                 configuration,
                 credentials,
@@ -2193,12 +2194,64 @@ async fn run_query_executor(
                     provider_id,
                     configuration,
                     credentials,
-                    &events,
+                    name,
                 )
                 .await;
                 if events.send(ExecutorEvent::ProfileTested(result)).is_err() {
                     return;
                 }
+            }
+            ExecutorCommand::TailnetStatus => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .tailnet_status()
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                .await;
+                let _ = events.send(ExecutorEvent::TailnetStatus(result));
+            }
+            ExecutorCommand::TailnetHostKey(request) => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .tailnet_host_key(request)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                .await;
+                let _ = events.send(ExecutorEvent::TailnetHostKey(result));
+            }
+            ExecutorCommand::TailnetProbe(request) => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .tailnet_probe(request)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                .await;
+                let _ = events.send(ExecutorEvent::TailnetProbe(result));
+            }
+            ExecutorCommand::TailnetServe(request) => {
+                let server = targets.borrow().clone();
+                let result = async {
+                    server
+                        .client()
+                        .await?
+                        .tailnet_serve(request.clone())
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                .await;
+                let _ = events.send(ExecutorEvent::TailnetServe { request, result });
             }
             ExecutorCommand::DeleteConnectionProfile {
                 tenant_id,
@@ -6444,26 +6497,12 @@ async fn create_connection_profile(
     let client = server.client().await?;
     let tenant_id = request.tenant_id;
     let name = request.name.clone();
-    let existing = client
-        .connection_profiles(TenantId(tenant_id))
-        .await
-        .map_err(|error| format!("checking saved connections failed: {error}"))?
-        .iter()
-        .any(|profile| profile.name == name);
-    if !existing {
-        test_connection_profile(
-            server,
-            tenant_id,
-            request.provider_id.clone(),
-            request.configuration.clone(),
-            request.credentials.clone(),
-            events,
-        )
+    client
+        .validate_connection_profile(request.clone())
         .await
         .map_err(|error| {
             format!("Connection check failed; requested profile was not saved: {error}")
         })?;
-    }
     let profile = client
         .upsert_connection_profile(request)
         .await
@@ -6489,12 +6528,11 @@ async fn test_connection_profile(
     provider_id: sift_protocol::ProviderId,
     configuration: serde_json::Value,
     credentials: Option<serde_json::Value>,
-    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+    name: String,
 ) -> Result<(), String> {
     let client = server.client().await?;
-    let name = format!("__sift_connection_test_{}", uuid::Uuid::new_v4());
-    let profile = client
-        .upsert_connection_profile(UpsertConnectionProfileRequest {
+    client
+        .validate_connection_profile(UpsertConnectionProfileRequest {
             tenant_id,
             vault_id: None,
             name,
@@ -6502,26 +6540,10 @@ async fn test_connection_profile(
             configuration,
             credentials,
             credential_mode: CredentialMode::Shared,
-            tags: vec!["sift:temporary-connection-test".into()],
+            tags: Vec::new(),
         })
         .await
-        .map_err(|error| format!("preparing connection test failed: {error}"))?;
-    let opened = open_query_context(server, tenant_id, profile.id.0, events).await;
-    if let Ok(context) = &opened {
-        let _ = context.client.close_session(context.session).await;
-    }
-    let cleanup = client
-        .delete_connection_profile(TenantId(tenant_id), profile.id)
-        .await
-        .map_err(|error| format!("removing temporary test profile failed: {error}"));
-    match (opened, cleanup) {
-        (Ok(_), Ok(())) => Ok(()),
-        (Err(error), Err(cleanup)) => Err(format!(
-            "{error}. Temporary profile cleanup also failed: {cleanup}"
-        )),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-    }
+        .map_err(|error| format!("Connection validation failed: {error}"))
 }
 
 const SEMANTIC_COMPLETION_LIMIT: u32 = 50;
@@ -7251,6 +7273,10 @@ mod tests {
                 sift_protocol::Code::ConnectionFailed,
                 "fixture refused connection",
             ))
+            .open_err(sift_protocol::DriverError::new(
+                sift_protocol::Code::ConnectionFailed,
+                "fixture replacement refused connection",
+            ))
             .build();
         let state = AppState {
             sessions: SessionStore::new(DriverRegistry::builder().register(driver).build()),
@@ -7310,6 +7336,31 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+        assert!(client.list_sessions().await.unwrap().is_empty());
+        let original = UpsertConnectionProfileRequest {
+            tenant_id: 1,
+            vault_id: None,
+            name: "existing fixture".into(),
+            provider_id: sift_protocol::Engine::Postgres.provider_id(),
+            configuration: serde_json::json!({"host":"127.0.0.1", "port":5432, "user":"fixture"}),
+            credentials: Some(serde_json::json!({"password":"fixture"})),
+            credential_mode: CredentialMode::Shared,
+            tags: Vec::new(),
+        };
+        let saved = client
+            .upsert_connection_profile(original.clone())
+            .await
+            .unwrap();
+        let mut replacement = original.clone();
+        replacement.configuration["host"] = "100.83.175.73".into();
+        replacement.credentials = None;
+        assert!(create_connection_profile(&server, replacement, &events)
+            .await
+            .is_err());
+        let profiles = client.connection_profiles(TenantId(1)).await.unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, saved.id);
+        assert_eq!(profiles[0].configuration, original.configuration);
         assert!(client.list_sessions().await.unwrap().is_empty());
         task.abort();
     }

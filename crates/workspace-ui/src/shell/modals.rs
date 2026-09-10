@@ -3661,7 +3661,7 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::ConnectionUrl => {
-                    let pending = self.database_connection_pending;
+                    let pending = self.database_connection_pending || self.tailnet.pending;
                     let workspace_name = self
                         .selected_database_tenant
                         .and_then(|id| {
@@ -3701,6 +3701,7 @@ impl WorkspaceShell {
                                 .w_full()
                                 .child(self.connection_url_input.clone()),
                         )
+                        .child(self.render_tailnet_controls(cx))
                         .child(
                             div()
                                 .text_xs()
@@ -4253,6 +4254,7 @@ impl WorkspaceShell {
                                             .child(field("TAGS",self.database_tags_input.clone()))
                                         )
                                 })
+                                .when(step == DatabaseWizardStep::Details && !sqlite, |form| form.child(self.render_tailnet_controls(cx)))
                                 .when(step == DatabaseWizardStep::Review && sqlite, |form| form
                                     .child(review_row("Database type","SQLite".into()))
                                     .child(review_row("Connection name",self.database_name_input.read(cx).text().to_string()))
@@ -7930,6 +7932,7 @@ impl WorkspaceShell {
                 })
                 .child(
                     modal_layout::card(data_results, padded, card_width, max_card_height, colors, cx.theme().metrics)
+                        .on_key_down(cx.listener(Self::handle_tailnet_key))
                         .relative()
                         .left(self.modal_offset.x)
                         .top(self.modal_offset.y)
