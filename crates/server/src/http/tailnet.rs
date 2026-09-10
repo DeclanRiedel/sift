@@ -172,14 +172,30 @@ pub(super) async fn tailnet_probe(
     let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
     ensure_instance_admin(&state, &auth)?;
     let result = crate::tailnet::probe(request).await;
-    audit_tailnet(&state, auth.principal_id, "probe", result.as_ref().is_ok_and(|report| report.reachable));
+    audit_tailnet(
+        &state,
+        auth.principal_id,
+        "probe",
+        result.as_ref().is_ok_and(|report| report.reachable),
+    );
     result.map(Json)
 }
 
 fn audit_tailnet(state: &AppState, actor: PrincipalId, action: &str, success: bool) {
     state.sessions.push_operation_full(
-        Operation::Metadata { action: action.into(), target: "tailnet".into(), id: None },
-        if success { OperationStatus::Succeeded } else { OperationStatus::Failed },
-        Some(actor.0), None, None, None,
+        Operation::Metadata {
+            action: action.into(),
+            target: "tailnet".into(),
+            id: None,
+        },
+        if success {
+            OperationStatus::Succeeded
+        } else {
+            OperationStatus::Failed
+        },
+        Some(actor.0),
+        None,
+        None,
+        None,
     );
 }

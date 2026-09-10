@@ -35,7 +35,7 @@ closed. No remote setup is performed during development/testing.
 - [x] Validate existing-profile replacements before writes.
 - [x] Opt-in remote Serve preview/apply/inspect/remove with durable ownership.
 - [x] Document setup, hosted-backend limitations, authentication and recovery.
-- [ ] Run formatting, strict workspace Clippy and workspace tests.
+- [x] Run formatting, strict workspace Clippy and workspace tests.
 
 ## Acceptance
 
@@ -59,3 +59,7 @@ passed, including 478 UI and 79 API tests. Live SSH/Serve acceptance on a user's
 tailnet is intentionally not marked complete: no remote configuration was
 changed during implementation. Verify the real SSH identity and remote
 prerequisites using [the setup guide](../TAILNET.md).
+
+Final integration verification also passed all 262 server unit tests and the
+79 API tests after isolating schema-cache keys by transport and effective
+direct/tunnel selection. Strict workspace Clippy and formatting checks passed.

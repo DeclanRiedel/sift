@@ -16,6 +16,12 @@ use tokio_util::sync::CancellationToken;
 const LIMIT: u64 = 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+pub(crate) fn schema_cache_host(host: &str, network: &serde_json::Value, tunneled: bool) -> String {
+    use sha2::Digest as _;
+    let identity = serde_json::to_vec(&(network, tunneled)).expect("JSON cache identity");
+    format!("{host}#sift-transport-{:x}", sha2::Sha256::digest(identity))
+}
+
 fn failure(message: impl Into<String>) -> ApiError {
     sift_protocol::DriverError::new(sift_protocol::Code::ConnectionFailed, message).into()
 }
@@ -519,6 +525,15 @@ pub async fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn schema_cache_separates_direct_and_loopback_transports() {
+        let network = serde_json::json!({"mode":"automatic", "ssh_user":"fixture", "ssh_port":22});
+        let direct = schema_cache_host("100.83.175.73", &network, false);
+        let tunnel = schema_cache_host("100.83.175.73", &network, true);
+        assert_ne!(direct, tunnel);
+        assert_ne!(direct, "100.83.175.73");
+        assert_eq!(tunnel, schema_cache_host("100.83.175.73", &network, true));
+    }
     #[tokio::test]
     async fn dropping_tunnel_lease_releases_listener() {
         let (port, lease) = forwarder(

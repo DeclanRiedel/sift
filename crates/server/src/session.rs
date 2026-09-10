@@ -1875,7 +1875,7 @@ impl SessionStore {
                 .require_capability("driver.schema.graph@1")?;
         }
         if request.refresh {
-            if let Some(spec) = self.spec_for_conn(session_id, conn_id)? {
+            if let Some(spec) = self.schema_cache_spec_for_conn(session_id, conn_id)? {
                 self.inner.schema_cache.invalidate_spec(&spec);
             }
         }
@@ -1931,7 +1931,7 @@ impl SessionStore {
             })?,
         );
         let observed_epoch = self
-            .spec_for_conn(session_id, conn_id)?
+            .schema_cache_spec_for_conn(session_id, conn_id)?
             .as_ref()
             .map(|spec| self.inner.schema_cache.invalidation_epoch(spec))
             .unwrap_or(1)
@@ -2634,7 +2634,7 @@ impl SessionStore {
         run.outcomes
             .sort_by_key(|outcome| (outcome.group_ordinal, outcome.statement_ordinal));
         if attempted_ddl {
-            if let Some(spec) = self.spec_for_conn(session, connection)? {
+            if let Some(spec) = self.schema_cache_spec_for_conn(session, connection)? {
                 self.inner.schema_cache.invalidate_spec(&spec);
             }
             if let Ok(graph) = self
@@ -2791,7 +2791,7 @@ impl SessionStore {
         scope: SchemaScope,
     ) -> ApiResult<CachedSchema> {
         let entry = self.get_conn_entry(session_id, conn_id)?;
-        let cache_spec = self.spec_for_conn(session_id, conn_id)?;
+        let cache_spec = self.schema_cache_spec_for_conn(session_id, conn_id)?;
         // Cache lookup: return immediately if a fresh snapshot exists
         // for this (spec, scope).
         if let Some(spec) = cache_spec.as_ref() {
@@ -2870,7 +2870,8 @@ impl SessionStore {
         }
     }
 
-    fn spec_for_conn(
+    /// Cache identity only: transport suffixes must never be used for I/O.
+    fn schema_cache_spec_for_conn(
         &self,
         session_id: SessionId,
         conn_id: ConnectionId,
@@ -2889,9 +2890,13 @@ impl SessionStore {
         {
             return Ok(None);
         }
-        serde_json::from_value(entry.configuration.clone())
-            .map(Some)
-            .map_err(|error| ApiError::Internal(error.to_string()))
+        let mut spec: ConnectionSpec = serde_json::from_value(entry.configuration.clone())
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        if let Some(network) = entry.configuration.get("sift_network") {
+            spec.host =
+                crate::tailnet::schema_cache_host(&spec.host, network, entry._tunnel.is_some());
+        }
+        Ok(Some(spec))
     }
 
     /// Re-establish a broken connection in place: open a fresh backend session
