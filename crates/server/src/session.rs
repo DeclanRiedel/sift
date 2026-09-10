@@ -1194,6 +1194,31 @@ impl SessionStore {
         .await
     }
 
+    /// Validate a candidate without publishing a metadata profile or session.
+    pub async fn test_provider_configuration(
+        &self,
+        provider_id: sift_protocol::ProviderId,
+        configuration: serde_json::Value,
+        credentials: std::collections::HashMap<String, Vec<u8>>,
+        tenant_id: i64,
+    ) -> ApiResult<()> {
+        let registered = self.inner.registry.get_provider(&provider_id)?;
+        let driver = RuntimeDriver::from_registered(registered);
+        self.run_bounded("test connection", async move {
+            let (effective, _tunnel) = crate::tailnet::prepare(&configuration)
+                .await
+                .map_err(|error| DriverError::new(Code::ConnectionFailed, error.to_string()))?;
+            let handle = driver
+                .open(&effective, &credentials, Some(tenant_id))
+                .await
+                .map_err(|error| {
+                    crate::tailnet::database_failure(&configuration, _tunnel.is_some(), error)
+                })?;
+            driver.close(handle).await
+        })
+        .await
+    }
+
     async fn open_provider_configuration(
         &self,
         session_id: SessionId,
@@ -1290,7 +1315,44 @@ impl SessionStore {
             ConnectionProvenance::Managed { tenant_id, .. } => Some(tenant_id.0),
             ConnectionProvenance::TrustedLocal => None,
         };
-        let handle = driver.open(&configuration, &credentials, tenant_id).await?;
+        if crate::tailnet::settings(&configuration)?.is_some() {
+            if let Some((principal, _, _)) = managed_identity {
+                let metadata = self
+                    .inner
+                    .authorization_store
+                    .read()
+                    .unwrap()
+                    .clone()
+                    .ok_or(ApiError::MetadataUnavailable)?;
+                if !metadata
+                    .principal_by_id(principal)?
+                    .is_some_and(|p| p.is_instance_admin && p.disabled_at.is_none())
+                {
+                    return Err(ApiError::Forbidden("Tailnet connections require instance administrator access to the backend SSH identity".into()));
+                }
+            }
+        }
+        let opener = driver.clone();
+        let open_configuration = configuration.clone();
+        let open_credentials = credentials.clone();
+        let (handle, tunnel) = self
+            .run_bounded("open connection", async move {
+                let (effective, tunnel) = crate::tailnet::prepare(&open_configuration)
+                    .await
+                    .map_err(|error| DriverError::new(Code::ConnectionFailed, error.to_string()))?;
+                let handle = opener
+                    .open(&effective, &open_credentials, tenant_id)
+                    .await
+                    .map_err(|error| {
+                        crate::tailnet::database_failure(
+                            &open_configuration,
+                            tunnel.is_some(),
+                            error,
+                        )
+                    })?;
+                Ok((handle, tunnel))
+            })
+            .await?;
         let info = {
             let Some(session) = self.inner.sessions.get(&session_id) else {
                 driver.close(handle).await?;
@@ -1316,6 +1378,7 @@ impl SessionStore {
                     credentials,
                     provenance,
                     _resource_guard: resource_guard,
+                    _tunnel: tunnel,
                 },
             );
             info
@@ -2863,14 +2926,24 @@ impl SessionStore {
             )
         };
         let opener = driver.clone();
-        let new_handle = self
+        let (new_handle, tunnel) = self
             .run_bounded("reconnect", async move {
-                opener.open(&configuration, &credentials, tenant_id).await
+                let (effective, tunnel) = crate::tailnet::prepare(&configuration)
+                    .await
+                    .map_err(|error| DriverError::new(Code::ConnectionFailed, error.to_string()))?;
+                let handle = opener
+                    .open(&effective, &credentials, tenant_id)
+                    .await
+                    .map_err(|error| {
+                        crate::tailnet::database_failure(&configuration, tunnel.is_some(), error)
+                    })?;
+                Ok((handle, tunnel))
             })
             .await?;
         self.with_session(&session_id, |s| {
             if let Some(mut entry) = s.connections.get_mut(&conn_id) {
                 entry.handle = new_handle.clone();
+                entry._tunnel = tunnel;
             }
         })?;
         // The old backend session is gone; close it best-effort off the
@@ -6249,6 +6322,7 @@ pub struct ConnectionEntry {
     pub credentials: std::collections::HashMap<String, Vec<u8>>,
     pub provenance: ConnectionProvenance,
     _resource_guard: Option<crate::resources::ResourceGuard>,
+    _tunnel: Option<crate::tailnet::TunnelLease>,
 }
 
 pub struct TransactionEntry {

@@ -11,6 +11,8 @@ mod repository;
 use repository::*;
 mod automation;
 use automation::*;
+mod tailnet;
+use tailnet::*;
 
 mod access;
 mod rooms;
@@ -860,6 +862,26 @@ pub fn app(state: AppState) -> Router {
             get_with(list_metadata_connections, doc("listMetadataConnectionProfiles", "List connection profiles")).post_with(upsert_metadata_connection, doc("upsertMetadataConnectionProfile", "Create or replace connection profile")),
         )
         .api_route(
+            "/v1/tailnet/status",
+            get_with(tailnet_status, doc("tailnetStatus", "Discover devices visible to the Sift backend")),
+        )
+        .api_route(
+            "/v1/metadata/connections/validate",
+            post_with(validate_connection_candidate, doc("validateConnectionCandidate", "Test candidate settings without saving; reuse existing credentials when omitted")),
+        )
+        .api_route(
+            "/v1/tailnet/probe",
+            post_with(tailnet_probe, doc("tailnetProbe", "Diagnose tailnet database connectivity")),
+        )
+        .api_route(
+            "/v1/tailnet/serve",
+            post_with(tailnet_serve, doc("tailnetServe", "Preview and manage explicitly approved remote Serve forwarding")),
+        )
+        .api_route(
+            "/v1/tailnet/host-key",
+            post_with(tailnet_host_key, doc("tailnetHostKey", "Read an untrusted SSH fingerprint for explicit verification")),
+        )
+        .api_route(
             "/v1/metadata/connections/:id",
             delete_with(delete_metadata_connection, doc("deleteMetadataConnectionProfile", "Delete connection profile")),
         )
@@ -1593,6 +1615,7 @@ fn body_tenant_rate_owned(method: &axum::http::Method, path: &str) -> bool {
             "/v1/sessions"
                 | "/v1/metadata/rooms"
                 | "/v1/metadata/connections"
+                | "/v1/metadata/connections/validate"
                 | "/v1/metadata/saved-queries"
                 | "/v1/auth/tokens"
         )
@@ -7215,11 +7238,24 @@ async fn upsert_metadata_connection(
         None
     };
     let registered = state.sessions.registry().get_provider(&req.provider_id)?;
+    let mut provider_configuration = req.configuration.clone();
+    if crate::tailnet::settings(&provider_configuration)?.is_some() {
+        ensure_instance_admin(&state, &auth)?;
+        if req.provider_id.as_str() == "sift/sqlite" {
+            return Err(ApiError::BadRequest(
+                "SQLite does not use tailnet transport".into(),
+            ));
+        }
+        provider_configuration
+            .as_object_mut()
+            .unwrap()
+            .remove("sift_network");
+    }
     let descriptor = registered.provider.descriptor();
     let semantic_engine = registered.provider.legacy_engine();
     let validator = jsonschema::draft202012::new(&descriptor.configuration_schema)
         .map_err(|error| ApiError::Internal(error.to_string()))?;
-    if let Err(error) = validator.validate(&req.configuration) {
+    if let Err(error) = validator.validate(&provider_configuration) {
         return Err(ApiError::BadRequest(format!(
             "provider configuration is invalid: {error}"
         )));

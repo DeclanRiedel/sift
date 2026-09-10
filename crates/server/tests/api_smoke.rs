@@ -2714,6 +2714,55 @@ async fn metadata_auth_and_tenant_edges_are_rejected() {
 }
 
 #[tokio::test]
+async fn tailnet_inventory_and_remote_mutations_require_instance_admin() {
+    let state = test_state_with_metadata(false);
+    let metadata = state.metadata.as_ref().unwrap();
+    let member = metadata
+        .create_principal("tailnet-member", "Member", None)
+        .unwrap();
+    metadata
+        .upsert_tenant_membership(TenantId(1), member.id, MembershipRole::Member)
+        .unwrap();
+    let (_, token) = metadata
+        .issue_api_token(member.id, Some(TenantId(1)), "fixture", None)
+        .unwrap();
+    let app = app(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/tailnet/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/tailnet/status")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let mut request = post_json(
+        "/v1/tailnet/serve",
+        serde_json::json!({
+            "connection": {"host":"100.83.175.73", "port":5432, "settings":{"mode":"tunnel", "ssh_user":"fixture", "ssh_port":22}},
+            "action":"apply", "acknowledge_exposure":true, "expected_revision":"fixture"
+        }),
+    );
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn metadata_room_roles_are_enforced() {
     let mut state = test_state_with_metadata(true);
     let metadata = state.metadata.as_ref().unwrap();

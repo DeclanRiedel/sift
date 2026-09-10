@@ -198,6 +198,11 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "logoutAuth",
     "openConnection",
     "openConnectionFromProfile",
+    "tailnetStatus",
+    "tailnetProbe",
+    "tailnetServe",
+    "tailnetHostKey",
+    "validateConnectionCandidate",
     "openSemanticDocument",
     "openapi",
     "pageComparison",
@@ -3679,11 +3684,46 @@ impl Client {
             .await
     }
 
+    pub async fn tailnet_status(&self) -> Result<sift_api_types::TailnetStatus> {
+        self.get("/v1/tailnet/status").await
+    }
+
+    pub async fn tailnet_host_key(
+        &self,
+        request: sift_api_types::TailnetProbeRequest,
+    ) -> Result<sift_api_types::TailnetHostKey> {
+        self.post("/v1/tailnet/host-key", &request).await
+    }
+
+    pub async fn tailnet_serve(
+        &self,
+        request: sift_api_types::TailnetServeRequest,
+    ) -> Result<sift_api_types::TailnetServeReport> {
+        self.post("/v1/tailnet/serve", &request).await
+    }
+
+    pub async fn tailnet_probe(
+        &self,
+        request: sift_api_types::TailnetProbeRequest,
+    ) -> Result<sift_api_types::TailnetProbeReport> {
+        self.post("/v1/tailnet/probe", &request).await
+    }
+
     pub async fn upsert_connection_profile(
         &self,
         request: UpsertConnectionProfileRequest,
     ) -> Result<ConnectionProfile> {
         self.post("/v1/metadata/connections", &request).await
+    }
+
+    pub async fn validate_connection_profile(
+        &self,
+        request: UpsertConnectionProfileRequest,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .post("/v1/metadata/connections/validate", &request)
+            .await?;
+        Ok(())
     }
 
     pub async fn delete_connection_profile(

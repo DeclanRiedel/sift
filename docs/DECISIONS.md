@@ -2377,3 +2377,39 @@ browsable and deletable. Full recovery needs both stores; tenant-selective
 recovery copies benchmark payloads under fresh opaque handles. Definition
 storage, parameter-aware reruns, sharing and orphan collection remain separate
 work. See the [workbench checklist](PLANS/query-performance.md).
+
+## ADR-061: Backend-owned tailnet transports and explicit remote exposure
+
+Database network access belongs to the Sift backend. Optional `sift_network`
+profile configuration selects direct tailnet access, SSH loopback forwarding,
+or direct-TCP-first fallback. Device discovery uses the installed Tailscale
+daemon. Neither desktop credentials nor a desktop-only tailnet membership are
+implicitly transferred to a hosted backend.
+
+Tailnet inventory, host-key scans, transport use, and Serve management require
+instance-admin access because they exercise the backend's network/SSH identity.
+OpenSSH runs non-interactively with strict host verification and no user SSH
+configuration execution. Explicitly verified Ed25519 public pins may be stored
+in profile configuration; private keys remain in the backend's existing agent
+or default identity files. Database credentials remain in SecretStore.
+
+Connection-owned loopback listeners avoid port reservation races. Dropping a
+tunnel lease cancels forwarding tasks and kills owned SSH child processes.
+Idempotent reconnect recreates the transport; no SQL replay or authentication
+fallback is introduced. TLS certificate verification is never weakened.
+
+Tailscale Serve is separate from connection establishment and profile deletion.
+Its fixed remote helper requires preview revision plus explicit exposure
+acknowledgement, rejects existing rules and Funnel-enabled devices, and keeps a
+private instance-bound remote ownership journal. It refuses removal after an
+external configuration change or uncertain apply. No distributed transaction
+with external tailscale administrators is claimed: the helper serializes Sift
+operations, while interrupted or conflicting outcomes require inspection.
+
+Candidate validation does not publish temporary profiles or sessions. Existing
+credentials can be reused server-side, with tenant-admin authorization required
+when changing their destination/configuration. Validation and upsert remain
+separate operations, so a later database outage can leave a validated saved
+profile. This is safer than deleting a possibly concurrently updated profile.
+
+See [Tailnet setup and recovery](TAILNET.md).

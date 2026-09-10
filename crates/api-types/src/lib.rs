@@ -5,6 +5,8 @@
 //! deserialize a server response.
 
 mod http;
+mod tailnet;
+pub use tailnet::*;
 
 pub use http::*;
 
