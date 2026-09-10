@@ -2092,12 +2092,6 @@ async fn run_query_executor(
                 credential_mode,
                 tags,
             } => {
-                if let Some(previous) = context.take() {
-                    if let Some(task) = notification_task.take() {
-                        task.abort();
-                    }
-                    parked_contexts.insert(previous.profile_id, previous);
-                }
                 let server = targets.borrow().clone();
                 let result = create_connection_profile(
                     &server,
@@ -2111,41 +2105,42 @@ async fn run_query_executor(
                         credential_mode,
                         tags,
                     },
+                    &events,
                 )
                 .await;
                 match result {
-                    Ok(entry) => {
-                        let connection_error =
-                            match open_query_context(&server, tenant_id, entry.id, &events).await {
-                                Ok(opened) => {
-                                    let _ = events.send(ExecutorEvent::Connection(
-                                        ConnectionStatus::Connected {
-                                            profile_id: entry.id,
-                                            name: entry.name.clone(),
-                                        },
-                                    ));
-                                    let _ = events.send(load_capabilities(&opened).await);
-                                    let schema_event = load_schema(&opened).await;
-                                    notification_task =
-                                        Some(spawn_notification_stream(&opened, events.clone()));
-                                    context = Some(opened);
-                                    let _ = events.send(schema_event);
-                                    None
-                                }
-                                Err(reason) => {
-                                    let _ = events.send(ExecutorEvent::Connection(
-                                        ConnectionStatus::Failed {
-                                            profile_id: entry.id,
-                                            reason: reason.clone(),
-                                        },
-                                    ));
-                                    Some(reason)
-                                }
-                            };
+                    Ok(CreatedConnection { entry, opened }) => {
+                        let opened = match opened {
+                            Ok(opened) => opened,
+                            Err(error) => {
+                                let _ = events.send(ExecutorEvent::ProfileCreated {
+                                    entry,
+                                    connection_error: Some(error),
+                                });
+                                continue;
+                            }
+                        };
+                        if let Some(previous) = context.take() {
+                            if let Some(task) = notification_task.take() {
+                                task.abort();
+                            }
+                            parked_contexts.insert(previous.profile_id, previous);
+                        }
+                        let _ =
+                            events.send(ExecutorEvent::Connection(ConnectionStatus::Connected {
+                                profile_id: entry.id,
+                                name: entry.name.clone(),
+                            }));
+                        let _ = events.send(load_capabilities(&opened).await);
+                        let schema_event = load_schema(&opened).await;
+                        notification_task =
+                            Some(spawn_notification_stream(&opened, events.clone()));
+                        context = Some(opened);
+                        let _ = events.send(schema_event);
                         if events
                             .send(ExecutorEvent::ProfileCreated {
                                 entry,
-                                connection_error,
+                                connection_error: None,
                             })
                             .is_err()
                         {
@@ -2209,6 +2204,12 @@ async fn run_query_executor(
                 tenant_id,
                 profile_id,
             } => {
+                let server = targets.borrow().clone();
+                if let Err(error) = delete_connection_profile(&server, tenant_id, profile_id).await
+                {
+                    let _ = events.send(ExecutorEvent::ProfileDeletionFailed(error));
+                    continue;
+                }
                 cancel_active_queries_for_profile(&mut active_queries, profile_id);
                 if context
                     .as_ref()
@@ -2224,14 +2225,9 @@ async fn run_query_executor(
                 if let Some(opened) = parked_contexts.remove(&profile_id) {
                     let _ = opened.client.close_session(opened.session).await;
                 }
-                let server = targets.borrow().clone();
-                let result = delete_connection_profile(&server, tenant_id, profile_id).await;
-                let event = match result {
-                    Ok(()) => ExecutorEvent::ProfileDeleted {
-                        tenant_id,
-                        profile_id,
-                    },
-                    Err(error) => ExecutorEvent::ProfileDeletionFailed(error),
+                let event = ExecutorEvent::ProfileDeleted {
+                    tenant_id,
+                    profile_id,
                 };
                 if events.send(event).is_err() {
                     return;
@@ -6435,23 +6431,55 @@ async fn load_table_definition(
         })
 }
 
+struct CreatedConnection {
+    entry: sift_workspace_ui::ConnectionNavEntry,
+    opened: Result<QueryContext, String>,
+}
+
 async fn create_connection_profile(
     server: &DesktopServer,
     request: UpsertConnectionProfileRequest,
-) -> Result<sift_workspace_ui::ConnectionNavEntry, String> {
+    events: &tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
+) -> Result<CreatedConnection, String> {
     let client = server.client().await?;
     let tenant_id = request.tenant_id;
     let name = request.name.clone();
+    let existing = client
+        .connection_profiles(TenantId(tenant_id))
+        .await
+        .map_err(|error| format!("checking saved connections failed: {error}"))?
+        .iter()
+        .any(|profile| profile.name == name);
+    if !existing {
+        test_connection_profile(
+            server,
+            tenant_id,
+            request.provider_id.clone(),
+            request.configuration.clone(),
+            request.credentials.clone(),
+            events,
+        )
+        .await
+        .map_err(|error| {
+            format!("Connection check failed; requested profile was not saved: {error}")
+        })?;
+    }
     let profile = client
         .upsert_connection_profile(request)
         .await
         .map_err(|error| format!("saving connection profile failed: {error}"))?;
-    Ok(sift_workspace_ui::ConnectionNavEntry {
-        id: profile.id.0,
-        tenant_id,
-        name,
-        provider_id: profile.provider_id,
-        tags: profile.tags,
+    // Validation and reconnect are separate operations. Never delete an upserted
+    // profile on a late reconnect failure: a concurrent request may own it.
+    let opened = open_query_context(server, tenant_id, profile.id.0, events).await;
+    Ok(CreatedConnection {
+        entry: sift_workspace_ui::ConnectionNavEntry {
+            id: profile.id.0,
+            tenant_id,
+            name,
+            provider_id: profile.provider_id,
+            tags: profile.tags,
+        },
+        opened,
     })
 }
 
@@ -6488,7 +6516,10 @@ async fn test_connection_profile(
         .map_err(|error| format!("removing temporary test profile failed: {error}"));
     match (opened, cleanup) {
         (Ok(_), Ok(())) => Ok(()),
-        (Err(error), _) => Err(error),
+        (Err(error), Err(cleanup)) => Err(format!(
+            "{error}. Temporary profile cleanup also failed: {cleanup}"
+        )),
+        (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(error),
     }
 }
@@ -6508,7 +6539,7 @@ async fn open_query_context(
         .await
         .map_err(|error| format!("opening a session failed: {error}"))?
         .id;
-    let connection_info = client
+    let connection_info = match client
         .open_connection_from_profile(
             session,
             OpenConnectionFromProfileRequest {
@@ -6517,7 +6548,13 @@ async fn open_query_context(
             },
         )
         .await
-        .map_err(|error| format!("opening a connection failed: {error}"))?;
+    {
+        Ok(connection) => connection,
+        Err(error) => {
+            let _ = client.close_session(session).await;
+            return Err(format!("opening a connection failed: {error}"));
+        }
+    };
     let sqlite = connection_info.provider_id.as_str() == "sift/sqlite";
     let connection = connection_info.id;
     let metadata_connection = if sqlite {
@@ -7195,6 +7232,87 @@ pub fn display_rects(cx: &App) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_connection_validation_leaves_no_profile_or_session() {
+        use sift_driver_api::mock::MockDriver;
+        use sift_metadata::{MemorySecretStore, MetadataStore};
+        use sift_server::{
+            http::{app, AppState, AuthState},
+            registry::DriverRegistry,
+            room_runtime::RoomRuntime,
+            session::SessionStore,
+        };
+        let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        metadata.bootstrap_local("fixture").unwrap();
+        let driver = MockDriver::builder()
+            .engine(sift_protocol::Engine::Postgres)
+            .open_err(sift_protocol::DriverError::new(
+                sift_protocol::Code::ConnectionFailed,
+                "fixture refused connection",
+            ))
+            .build();
+        let state = AppState {
+            sessions: SessionStore::new(DriverRegistry::builder().register(driver).build()),
+            rooms: RoomRuntime::default(),
+            shutdown: Default::default(),
+            auth: AuthState {
+                loopback_bypass: true,
+                ..Default::default()
+            },
+            metadata: Some(metadata),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app(state).into_make_service())
+                .await
+                .unwrap();
+        });
+        let client = Client::new(format!("http://{addr}"));
+        let server = DesktopServer::Remote {
+            client: client.clone(),
+            instance: sift_workspace_ui::InstanceSpec {
+                id: "fixture".into(),
+                name: "fixture".into(),
+                base_url: format!("http://{addr}"),
+                kind: sift_workspace_ui::InstanceKind::Hosted,
+            },
+            expected_instance_id: None,
+        };
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let result = create_connection_profile(
+            &server,
+            UpsertConnectionProfileRequest {
+                tenant_id: 1,
+                vault_id: None,
+                name: "unreachable fixture".into(),
+                provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                configuration: serde_json::json!({
+                    "host": "100.83.175.73",
+                    "port": 5432,
+                    "database": "fixture",
+                    "user": "fixture",
+                }),
+                credentials: Some(serde_json::json!({"password": "fixture"})),
+                credential_mode: CredentialMode::Shared,
+                tags: Vec::new(),
+            },
+            &events,
+        )
+        .await;
+        assert!(result
+            .err()
+            .unwrap()
+            .contains("requested profile was not saved"));
+        assert!(client
+            .connection_profiles(TenantId(1))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(client.list_sessions().await.unwrap().is_empty());
+        task.abort();
+    }
 
     #[tokio::test]
     async fn room_snapshots_wait_for_capacity_and_stop_when_the_view_closes() {

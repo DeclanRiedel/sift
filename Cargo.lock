@@ -7821,6 +7821,7 @@ dependencies = [
 name = "sift-desktop"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "embed-resource",
  "futures",
  "gpui",
@@ -7833,6 +7834,7 @@ dependencies = [
  "sift-api-types",
  "sift-client-sdk",
  "sift-doc",
+ "sift-driver-api",
  "sift-instance-config",
  "sift-metadata",
  "sift-protocol",

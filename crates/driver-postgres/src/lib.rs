@@ -602,6 +602,14 @@ fn format_postgres_db_error(
 /// guidance without ever copying the password or raw server error into the
 /// user-visible message.
 fn contextualize_open_error(spec: &ConnectionSpec, mut error: DriverError) -> DriverError {
+    // Transport failures have no SQLSTATE and tokio-postgres renders this
+    // generic message. They are connection failures, not server-internal faults.
+    if error.code == Code::DriverInternal
+        && error.native_code.is_none()
+        && error.message == "error connecting to server"
+    {
+        error.code = Code::ConnectionFailed;
+    }
     let target = connection_target(spec);
     let loopback_hint = is_loopback_host(&spec.host).then_some(
         " localhost refers to the machine running the Sift server; use the database server hostname or IP when PostgreSQL runs elsewhere.",
@@ -866,6 +874,18 @@ mod tests {
         assert!(error.message.contains("database server hostname or IP"));
         assert!(!error.message.contains("do-not-leak"));
         assert!(!error.message.contains("db error"));
+    }
+
+    #[test]
+    fn opaque_transport_failure_reports_the_actual_target() {
+        let error = contextualize_open_error(
+            &connection_spec("100.83.175.73"),
+            DriverError::new(Code::DriverInternal, "error connecting to server"),
+        );
+        assert_eq!(error.code, Code::ConnectionFailed);
+        assert!(error.message.contains("100.83.175.73:5433"));
+        assert!(!error.message.contains("localhost"));
+        assert!(!error.message.contains("do-not-leak"));
     }
 
     #[test]

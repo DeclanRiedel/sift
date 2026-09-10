@@ -1024,7 +1024,7 @@ fn shell_connection_row_menu(
                     shell.request_delete_connection(&delete_entry, cx);
                 }))
                 .child(icon(IconName::Close, colors.danger, 11.))
-                .child("Remove in sift.toml"),
+                .child("Remove connection…"),
         )
 }
 
@@ -18026,7 +18026,7 @@ impl WorkspaceShell {
                             .bg(colors.active_surface)
                             .text_xs()
                             .text_color(colors.muted_text)
-                            .child("sift.toml"),
+                            .child("saved"),
                     )
                     .child(
                         div()
@@ -20498,8 +20498,8 @@ impl WorkspaceShell {
     }
 
     fn request_delete_connection(&mut self, entry: &ConnectionNavEntry, cx: &mut Context<Self>) {
-        let _ = entry;
-        self.edit_manifest_section("connections", cx);
+        self.modal = Some(Modal::ConfirmDeleteConnection(entry.clone()));
+        cx.notify();
     }
 
     fn disconnect_connection_profile(&mut self, profile_id: i64, cx: &mut Context<Self>) {
@@ -42541,7 +42541,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn connection_rows_route_management_to_sift_toml(cx: &mut TestAppContext) {
+    fn connection_rows_route_edit_to_manifest_and_confirm_removal(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -42614,9 +42614,26 @@ mod tests {
         let remove = cx.debug_bounds("connection-row-remove").unwrap();
         cx.simulate_click(remove.center(), Modifiers::default());
         cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert!(matches!(
+                &shell.modal,
+                Some(Modal::ConfirmDeleteConnection(entry)) if entry.id == 7 && entry.tenant_id == 1
+            ));
+        });
+        assert!(instance_receiver.try_recv().is_err());
+        assert!(receiver.try_recv().is_err());
+        workspace.update(&mut cx, |shell, cx| {
+            let Some(Modal::ConfirmDeleteConnection(entry)) = shell.modal.clone() else {
+                panic!("expected connection removal confirmation");
+            };
+            shell.confirm_delete_connection(&entry, cx);
+        });
         assert!(matches!(
-            instance_receiver.try_recv(),
-            Ok(InstanceCommand::OpenCurrentConfiguration)
+            receiver.try_recv(),
+            Ok(ExecutorCommand::DeleteConnectionProfile {
+                tenant_id: 1,
+                profile_id: 7,
+            })
         ));
     }
 
@@ -47975,6 +47992,58 @@ mod tests {
         assert!(configuration.get("engine_specific").is_none());
         assert_eq!(credentials.unwrap()["password"], "secret value");
         assert_eq!(credential_mode, sift_api_types::CredentialMode::Shared);
+
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::ProfileCreationFailed("fixture failed".into()),
+                cx,
+            );
+            shell.connection_url_input.update(cx, |input, cx| {
+                input.set_text(
+                    "postgresql://fixture:fixture@100.83.175.73:5432/fixture",
+                    cx,
+                )
+            });
+            shell.submit_connection_url(cx);
+        });
+        assert!(
+            matches!(receiver.try_recv(),Ok(ExecutorCommand::CreateConnectionProfile {name,configuration,..}) if name=="fixture @ 100.83.175.73:5432" && configuration["host"]=="100.83.175.73")
+        );
+    }
+
+    #[gpui::test]
+    fn metadata_connection_removal_requires_confirmation_not_a_manifest(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(8);
+        let entry = ConnectionNavEntry {
+            id: 37,
+            tenant_id: 1,
+            name: "broken URL profile".into(),
+            provider_id: sift_protocol::Engine::Postgres.provider_id(),
+            tags: Vec::new(),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.request_delete_connection(&entry, cx);
+            assert_eq!(
+                shell.modal,
+                Some(Modal::ConfirmDeleteConnection(entry.clone()))
+            );
+            assert!(shell.pending_manifest_path.is_none());
+        });
+        assert!(receiver.try_recv().is_err());
+        workspace.update(&mut cx, |shell, cx| {
+            shell.confirm_delete_connection(&entry, cx)
+        });
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::DeleteConnectionProfile {
+                tenant_id: 1,
+                profile_id: 37
+            })
+        ));
     }
 
     #[test]
