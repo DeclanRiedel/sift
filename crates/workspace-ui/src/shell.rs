@@ -9806,6 +9806,7 @@ pub struct WorkspaceShell {
     result_edit_sources: HashMap<u64, Option<DatabaseObjectSource>>,
     pending_result_focus: Option<u64>,
     modal_offset: gpui::Point<Pixels>,
+    workspace_window: gpui::AnyWindowHandle,
     data_window: Option<gpui::WindowHandle<data_window::DataWindow>>,
     modal_drag: Option<(gpui::Point<Pixels>, gpui::Point<Pixels>, Bounds<Pixels>)>,
     modal_position_kind: Option<Modal>,
@@ -10756,10 +10757,12 @@ impl WorkspaceShell {
         });
         let shell_window = window.window_handle();
         let key_interceptor_subscription = cx.intercept_keystrokes(move |event, window, cx| {
-            if window.window_handle() != shell_window {
-                return;
-            }
             let _ = shell.update(cx, |shell, cx| {
+                let event_window = window.window_handle();
+                let data_window = shell.data_window.map(gpui::AnyWindowHandle::from);
+                if event_window != shell_window && data_window != Some(event_window) {
+                    return;
+                }
                 shell.intercept_ide_input(event, window, cx);
             });
         });
@@ -11062,6 +11065,7 @@ impl WorkspaceShell {
             result_edit_sources: HashMap::new(),
             pending_result_focus: None,
             modal_offset: gpui::point(px(0.), px(0.)),
+            workspace_window: shell_window,
             data_window: None,
             modal_drag: None,
             modal_position_kind: None,
@@ -27438,6 +27442,28 @@ impl WorkspaceShell {
             pane.update(cx, |_, cx| cx.notify());
         }
         results.update(cx, ResultsView::focus_data);
+        let expanded_in_data_window = self.panes.get(self.active_pane).is_some_and(|pane| {
+            let pane = pane.read(cx);
+            pane.active_item()
+                .is_some_and(|item| pane.expanded_result_item == Some(item.id))
+        });
+        if expanded_in_data_window {
+            if let Some(data_window) = self.data_window {
+                let result_focus = results.focus_handle(cx);
+                if gpui::AnyWindowHandle::from(data_window) == window.window_handle() {
+                    result_focus.focus(window, cx);
+                    cx.notify();
+                    return;
+                }
+                if data_window
+                    .update(cx, move |_, window, cx| result_focus.focus(window, cx))
+                    .is_ok()
+                {
+                    cx.notify();
+                    return;
+                }
+            }
+        }
         results.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
@@ -33888,9 +33914,14 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         if let Some(pane) = self.panes.get(self.active_pane) {
-            pane.read(cx)
-                .active_focus_handle(cx)
-                .dispatch_action(action, window, cx);
+            let focus = pane.read(cx).active_focus_handle(cx);
+            if window.window_handle() == self.workspace_window {
+                focus.dispatch_action(action, window, cx);
+            } else {
+                let _ = self.workspace_window.update(cx, move |_, window, cx| {
+                    focus.dispatch_action(action, window, cx)
+                });
+            }
         }
     }
 
@@ -43500,6 +43531,16 @@ mod tests {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(128);
+        let (_events_sender, events) = tokio::sync::mpsc::unbounded_channel();
+        let editor =
+            workspace.read_with(&cx, |shell, cx| shell.panes[0].read(cx).editor(1).unwrap());
+        workspace.update(&mut cx, |shell, cx| {
+            shell.attach_executor(sender, events, cx)
+        });
+        editor.update(&mut cx, |editor, cx| {
+            editor.replace_text_from_owner("select 1", cx)
+        });
         workspace.update(&mut cx, |shell, cx| {
             shell.route_result(
                 1,
@@ -43543,10 +43584,19 @@ mod tests {
             native
         });
         assert!(cx.debug_bounds("modal-layer").is_none());
+        let detached_result_focus = native
+            .read_with(&cx, |data, cx| data.results.focus_handle(cx))
+            .unwrap();
         let mut detached = VisualTestContext::from_window(native.into(), &cx);
         detached.run_until_parked();
         assert!(detached.debug_bounds("data-results-window-body").is_some());
         assert!(detached.debug_bounds("result-row-fields-0").is_some());
+        detached.simulate_keystrokes("space g r");
+        assert!(detached.update(|window, _| detached_result_focus.is_focused(window)));
+        detached.simulate_keystrokes("space x s");
+        assert!(std::iter::from_fn(|| commands.try_recv().ok()).any(
+            |command| matches!(command, ExecutorCommand::Execute { sql, .. } if sql == "select 1")
+        ));
         detached.simulate_keystrokes("escape");
         detached.run_until_parked();
         cx.run_until_parked();
@@ -43554,6 +43604,24 @@ mod tests {
             assert!(shell.modal.is_none());
             assert_eq!(shell.panes[0].read(cx).expanded_result_item, None);
         });
+        workspace.update(&mut cx, |shell, cx| {
+            shell.route_result(
+                1,
+                ResultState::Ready(crate::results::ResultData {
+                    columns: vec![crate::results::ResultColumn {
+                        name: "id".into(),
+                        type_label: "int64".into(),
+                        nullable: false,
+                    }],
+                    rows: vec![sift_protocol::Row::new(vec![sift_protocol::Value::Int64(
+                        1,
+                    )])],
+                    ..Default::default()
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
         assert!(cx.debug_bounds("result-row-0").is_some());
         assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
         assert!(!cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));

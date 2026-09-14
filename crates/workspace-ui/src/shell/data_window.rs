@@ -11,6 +11,7 @@ impl Render for DataWindow {
         let colors = cx.theme().colors;
         div()
             .size_full()
+            .key_context("SiftWorkspace keymap_profile=vim")
             .flex()
             .flex_col()
             .bg(colors.background)
