@@ -634,6 +634,7 @@ struct QueryContext {
     /// feel slower than running many queries, while sharing either lane can
     /// block behind a streaming query or corrupt SQL Server SHOWPLAN state.
     plan_connection: ConnectionId,
+    semantic_connection: ConnectionId,
     /// One explain sequence at a time. SQL Server's SHOWPLAN ON/query/OFF
     /// sequence must not interleave when two tabs request plans together.
     plan_lock: Arc<tokio::sync::Mutex<()>>,
@@ -643,6 +644,65 @@ struct QueryContext {
     /// Semantic work runs on its own task; dropping this sender ends it and
     /// releases every server document it owns with the connection.
     semantic: tokio::sync::mpsc::UnboundedSender<SemanticControl>,
+    session_lease: QuerySessionLease,
+}
+
+struct QuerySessionLease {
+    client: Client,
+    session: Option<SessionId>,
+}
+
+impl QuerySessionLease {
+    fn new(client: Client, session: SessionId) -> Self {
+        Self {
+            client,
+            session: Some(session),
+        }
+    }
+
+    async fn close(mut self) {
+        if let Some(session) = self.session.take() {
+            let _ = self.client.close_session(session).await;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.session = None;
+    }
+}
+
+impl Drop for QuerySessionLease {
+    fn drop(&mut self) {
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        let client = self.client.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = client.close_session(session).await;
+            });
+        }
+    }
+}
+
+impl QueryContext {
+    async fn close(self) {
+        self.session_lease.close().await;
+    }
+
+    fn disarm_session_cleanup(&mut self) {
+        self.session_lease.disarm();
+    }
+
+    fn owns_connection(&self, connection: ConnectionId) -> bool {
+        [
+            self.connection,
+            self.metadata_connection,
+            self.plan_connection,
+            self.semantic_connection,
+        ]
+        .contains(&connection)
+    }
 }
 
 fn semantic_target_matches(
@@ -760,10 +820,10 @@ async fn run_query_executor(
                     task.abort();
                 }
                 if let Some(previous) = context.take() {
-                    let _ = previous.client.close_session(previous.session).await;
+                    previous.close().await;
                 }
                 for (_, previous) in parked_contexts.drain() {
-                    let _ = previous.client.close_session(previous.session).await;
+                    previous.close().await;
                 }
                 if events.send(ExecutorEvent::Connection(ConnectionStatus::Disconnected)).is_err() {
                     return;
@@ -915,7 +975,7 @@ async fn run_query_executor(
                 }
                 if let Some(previous) = parked_contexts.remove(&0) {
                     cancel_active_queries_for_profile(&mut active_queries, 0);
-                    let _ = previous.client.close_session(previous.session).await;
+                    previous.close().await;
                 }
                 let server = targets.borrow().clone();
                 match open_ad_hoc_query_context(
@@ -970,10 +1030,10 @@ async fn run_query_executor(
                     task.abort();
                 }
                 if let Some(opened) = context.take() {
-                    let _ = opened.client.close_session(opened.session).await;
+                    opened.close().await;
                 }
                 for (_, opened) in parked_contexts.drain() {
-                    let _ = opened.client.close_session(opened.session).await;
+                    opened.close().await;
                 }
                 if events
                     .send(ExecutorEvent::Connection(ConnectionStatus::Disconnected))
@@ -1552,14 +1612,18 @@ async fn run_query_executor(
                     if let Some(task) = notification_task.take() {
                         task.abort();
                     }
-                    context = None;
+                    if let Some(mut opened) = context.take() {
+                        opened.disarm_session_cleanup();
+                    }
                 }
                 let parked_profile_id = parked_contexts.iter().find_map(|(profile_id, opened)| {
                     (opened.session == session_id).then_some(*profile_id)
                 });
                 if let Some(profile_id) = parked_profile_id {
                     cancel_active_queries_for_profile(&mut active_queries, profile_id);
-                    parked_contexts.remove(&profile_id);
+                    if let Some(mut opened) = parked_contexts.remove(&profile_id) {
+                        opened.disarm_session_cleanup();
+                    }
                 }
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
@@ -1588,33 +1652,15 @@ async fn run_query_executor(
                 connection_id,
             } => {
                 let active_profile_id = context.as_ref().and_then(|opened| {
-                    (opened.session == session_id
-                        && [
-                            opened.connection,
-                            opened.metadata_connection,
-                            opened.plan_connection,
-                        ]
-                        .contains(&connection_id))
-                    .then_some(opened.profile_id)
+                    (opened.session == session_id && opened.owns_connection(connection_id))
+                        .then_some(opened.profile_id)
                 });
                 let active_connection_closed = context.as_ref().is_some_and(|opened| {
-                    opened.session == session_id
-                        && [
-                            opened.connection,
-                            opened.metadata_connection,
-                            opened.plan_connection,
-                        ]
-                        .contains(&connection_id)
+                    opened.session == session_id && opened.owns_connection(connection_id)
                 });
                 let parked_profile = parked_contexts.iter().find_map(|(profile_id, opened)| {
-                    (opened.session == session_id
-                        && [
-                            opened.connection,
-                            opened.metadata_connection,
-                            opened.plan_connection,
-                        ]
-                        .contains(&connection_id))
-                    .then_some(*profile_id)
+                    (opened.session == session_id && opened.owns_connection(connection_id))
+                        .then_some(*profile_id)
                 });
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
@@ -1627,7 +1673,9 @@ async fn run_query_executor(
                         if let Some(task) = notification_task.take() {
                             task.abort();
                         }
-                        context = None;
+                        if let Some(mut opened) = context.take() {
+                            opened.disarm_session_cleanup();
+                        }
                         client
                             .close_session(session_id)
                             .await
@@ -1645,7 +1693,9 @@ async fn run_query_executor(
                 };
                 if let Some(profile_id) = parked_profile {
                     cancel_active_queries_for_profile(&mut active_queries, profile_id);
-                    parked_contexts.remove(&profile_id);
+                    if let Some(mut opened) = parked_contexts.remove(&profile_id) {
+                        opened.disarm_session_cleanup();
+                    }
                 }
                 if active_connection_closed {
                     let _ = events.send(ExecutorEvent::Connection(ConnectionStatus::Disconnected));
@@ -2272,11 +2322,11 @@ async fn run_query_executor(
                         if let Some(task) = notification_task.take() {
                             task.abort();
                         }
-                        let _ = opened.client.close_session(opened.session).await;
+                        opened.close().await;
                     }
                 }
                 if let Some(opened) = parked_contexts.remove(&profile_id) {
-                    let _ = opened.client.close_session(opened.session).await;
+                    opened.close().await;
                 }
                 let event = ExecutorEvent::ProfileDeleted {
                     tenant_id,
@@ -6647,6 +6697,7 @@ async fn open_query_context(
         controls,
         events.clone(),
     )));
+    let session_lease = QuerySessionLease::new(client.clone(), session);
     Ok(QueryContext {
         sqlite,
         instance_id: server.instance().id,
@@ -6656,11 +6707,13 @@ async fn open_query_context(
         transaction: None,
         metadata_connection,
         plan_connection,
+        semantic_connection,
         plan_lock: Arc::new(tokio::sync::Mutex::new(())),
         profile_id,
         connection_profile_id: Some(profile_id),
         tenant_id,
         semantic,
+        session_lease,
     })
 }
 
@@ -6723,6 +6776,7 @@ async fn open_ad_hoc_query_context(
         controls,
         events.clone(),
     )));
+    let session_lease = QuerySessionLease::new(client.clone(), session);
     Ok(QueryContext {
         sqlite: false,
         instance_id: server.instance().id,
@@ -6732,11 +6786,13 @@ async fn open_ad_hoc_query_context(
         transaction: None,
         metadata_connection,
         plan_connection,
+        semantic_connection,
         plan_lock: Arc::new(tokio::sync::Mutex::new(())),
         profile_id: 0,
         connection_profile_id: None,
         tenant_id,
         semantic,
+        session_lease,
     })
 }
 
