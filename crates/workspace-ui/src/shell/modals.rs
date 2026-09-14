@@ -3398,7 +3398,7 @@ impl WorkspaceShell {
                                                 .truncate()
                                                 .text_xs()
                                                 .child(format!(
-                                                    "Session {} · {} connection(s)",
+                                                    "Session ID {} · {} database channel(s)",
                                                     session_id.0,
                                                     session.connections.len()
                                                 )),
@@ -3504,6 +3504,15 @@ impl WorkspaceShell {
                                                     .on_click(cx.listener(|shell, _, _, cx| {
                                                         shell.load_server_sessions(cx)
                                                     })),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.muted_text)
+                                            .whitespace_normal()
+                                            .child(
+                                                "A single database uses isolated query, metadata, plan, and semantic channels. The session ID is an identifier, not a count.",
                                             ),
                                     )
                                     .when(
