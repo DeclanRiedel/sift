@@ -10269,7 +10269,7 @@ impl WorkspaceShell {
                 (definition.id, input)
             })
             .collect();
-        let query_input = cx.new(|cx| TextInput::new("", "Run a command or use / @ # ? !", cx));
+        let query_input = cx.new(|cx| TextInput::new("", "", cx).aria_label("Command palette"));
         let query_history_input = cx.new(|cx| {
             TextInput::new("", "Search query history…", cx).aria_label("Search query history")
         });
