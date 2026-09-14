@@ -156,25 +156,6 @@ impl WorkspaceShell {
             .focus(window, cx);
     }
 
-    pub(super) fn open_vault_item_shortcut(
-        &mut self,
-        item_id: i64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(index) = self
-            .vault_items
-            .iter()
-            .position(|item| item.id.0 == item_id)
-        else {
-            return;
-        };
-        self.vault_item_selected = index;
-        self.active_left_panel = LeftPanel::Collaboration;
-        self.collaboration_section = CollaborationSection::Vault;
-        self.open_selected_vault_item(window, cx);
-    }
-
     pub(super) fn submit_create_vault(&mut self, cx: &mut Context<Self>) {
         let Some(tenant_id) = self.selected_tenant_id() else {
             self.vault_error = Some("No tenant is available".into());

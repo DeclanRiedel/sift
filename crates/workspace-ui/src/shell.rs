@@ -36888,10 +36888,8 @@ impl WorkspaceShell {
         div()
             .id("connections-health-footer")
             .debug_selector(|| "connections-health-footer".into())
-            .absolute()
-            .right_0()
-            .bottom_0()
-            .left_0()
+            .relative()
+            .w_full()
             .h(cx.theme().metrics.row_height)
             .flex_none()
             .flex()
@@ -36900,6 +36898,8 @@ impl WorkspaceShell {
             .px_3()
             .border_t_1()
             .border_color(colors.subtle_border)
+            .bg(colors.panel)
+            .occlude()
             .children(health_details)
             .child(
                 div()
@@ -37655,15 +37655,21 @@ impl WorkspaceShell {
                 },
             )
             .when(
+                dock.id == DockId::Left
+                    && self.active_left_panel == LeftPanel::Connections
+                    && self.lifecycle.tenants.is_empty(),
+                |dock_view| {
+                    dock_view.child(Self::dock_panel_state(
+                        "connections-disconnected-state",
+                        self.lifecycle.status_label(),
+                        colors.muted_text,
+                    ))
+                },
+            )
+            .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
                 |dock_view| {
                     let rows = self.connection_dock_rows();
-                    let vault_shortcuts = self
-                        .vault_items
-                        .iter()
-                        .filter(|item| item.kind == sift_protocol::VaultItemKind::Connection)
-                        .map(|item| (item.id.0, item.label.clone()))
-                        .collect::<Vec<_>>();
                     if self.focused_surface == WorkspaceSurface::Connections {
                         if let Some(index) = rows.iter().position(|row| {
                             matches!(
@@ -37678,30 +37684,6 @@ impl WorkspaceShell {
                     }
                     let row_count = rows.len();
                     dock_view
-                        .when(!vault_shortcuts.is_empty(), |panel| {
-                            panel.child(
-                                div()
-                                    .mx_2()
-                                    .mb_1()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.subtle_border)
-                                    .child(div().px_2().py_1().child(SectionLabel::new("FROM VAULT")))
-                                    .children(vault_shortcuts.into_iter().enumerate().map(
-                                        |(index, (item_id, label))| {
-                                            Button::new(("vault-connection-shortcut", index), label)
-                                                .tone(ButtonTone::Ghost)
-                                                .on_click(cx.listener(
-                                                    move |shell, _, window, cx| {
-                                                        shell.open_vault_item_shortcut(
-                                                            item_id, window, cx,
-                                                        )
-                                                    },
-                                                ))
-                                        },
-                                    )),
-                            )
-                        })
                         .child(
                             uniform_list(
                                 "connections-scroll",
@@ -37730,18 +37712,6 @@ impl WorkspaceShell {
                             .track_scroll(&self.connections_scroll_handle),
                         )
                         .child(self.render_connections_footer(cx))
-                },
-            )
-            .when(
-                dock.id == DockId::Left
-                    && self.active_left_panel == LeftPanel::Connections
-                    && self.lifecycle.tenants.is_empty(),
-                |dock_view| {
-                    dock_view.child(Self::dock_panel_state(
-                        "connections-disconnected-state",
-                        self.lifecycle.status_label(),
-                        colors.muted_text,
-                    ))
                 },
             )
             .when(
