@@ -1465,7 +1465,9 @@ struct ObjectBrowserState {
     profile_id: i64,
     context: DatabaseObjectSource,
     rows: Vec<ObjectBrowserRow>,
+    visible_indices: Vec<usize>,
     selected: usize,
+    scroll_handle: UniformListScrollHandle,
     connections: Vec<ConnectionNavEntry>,
     connection_picker_open: bool,
     catalogs: Vec<String>,
@@ -1481,28 +1483,45 @@ struct ObjectBrowserState {
 
 impl ObjectBrowserState {
     fn visible_rows(&self) -> impl Iterator<Item = &ObjectBrowserRow> {
-        self.rows.iter().filter(|row| {
-            row.source.object.to_lowercase().contains(&self.search)
-                && self
-                    .catalog
-                    .as_ref()
-                    .is_none_or(|catalog| row.source.catalog.as_ref() == Some(catalog))
-                && self
-                    .schema
-                    .as_ref()
-                    .is_none_or(|schema| &row.source.schema == schema)
-                && self
-                    .enabled_groups
-                    .contains(&ObjectGroupKind::from_object_kind(row.source.object_kind))
-        })
+        self.visible_indices
+            .iter()
+            .filter_map(|index| self.rows.get(*index))
     }
 
     fn visible_row_count(&self) -> usize {
-        self.visible_rows().count()
+        self.visible_indices.len()
     }
 
     fn selected_row(&self) -> Option<&ObjectBrowserRow> {
-        self.visible_rows().nth(self.selected)
+        self.visible_indices
+            .get(self.selected)
+            .and_then(|index| self.rows.get(*index))
+    }
+
+    fn rebuild_visible_indices(&mut self) {
+        self.visible_indices = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                (row.source.object.to_lowercase().contains(&self.search)
+                    && self
+                        .catalog
+                        .as_ref()
+                        .is_none_or(|catalog| row.source.catalog.as_ref() == Some(catalog))
+                    && self
+                        .schema
+                        .as_ref()
+                        .is_none_or(|schema| &row.source.schema == schema)
+                    && self
+                        .enabled_groups
+                        .contains(&ObjectGroupKind::from_object_kind(row.source.object_kind)))
+                .then_some(index)
+            })
+            .collect();
+        self.selected = self
+            .selected
+            .min(self.visible_indices.len().saturating_sub(1));
     }
 
     fn select_catalog(&mut self, catalog: String) {
@@ -1514,6 +1533,7 @@ impl ObjectBrowserState {
         self.schema_picker_open = false;
         self.connection_picker_open = false;
         self.sync_context();
+        self.rebuild_visible_indices();
     }
 
     fn select_schema(&mut self, schema: String) {
@@ -1523,6 +1543,7 @@ impl ObjectBrowserState {
         self.connection_picker_open = false;
         self.catalog_picker_open = false;
         self.sync_context();
+        self.rebuild_visible_indices();
     }
 
     fn sync_context(&mut self) {
@@ -5600,9 +5621,10 @@ impl Pane {
     fn open_object_browser(
         &mut self,
         item: ItemPresentation,
-        state: ObjectBrowserState,
+        mut state: ObjectBrowserState,
         cx: &mut Context<Self>,
     ) {
+        state.rebuild_visible_indices();
         let item_id = item.id;
         if let Some(index) = self
             .object_browsers
@@ -5641,6 +5663,7 @@ impl Pane {
             if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
                 browser.search = input.read(cx).text().to_lowercase();
                 browser.selected = 0;
+                browser.rebuild_visible_indices();
                 cx.notify();
             }
         });
@@ -5693,6 +5716,7 @@ impl Pane {
                     browser
                         .search_input
                         .update(cx, |input, cx| input.set_text("", cx));
+                    browser.rebuild_visible_indices();
                 }
                 self.focus_handle.focus(window, cx);
                 cx.stop_propagation();
@@ -5707,18 +5731,22 @@ impl Pane {
             cx.notify();
             return;
         }
+        if let Some(action) = match event.keystroke.key.as_str() {
+            "enter" => Some('o'),
+            "n" | "d" | "x" | "i" | "e" => event.keystroke.key.chars().next(),
+            _ => None,
+        } {
+            self.object_browser_action(action, cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         let visible_row_count = browser.visible_row_count();
         match event.keystroke.key.as_str() {
             "j" | "down" => {
                 browser.selected = (browser.selected + 1).min(visible_row_count.saturating_sub(1));
             }
             "k" | "up" => browser.selected = browser.selected.saturating_sub(1),
-            "enter" => self.object_browser_action('o', cx),
-            "n" => self.object_browser_action('n', cx),
-            "d" => self.object_browser_action('d', cx),
-            "x" => self.object_browser_action('x', cx),
-            "i" => self.object_browser_action('i', cx),
-            "e" => self.object_browser_action('e', cx),
             "c" => {
                 if let Some(index) = browser
                     .connections
@@ -5759,6 +5787,7 @@ impl Pane {
                     browser.enabled_groups.insert(group);
                 }
                 browser.selected = 0;
+                browser.rebuild_visible_indices();
             }
             "escape" => {
                 browser.connection_picker_open = false;
@@ -5767,6 +5796,9 @@ impl Pane {
             }
             _ => return,
         }
+        browser
+            .scroll_handle
+            .scroll_to_item(browser.selected, ScrollStrategy::Nearest);
         cx.stop_propagation();
         cx.notify();
     }
@@ -5962,6 +5994,7 @@ impl Pane {
                             browser.enabled_groups.insert(group);
                         }
                         browser.selected = 0;
+                        browser.rebuild_visible_indices();
                     }
                     cx.notify();
                 }))
@@ -6333,7 +6366,7 @@ impl Pane {
                             .debug_selector(|| "object-browser-header-rows".into())
                             .w(px(80.))
                             .text_right()
-                            .child("ROWS"),
+                            .child("EST. ROWS"),
                     )
                     .child(
                         div()
@@ -6371,7 +6404,8 @@ impl Pane {
                         };
                         range
                             .filter_map(|index| {
-                                let row = browser.visible_rows().nth(index)?.clone();
+                                let row_index = *browser.visible_indices.get(index)?;
+                                let row = browser.rows.get(row_index)?.clone();
                                 let selected = browser.selected == index;
                                 let name = row.source.object.clone();
                                 let object_color = ObjectGroupKind::from_object_kind(
@@ -6473,7 +6507,8 @@ impl Pane {
                     )
                     .flex_1()
                     .min_h_0()
-                    .w_full(),
+                    .w_full()
+                    .track_scroll(&browser.scroll_handle),
                 )
             })
             .into_any_element()
@@ -19740,7 +19775,9 @@ impl WorkspaceShell {
                         profile_id,
                         context,
                         rows,
+                        visible_indices: Vec::new(),
                         selected: 0,
+                        scroll_handle: UniformListScrollHandle::new(),
                         connections,
                         connection_picker_open: false,
                         catalogs,
@@ -19827,6 +19864,7 @@ impl WorkspaceShell {
                     }
                     browser.loading = false;
                     browser.load_error = None;
+                    browser.rebuild_visible_indices();
                     browser.selected = selected_source
                         .and_then(|selected| {
                             browser
@@ -19934,6 +19972,7 @@ impl WorkspaceShell {
                 browser.schema_picker_open = false;
                 browser.loading = loading;
                 browser.load_error = None;
+                browser.rebuild_visible_indices();
             }
             if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
                 item.title = "objs".into();

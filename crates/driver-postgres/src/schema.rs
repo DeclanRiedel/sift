@@ -730,10 +730,14 @@ async fn shallow_tree(
             "SELECT n.nspname AS schema_name,
                     c.relname AS object_name,
                     c.relkind AS relkind,
-                    GREATEST(c.reltuples, 0)::bigint AS estimated_rows,
+                    CASE
+                        WHEN GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1)) < 0 THEN NULL
+                        ELSE GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1))
+                    END AS estimated_rows,
                     obj_description(c.oid, 'pg_class') AS comment
              FROM pg_class c
              JOIN pg_namespace n ON n.oid = c.relnamespace
+             LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
              WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
                AND n.nspname NOT LIKE 'pg_toast%'
                AND c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')
@@ -749,10 +753,14 @@ async fn shallow_tree(
             "SELECT n.nspname AS schema_name,
                     c.relname AS object_name,
                     c.relkind AS relkind,
-                    GREATEST(c.reltuples, 0)::bigint AS estimated_rows,
+                    CASE
+                        WHEN GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1)) < 0 THEN NULL
+                        ELSE GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1))
+                    END AS estimated_rows,
                     obj_description(c.oid, 'pg_class') AS comment
              FROM pg_class c
              JOIN pg_namespace n ON n.oid = c.relnamespace
+             LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
              WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
                AND n.nspname NOT LIKE 'pg_toast%'
                AND c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')
@@ -873,7 +881,9 @@ async fn shallow_tree(
             kind,
             ObjectKind::Table | ObjectKind::ForeignTable | ObjectKind::PartitionedTable
         ) {
-            info.estimated_rows = u64::try_from(row.get::<_, i64>(3)).ok();
+            info.estimated_rows = row
+                .get::<_, Option<i64>>(3)
+                .and_then(|rows| u64::try_from(rows).ok());
         }
         info.comment = row.get(4);
         by_schema.entry(schema_name).or_default().push(info);
