@@ -40489,60 +40489,74 @@ impl gpui::Render for WorkspaceShell {
                             }
                         };
                         let mut toast_bg = colors.elevated_surface;
-                        toast_bg.a = 1.0;
+                        toast_bg.a = 0.9;
                         div()
                             .id(("toast", toast.id as usize))
                             .role(Role::Button)
                             .aria_label(format!("Dismiss notification: {}", toast.message))
-                            .w(px(340.))
-                            .max_w(gpui::relative(0.8))
+                            .min_w(px(280.))
+                            .max_w(px(460.))
                             .px_3()
                             .py_2()
                             .flex()
-                            .items_center()
+                            .items_start()
                             .gap_2()
                             .rounded(cx.theme().metrics.radius_large)
                             .border_1()
                             .border_color(tone_color)
                             .bg(toast_bg)
                             .shadow_lg()
+                            .occlude()
                             .hover(|toast| toast.bg(colors.panel))
                             .on_click(cx.listener(|shell, _, _, cx| shell.dismiss_toast(cx)))
                             .child(
                                 div()
+                                    .debug_selector(|| "toast-action-column".into())
                                     .flex_none()
-                                    .size(px(24.))
                                     .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(cx.theme().metrics.radius)
-                                    .bg(chip_bg)
-                                    .child(icon(icon_name, tone_color, 14.)),
+                                    .flex_col()
+                                    .items_start()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .size(px(24.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(cx.theme().metrics.radius)
+                                            .bg(chip_bg)
+                                            .child(icon(icon_name, tone_color, 14.)),
+                                    )
+                                    .child(
+                                        IconButton::new(
+                                            ("copy-toast", toast.id as usize),
+                                            IconName::Copy,
+                                            "Copy notification",
+                                        )
+                                        .debug_selector(format!("copy-toast-{}", toast.id))
+                                        .square(px(24.))
+                                        .icon_size(12.)
+                                        .on_click({
+                                            let message = toast.message.clone();
+                                            move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                cx.write_to_clipboard(
+                                                    gpui::ClipboardItem::new_string(
+                                                        message.clone(),
+                                                    ),
+                                                );
+                                            }
+                                        }),
+                                    ),
                             )
                             .child(
                                 div()
+                                    .debug_selector(|| "toast-message".into())
                                     .flex_1()
                                     .min_w_0()
                                     .whitespace_normal()
                                     .text_sm()
                                     .child(toast.message.clone()),
-                            )
-                            .child(
-                                IconButton::new(
-                                    ("copy-toast", toast.id as usize),
-                                    IconName::Copy,
-                                    "Copy notification",
-                                )
-                                .debug_selector(format!("copy-toast-{}", toast.id))
-                                .on_click({
-                                    let message = toast.message.clone();
-                                    move |_, _, cx| {
-                                        cx.stop_propagation();
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                            message.clone(),
-                                        ));
-                                    }
-                                }),
                             )
                             .child(icon(IconName::Close, colors.muted_text, 12.))
                     }))
@@ -48393,6 +48407,10 @@ mod tests {
         let copy = cx
             .debug_bounds("copy-toast-1")
             .expect("notification copy button");
+        let action_column = cx.debug_bounds("toast-action-column").unwrap();
+        let toast_message = cx.debug_bounds("toast-message").unwrap();
+        assert!(action_column.contains(&copy.center()));
+        assert!(copy.right() <= toast_message.left());
         cx.simulate_click(copy.center(), Modifiers::default());
         workspace.read_with(&cx, |shell, _| assert_eq!(shell.toasts.len(), 1));
         workspace.update(&mut cx, |shell, cx| {
