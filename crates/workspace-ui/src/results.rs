@@ -716,6 +716,10 @@ impl ResultState {
     }
 
     pub fn status_label(&self) -> String {
+        self.status_label_with_bytes(None)
+    }
+
+    fn status_label_with_bytes(&self, bytes_received: Option<u64>) -> String {
         match self {
             ResultState::Idle => "Ready".into(),
             ResultState::Detached(reference) => match reference.affected_rows {
@@ -731,16 +735,18 @@ impl ResultState {
             ResultState::Pending => "Running…".into(),
             ResultState::Streaming(data) => format!("{}+ row(s) · Running…", data.rows.len()),
             ResultState::Ready(data) => match (data.rows.len(), data.affected_rows) {
-                (0, Some(affected)) => match data.duration_ms {
-                    Some(duration) => format!("{affected} row(s) affected · {duration} ms"),
-                    None => format!("{affected} row(s) affected"),
-                },
+                (0, Some(affected)) => completed_status_label(
+                    format!("{affected} row(s) affected"),
+                    bytes_received,
+                    data.duration_ms,
+                ),
                 (rows, _) => {
                     let more = if data.has_more { "+" } else { "" };
-                    match data.duration_ms {
-                        Some(duration) => format!("{rows}{more} row(s) · {duration} ms"),
-                        None => format!("{rows}{more} row(s)"),
-                    }
+                    completed_status_label(
+                        format!("{rows}{more} row(s)"),
+                        bytes_received,
+                        data.duration_ms,
+                    )
                 }
             },
             ResultState::Unavailable(reason) => reason.clone(),
@@ -802,6 +808,21 @@ fn format_duration(milliseconds: u64) -> String {
     } else {
         format!("{:.1} s", milliseconds as f64 / 1_000.0)
     }
+}
+
+fn completed_status_label(
+    row_label: String,
+    bytes_received: Option<u64>,
+    duration_ms: Option<u64>,
+) -> String {
+    let mut parts = vec![row_label];
+    if let Some(bytes) = bytes_received.filter(|bytes| *bytes > 0) {
+        parts.push(format_bytes(bytes));
+    }
+    if let Some(duration) = duration_ms {
+        parts.push(format!("{duration} ms"));
+    }
+    parts.join(" · ")
 }
 
 fn single_line_text(text: &SharedString) -> SharedString {
@@ -1416,7 +1437,12 @@ impl ResultsView {
             .as_ref()
             .filter(|_| matches!(self.state, ResultState::Pending | ResultState::Streaming(_)))
         else {
-            return self.state.status_label();
+            let bytes_received = self
+                .execution_progress
+                .as_ref()
+                .map(|progress| progress.bytes_received)
+                .filter(|bytes| *bytes > 0);
+            return self.state.status_label_with_bytes(bytes_received);
         };
         let phase = match progress.phase {
             sift_protocol::ExecutionPhase::Queued => "Queued",
@@ -7662,6 +7688,11 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(state.status_label(), "3 row(s) affected · 7 ms");
+
+        assert_eq!(
+            state.status_label_with_bytes(Some(2_048)),
+            "3 row(s) affected · 2.0 KiB · 7 ms"
+        );
     }
 
     #[gpui::test]
@@ -7726,6 +7757,19 @@ mod tests {
                 view.execution_status_label(),
                 "Streaming · statement 2/3 · 42 rows · 2.0 KiB · 1.2 s"
             );
+            assert_eq!(
+                view.apply_stream_page(
+                    Page::Done {
+                        affected_rows: None,
+                        warnings: Vec::new(),
+                    },
+                    cx,
+                ),
+                StreamProgress::Terminal
+            );
+            let completed = view.execution_status_label();
+            assert!(completed.starts_with("0 row(s) · 2.0 KiB · "));
+            assert!(completed.ends_with(" ms"));
         });
     }
 
