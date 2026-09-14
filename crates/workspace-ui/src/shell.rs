@@ -1860,6 +1860,42 @@ fn sql_may_mutate(sql: &str) -> bool {
         })
 }
 
+fn drop_completion_label(sql: &str) -> Option<String> {
+    let mut source = sql.trim_start_matches('\u{feff}').trim_start();
+    loop {
+        if let Some(comment) = source.strip_prefix("--") {
+            source = comment.split_once('\n')?.1.trim_start();
+        } else if let Some(comment) = source.strip_prefix("/*") {
+            source = comment.split_once("*/")?.1.trim_start();
+        } else {
+            break;
+        }
+    }
+    let mut words = source.split(|character: char| !character.is_ascii_alphanumeric());
+    if !words
+        .find(|word| !word.is_empty())
+        .is_some_and(|word| word.eq_ignore_ascii_case("DROP"))
+    {
+        return None;
+    }
+    let object = words
+        .find(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase);
+    Some(match object.as_deref() {
+        Some("table") => "Table dropped".into(),
+        Some("view") => "View dropped".into(),
+        Some("index") => "Index dropped".into(),
+        Some("schema") => "Schema dropped".into(),
+        Some("database") => "Database dropped".into(),
+        Some("function") => "Function dropped".into(),
+        Some("procedure") => "Procedure dropped".into(),
+        Some("trigger") => "Trigger dropped".into(),
+        Some("type") => "Type dropped".into(),
+        Some("sequence") => "Sequence dropped".into(),
+        _ => "DROP completed".into(),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DatabaseWizardStep {
     Provider,
@@ -16280,6 +16316,16 @@ impl WorkspaceShell {
         } else {
             None
         };
+        let command_completion_label = drop_completion_label(&sql);
+        if let Some(results) = self
+            .panes
+            .iter()
+            .find_map(|pane| pane.read(cx).results.get(&item_id).cloned())
+        {
+            results.update(cx, |results, _| {
+                results.set_command_completion_label(command_completion_label)
+            });
+        }
         if sender
             .send(ExecutorCommand::Execute {
                 item_id,
@@ -45096,6 +45142,11 @@ mod tests {
             "with changed as (delete from users returning *) select * from changed"
         ));
         assert!(sql_may_mutate("select 1; drop table users"));
+        assert_eq!(
+            drop_completion_label("-- cleanup\nDROP TABLE users"),
+            Some("Table dropped".into())
+        );
+        assert_eq!(drop_completion_label("DELETE FROM users"), None);
     }
 
     #[gpui::test]

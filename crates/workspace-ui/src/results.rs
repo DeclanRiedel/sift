@@ -1237,6 +1237,9 @@ pub struct ResultsView {
     restore_grid_focus: bool,
     query_started_at: Option<std::time::Instant>,
     execution_progress: Option<sift_protocol::ExecutionProgress>,
+    /// A statement-aware completion for commands whose native row count is
+    /// not meaningful (for example PostgreSQL reports zero for DROP).
+    command_completion_label: Option<String>,
     row_json_filter_input: Entity<TextInput>,
     _row_json_filter_subscription: Subscription,
     row_json_folded: bool,
@@ -1382,6 +1385,7 @@ impl ResultsView {
             restore_grid_focus: false,
             query_started_at: None,
             execution_progress: None,
+            command_completion_label: None,
             row_json_filter_input,
             _row_json_filter_subscription: row_json_filter_subscription,
             row_json_folded: false,
@@ -1431,6 +1435,10 @@ impl ResultsView {
         cx.notify();
     }
 
+    pub(crate) fn set_command_completion_label(&mut self, label: Option<String>) {
+        self.command_completion_label = label;
+    }
+
     pub fn execution_status_label(&self) -> String {
         let Some(progress) = self
             .execution_progress
@@ -1442,6 +1450,13 @@ impl ResultsView {
                 .as_ref()
                 .map(|progress| progress.bytes_received)
                 .filter(|bytes| *bytes > 0);
+            if let (Some(label), ResultState::Ready(data)) =
+                (self.command_completion_label.as_ref(), &self.state)
+            {
+                if data.rows.is_empty() {
+                    return completed_status_label(label.clone(), bytes_received, data.duration_ms);
+                }
+            }
             return self.state.status_label_with_bytes(bytes_received);
         };
         let phase = match progress.phase {
@@ -2668,13 +2683,30 @@ impl ResultsView {
                     ResultState::Streaming(data) => data,
                     _ => unreachable!("stream initialized above"),
                 };
-                data.affected_rows = affected_rows;
+                data.affected_rows = if data.rows.is_empty()
+                    && self.command_completion_label.is_some()
+                    && affected_rows == Some(0)
+                {
+                    None
+                } else {
+                    affected_rows
+                };
                 data.duration_ms = self.query_started_at.take().map(|started| {
                     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
                 });
                 data.warnings = warnings;
                 self.state = ResultState::Ready(data);
                 self.messages = Self::messages_for_state(&self.state);
+                if let Some(label) = self
+                    .command_completion_label
+                    .clone()
+                    .filter(|_| self.state.ready().is_some_and(|data| data.rows.is_empty()))
+                {
+                    self.messages.push(ResultMessage {
+                        severity: MessageSeverity::Info,
+                        text: label,
+                    });
+                }
                 self.selected_message = None;
                 self.stream_result_seen = false;
                 self.window_held = false;
@@ -7732,6 +7764,33 @@ mod tests {
                 panic!("terminal page should complete the result")
             };
             assert!(data.duration_ms.is_some_and(|duration| duration >= 12));
+        });
+    }
+
+    #[gpui::test]
+    fn drop_completion_replaces_native_zero_row_count(cx: &mut TestAppContext) {
+        let view = cx.new(ResultsView::new);
+        view.update(cx, |view, cx| {
+            view.set_command_completion_label(Some("Table dropped".into()));
+            view.begin_stream(cx);
+            let progress = view.apply_stream_page(
+                Page::Done {
+                    affected_rows: Some(0),
+                    warnings: Vec::new(),
+                },
+                cx,
+            );
+            assert_eq!(progress, StreamProgress::Terminal);
+            assert!(matches!(
+                view.state(),
+                ResultState::Ready(ResultData {
+                    affected_rows: None,
+                    ..
+                })
+            ));
+            assert!(view.execution_status_label().starts_with("Table dropped"));
+            assert_eq!(view.messages.len(), 1);
+            assert_eq!(view.messages[0].text, "Table dropped");
         });
     }
 
