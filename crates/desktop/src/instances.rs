@@ -966,8 +966,7 @@ async fn inspect_root(
             .map_err(|error| format!("realizing instance settings failed: {error:#}"))?;
         sift_server::instance_runtime::ensure_file_secret_key(&config)
             .map_err(|error| format!("preparing instance secret store failed: {error:#}"))?;
-        let store = sift_server::metadata_runtime::build_metadata_store(&config)
-            .map_err(|error| format!("opening instance metadata failed: {error:#}"))?
+        let store = build_desktop_instance_metadata_store(&config)?
             .ok_or_else(|| "instance metadata is disabled".to_string())?;
         store
             .plan_instance_manifest(&instance.manifest)
@@ -1027,8 +1026,7 @@ async fn inspect_root(
             .map_err(|error| format!("loading applied instance failed: {error:#}"))?;
         sift_server::instance_runtime::ensure_file_secret_key(&applied.config)
             .map_err(|error| format!("preparing instance secret store failed: {error:#}"))?;
-        let store = sift_server::metadata_runtime::build_metadata_store(&applied.config)
-            .map_err(|error| format!("opening instance metadata failed: {error:#}"))?
+        let store = build_desktop_instance_metadata_store(&applied.config)?
             .ok_or_else(|| "instance metadata is disabled".to_string())?;
         store
             .verified_instance_credential_status()
@@ -1262,6 +1260,31 @@ fn manifest_value_summary(path: &str, value: &serde_json::Value) -> Option<Strin
     Some(rendered)
 }
 
+fn build_desktop_instance_metadata_store(
+    config: &sift_server::config::Config,
+) -> Result<Option<sift_metadata::MetadataStore>, String> {
+    use sift_server::config::{DeploymentPolicy, RuntimeMode};
+
+    if config.deployment == DeploymentPolicy::Personal && config.mode == RuntimeMode::InProcess {
+        let status = sift_server::metadata_runtime::migration_status(config)
+            .map_err(|error| format!("checking instance metadata failed: {error:#}"))?;
+        if !status.is_current() {
+            let _maintenance = sift_server::runtime::acquire_maintenance_exclusive(config)
+                .map_err(|error| {
+                    format!("stopping instance for automatic metadata migration failed: {error:#}")
+                })?;
+            sift_server::metadata_runtime::apply_metadata_migrations(config, true).map_err(
+                |error| {
+                    format!("applying compatible instance metadata migration failed: {error:#}")
+                },
+            )?;
+        }
+    }
+
+    sift_server::metadata_runtime::build_metadata_store(config)
+        .map_err(|error| format!("opening instance metadata failed: {error:#}"))
+}
+
 async fn apply_root(
     root: &std::path::Path,
     allow_destroy: bool,
@@ -1307,8 +1330,7 @@ async fn import_root_credential(
         .map_err(|error| format!("preparing instance secret store failed: {error:#}"))?;
     let _maintenance = sift_server::runtime::acquire_maintenance_exclusive(&applied.config)
         .map_err(|error| format!("stop the instance before importing credentials: {error:#}"))?;
-    let store = sift_server::metadata_runtime::build_metadata_store(&applied.config)
-        .map_err(|error| format!("opening instance metadata failed: {error:#}"))?
+    let store = build_desktop_instance_metadata_store(&applied.config)?
         .ok_or_else(|| "instance metadata is disabled".to_string())?;
     let field = match kind {
         InstanceCredentialKind::GithubOauthClientSecret => "client_secret",
@@ -1799,6 +1821,56 @@ async fn forget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn metadata_config(
+        directory: &std::path::Path,
+        deployment: sift_server::config::DeploymentPolicy,
+    ) -> sift_server::config::Config {
+        let mut config = sift_server::config::Config {
+            deployment,
+            ..Default::default()
+        };
+        config.metadata.path = Some(directory.join("metadata.sqlite").display().to_string());
+        config.metadata.bootstrap_local = false;
+        config.runtime.state_dir = Some(directory.join("runtime").display().to_string());
+        config
+    }
+
+    #[test]
+    fn desktop_personal_instance_applies_compatible_metadata_migrations() {
+        let directory = tempfile::tempdir().unwrap();
+        let personal = metadata_config(
+            directory.path(),
+            sift_server::config::DeploymentPolicy::Personal,
+        );
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../metadata/tests/fixtures/schema-v43.sqlite"),
+            personal.metadata.path.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            sift_server::metadata_runtime::migration_status(&personal)
+                .unwrap()
+                .current_version,
+            43
+        );
+
+        let store = build_desktop_instance_metadata_store(&personal)
+            .unwrap()
+            .expect("metadata enabled");
+        store.ensure_schema_current().unwrap();
+
+        let team_directory = tempfile::tempdir().unwrap();
+        let team = metadata_config(
+            team_directory.path(),
+            sift_server::config::DeploymentPolicy::Team,
+        );
+        let error = build_desktop_instance_metadata_store(&team)
+            .err()
+            .expect("team instances require an explicit migration");
+        assert!(error.contains("metadata schema migration required"));
+    }
 
     #[test]
     fn manifest_plan_flattens_changed_fields_and_bounds_values() {

@@ -24,9 +24,11 @@ operator outside the personal launcher lifecycle.
 ## Deployment policy
 
 The personal, in-process launcher runs `migrate apply --automatic` before it
-starts the selected binary. Daemon, team, remote, and container lifecycles do
-not migrate implicitly: their operator or orchestrator runs `migrate status`
-and `migrate apply` while the server is stopped.
+starts the selected binary. The desktop instance manager applies the same
+policy before inspecting a locally managed personal instance, while holding
+that instance's offline maintenance lock. Daemon, team, remote, and container
+lifecycles do not migrate implicitly: their operator or orchestrator runs
+`migrate status` and `migrate apply` while the server is stopped.
 
 Automatic migration accepts only migrations classified as backward-compatible
 with the previous binary. This preserves launcher's candidate rollback: if a
