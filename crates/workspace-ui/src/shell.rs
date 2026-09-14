@@ -15880,6 +15880,21 @@ impl WorkspaceShell {
         }
     }
 
+    fn rebind_query_semantic_target(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        self.semantic_completion_tasks.remove(&item_id);
+        self.semantic_analyze_tasks.remove(&item_id);
+        self.query_semantic_targets.remove(&item_id);
+        if let Some(target) = self
+            .sourced_semantic_target(item_id, cx)
+            .or_else(|| self.active_semantic_target())
+        {
+            self.query_semantic_targets.insert(item_id, target);
+        }
+        if let Some(editor) = self.editor_for_item(item_id, cx) {
+            editor.update(cx, |editor, cx| editor.invalidate_semantic_context(cx));
+        }
+    }
+
     fn remembered_query_params(&self, sql: &str) -> Result<Vec<sift_protocol::Value>, String> {
         let parameters = detect_query_parameters(sql);
         if parameters.is_empty() {
@@ -24186,7 +24201,7 @@ impl WorkspaceShell {
             if !pane.read(cx).contains_item(item_id) {
                 continue;
             }
-            return pane.update(cx, |pane, cx| {
+            let applied = pane.update(cx, |pane, cx| {
                 let Some(item) = pane.items.iter().find(|item| item.id == item_id) else {
                     return false;
                 };
@@ -24216,6 +24231,10 @@ impl WorkspaceShell {
                 cx.notify();
                 true
             });
+            if applied {
+                self.rebind_query_semantic_target(item_id, cx);
+            }
+            return applied;
         }
         false
     }
@@ -24330,10 +24349,14 @@ impl WorkspaceShell {
         let profile_id = match item.source.as_ref() {
             Some(ItemSource::DatabaseObject(source)) => Some(source.profile_id),
             Some(ItemSource::SavedQuery(source)) => source.connection_profile_id,
-            _ => match self.connection_status {
-                ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
-                _ => None,
-            },
+            _ => self
+                .query_semantic_targets
+                .get(&item.id)
+                .map(|target| target.profile_id)
+                .or(match self.connection_status {
+                    ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
+                    _ => None,
+                }),
         };
         Some(ActiveQuerySnapshot {
             item_id: item.id,
@@ -24889,6 +24912,9 @@ impl WorkspaceShell {
         let title = format!("{}.sql", query.name);
         let item_id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
+        let semantic_target = query
+            .connection_profile_id
+            .and_then(|profile| self.semantic_target_for_profile(profile.0));
         let keymap = EditorKeymap::Vim;
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&query.sql_text), cx)
@@ -24922,6 +24948,9 @@ impl WorkspaceShell {
                 )
             });
         }
+        if let Some(target) = semantic_target {
+            self.query_semantic_targets.insert(item_id, target);
+        }
         self.focus_active_pane(window, cx);
         self.persist(cx);
         cx.notify();
@@ -24947,6 +24976,7 @@ impl WorkspaceShell {
         let title = format!("query-{ordinal}.sql");
         let item_id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
+        let semantic_target = self.active_semantic_target();
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(""), cx).with_keymap(EditorKeymap::Vim)
         });
@@ -24968,6 +24998,9 @@ impl WorkspaceShell {
                     cx,
                 )
             });
+        }
+        if let Some(target) = semantic_target {
+            self.query_semantic_targets.insert(item_id, target);
         }
         self.focus_active_pane(window, cx);
         self.persist(cx);
@@ -34466,9 +34499,69 @@ impl WorkspaceShell {
             pane.database_source(item.id)
                 .map(|source| (item.id, source))
         });
-        let database_breadcrumb = active_database_source.map(|(item_id, source)| {
-            app_bar::render_database_breadcrumb(item_id, source, colors, cx)
+        let query_context = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            let item = pane.active_item()?;
+            (item.kind == ItemKind::Query && pane.database_source(item.id).is_none())
+                .then(|| {
+                    self.query_semantic_targets
+                        .get(&item.id)
+                        .cloned()
+                        .or_else(|| self.sourced_semantic_target(item.id, cx))
+                })
+                .flatten()
         });
+        let database_context = active_database_source
+            .map(|(item_id, source)| {
+                app_bar::render_database_breadcrumb(item_id, source, colors, cx)
+            })
+            .or_else(|| {
+                query_context.map(|target| {
+                    let database = target.database.clone();
+                    let aria_label = database.as_ref().map_or_else(
+                        || format!("Query connection {}", target.profile_name),
+                        |database| {
+                            format!(
+                                "Query connection {} database {database}",
+                                target.profile_name
+                            )
+                        },
+                    );
+                    div()
+                        .id("query-connection-context")
+                        .debug_selector(|| "query-connection-context".into())
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .overflow_hidden()
+                        .text_xs()
+                        .aria_label(aria_label)
+                        .child(
+                            div()
+                                .max_w(px(180.))
+                                .truncate()
+                                .text_color(colors.muted_text)
+                                .child(target.profile_name),
+                        )
+                        .children(database.map(|database| {
+                            div()
+                                .flex()
+                                .min_w_0()
+                                .items_center()
+                                .gap_1()
+                                .child(icon(IconName::ChevronRight, colors.disabled_text, 9.))
+                                .child(
+                                    div()
+                                        .max_w(px(180.))
+                                        .truncate()
+                                        .text_color(colors.text)
+                                        .child(database),
+                                )
+                        }))
+                        .into_any_element()
+                })
+            });
 
         let git_context_label = self.workspace_git_context_label();
         let server_name = self.active_server_name();
@@ -34554,7 +34647,7 @@ impl WorkspaceShell {
                 .gap_2()
                 // Interactive breadcrumbs must not become native window drag targets.
                 .occlude()
-                .when(database_breadcrumb.is_none(), |title| {
+                .when(database_context.is_none(), |title| {
                     title.window_control_area(WindowControlArea::Drag)
                 })
                 .on_mouse_down(
@@ -34572,7 +34665,7 @@ impl WorkspaceShell {
                 .text_center()
                 .text_sm()
                 .text_color(colors.muted_text)
-                .child(database_breadcrumb.unwrap_or_else(|| {
+                .child(database_context.unwrap_or_else(|| {
                     div()
                         .min_w_0()
                         .truncate()
@@ -51087,6 +51180,82 @@ mod tests {
             CommandRegistry::definition(CommandId::NewQuery).language,
             "<leader> q n"
         );
+    }
+
+    #[gpui::test]
+    fn query_connection_context_is_pinned_and_rebound_with_saved_query(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let item_id = workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "demo".into(),
+                rooms: Vec::new(),
+                connections: vec![
+                    crate::ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "Postgres lab".into(),
+                        provider_id: sift_protocol::Engine::Postgres.provider_id(),
+                        tags: Vec::new(),
+                    },
+                    crate::ConnectionNavEntry {
+                        id: 3,
+                        tenant_id: 1,
+                        name: "Analytics".into(),
+                        provider_id: sift_protocol::Engine::SqlServer.provider_id(),
+                        tags: Vec::new(),
+                    },
+                ],
+            }];
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Postgres lab".into(),
+            };
+            shell.new_query(window, cx);
+            let item_id = shell.panes[shell.active_pane]
+                .read(cx)
+                .active_item()
+                .unwrap()
+                .id;
+            assert_eq!(shell.query_semantic_targets[&item_id].profile_id, 2);
+
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 3,
+                name: "Analytics".into(),
+            };
+            let saved = sift_api_types::SavedQuery {
+                id: sift_api_types::SavedQueryId(9),
+                tenant_id: sift_api_types::TenantId(1),
+                owner_principal_id: Some(sift_api_types::PrincipalId(7)),
+                name: "Bound query".into(),
+                sql_text: "select 1".into(),
+                connection_profile_id: Some(sift_api_types::ConnectionProfileId(3)),
+                tags: Vec::new(),
+                created_at: "2026-09-14T10:00:00Z".parse().unwrap(),
+                updated_at: "2026-09-14T10:00:00Z".parse().unwrap(),
+                revision: 1,
+            };
+            assert!(shell.apply_saved_query_to_item(item_id, &saved, false, cx));
+            assert_eq!(shell.query_semantic_targets[&item_id].profile_id, 3);
+            assert_eq!(
+                shell
+                    .active_query_snapshot(cx)
+                    .unwrap()
+                    .connection_profile_id,
+                Some(3)
+            );
+            item_id
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("query-connection-context").is_some());
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell.query_semantic_targets[&item_id].profile_name,
+                "Analytics"
+            );
+        });
     }
 
     #[gpui::test]
