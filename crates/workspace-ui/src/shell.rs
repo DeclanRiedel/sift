@@ -40730,31 +40730,25 @@ impl gpui::Render for WorkspaceShell {
                                     .child(toast.message.clone()),
                             )
                             .child(
-                                div()
-                                    .absolute()
-                                    .top_2()
-                                    .right_2()
-                                    .child(
-                                        IconButton::new(
-                                            ("copy-toast", toast.id as usize),
-                                            IconName::Copy,
-                                            "Copy notification",
-                                        )
-                                        .debug_selector(format!("copy-toast-{}", toast.id))
-                                        .square(px(24.))
-                                        .icon_size(12.)
-                                        .on_click({
-                                            let message = toast.message.clone();
-                                            move |_, _, cx| {
-                                                cx.stop_propagation();
-                                                cx.write_to_clipboard(
-                                                    gpui::ClipboardItem::new_string(
-                                                        message.clone(),
-                                                    ),
-                                                );
-                                            }
-                                        }),
-                                    ),
+                                div().absolute().top_2().right_2().child(
+                                    IconButton::new(
+                                        ("copy-toast", toast.id as usize),
+                                        IconName::Copy,
+                                        "Copy notification",
+                                    )
+                                    .debug_selector(format!("copy-toast-{}", toast.id))
+                                    .square(px(24.))
+                                    .icon_size(12.)
+                                    .on_click({
+                                        let message = toast.message.clone();
+                                        move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                                message.clone(),
+                                            ));
+                                        }
+                                    }),
+                                ),
                             )
                     }))
             }))

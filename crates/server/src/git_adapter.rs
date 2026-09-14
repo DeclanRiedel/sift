@@ -35,6 +35,10 @@ pub enum GitAdapterError {
     ExecutableUnavailable,
     #[error("the projection is not a Git repository")]
     NotRepository,
+    #[error("the Git repository metadata is invalid or corrupt")]
+    CorruptRepository,
+    #[error("Git cannot read the repository; verify the projection filesystem permissions")]
+    RepositoryPermissionDenied,
     #[error("Git rejected the repository ownership; verify the projection owner and operator-configured root")]
     UntrustedRepository,
     #[error("Git input or output is invalid")]
@@ -2651,6 +2655,17 @@ fn classify_local_error(code: Option<i32>, stderr: &[u8]) -> GitAdapterError {
     let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
     if stderr.contains("dubious ownership") || stderr.contains("unsafe repository") {
         GitAdapterError::UntrustedRepository
+    } else if stderr.contains("not a git repository") {
+        GitAdapterError::NotRepository
+    } else if stderr.contains("permission denied") || stderr.contains("access is denied") {
+        GitAdapterError::RepositoryPermissionDenied
+    } else if stderr.contains("index file corrupt")
+        || stderr.contains("index file smaller than expected")
+        || stderr.contains("unknown index entry format")
+        || stderr.contains("bad object head")
+        || stderr.contains("bad config line")
+    {
+        GitAdapterError::CorruptRepository
     } else {
         GitAdapterError::CommandFailed(code)
     }
@@ -3228,6 +3243,29 @@ mod tests {
         );
         assert!(matches!(error, GitAdapterError::UntrustedRepository));
         assert!(!error.to_string().contains("/secret/checkout"));
+    }
+
+    #[test]
+    fn local_repository_failures_are_actionable_and_redacted() {
+        let cases = [
+            (
+                b"fatal: not a git repository: '/secret/checkout'".as_slice(),
+                GitAdapterError::NotRepository,
+            ),
+            (
+                b"fatal: /secret/checkout/.git/index: index file smaller than expected".as_slice(),
+                GitAdapterError::CorruptRepository,
+            ),
+            (
+                b"fatal: cannot open '/secret/checkout/.git/HEAD': Permission denied".as_slice(),
+                GitAdapterError::RepositoryPermissionDenied,
+            ),
+        ];
+        for (stderr, expected) in cases {
+            let error = classify_local_error(Some(128), stderr);
+            assert_eq!(error.to_string(), expected.to_string());
+            assert!(!error.to_string().contains("/secret/checkout"));
+        }
     }
 
     #[test]

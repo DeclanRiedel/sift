@@ -5459,6 +5459,8 @@ fn git_adapter_error(error: crate::git_adapter::GitAdapterError) -> ApiError {
         GitAdapterError::Disabled
         | GitAdapterError::ExecutableUnavailable
         | GitAdapterError::NotRepository
+        | GitAdapterError::CorruptRepository
+        | GitAdapterError::RepositoryPermissionDenied
         | GitAdapterError::UntrustedRepository
         | GitAdapterError::InvalidData
         | GitAdapterError::UnsupportedOperation(_)
