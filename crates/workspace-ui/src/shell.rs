@@ -806,6 +806,8 @@ enum ConnectionDockRow {
     },
 }
 
+const CONNECTIONS_SCROLL_TAIL_ROWS: usize = 4;
+
 #[derive(Debug, Clone)]
 enum ConnectionTreeAction {
     Tenant(i64),
@@ -37849,7 +37851,7 @@ impl WorkspaceShell {
                                 .scroll_to_item(index, ScrollStrategy::Nearest);
                         }
                     }
-                    let row_count = rows.len();
+                    let row_count = rows.len() + CONNECTIONS_SCROLL_TAIL_ROWS;
                     dock_view
                         .child(
                             uniform_list(
@@ -37857,11 +37859,17 @@ impl WorkspaceShell {
                                 row_count,
                             cx.processor(move |shell, range: Range<usize>, _, cx| {
                                     range
-                                        .filter_map(|index| {
-                                            rows.get(index).cloned().map(|row| (index, row))
-                                        })
-                                        .map(|(index, row)| {
-                                            shell.render_connection_dock_row(index, row, cx)
+                                        .map(|index| {
+                                            if let Some(row) = rows.get(index).cloned() {
+                                                shell.render_connection_dock_row(index, row, cx)
+                                            } else {
+                                                div()
+                                                    .debug_selector(|| {
+                                                        "connections-scroll-tail".into()
+                                                    })
+                                                    .h(cx.theme().metrics.row_height)
+                                                    .into_any_element()
+                                            }
                                         })
                                         .collect()
                                 }),
@@ -52651,6 +52659,7 @@ mod tests {
         let footer = cx
             .debug_bounds("connections-health-footer")
             .expect("connections health footer");
+        assert!(cx.debug_bounds("connections-scroll-tail").is_some());
         let left_dock = cx.debug_bounds("left-dock").expect("left dock");
         assert_eq!(footer.bottom(), left_dock.bottom());
         let search = cx
