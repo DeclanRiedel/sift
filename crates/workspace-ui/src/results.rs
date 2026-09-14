@@ -6078,7 +6078,6 @@ impl ResultsView {
                 .p_4()
                 .text_center()
                 .gap_2()
-                .child(icon(IconName::Activity, colors.accent, 24.))
                 .child(
                     div()
                         .text_color(colors.text)
