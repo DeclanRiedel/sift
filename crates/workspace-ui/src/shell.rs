@@ -51546,6 +51546,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn problem_copy_buttons_remain_interactive_after_scrolling(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            for index in 0..50 {
+                shell.record_runtime_error(
+                    None,
+                    &format!("Problem {index}"),
+                    format!("Failure details {index}"),
+                    cx,
+                );
+            }
+            shell.show_global_problems(window, cx);
+        });
+        cx.run_until_parked();
+
+        let editor = cx.debug_bounds("editor-scroll").expect("Problems editor");
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: editor.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-1_200.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+
+        let copy = cx
+            .debug_bounds("copy-message-20")
+            .expect("copy button for a scrolled problem");
+        assert!(copy.top() >= editor.top() && copy.bottom() <= editor.bottom());
+        cx.simulate_mouse_move(copy.center(), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("copy-message-20"), Some(copy));
+        cx.simulate_click(copy.center(), Modifiers::default());
+        assert!(cx
+            .read_from_clipboard()
+            .unwrap()
+            .text()
+            .unwrap()
+            .contains("Failure details 20"));
+    }
+
+    #[gpui::test]
     fn workspace_reconcile_dismisses_with_escape_and_ignores_scrim(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);

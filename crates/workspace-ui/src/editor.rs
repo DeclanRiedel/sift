@@ -3795,12 +3795,10 @@ impl QueryEditor {
             })
             .collect::<Vec<_>>();
         starts.push(text.len());
-        let top = -self.scroll_handle.offset().y;
-        let bottom = top + self.scroll_handle.bounds().size.height;
         starts
             .windows(2)
             .enumerate()
-            .filter_map(|(index, offsets)| {
+            .map(|(index, offsets)| {
                 let message = text[offsets[0]..offsets[1]].trim_end().to_owned();
                 let position = if message.starts_with("[ERROR]") || message.starts_with("[WARNING]")
                 {
@@ -3810,32 +3808,22 @@ impl QueryEditor {
                 };
                 let (row, _) = self.visual_position(position);
                 let y = EDITOR_VERTICAL_INSET + EDITOR_LINE_HEIGHT * row as f32;
-                if self.scroll_handle.bounds().size.height > px(0.)
-                    && (y + EDITOR_LINE_HEIGHT < top || y > bottom)
-                {
-                    return None;
-                }
-                Some(
-                    div()
-                        .absolute()
-                        .right(px(8.))
-                        .top(y)
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            IconButton::new(
-                                ("copy-message", index),
-                                IconName::Copy,
-                                "Copy message",
-                            )
+                div()
+                    .absolute()
+                    .right(px(8.))
+                    .top(y)
+                    .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        IconButton::new(("copy-message", index), IconName::Copy, "Copy message")
                             .debug_selector(format!("copy-message-{index}"))
                             .square(EDITOR_LINE_HEIGHT)
                             .icon_size(12.)
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(message.clone()))
                             }),
-                        )
-                        .into_any_element(),
-                )
+                    )
+                    .into_any_element()
             })
             .collect()
     }
