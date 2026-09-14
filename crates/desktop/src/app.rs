@@ -5237,8 +5237,15 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::ImportCsv { request } => {
-                let result = match context.as_ref() {
+            ExecutorCommand::ImportCsv {
+                profile_id,
+                request,
+            } => {
+                let result = match context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == profile_id)
+                    .or_else(|| parked_contexts.get(&profile_id))
+                {
                     Some(opened) => opened
                         .client
                         .import_csv(opened.session, opened.connection, request)

@@ -7222,51 +7222,16 @@ impl WorkspaceShell {
                 }
                 Modal::CsvImport => {
                     let preview = self.csv_import_preview.as_ref();
-                    let mappings = preview
-                        .into_iter()
-                        .flat_map(|preview| &preview.columns)
-                        .enumerate()
-                        .map(|(index, column)| {
-                            div()
-                                .debug_selector(move || format!("csv-import-column-{index}"))
-                                .grid()
-                                .grid_cols(4)
-                                .gap_2()
-                                .px_2()
-                                .py_1()
-                                .border_b_1()
-                                .border_color(colors.subtle_border)
-                                .text_xs()
-                                .child(column.source.clone())
-                                .child(format!("→ {}", column.target))
-                                .child(format!("{:?}", column.inferred_type))
-                                .child(if column.nullable { "nullable" } else { "required" })
-                        })
-                        .collect::<Vec<_>>();
-                    let rows = preview
-                        .into_iter()
-                        .flat_map(|preview| &preview.rows)
-                        .enumerate()
-                        .map(|(index, row)| {
-                            div()
-                                .debug_selector(move || format!("csv-import-preview-row-{index}"))
-                                .px_2()
-                                .py_1()
-                                .border_b_1()
-                                .border_color(colors.subtle_border)
-                                .font_family("monospace")
-                                .text_xs()
-                                .truncate()
-                                .child(row.join("  |  "))
-                        })
-                        .collect::<Vec<_>>();
-                    let (table, row_count, conflict_policy, create_table) = preview.map_or_else(
+                    let (table, row_count, conflict_policy, create_table, target, columns, rows) = preview.map_or_else(
                         || {
                             (
                                 "CSV import".to_owned(),
                                 0,
                                 sift_protocol::CsvConflictPolicy::Abort,
                                 true,
+                                "No connection selected".to_owned(),
+                                Vec::new(),
+                                Vec::new(),
                             )
                         },
                         |preview| {
@@ -7275,38 +7240,109 @@ impl WorkspaceShell {
                                 preview.row_count,
                                 preview.conflict_policy,
                                 preview.create_table,
+                                preview.target.database.as_deref().map_or_else(
+                                    || preview.target.profile_name.clone(),
+                                    |database| format!("{} / {database}", preview.target.profile_name),
+                                ),
+                                preview.columns.clone(),
+                                preview.rows.clone(),
                             )
                         },
                     );
+                    let cell_width = px(150.);
+                    let grid_width = px((columns.len().max(1) as f32 * 150.).max(420.));
+                    let mapping_cells = columns.iter().enumerate().map(|(index, column)| {
+                        div()
+                            .debug_selector(move || format!("csv-import-column-{index}"))
+                            .w(cell_width)
+                            .flex_none()
+                            .px_2()
+                            .py_1()
+                            .border_r_1()
+                            .border_color(colors.subtle_border)
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().truncate().child(column.target.clone()))
+                            .child(
+                                div()
+                                    .text_color(colors.muted_text)
+                                    .child(format!(
+                                        "{:?} · {}",
+                                        column.inferred_type,
+                                        if column.nullable { "nullable" } else { "required" }
+                                    )),
+                            )
+                    });
+                    let data_header = columns.iter().map(|column| {
+                        div()
+                            .w(cell_width)
+                            .flex_none()
+                            .h(px(26.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .border_r_1()
+                            .border_color(colors.subtle_border)
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(column.source.clone())
+                    });
+                    let data_rows = rows.into_iter().enumerate().map(|(index, row)| {
+                        div()
+                            .debug_selector(move || format!("csv-import-preview-row-{index}"))
+                            .w(grid_width)
+                            .flex()
+                            .border_t_1()
+                            .border_color(colors.subtle_border)
+                            .children(row.into_iter().map(move |value| {
+                                div()
+                                    .w(cell_width)
+                                    .flex_none()
+                                    .h(px(26.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .border_r_1()
+                                    .border_color(colors.subtle_border)
+                                    .font_family("monospace")
+                                    .truncate()
+                                    .child(value)
+                            }))
+                    });
                     div()
                         .debug_selector(|| "csv-import-preview".into())
-                        .w_full()
-                        .max_h(px(700.))
+                        .w(px(760.))
+                        .max_h(px(680.))
                         .flex()
                         .flex_col()
-                        .gap_3()
-                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Import CSV into {table}")))
-                        .child(div().text_sm().text_color(colors.muted_text).child(format!("{row_count} data row(s) · inferred from first 200 rows · preview limited to 20")))
-                        .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("COLUMN MAPPING"))
-                        .child(div().id("csv-import-mappings").max_h(px(180.)).overflow_y_scroll().border_1().border_color(colors.subtle_border).children(mappings))
+                        .gap_2()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(if create_table { format!("Prepare {table}") } else { format!("Import into {table}") }))
+                        .child(div().text_sm().text_color(colors.muted_text).child(format!("{target} · {row_count} rows · 200 sampled · 20 previewed")))
+                        .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("INFERRED COLUMNS"))
+                        .child(div().id("csv-import-mappings").overflow_x_scroll().border_1().border_color(colors.subtle_border).child(div().w(grid_width).flex().text_xs().children(mapping_cells)))
                         .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("DATA PREVIEW"))
-                        .child(div().id("csv-import-preview-rows").flex_1().min_h_0().overflow_y_scroll().border_1().border_color(colors.subtle_border).children(rows))
+                        .child(div().id("csv-import-preview-rows").flex_1().min_h(px(120.)).overflow_scroll().border_1().border_color(colors.subtle_border).text_xs().child(div().w(grid_width).child(div().w(grid_width).flex().bg(colors.toolbar).children(data_header)).children(data_rows)))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .child(
-                                    Button::new(
-                                        "csv-import-conflict-policy",
-                                        format!("Duplicates: {:?}", conflict_policy),
-                                    )
-                                    .debug_selector("csv-import-conflict-policy")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                        shell.toggle_csv_conflict_policy(cx)
-                                    })),
-                                )
+                                .children((!create_table).then(||
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(div().text_xs().text_color(colors.muted_text).child("Duplicates"))
+                                        .children([
+                                            ("Abort", sift_protocol::CsvConflictPolicy::Abort),
+                                            ("Skip", sift_protocol::CsvConflictPolicy::Skip),
+                                            ("Quarantine", sift_protocol::CsvConflictPolicy::Quarantine),
+                                        ].into_iter().enumerate().map(|(index, (label, policy))| Button::new(("csv-import-conflict-policy", index), label)
+                                            .debug_selector(format!("csv-import-conflict-{}", label.to_lowercase()))
+                                            .tone(if conflict_policy == policy { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                                            .on_click(cx.listener(move |shell, _, _, cx| shell.set_csv_conflict_policy(policy, cx))))),
+                                ))
                                 .child(
                                     div()
                                         .flex()
@@ -7328,7 +7364,7 @@ impl WorkspaceShell {
                                             Button::new(
                                                 "confirm-csv-import",
                                                 if create_table {
-                                                    "Create table and import"
+                                                    "Open CREATE TABLE query"
                                                 } else {
                                                     "Import into table"
                                                 },
@@ -7336,8 +7372,8 @@ impl WorkspaceShell {
                                             .debug_selector("confirm-csv-import")
                                             .tone(ButtonTone::Accent)
                                             .disabled(preview.is_none())
-                                            .on_click(cx.listener(|shell, _, _, cx| {
-                                                shell.confirm_csv_import(cx)
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.confirm_csv_import(window, cx)
                                             })),
                                         ),
                                 ),
