@@ -43773,6 +43773,32 @@ mod tests {
     }
 
     #[gpui::test]
+    fn room_administration_fits_content_without_card_scrolling(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.modal = Some(Modal::RoomAdministration);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let card = cx.debug_bounds("modal-card").unwrap();
+        let heading_before = cx.debug_bounds("room-administration-heading").unwrap();
+        assert!(card.size.height < px(620.));
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: card.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-500.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("room-administration-heading").unwrap(),
+            heading_before
+        );
+    }
+
+    #[gpui::test]
     fn long_modal_errors_do_not_hide_footer_actions(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);

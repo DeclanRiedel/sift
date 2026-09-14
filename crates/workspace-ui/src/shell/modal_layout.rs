@@ -23,7 +23,7 @@ pub(super) fn card(
             card.w(gpui::relative(0.985)).h(gpui::relative(0.985))
         })
         .when(!data_results, |card| {
-            card.max_h(max_height).overflow_scroll()
+            card.max_h(max_height).overflow_hidden()
         })
         .flex()
         .flex_col()
