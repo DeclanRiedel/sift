@@ -1211,6 +1211,10 @@ pub struct QueryEditor {
     revision: u64,
     mouse_anchor: Option<usize>,
     pub(crate) message_copy_buttons: bool,
+    /// Keep the last wrap layout while a horizontal split is being dragged.
+    /// Re-shaping every line for every intermediate width makes the pointer
+    /// trail the resize handle; the final width is applied when the drag ends.
+    suspend_wrap_updates: bool,
     line_cache: RefCell<LineLayoutCache>,
     wraps: RefCell<WrapCache>,
     marked_range: Option<Range<usize>>,
@@ -1274,6 +1278,7 @@ impl QueryEditor {
             revision: 1,
             mouse_anchor: None,
             message_copy_buttons: false,
+            suspend_wrap_updates: false,
             line_cache: RefCell::new(LineLayoutCache::default()),
             wraps: RefCell::new(WrapCache::default()),
             marked_range: None,
@@ -1389,6 +1394,21 @@ impl QueryEditor {
             cx.emit(EditorEvent::DiagnosticsChanged);
             cx.notify();
         }
+    }
+
+    pub(crate) fn suspend_wrap_updates(&mut self, suspend: bool, cx: &mut Context<Self>) {
+        if self.suspend_wrap_updates == suspend {
+            return;
+        }
+        self.suspend_wrap_updates = suspend;
+        if !suspend {
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wrap_updates_suspended(&self) -> bool {
+        self.suspend_wrap_updates
     }
 
     /// Replace the complete document from its owning surface without emitting
@@ -4580,7 +4600,9 @@ impl Element for QueryEditorElement {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let editor = self.editor.read(cx);
-        if editor.update_wraps(editor.scroll_handle.bounds().size.width, cx.theme(), window) {
+        if !editor.suspend_wrap_updates
+            && editor.update_wraps(editor.scroll_handle.bounds().size.width, cx.theme(), window)
+        {
             editor.reveal_cursor();
         }
         let line_count = editor.visual_rows().len();
@@ -4624,7 +4646,8 @@ impl Element for QueryEditorElement {
         let mut lines = Vec::new();
         let mut line_numbers = Vec::new();
         let line_starts = editor.document.line_starts();
-        let wraps_changed = editor.update_wraps(bounds.size.width, theme, window);
+        let wraps_changed =
+            !editor.suspend_wrap_updates && editor.update_wraps(bounds.size.width, theme, window);
         let displayed_lines = editor.visual_rows();
         if wraps_changed
             && bounds.size.height
