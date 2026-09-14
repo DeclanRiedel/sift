@@ -2867,6 +2867,30 @@ impl QueryEditor {
         true
     }
 
+    /// Move a plain Insert-mode caret without asking ModalKit for a complete
+    /// snapshot. Key-repeat can deliver arrows much faster than frames; the
+    /// snapshot path turns each one into work proportional to the document.
+    fn move_in_insert(
+        &mut self,
+        movement: impl FnOnce(&mut QueryDocument),
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.vim_mode != VimMode::Insert
+            || !self.secondary_cursors.is_empty()
+            || !self.vim.as_mut().is_some_and(VimEngine::is_plain_insert)
+        {
+            return false;
+        }
+        movement(&mut self.document);
+        let (line, column) = self.document.cursor_position();
+        self.vim
+            .as_mut()
+            .expect("plain Insert mode requires a Vim engine")
+            .set_indexed_cursor((line - 1, column - 1));
+        self.selection_changed(cx);
+        true
+    }
+
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
         if self.read_only || self.delete_in_insert(true, cx) {
             return;
@@ -3002,6 +3026,9 @@ impl QueryEditor {
     }
 
     fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.move_in_insert(|document| document.move_left(false), cx) {
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Left, cx) {
             return;
         }
@@ -3010,6 +3037,9 @@ impl QueryEditor {
     }
 
     fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.move_in_insert(|document| document.move_right(false), cx) {
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Right, cx) {
             return;
         }
@@ -3022,6 +3052,9 @@ impl QueryEditor {
             cx.notify();
             return;
         }
+        if self.move_in_insert(|document| document.move_up(false), cx) {
+            return;
+        }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Up, cx) {
             return;
         }
@@ -3032,6 +3065,9 @@ impl QueryEditor {
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
         if self.semantic.move_completion_selection(1) {
             cx.notify();
+            return;
+        }
+        if self.move_in_insert(|document| document.move_down(false), cx) {
             return;
         }
         if self.vim_key(modalkit::crossterm::event::KeyCode::Down, cx) {
@@ -5831,6 +5867,24 @@ mod tests {
         assert!(requests
             .iter()
             .all(|(_, request)| !matches!(request, SemanticRequestKind::AutoComplete { .. })));
+    }
+
+    #[gpui::test]
+    fn vim_insert_arrow_repeat_keeps_the_indexed_cursor_in_sync(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("select users", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.set_keymap(EditorKeymap::Vim, cx);
+            assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
+            for _ in 0..5 {
+                editor.move_left(&MoveLeft, window, cx);
+            }
+            assert_eq!(editor.document().cursor(), 7);
+            assert!(editor.vim_text("X", cx));
+        });
+        editor.read_with(&cx, |editor, _| {
+            assert_eq!(editor.document().text(), "select Xusers");
+            assert_eq!(editor.vim_mode(), VimMode::Insert);
+        });
     }
 
     #[gpui::test]
