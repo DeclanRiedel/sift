@@ -536,6 +536,39 @@ impl CommandRegistry {
             CommandLanguageMatch::Invalid
         }
     }
+
+    /// Return the next keys shown by the leader preview. Non-leader Vim
+    /// spellings (for example `[ c`) must never leak into this list.
+    pub fn leader_choices_with(
+        keys: &[String],
+        bindings: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, Vec<&'static str>> {
+        let mut choices = BTreeMap::<String, Vec<&'static str>>::new();
+        for definition in DEFINITIONS {
+            let language = bindings
+                .get(definition.id.as_str())
+                .map_or(definition.language, String::as_str);
+            let tokens = language.split_whitespace().collect::<Vec<_>>();
+            if tokens.first() != Some(&"<leader>") {
+                continue;
+            }
+            let command_keys = &tokens[1..];
+            if command_keys.len() <= keys.len()
+                || !command_keys
+                    .iter()
+                    .take(keys.len())
+                    .zip(keys)
+                    .all(|(token, key)| *token == key)
+            {
+                continue;
+            }
+            choices
+                .entry(command_keys[keys.len()].to_owned())
+                .or_default()
+                .push(definition.label);
+        }
+        choices
+    }
 }
 
 const DEFINITIONS: &[CommandDefinition] = &[
@@ -1979,6 +2012,18 @@ mod tests {
         assert_eq!(
             CommandRegistry::resolve_language_with(&["z".into(), "s".into()], &bindings),
             CommandLanguageMatch::Command(CommandId::ExecuteStatement)
+        );
+    }
+
+    #[test]
+    fn leader_preview_excludes_non_leader_vim_bindings() {
+        let choices = CommandRegistry::leader_choices_with(&[], &BTreeMap::new());
+
+        assert!(choices.contains_key("d"));
+        assert!(!choices.contains_key("c"));
+        assert_eq!(
+            CommandRegistry::resolve_language(&["c".into()]),
+            CommandLanguageMatch::Invalid
         );
     }
 }

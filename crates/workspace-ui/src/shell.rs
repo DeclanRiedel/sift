@@ -40212,31 +40212,7 @@ impl WorkspaceShell {
         } else {
             format!("<leader> {}", keys.join(" "))
         };
-        let mut choices = std::collections::BTreeMap::<String, Vec<&str>>::new();
-        for definition in CommandRegistry::definitions() {
-            let language = self
-                .keymaps
-                .bindings
-                .get(definition.id.as_str())
-                .map_or(definition.language, String::as_str);
-            if language.is_empty() {
-                continue;
-            }
-            let tokens = language.split_whitespace().skip(1).collect::<Vec<_>>();
-            if tokens.len() <= keys.len()
-                || !tokens
-                    .iter()
-                    .take(keys.len())
-                    .zip(keys)
-                    .all(|(token, key)| *token == key)
-            {
-                continue;
-            }
-            choices
-                .entry(tokens[keys.len()].to_owned())
-                .or_default()
-                .push(definition.label);
-        }
+        let choices = CommandRegistry::leader_choices_with(keys, &self.keymaps.bindings);
         let colors = cx.theme().colors;
         Some(
             div()
