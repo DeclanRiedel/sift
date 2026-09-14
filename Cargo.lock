@@ -8153,6 +8153,7 @@ dependencies = [
  "chrono",
  "criterion",
  "csv",
+ "diff",
  "gpui",
  "gpui_platform",
  "image",

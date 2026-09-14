@@ -4943,6 +4943,9 @@ impl Pane {
         }
         .cloned()
         .unwrap_or_default();
+        let change_baseline = (view == DatabaseItemView::Json)
+            .then(|| self.database_json_baselines.get(&item_id).cloned())
+            .flatten();
         editor.update(cx, |editor, cx| {
             editor.set_read_only(view == DatabaseItemView::Ddl, cx);
             editor.set_language(
@@ -4954,6 +4957,7 @@ impl Pane {
                 cx,
             );
             editor.replace_text_from_owner(&replacement, cx);
+            editor.set_change_baseline(change_baseline, cx);
         });
         self.database_item_views.insert(item_id, view);
         cx.notify();

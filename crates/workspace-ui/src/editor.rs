@@ -77,6 +77,54 @@ fn line_indices(text: &str) -> (Vec<usize>, Vec<usize>) {
     (starts, char_starts)
 }
 
+fn line_change_markers(baseline: &str, current: &str) -> Vec<Option<LineChangeKind>> {
+    let line_count = line_indices(current).0.len();
+    let mut markers = vec![None; line_count];
+    let mut current_line = 0usize;
+    let mut removed = 0usize;
+    let mut added = 0usize;
+
+    let flush_hunk = |markers: &mut [Option<LineChangeKind>],
+                      current_line: &mut usize,
+                      removed: &mut usize,
+                      added: &mut usize| {
+        if *removed == 0 && *added == 0 {
+            return;
+        }
+        let paired = (*removed).min(*added);
+        for marker in markers.iter_mut().skip(*current_line).take(paired) {
+            *marker = Some(LineChangeKind::Modified);
+        }
+        for marker in markers
+            .iter_mut()
+            .skip(*current_line + paired)
+            .take(*added - paired)
+        {
+            *marker = Some(LineChangeKind::Added);
+        }
+        if *removed > *added && !markers.is_empty() {
+            let deletion_line = (*current_line + *added).min(markers.len() - 1);
+            markers[deletion_line] = Some(LineChangeKind::Deleted);
+        }
+        *current_line += *added;
+        *removed = 0;
+        *added = 0;
+    };
+
+    for change in diff::lines(baseline, current) {
+        match change {
+            diff::Result::Left(_) => removed += 1,
+            diff::Result::Right(_) => added += 1,
+            diff::Result::Both(_, _) => {
+                flush_hunk(&mut markers, &mut current_line, &mut removed, &mut added);
+                current_line += 1;
+            }
+        }
+    }
+    flush_hunk(&mut markers, &mut current_line, &mut removed, &mut added);
+    markers
+}
+
 fn identifier_hover_position(text: &str, offset: usize) -> Option<u32> {
     let mut probe = offset.min(text.len());
     if probe == text.len() {
@@ -1130,6 +1178,19 @@ struct FindMatchCache {
     matches: Arc<Vec<Range<usize>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineChangeKind {
+    Modified,
+    Added,
+    Deleted,
+}
+
+#[derive(Default)]
+struct LineChangeCache {
+    revision: Option<u64>,
+    markers: Arc<Vec<Option<LineChangeKind>>>,
+}
+
 /// Multi-line GPUI editor over a [`QueryDocument`]. Character and IME input flow
 /// through the platform via [`EntityInputHandler`]; editing commands arrive as
 /// typed actions the workspace keymap binds under the `SiftEditor` context.
@@ -1172,6 +1233,8 @@ pub struct QueryEditor {
     replace_query: Entity<TextInput>,
     find_case_sensitive: bool,
     find_cache: RefCell<FindMatchCache>,
+    change_baseline: Option<String>,
+    line_change_cache: RefCell<LineChangeCache>,
     snippet_tabstops: Vec<Range<usize>>,
     snippet_tabstop_index: usize,
     folded_lines: Vec<Range<usize>>,
@@ -1233,6 +1296,8 @@ impl QueryEditor {
             replace_query,
             find_case_sensitive: false,
             find_cache: RefCell::new(FindMatchCache::default()),
+            change_baseline: None,
+            line_change_cache: RefCell::new(LineChangeCache::default()),
             snippet_tabstops: Vec::new(),
             snippet_tabstop_index: 0,
             folded_lines: Vec::new(),
@@ -1241,7 +1306,34 @@ impl QueryEditor {
 
     pub fn with_language(mut self, language: EditorLanguage) -> Self {
         self.language = language;
+        if language == EditorLanguage::Json {
+            self.change_baseline = Some(self.document.text().to_owned());
+        }
         self
+    }
+
+    pub(crate) fn set_change_baseline(&mut self, baseline: Option<String>, cx: &mut Context<Self>) {
+        if self.change_baseline == baseline {
+            return;
+        }
+        self.change_baseline = baseline;
+        *self.line_change_cache.borrow_mut() = LineChangeCache::default();
+        cx.notify();
+    }
+
+    fn line_change_markers(&self) -> Arc<Vec<Option<LineChangeKind>>> {
+        if self.language != EditorLanguage::Json {
+            return Arc::default();
+        }
+        let Some(baseline) = self.change_baseline.as_deref() else {
+            return Arc::default();
+        };
+        let mut cache = self.line_change_cache.borrow_mut();
+        if cache.revision != Some(self.revision) {
+            cache.markers = Arc::new(line_change_markers(baseline, self.document.text()));
+            cache.revision = Some(self.revision);
+        }
+        cache.markers.clone()
     }
 
     pub fn with_diff_language(mut self, language: EditorLanguage) -> Self {
@@ -4535,6 +4627,7 @@ impl Element for QueryEditorElement {
         } else {
             Arc::new(Vec::new())
         };
+        let line_changes = editor.line_change_markers();
         let viewport = editor.scroll_handle.bounds();
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -4674,7 +4767,7 @@ impl Element for QueryEditorElement {
             ));
             let top = text_top + line_height * display_index as f32;
 
-            if let Some(diagnostic) = editor
+            let diagnostic_color = editor
                 .semantic
                 .diagnostic_indexes_on_line(line_index)
                 .iter()
@@ -4685,16 +4778,25 @@ impl Element for QueryEditorElement {
                     sift_protocol::DiagnosticSeverity::Information => 2,
                     sift_protocol::DiagnosticSeverity::Hint => 3,
                 })
-            {
-                let color = match diagnostic.severity {
+                .map(|diagnostic| match diagnostic.severity {
                     sift_protocol::DiagnosticSeverity::Error => theme.colors.danger,
                     sift_protocol::DiagnosticSeverity::Warning => theme.colors.warning,
                     _ => theme.colors.muted_text,
-                };
+                });
+            let change_color = line_changes
+                .get(line_index)
+                .copied()
+                .flatten()
+                .map(|change| match change {
+                    LineChangeKind::Modified => theme.colors.accent,
+                    LineChangeKind::Added => theme.colors.success,
+                    LineChangeKind::Deleted => theme.colors.warning,
+                });
+            if let Some(color) = diagnostic_color.or(change_color) {
                 gutter_diagnostic_quads.push(fill(
                     Bounds::new(
-                        point(bounds.left() + px(4.), top + px(5.)),
-                        size(px(3.), line_height - px(10.)),
+                        point(bounds.left() + px(4.), top),
+                        size(px(3.), line_height),
                     ),
                     color,
                 ));
@@ -5754,6 +5856,22 @@ mod tests {
 
     fn doc(text: &str) -> QueryDocument {
         QueryDocument::new(7, text)
+    }
+
+    #[test]
+    fn json_line_changes_distinguish_modification_addition_and_deletion() {
+        assert_eq!(
+            line_change_markers("{\n  \"a\": 1\n}", "{\n  \"a\": 2\n}"),
+            vec![None, Some(LineChangeKind::Modified), None]
+        );
+        assert_eq!(
+            line_change_markers("{\n}", "{\n  \"a\": 1,\n}"),
+            vec![None, Some(LineChangeKind::Added), None]
+        );
+        assert_eq!(
+            line_change_markers("{\n  \"a\": 1,\n}", "{\n}"),
+            vec![None, Some(LineChangeKind::Deleted)]
+        );
     }
 
     #[test]

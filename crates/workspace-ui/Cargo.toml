@@ -11,6 +11,7 @@ benchmark = []
 [dependencies]
 chrono = { workspace = true }
 csv = { workspace = true }
+diff = { workspace = true }
 gpui = { workspace = true }
 image = { workspace = true, features = ["jpeg", "gif", "webp"] }
 modalkit = { workspace = true }
