@@ -1729,6 +1729,10 @@ impl SessionStore {
                 (tenant == tenant_id && profile == profile_id).then_some((session, connection))
             })
             .collect();
+        let affected_sessions = targets
+            .iter()
+            .map(|(session, _)| *session)
+            .collect::<Vec<_>>();
         let mut disconnected = 0;
         for (session, connection) in targets {
             match self.close_connection_unchecked(session, connection).await {
@@ -1739,6 +1743,7 @@ impl SessionStore {
                 }
             }
         }
+        self.close_empty_sessions(affected_sessions);
         disconnected
     }
 
@@ -1752,6 +1757,10 @@ impl SessionStore {
                 (principal == principal_id).then_some((session, connection))
             })
             .collect();
+        let affected_sessions = targets
+            .iter()
+            .map(|(session, _)| *session)
+            .collect::<Vec<_>>();
         let mut disconnected = 0;
         for (session, connection) in targets {
             if self
@@ -1762,6 +1771,7 @@ impl SessionStore {
                 disconnected += 1;
             }
         }
+        self.close_empty_sessions(affected_sessions);
         disconnected
     }
 
@@ -1780,6 +1790,10 @@ impl SessionStore {
                     .then_some((session, connection))
             })
             .collect();
+        let affected_sessions = targets
+            .iter()
+            .map(|(session, _)| *session)
+            .collect::<Vec<_>>();
         let mut disconnected = 0;
         for (session, connection) in targets {
             if self
@@ -1790,7 +1804,23 @@ impl SessionStore {
                 disconnected += 1;
             }
         }
+        self.close_empty_sessions(affected_sessions);
         disconnected
+    }
+
+    fn close_empty_sessions(&self, mut sessions: Vec<SessionId>) {
+        sessions.sort_unstable_by_key(|session| session.0);
+        sessions.dedup_by_key(|session| session.0);
+        for session_id in sessions {
+            let empty = self
+                .inner
+                .sessions
+                .get(&session_id)
+                .is_some_and(|session| session.connections.is_empty());
+            if empty {
+                let _ = self.close_session(session_id);
+            }
+        }
     }
 
     pub fn list_connections(&self, session_id: SessionId) -> ApiResult<Vec<ConnectionInfo>> {
@@ -6887,6 +6917,25 @@ mod tests {
         // The snapshot taken before the second push is unchanged (COW).
         assert_eq!(snapshot, vec![1]);
         assert_eq!(ring.to_vec(), vec![1, 2]);
+    }
+
+    #[test]
+    fn managed_cleanup_closes_only_affected_empty_sessions() {
+        let store = SessionStore::new(DriverRegistry::new());
+        let first = store.open_session(OpenSessionRequest {
+            tag: None,
+            tenant_id: None,
+        });
+        let retained = store.open_session(OpenSessionRequest {
+            tag: None,
+            tenant_id: None,
+        });
+        store.close_empty_sessions(vec![first.id]);
+        assert!(matches!(
+            store.session_info(first.id),
+            Err(ApiError::SessionNotFound(_))
+        ));
+        assert_eq!(store.session_info(retained.id).unwrap().id, retained.id);
     }
 
     #[test]
