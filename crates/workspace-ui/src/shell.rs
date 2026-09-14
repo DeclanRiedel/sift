@@ -39010,6 +39010,7 @@ impl WorkspaceShell {
                     dock_view
                         .child(
                             div()
+                                .debug_selector(|| "saved-queries-panel-header".into())
                                 .h(cx.theme().metrics.row_height)
                                 .px_3()
                                 .flex()
@@ -39165,13 +39166,15 @@ impl WorkspaceShell {
                                                     .debug_selector(move || {
                                                         format!("saved-query-panel-rename-{index}")
                                                     })
-                                                    .h(px(80.))
-                                                    .mx_2()
-                                                    .px_2()
+                                                    .h(px(64.))
+                                                    .w_full()
+                                                    .px_3()
                                                     .flex()
                                                     .items_center()
                                                     .gap_2()
                                                     .bg(colors.active_surface)
+                                                    .border_b_1()
+                                                    .border_color(colors.subtle_border)
                                                     .child(
                                                         div()
                                                             .flex_1()
@@ -39201,13 +39204,15 @@ impl WorkspaceShell {
                                                     .debug_selector(move || {
                                                         format!("saved-query-panel-tags-{index}")
                                                     })
-                                                    .h(px(80.))
-                                                    .mx_2()
-                                                    .px_2()
+                                                    .h(px(64.))
+                                                    .w_full()
+                                                    .px_3()
                                                     .flex()
                                                     .items_center()
                                                     .gap_2()
                                                     .bg(colors.active_surface)
+                                                    .border_b_1()
+                                                    .border_color(colors.subtle_border)
                                                     .child(
                                                         div()
                                                             .flex_1()
@@ -39239,13 +39244,15 @@ impl WorkspaceShell {
                                                     .debug_selector(move || {
                                                         format!("saved-query-panel-delete-{index}")
                                                     })
-                                                    .h(px(80.))
-                                                    .mx_2()
-                                                    .px_2()
+                                                    .h(px(64.))
+                                                    .w_full()
+                                                    .px_3()
                                                     .flex()
                                                     .items_center()
                                                     .gap_2()
                                                     .bg(colors.warning_muted)
+                                                    .border_b_1()
+                                                    .border_color(colors.subtle_border)
                                                     .text_color(colors.warning)
                                                     .child(icon(
                                                         IconName::Warning,
@@ -39284,15 +39291,10 @@ impl WorkspaceShell {
                                                 .debug_selector(move || {
                                                     format!("saved-query-panel-row-{index}")
                                                 })
-                                                .h(px(80.))
-                                                .mx_2()
-                                                .px_2()
-                                                .py_1()
+                                                .h(px(64.))
+                                                .w_full()
                                                 .flex()
-                                                .flex_col()
-                                                .justify_center()
-                                                .gap_1()
-                                                .rounded_sm()
+                                                .items_stretch()
                                                 .border_b_1()
                                                 .border_color(colors.subtle_border)
                                                 .when(selected, |row| {
@@ -39322,31 +39324,56 @@ impl WorkspaceShell {
                                                         },
                                                     ),
                                                 )
+                                                .child(div().w(px(2.)).flex_none().when(
+                                                    selected,
+                                                    |marker| marker.bg(colors.accent),
+                                                ))
                                                 .child(
                                                     div()
+                                                        .flex_1()
                                                         .min_w_0()
-                                                        .truncate()
-                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                        .child(query.name),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .min_w_0()
-                                                        .truncate()
-                                                        .font_family("monospace")
-                                                        .text_xs()
-                                                        .text_color(colors.muted_text)
-                                                        .child(query.sql_text.replace(
-                                                            ['\n', '\r'],
-                                                            " ",
-                                                        )),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .truncate()
-                                                        .text_xs()
-                                                        .text_color(colors.disabled_text)
-                                                        .child(detail),
+                                                        .px_3()
+                                                        .py_2()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .justify_center()
+                                                        .gap_1()
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_2()
+                                                                .child(
+                                                                    div()
+                                                                        .flex_1()
+                                                                        .min_w_0()
+                                                                        .truncate()
+                                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                                        .child(query.name),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .flex_none()
+                                                                        .max_w(gpui::relative(0.45))
+                                                                        .truncate()
+                                                                        .text_xs()
+                                                                        .text_color(colors.disabled_text)
+                                                                        .child(detail),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .font_family("monospace")
+                                                                .text_xs()
+                                                                .text_color(colors.muted_text)
+                                                                .child(query.sql_text.replace(
+                                                                    ['\n', '\r'],
+                                                                    " ",
+                                                                )),
+                                                        ),
                                                 )
                                                 .into_any_element()
                                         })
@@ -39361,7 +39388,7 @@ impl WorkspaceShell {
                         .when(self.navigation_hints_visible(), |panel| panel.child(
                             div()
                                 .debug_selector(|| "saved-queries-keyboard-hint".into())
-                                .h(px(58.))
+                                .h(px(40.))
                                 .w_full()
                                 .px_2()
                                 .flex_none()
@@ -39380,15 +39407,7 @@ impl WorkspaceShell {
                                         .min_w_0()
                                         .truncate()
                                         .text_center()
-                                        .child("j/k · Enter open · d DDL · p preview"),
-                                )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_center()
-                                        .child("/ filter · R refresh"),
+                                        .child("j/k navigate · Enter open · / filter · R refresh"),
                                 )
                                 .child(
                                     div()
@@ -51909,12 +51928,16 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("saved-query-panel-row-0").is_some());
         assert!(cx.debug_bounds("saved-query-panel-row-1").is_some());
+        let header = cx.debug_bounds("saved-queries-panel-header").unwrap();
+        let first_row = cx.debug_bounds("saved-query-panel-row-0").unwrap();
+        assert_eq!(first_row.left(), header.left());
+        assert_eq!(first_row.right(), header.right());
         assert_eq!(
             cx.debug_bounds("saved-queries-keyboard-hint")
                 .expect("saved-query keyboard hint")
                 .size
                 .height,
-            px(58.)
+            px(40.)
         );
 
         cx.simulate_keystrokes("j");
