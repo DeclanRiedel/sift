@@ -40678,12 +40678,17 @@ impl gpui::Render for WorkspaceShell {
                         toast_bg.a = 0.9;
                         div()
                             .id(("toast", toast.id as usize))
+                            .debug_selector({
+                                let toast_id = toast.id;
+                                move || format!("toast-{toast_id}")
+                            })
                             .role(Role::Button)
                             .aria_label(format!("Dismiss notification: {}", toast.message))
                             .min_w(px(280.))
                             .max_w(px(460.))
                             .px_3()
                             .py_2()
+                            .relative()
                             .flex()
                             .items_start()
                             .gap_2()
@@ -40697,22 +40702,30 @@ impl gpui::Render for WorkspaceShell {
                             .on_click(cx.listener(|shell, _, _, cx| shell.dismiss_toast(cx)))
                             .child(
                                 div()
-                                    .debug_selector(|| "toast-action-column".into())
                                     .flex_none()
+                                    .size(px(24.))
                                     .flex()
-                                    .flex_col()
-                                    .items_start()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .size(px(24.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(cx.theme().metrics.radius)
-                                            .bg(chip_bg)
-                                            .child(icon(icon_name, tone_color, 14.)),
-                                    )
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(cx.theme().metrics.radius)
+                                    .bg(chip_bg)
+                                    .child(icon(icon_name, tone_color, 14.)),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "toast-message".into())
+                                    .flex_1()
+                                    .min_w_0()
+                                    .pr_8()
+                                    .whitespace_normal()
+                                    .text_sm()
+                                    .child(toast.message.clone()),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_2()
+                                    .right_2()
                                     .child(
                                         IconButton::new(
                                             ("copy-toast", toast.id as usize),
@@ -40735,16 +40748,6 @@ impl gpui::Render for WorkspaceShell {
                                         }),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .debug_selector(|| "toast-message".into())
-                                    .flex_1()
-                                    .min_w_0()
-                                    .whitespace_normal()
-                                    .text_sm()
-                                    .child(toast.message.clone()),
-                            )
-                            .child(icon(IconName::Close, colors.muted_text, 12.))
                     }))
             }))
             .children(self.render_key_language_hint(cx))
@@ -48656,10 +48659,9 @@ mod tests {
         let copy = cx
             .debug_bounds("copy-toast-1")
             .expect("notification copy button");
-        let action_column = cx.debug_bounds("toast-action-column").unwrap();
-        let toast_message = cx.debug_bounds("toast-message").unwrap();
-        assert!(action_column.contains(&copy.center()));
-        assert!(copy.right() <= toast_message.left());
+        let toast = cx.debug_bounds("toast-1").unwrap();
+        assert!(copy.center().x > toast.center().x);
+        assert!(copy.center().y <= toast.center().y);
         cx.simulate_click(copy.center(), Modifiers::default());
         workspace.read_with(&cx, |shell, _| assert_eq!(shell.toasts.len(), 1));
         workspace.update(&mut cx, |shell, cx| {
