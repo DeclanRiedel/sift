@@ -1075,6 +1075,27 @@ impl SessionStore {
             .remove(&id)
             .ok_or(ApiError::SessionNotFound(id))?;
         self.inner.semantic.close_session(id.0);
+        self.inner
+            .search_indexes
+            .retain(|(session, _), _| *session != id);
+        self.inner
+            .migration_plans
+            .retain(|_, stored| stored.session != id);
+        self.inner
+            .migration_locks
+            .retain(|(session, _), _| *session != id);
+        for run in self
+            .inner
+            .migration_runs
+            .iter()
+            .filter(|run| run.session == id)
+        {
+            if let Some(cancel) = self.inner.migration_cancellations.get(run.key()) {
+                cancel.store(true, Ordering::Release);
+            }
+        }
+        self.inner.retained_query_results.close_session(id);
+        self.inner.comparisons.close_session(id);
         // Drop connections. We spawn closes concurrently to not block the
         // handler on N sequential round-trips.
         for entry in session.connections.iter() {
@@ -1098,10 +1119,21 @@ impl SessionStore {
             }
             let cursors = self.inner.cursors.clone();
             let sessions = self.clone();
+            let transactions = drain_connection_transactions(&session, connection_id);
             tokio::spawn(async move {
                 for cursor in cursors.connection_cursors(id, connection_id) {
                     let _ = driver.cancel(handle.clone(), cursor).await;
                     sessions.cursor_remove(cursor);
+                }
+                for transaction in transactions {
+                    if let Err(error) = driver.rollback(transaction.handle).await {
+                        tracing::warn!(
+                            session_id = %id,
+                            conn_id = %connection_id,
+                            %error,
+                            "transaction rollback during session close failed"
+                        );
+                    }
                 }
                 if let Err(e) = driver.close(handle).await {
                     tracing::warn!(error = %e, "error closing conn during session close");
@@ -1632,6 +1664,24 @@ impl SessionStore {
                     .map(|(_, entry)| (txs, entry))
             })?
             .ok_or(ApiError::ConnectionNotFound(conn_id))?;
+        self.inner.search_indexes.remove(&(session_id, conn_id));
+        self.inner
+            .retained_query_results
+            .close_connection(session_id, conn_id);
+        self.inner.migration_locks.remove(&(session_id, conn_id));
+        for run in self
+            .inner
+            .migration_runs
+            .iter()
+            .filter(|run| run.session == session_id && run.connection == conn_id)
+        {
+            if let Some(cancel) = self.inner.migration_cancellations.get(run.key()) {
+                cancel.store(true, Ordering::Release);
+            }
+        }
+        self.inner
+            .migration_plans
+            .retain(|_, stored| stored.session != session_id || stored.connection != conn_id);
         for cursor in self.inner.cursors.connection_cursors(session_id, conn_id) {
             if let Err(error) = entry.driver.cancel(entry.handle.clone(), cursor).await {
                 tracing::debug!(%error, %cursor, "cursor cancel during connection close failed");

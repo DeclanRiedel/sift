@@ -113,6 +113,15 @@ impl RetainedQueryRegistry {
         self.entries
             .retain(|_, result| result.created.elapsed() < RESULT_TTL);
     }
+
+    pub(crate) fn close_session(&self, session: SessionId) {
+        self.entries.retain(|_, result| result.session != session);
+    }
+
+    pub(crate) fn close_connection(&self, session: SessionId, connection: ConnectionId) {
+        self.entries
+            .retain(|_, result| result.session != session || result.connection != connection);
+    }
 }
 
 pub fn schema_digest(columns: &[ColumnMetadata]) -> String {
@@ -282,6 +291,17 @@ impl ComparisonRegistry {
             summary.patch_refusal_reasons = vec!["comparison was canceled".into()];
         }
         Ok(summary.status)
+    }
+
+    pub(crate) fn close_session(&self, session: SessionId) {
+        self.entries.retain(|_, entry| {
+            if entry.session == session {
+                entry.cancel.store(true, Ordering::Release);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     fn reap(&self) {
@@ -706,5 +726,39 @@ mod tests {
         bytes[0] ^= 1;
         let tampered = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         assert!(decode_page_token(&secret, id, &tampered).is_err());
+    }
+
+    #[test]
+    fn closing_session_releases_retained_results_and_comparisons() {
+        let closing = SessionId(7);
+        let retained = SessionId(8);
+        let results = RetainedQueryRegistry::default();
+        results.insert(
+            closing,
+            ConnectionId(1),
+            CursorId(1),
+            Vec::new(),
+            Vec::new(),
+        );
+        results.insert(
+            retained,
+            ConnectionId(1),
+            CursorId(2),
+            Vec::new(),
+            Vec::new(),
+        );
+        results.close_session(closing);
+        assert!(!results.entries.contains_key(&CursorId(1)));
+        assert!(results.entries.contains_key(&CursorId(2)));
+
+        let comparisons = ComparisonRegistry::default();
+        let closing_id = ComparisonId(uuid::Uuid::new_v4());
+        let retained_id = ComparisonId(uuid::Uuid::new_v4());
+        let closing_entry = comparisons.create(closing, summary(closing_id));
+        comparisons.create(retained, summary(retained_id));
+        comparisons.close_session(closing);
+        assert!(closing_entry.canceled());
+        assert!(!comparisons.entries.contains_key(&closing_id));
+        assert!(comparisons.entries.contains_key(&retained_id));
     }
 }
