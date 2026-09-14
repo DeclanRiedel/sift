@@ -145,9 +145,9 @@ struct SessionStoreInner {
     /// Per-spec schema cache with TTL + engine-specific invalidators.
     schema_cache: SchemaCache,
     /// Per-connection schema-search index (object + column names), built lazily
-    /// and cached with a TTL. Keyed by connection since
-    /// search scope is the active connection.
-    search_indexes: DashMap<ConnectionId, (Arc<crate::search::SearchIndex>, Instant)>,
+    /// and cached with a TTL. Connection IDs are session-local, so both IDs
+    /// are required to isolate search state.
+    search_indexes: DashMap<(SessionId, ConnectionId), (Arc<crate::search::SearchIndex>, Instant)>,
     /// Process-local parsed SQL document state (ADR-032).
     semantic: sift_semantic::SemanticRegistry,
     /// Operator-owned formatter policy from sift.toml.
@@ -4359,7 +4359,8 @@ impl SessionStore {
         session_id: SessionId,
         conn_id: ConnectionId,
     ) -> ApiResult<(Arc<crate::search::SearchIndex>, sift_protocol::IndexState)> {
-        if let Some(entry) = self.inner.search_indexes.get(&conn_id) {
+        let cache_key = (session_id, conn_id);
+        if let Some(entry) = self.inner.search_indexes.get(&cache_key) {
             if entry.1.elapsed() < SEARCH_INDEX_TTL {
                 return Ok((entry.0.clone(), sift_protocol::IndexState::Ready));
             }
@@ -4390,7 +4391,7 @@ impl SessionStore {
         let index = Arc::new(crate::search::SearchIndex::build(&snapshot, columns));
         self.inner
             .search_indexes
-            .insert(conn_id, (index.clone(), Instant::now()));
+            .insert(cache_key, (index.clone(), Instant::now()));
         Ok((index, sift_protocol::IndexState::Ready))
     }
 
