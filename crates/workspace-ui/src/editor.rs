@@ -1226,6 +1226,7 @@ struct VisualRow {
 #[derive(Default)]
 struct WrapCache {
     revision: u64,
+    dirty_line: Option<usize>,
     width: f32,
     folds: Vec<Range<usize>>,
     rows: Arc<Vec<VisualRow>>,
@@ -1237,6 +1238,10 @@ struct WrapCache {
         Option<EditorLanguage>,
     )>,
     lines: HashMap<usize, WrappedLine>,
+    #[cfg(test)]
+    full_rebuilds: usize,
+    #[cfg(test)]
+    incremental_rewraps: usize,
 }
 
 struct WrappedLine {
@@ -1341,6 +1346,7 @@ pub struct QueryEditor {
     cursor_blink: Entity<CursorBlink>,
     cursor_event_pending: bool,
     document_change_pending: bool,
+    semantic_analysis_pending: bool,
     revision: u64,
     mouse_anchor: Option<usize>,
     pub(crate) message_copy_buttons: bool,
@@ -1363,6 +1369,9 @@ pub struct QueryEditor {
     json_schema: Option<JsonSchema>,
     json_analysis_epoch: u64,
     json_diagnostic_task: Option<Task<()>>,
+    toml_analysis_epoch: u64,
+    toml_diagnostic_task: Option<Task<()>>,
+    toml_error: Option<String>,
     find_open: bool,
     find_query: Entity<TextInput>,
     replace_query: Entity<TextInput>,
@@ -1408,6 +1417,7 @@ impl QueryEditor {
             cursor_blink,
             cursor_event_pending: false,
             document_change_pending: false,
+            semantic_analysis_pending: false,
             revision: 1,
             mouse_anchor: None,
             message_copy_buttons: false,
@@ -1430,6 +1440,9 @@ impl QueryEditor {
             json_schema: None,
             json_analysis_epoch: 0,
             json_diagnostic_task: None,
+            toml_analysis_epoch: 0,
+            toml_diagnostic_task: None,
+            toml_error: None,
             find_open: false,
             find_query,
             replace_query,
@@ -1448,6 +1461,9 @@ impl QueryEditor {
         self.language = language;
         if matches!(language, EditorLanguage::Json | EditorLanguage::Toml) {
             self.change_baseline = Some(self.document.text().to_owned());
+        }
+        if language == EditorLanguage::Toml {
+            self.toml_error = toml_diagnostic(self.document.text());
         }
         self
     }
@@ -1555,13 +1571,16 @@ impl QueryEditor {
         }
         self.document.end_undo_group();
         self.cancel_json_diagnostics();
+        self.cancel_toml_diagnostics();
         let length = self.document.text().len();
         self.document.replace_range(0..length, text);
         let _ = self.document.take_room_update();
+        self.document.last_change.take();
         self.resync_keymap_after_external_change(cx);
         self.marked_range = None;
         self.revision = self.revision.wrapping_add(1);
         self.line_cache.borrow_mut().lines.clear();
+        *self.wraps.borrow_mut() = WrapCache::default();
         let diagnostics_changed = !self.semantic.diagnostics().is_empty();
         self.semantic.invalidate();
         if diagnostics_changed {
@@ -1571,6 +1590,8 @@ impl QueryEditor {
             self.refresh_manifest_diagnostics();
         } else if self.language == EditorLanguage::Json {
             self.refresh_local_diagnostics();
+        } else if self.language == EditorLanguage::Toml {
+            self.toml_error = toml_diagnostic(self.document.text());
         } else {
             self.request_semantic(SemanticRequestKind::Analyze, cx);
         }
@@ -1606,6 +1627,7 @@ impl QueryEditor {
             return;
         }
         self.cancel_json_diagnostics();
+        self.cancel_toml_diagnostics();
         self.language = language;
         self.diff_language = None;
         self.semantic.invalidate();
@@ -1613,6 +1635,8 @@ impl QueryEditor {
             self.refresh_manifest_diagnostics();
         } else if self.language == EditorLanguage::Json {
             self.refresh_local_diagnostics();
+        } else if self.language == EditorLanguage::Toml {
+            self.toml_error = toml_diagnostic(self.document.text());
         } else {
             self.request_semantic(SemanticRequestKind::Analyze, cx);
         }
@@ -1684,6 +1708,7 @@ impl QueryEditor {
         self.resync_keymap_after_external_change(cx);
         self.revision = self.revision.wrapping_add(1);
         self.line_cache.borrow_mut().lines.clear();
+        *self.wraps.borrow_mut() = WrapCache::default();
         self.marked_range = None;
         self.semantic.invalidate();
         self.request_semantic(SemanticRequestKind::Analyze, cx);
@@ -2318,7 +2343,7 @@ impl QueryEditor {
 
     fn visual_rows(&self) -> Arc<Vec<VisualRow>> {
         let cache = self.wraps.borrow();
-        if cache.revision == self.revision
+        if (cache.revision == self.revision || cache.dirty_line.is_some())
             && cache.folds == self.folded_lines
             && !cache.rows.is_empty()
         {
@@ -2364,13 +2389,16 @@ impl QueryEditor {
             self.diff_language,
         );
         let width_changed = cache.width != f32::from(available);
-        if cache.style.as_ref() != Some(&style_key) {
+        let style_changed = cache.style.as_ref() != Some(&style_key);
+        if style_changed {
             cache.lines.clear();
             cache.rows = Arc::default();
+            cache.dirty_line = None;
             cache.style = Some(style_key);
         }
         if cache.width == f32::from(available)
             && cache.revision == self.revision
+            && cache.dirty_line.is_none()
             && cache.folds == self.folded_lines
             && !cache.rows.is_empty()
         {
@@ -2378,6 +2406,71 @@ impl QueryEditor {
         }
         let text = self.document.text();
         let starts = self.document.line_starts();
+        let incremental_source = (!width_changed
+            && !style_changed
+            && cache.folds == self.folded_lines
+            && !cache.rows.is_empty())
+        .then_some(cache.dirty_line)
+        .flatten();
+        if let Some((source, start, old_line_len)) = incremental_source.and_then(|source| {
+            Some((
+                source,
+                *starts.get(source)?,
+                cache.lines.get(&source)?.text.len(),
+            ))
+        }) {
+            cache.dirty_line = None;
+            let end = starts.get(source + 1).map_or(text.len(), |end| end - 1);
+            let line = &text[start..end];
+            let byte_delta = line.len() as isize - old_line_len as isize;
+            let runs =
+                editor_text_runs(line, style.font(), theme, self.language, self.diff_language);
+            let shaped =
+                window
+                    .text_system()
+                    .shape_line(line.to_owned().into(), font_size, &runs, None);
+            let ranges = wrapped_line_ranges(line, &shaped, available);
+            let row_start = cache.rows.partition_point(|row| row.source < source);
+            let row_end = cache.rows.partition_point(|row| row.source <= source);
+            let replacement = ranges
+                .iter()
+                .map(|range| VisualRow {
+                    source,
+                    range: start + range.start..start + range.end,
+                    ghost: None,
+                })
+                .collect::<Vec<_>>();
+            let replacement_len = replacement.len();
+            let rows = Arc::make_mut(&mut cache.rows);
+            rows.splice(row_start..row_end, replacement);
+            for row in rows.iter_mut().skip(row_start + replacement_len) {
+                row.range.start = row.range.start.saturating_add_signed(byte_delta);
+                row.range.end = row.range.end.saturating_add_signed(byte_delta);
+            }
+            cache.lines.insert(
+                source,
+                WrappedLine {
+                    text: line.to_owned(),
+                    shaped,
+                    ranges,
+                },
+            );
+            cache.revision = self.revision;
+            #[cfg(test)]
+            {
+                cache.incremental_rewraps += 1;
+            }
+            self.line_cache
+                .borrow_mut()
+                .lines
+                .retain(|row, _| *row < row_start);
+            return true;
+        }
+        cache.dirty_line = None;
+        #[cfg(test)]
+        {
+            cache.full_rebuilds += 1;
+        }
         let line_changes = self.line_changes();
         cache.lines.retain(|source, _| *source < starts.len());
         let mut rows = Vec::new();
@@ -2465,6 +2558,7 @@ impl QueryEditor {
             reusable_paint.push(false);
         }
         cache.revision = self.revision;
+        cache.dirty_line = None;
         cache.width = available.into();
         cache.folds = self.folded_lines.clone();
         cache.rows = Arc::new(rows);
@@ -2702,6 +2796,26 @@ impl QueryEditor {
         self.revision = self.revision.wrapping_add(1);
         cx.emit(EditorEvent::DocumentEdited);
         let change = self.document.last_change.take();
+        {
+            let mut wraps = self.wraps.borrow_mut();
+            let live_line_diff = self.file_change_indicators
+                && self.change_baseline.is_some()
+                && matches!(self.language, EditorLanguage::Json | EditorLanguage::Toml);
+            let incrementally_wrappable = change.is_some_and(|change| !change.structural)
+                && !live_line_diff
+                && self.diff_language.is_none();
+            if incrementally_wrappable {
+                let line = change.expect("checked document change").line;
+                if wraps.dirty_line.is_none_or(|dirty| dirty == line) {
+                    wraps.dirty_line = Some(line);
+                } else {
+                    wraps.rows = Arc::default();
+                    wraps.dirty_line = None;
+                }
+            } else {
+                wraps.dirty_line = None;
+            }
+        }
         let mut cache = self.line_cache.borrow_mut();
         if let Some(change) = change.filter(|change| !change.structural) {
             let wraps = self.wraps.borrow();
@@ -2751,11 +2865,18 @@ impl QueryEditor {
                 cx.emit(EditorEvent::DiagnosticsChanged);
             }
             self.schedule_json_diagnostics(cx);
+        } else if self.language == EditorLanguage::Toml {
+            self.schedule_toml_diagnostics(cx);
         } else {
             if diagnostics_changed {
                 cx.emit(EditorEvent::DiagnosticsChanged);
             }
-            self.request_semantic(SemanticRequestKind::Analyze, cx);
+            if allow_auto_completion {
+                self.semantic_analysis_pending = false;
+                self.request_semantic(SemanticRequestKind::Analyze, cx);
+            } else {
+                self.semantic_analysis_pending = true;
+            }
         }
         let auto_complete = allow_auto_completion
             && self.secondary_cursors.is_empty()
@@ -2800,6 +2921,10 @@ impl QueryEditor {
                 editor.document_change_pending = false;
                 if let Some(update) = editor.document.take_room_update() {
                     cx.emit(EditorEvent::RoomUpdateReady { update });
+                }
+                if editor.semantic_analysis_pending {
+                    editor.semantic_analysis_pending = false;
+                    editor.request_semantic(SemanticRequestKind::Analyze, cx);
                 }
             });
         })
@@ -2859,6 +2984,41 @@ impl QueryEditor {
                         false,
                     );
                     cx.emit(EditorEvent::DiagnosticsChanged);
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn cancel_toml_diagnostics(&mut self) {
+        self.toml_analysis_epoch = self.toml_analysis_epoch.wrapping_add(1);
+        self.toml_diagnostic_task.take();
+    }
+
+    fn schedule_toml_diagnostics(&mut self, cx: &mut Context<Self>) {
+        self.toml_analysis_epoch = self.toml_analysis_epoch.wrapping_add(1);
+        let epoch = self.toml_analysis_epoch;
+        self.toml_error = None;
+        self.toml_diagnostic_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(JSON_DIAGNOSTIC_IDLE_DELAY)
+                .await;
+            let Ok(Some((source, revision))) = this.update(cx, |editor, _| {
+                (editor.language == EditorLanguage::Toml && editor.toml_analysis_epoch == epoch)
+                    .then(|| (editor.document.text().to_owned(), editor.revision))
+            }) else {
+                return;
+            };
+            let error = cx
+                .background_executor()
+                .spawn(async move { toml_diagnostic(&source) })
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                if editor.language == EditorLanguage::Toml
+                    && editor.toml_analysis_epoch == epoch
+                    && editor.revision == revision
+                {
+                    editor.toml_error = error;
                     cx.notify();
                 }
             });
@@ -4552,9 +4712,7 @@ impl gpui::Render for QueryEditor {
             self.semantic_status()
         } else {
             match self.language {
-                EditorLanguage::Toml => {
-                    toml_diagnostic(self.document.text()).map(|message| (message, true))
-                }
+                EditorLanguage::Toml => self.toml_error.clone().map(|message| (message, true)),
                 EditorLanguage::Json
                 | EditorLanguage::Sql
                 | EditorLanguage::Markdown
@@ -6193,6 +6351,31 @@ mod tests {
         assert!(editor.read_with(cx, |editor, _| editor.semantic.error_count()) > 0);
     }
 
+    #[gpui::test]
+    fn toml_validation_never_runs_in_render_loop(cx: &mut TestAppContext) {
+        let editor =
+            cx.new(|cx| QueryEditor::new(doc("key ="), cx).with_language(EditorLanguage::Toml));
+        assert!(editor.read_with(cx, |editor, _| editor.toml_error.is_some()));
+        editor.update(cx, |editor, cx| {
+            let end = editor.document.text().len();
+            editor.document.replace_range(end..end, " 1");
+            editor.edited_with_auto_completion(false, cx);
+            assert!(editor.toml_error.is_none());
+        });
+        cx.executor().advance_clock(JSON_DIAGNOSTIC_IDLE_DELAY);
+        cx.run_until_parked();
+        assert!(editor.read_with(cx, |editor, _| editor.toml_error.is_none()));
+
+        editor.update(cx, |editor, cx| {
+            let end = editor.document.text().len();
+            editor.document.replace_range(end - 1..end, "");
+            editor.edited_with_auto_completion(false, cx);
+        });
+        cx.executor().advance_clock(JSON_DIAGNOSTIC_IDLE_DELAY);
+        cx.run_until_parked();
+        assert!(editor.read_with(cx, |editor, _| editor.toml_error.is_some()));
+    }
+
     #[test]
     fn automatic_completion_activates_only_in_useful_sql_contexts() {
         for sql in [
@@ -6319,6 +6502,7 @@ mod tests {
             assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
             editor.backspace(&Backspace, window, cx);
         });
+        cx.executor().advance_clock(DOCUMENT_CHANGE_BATCH_DELAY);
         cx.run_until_parked();
         editor.read_with(&cx, |editor, _| {
             assert_eq!(editor.document().text(), "select user");
@@ -7969,6 +8153,34 @@ mod tests {
             let narrow = editor.visual_rows().len();
             editor.update_wraps(px(600.), cx.theme(), window);
             assert!(editor.visual_rows().len() < narrow);
+        });
+    }
+
+    #[gpui::test]
+    fn repeated_large_sql_edits_rewrap_only_changed_line(cx: &mut TestAppContext) {
+        let mut text = (0..10_000)
+            .map(|line| format!("select {line};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        text.push_str(&"x".repeat(128));
+        let (mut cx, editor, _) = editor_with_spy(&text, cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            let width = px(600.);
+            editor.update_wraps(width, cx.theme(), window);
+            let (full_before, incremental_before) = {
+                let wraps = editor.wraps.borrow();
+                (wraps.full_rebuilds, wraps.incremental_rewraps)
+            };
+            for _ in 0..100 {
+                let end = editor.document.text().len();
+                editor.document.replace_range(end - 1..end, "");
+                editor.edited_with_auto_completion(false, cx);
+                editor.update_wraps(width, cx.theme(), window);
+            }
+            let wraps = editor.wraps.borrow();
+            assert_eq!(wraps.full_rebuilds, full_before);
+            assert_eq!(wraps.incremental_rewraps, incremental_before + 100);
+            assert_eq!(editor.document.text().len(), text.len() - 100);
         });
     }
 
