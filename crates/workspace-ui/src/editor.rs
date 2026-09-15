@@ -369,6 +369,7 @@ fn floor_char_boundary(text: &str, mut offset: usize) -> usize {
 /// are byte offsets into the materialized text at the time the edit applied.
 #[derive(Debug, Clone)]
 struct Edit {
+    group: u64,
     at: usize,
     removed: String,
     inserted: String,
@@ -399,8 +400,11 @@ pub struct QueryDocument {
     goal_column: Option<usize>,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    active_undo_group: Option<u64>,
+    next_undo_group: u64,
     last_change: Option<DocumentChange>,
     pending_room_update: Option<Vec<u8>>,
+    pending_room_frontier: Option<Vec<u8>>,
 }
 
 impl QueryDocument {
@@ -423,8 +427,11 @@ impl QueryDocument {
             goal_column: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            active_undo_group: None,
+            next_undo_group: 1,
             last_change: None,
             pending_room_update: None,
+            pending_room_frontier: None,
         }
     }
 
@@ -448,8 +455,11 @@ impl QueryDocument {
             goal_column: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            active_undo_group: None,
+            next_undo_group: 1,
             last_change: None,
             pending_room_update: None,
+            pending_room_frontier: None,
         })
     }
 
@@ -552,7 +562,10 @@ impl QueryDocument {
     /// Apply a text splice against the replica and refresh the cached text. Only
     /// touches CRDT state; selection and history are the caller's concern.
     fn splice(&mut self, start: usize, end: usize, new_text: &str) {
-        let since = self.replica.version_vector();
+        let since = self
+            .pending_room_frontier
+            .clone()
+            .unwrap_or_else(|| self.replica.version_vector());
         let line = self.line_of_offset(start);
         let line_start = self.line_starts[line];
         let char_start = self.line_char_starts[line] + self.text[line_start..start].chars().count();
@@ -587,6 +600,7 @@ impl QueryDocument {
                 *char_start = char_start.saturating_add_signed(char_delta);
             }
         }
+        self.pending_room_frontier.get_or_insert(since.clone());
         self.pending_room_update = self
             .replica
             .updates_since_if_any(&since)
@@ -594,7 +608,31 @@ impl QueryDocument {
     }
 
     fn take_room_update(&mut self) -> Option<Vec<u8>> {
-        self.pending_room_update.take()
+        let update = self.pending_room_update.take();
+        self.pending_room_frontier = None;
+        update
+    }
+
+    fn begin_undo_group(&mut self) {
+        if self.active_undo_group.is_none() {
+            let group = self.next_undo_group;
+            self.next_undo_group = self.next_undo_group.wrapping_add(1).max(1);
+            self.active_undo_group = Some(group);
+        }
+    }
+
+    fn end_undo_group(&mut self) {
+        self.active_undo_group = None;
+    }
+
+    fn edit_group(&mut self) -> u64 {
+        if let Some(group) = self.active_undo_group {
+            group
+        } else {
+            let group = self.next_undo_group;
+            self.next_undo_group = self.next_undo_group.wrapping_add(1).max(1);
+            group
+        }
     }
 
     /// Replace `range` with `new_text`, recording the edit for undo and
@@ -611,6 +649,7 @@ impl QueryDocument {
                 .then_some((start, new_text.len())),
         });
         let edit = Edit {
+            group: self.edit_group(),
             at: start,
             removed,
             inserted: new_text.to_string(),
@@ -660,41 +699,69 @@ impl QueryDocument {
     }
 
     pub fn undo(&mut self) -> bool {
+        self.end_undo_group();
         let Some(edit) = self.undo.pop() else {
             return false;
         };
+        let group = edit.group;
         let start = edit.at;
-        let end = start + edit.inserted.len();
+        let mut structural = edit.inserted.contains('\n') || edit.removed.contains('\n');
         self.last_change = Some(DocumentChange {
             line: self.line_of_offset(start),
-            structural: edit.inserted.contains('\n') || edit.removed.contains('\n'),
+            structural,
             insertion: None,
         });
-        self.splice(start, end, &edit.removed);
-        self.selection = edit.selection_before.clone();
-        self.reversed = edit.reversed_before;
+        let mut selection = edit.selection_before.clone();
+        let mut reversed = edit.reversed_before;
+        self.splice(start, start + edit.inserted.len(), &edit.removed);
         self.goal_column = None;
         self.redo.push(edit);
+        while self.undo.last().is_some_and(|edit| edit.group == group) {
+            let edit = self.undo.pop().expect("matching undo group");
+            structural |= edit.inserted.contains('\n') || edit.removed.contains('\n');
+            selection = edit.selection_before.clone();
+            reversed = edit.reversed_before;
+            self.splice(edit.at, edit.at + edit.inserted.len(), &edit.removed);
+            self.redo.push(edit);
+        }
+        self.selection = selection;
+        self.reversed = reversed;
+        if let Some(change) = self.last_change.as_mut() {
+            change.structural = structural;
+        }
         true
     }
 
     pub fn redo(&mut self) -> bool {
+        self.end_undo_group();
         let Some(edit) = self.redo.pop() else {
             return false;
         };
+        let group = edit.group;
         let start = edit.at;
-        let end = start + edit.removed.len();
+        let mut structural = edit.inserted.contains('\n') || edit.removed.contains('\n');
         self.last_change = Some(DocumentChange {
             line: self.line_of_offset(start),
-            structural: edit.inserted.contains('\n') || edit.removed.contains('\n'),
+            structural,
             insertion: None,
         });
-        self.splice(start, end, &edit.inserted);
-        let cursor = start + edit.inserted.len();
+        self.splice(start, start + edit.removed.len(), &edit.inserted);
+        let mut cursor = start + edit.inserted.len();
         self.selection = cursor..cursor;
         self.reversed = false;
         self.goal_column = None;
         self.undo.push(edit);
+        while self.redo.last().is_some_and(|edit| edit.group == group) {
+            let edit = self.redo.pop().expect("matching redo group");
+            structural |= edit.inserted.contains('\n') || edit.removed.contains('\n');
+            self.splice(edit.at, edit.at + edit.removed.len(), &edit.inserted);
+            cursor = edit.at + edit.inserted.len();
+            self.undo.push(edit);
+        }
+        self.selection = cursor..cursor;
+        if let Some(change) = self.last_change.as_mut() {
+            change.structural = structural;
+        }
         true
     }
 
@@ -1487,6 +1554,7 @@ impl QueryEditor {
         if self.document.text() == text {
             return;
         }
+        self.document.end_undo_group();
         self.cancel_json_diagnostics();
         let length = self.document.text().len();
         self.document.replace_range(0..length, text);
@@ -1525,6 +1593,7 @@ impl QueryEditor {
                 .expect("Vim keymap must own an engine")
                 .input_text("i");
             self.vim_mode = snapshot.mode;
+            self.document.begin_undo_group();
         }
         cx.emit(EditorEvent::VimStateChanged);
     }
@@ -1576,6 +1645,7 @@ impl QueryEditor {
         if self.keymap == keymap {
             return;
         }
+        self.document.end_undo_group();
         self.apply_keymap(keymap);
         self.sync_mode_semantics();
         cx.emit(EditorEvent::VimStateChanged);
@@ -2936,6 +3006,11 @@ impl QueryEditor {
         let clipboard = snapshot.clipboard;
         let vim_state_changed =
             self.vim_mode != snapshot.mode || self.vim_entered != snapshot.entered;
+        if self.vim_mode != VimMode::Insert && snapshot.mode == VimMode::Insert {
+            self.document.begin_undo_group();
+        } else if self.vim_mode == VimMode::Insert && snapshot.mode != VimMode::Insert {
+            self.document.end_undo_group();
+        }
         self.vim_entered = snapshot.entered;
         let mut document_changed = mirrored_edit;
         let mut inserted_text = mirrored_edit;
@@ -6293,10 +6368,9 @@ mod tests {
             assert!(!editor.allows_semantic_request(&SemanticRequestKind::Complete { cursor: 0 }));
             editor.delete_forward(&DeleteForward, window, cx);
             assert_eq!(editor.document.text(), "");
+            editor.exit_insert_mode(&ExitInsertMode, window, cx);
             editor.vim_undo(&VimUndo, window, cx);
-            assert_eq!(editor.document.text(), "β");
-            editor.vim_text("Z", cx);
-            assert_eq!(editor.document.text(), "Zβ");
+            assert_eq!(editor.document.text(), "α\nβ");
         });
     }
 
@@ -6394,9 +6468,29 @@ mod tests {
             assert_eq!(editor.document.text(), "SELECT * FROM");
             editor.vim_text(" ", cx);
             assert_eq!(editor.document.text(), "SELECT * FROM ");
+            editor.exit_insert_mode(&ExitInsertMode, window, cx);
             editor.vim_undo(&VimUndo, window, cx);
+            assert_eq!(editor.document.text(), "");
+        });
+    }
+
+    #[gpui::test]
+    fn vim_undo_reverts_one_complete_insert_session(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("SELECT ", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx);
+            for character in "customerx".chars() {
+                editor.vim_text(&character.to_string(), cx);
+            }
+            editor.backspace(&Backspace, window, cx);
+            editor.vim_text("s", cx);
+            editor.exit_insert_mode(&ExitInsertMode, window, cx);
+            assert_eq!(editor.document.text(), "SELECT customers");
+
             editor.vim_undo(&VimUndo, window, cx);
-            assert_eq!(editor.document.text(), "SELECT * fro");
+            assert_eq!(editor.document.text(), "SELECT ");
+            editor.redo(&Redo, window, cx);
+            assert_eq!(editor.document.text(), "SELECT customers");
         });
     }
 
@@ -7080,15 +7174,16 @@ mod tests {
             editor.read_with(&cx, |editor, _| editor.document().text().to_string()),
             "select "
         );
+        cx.simulate_keystrokes("escape");
         cx.update(|window, cx| focus.dispatch_action(&Undo, window, cx));
         assert_eq!(
             editor.read_with(&cx, |editor, _| editor.document().text().to_string()),
-            "select 1"
+            "select"
         );
-        cx.update(|window, cx| focus.dispatch_action(&Newline, window, cx));
+        cx.update(|window, cx| focus.dispatch_action(&Redo, window, cx));
         assert_eq!(
             editor.read_with(&cx, |editor, _| editor.document().text().to_string()),
-            "select 1\n"
+            "select "
         );
     }
 
@@ -7828,6 +7923,37 @@ mod tests {
         receiver.import(&update).unwrap();
 
         assert_eq!(receiver.text(), "select 10");
+    }
+
+    #[test]
+    fn grouped_edits_export_complete_room_updates_through_undo_and_redo() {
+        let seed = TextReplica::new(41).unwrap();
+        seed.insert(0, "select ").unwrap();
+        let snapshot = seed.export_snapshot().unwrap();
+        let mut document = QueryDocument::from_room_snapshot(&snapshot).unwrap();
+        let receiver = TextReplica::from_snapshot(42, &snapshot).unwrap();
+
+        document.begin_undo_group();
+        for character in "users".chars() {
+            document.insert(&character.to_string());
+        }
+        document.end_undo_group();
+        receiver
+            .import(&document.take_room_update().unwrap())
+            .unwrap();
+        assert_eq!(receiver.text(), "select users");
+
+        assert!(document.undo());
+        receiver
+            .import(&document.take_room_update().unwrap())
+            .unwrap();
+        assert_eq!(receiver.text(), "select ");
+
+        assert!(document.redo());
+        receiver
+            .import(&document.take_room_update().unwrap())
+            .unwrap();
+        assert_eq!(receiver.text(), "select users");
     }
 
     #[test]
