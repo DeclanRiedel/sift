@@ -34,6 +34,7 @@ pub struct PaneTab {
     div: Stateful<Div>,
     selected: bool,
     selected_background: Option<gpui::Hsla>,
+    width: Option<gpui::Pixels>,
     compact: bool,
     dirty: bool,
     staged: bool,
@@ -46,6 +47,7 @@ impl PaneTab {
             div: div().id(id),
             selected: false,
             selected_background: None,
+            width: None,
             compact: false,
             dirty: false,
             staged: false,
@@ -70,6 +72,11 @@ impl PaneTab {
 
     pub fn selected_background(mut self, color: gpui::Hsla) -> Self {
         self.selected_background = Some(color);
+        self
+    }
+
+    pub fn width(mut self, width: gpui::Pixels) -> Self {
+        self.width = Some(width);
         self
     }
 
@@ -109,6 +116,9 @@ impl RenderOnce for PaneTab {
             .h(cx.theme().metrics.tab_height)
             .min_w(px(if self.compact { 0. } else { 110. }))
             .max_w(px(240.))
+            .when_some(self.width, |tab, width| {
+                tab.w(width).min_w(width).max_w(width)
+            })
             .border_r_1()
             .when(!self.selected, |tab| tab.border_b_1())
             .border_color(colors.subtle_border)

@@ -4443,6 +4443,10 @@ pub struct Pane {
     notification_filter: Option<ToastTone>,
 }
 
+const TAB_VIRTUALIZATION_THRESHOLD: usize = 48;
+const VIRTUALIZED_TAB_WIDTH: f32 = 180.0;
+const TAB_VIRTUALIZATION_OVERSCAN: usize = 2;
+
 impl Pane {
     fn from_presentation(
         pane: PanePresentation,
@@ -4537,7 +4541,7 @@ impl Pane {
                 database_item_views.insert(id, DatabaseItemView::Query);
             }
         }
-        Self {
+        let pane = Self {
             id,
             items,
             active_item,
@@ -4573,7 +4577,9 @@ impl Pane {
             maximized: false,
             expanded_result_item: None,
             notification_filter: None,
-        }
+        };
+        pane.reveal_tab(active_item);
+        pane
     }
 
     /// Adopt a results surface for `item_id`, subscribing to its intents.
@@ -5079,6 +5085,43 @@ impl Pane {
             .any(|id| self.items.iter().any(|item| item.id == *id))
     }
 
+    fn visible_tab_range(&self) -> Range<usize> {
+        if self.items.len() <= TAB_VIRTUALIZATION_THRESHOLD {
+            return 0..self.items.len();
+        }
+        let viewport = f32::from(self.tab_scroll_handle.bounds().size.width).max(240.0);
+        let left = -f32::from(self.tab_scroll_handle.offset().x);
+        let first = ((left / VIRTUALIZED_TAB_WIDTH).floor() as usize)
+            .saturating_sub(TAB_VIRTUALIZATION_OVERSCAN)
+            .min(self.items.len().saturating_sub(1));
+        let visible =
+            (viewport / VIRTUALIZED_TAB_WIDTH).ceil() as usize + TAB_VIRTUALIZATION_OVERSCAN * 2;
+        first..(first + visible).min(self.items.len())
+    }
+
+    fn reveal_tab(&self, index: usize) {
+        if self.items.len() <= TAB_VIRTUALIZATION_THRESHOLD {
+            self.tab_scroll_handle.scroll_to_item(index);
+            return;
+        }
+        let viewport = f32::from(self.tab_scroll_handle.bounds().size.width).max(240.0);
+        let visible_left = -f32::from(self.tab_scroll_handle.offset().x);
+        let visible_right = visible_left + viewport;
+        let tab_left = index as f32 * VIRTUALIZED_TAB_WIDTH;
+        let tab_right = tab_left + VIRTUALIZED_TAB_WIDTH;
+        let target = if tab_left < visible_left {
+            tab_left
+        } else if tab_right > visible_right {
+            tab_right - viewport
+        } else {
+            return;
+        };
+        let max = (self.items.len() as f32 * VIRTUALIZED_TAB_WIDTH - viewport).max(0.0);
+        let mut offset = self.tab_scroll_handle.offset();
+        offset.x = px(-target.clamp(0.0, max));
+        self.tab_scroll_handle.set_offset(offset);
+    }
+
     fn activate_item(&mut self, index: usize, record_history: bool) {
         if index >= self.items.len() || index == self.active_item {
             return;
@@ -5090,7 +5133,7 @@ impl Pane {
             self.forward_items.clear();
         }
         self.active_item = index;
-        self.tab_scroll_handle.scroll_to_item(index);
+        self.reveal_tab(index);
     }
 
     fn navigate_backward(&mut self) {
@@ -5102,7 +5145,7 @@ impl Pane {
                 self.forward_items.push(current);
             }
             self.active_item = index;
-            self.tab_scroll_handle.scroll_to_item(index);
+            self.reveal_tab(index);
             break;
         }
     }
@@ -5116,7 +5159,7 @@ impl Pane {
                 self.backward_items.push(current);
             }
             self.active_item = index;
-            self.tab_scroll_handle.scroll_to_item(index);
+            self.reveal_tab(index);
             break;
         }
     }
@@ -6831,7 +6874,7 @@ impl Pane {
         let to = if from < to { to - 1 } else { to };
         self.items.insert(to, item);
         self.active_item = to;
-        self.tab_scroll_handle.scroll_to_item(to);
+        self.reveal_tab(to);
     }
 
     /// Detach an item so another pane can adopt it. Caller persists layout.
@@ -6925,7 +6968,7 @@ impl Pane {
         };
         self.items.insert(insertion_index, transfer.item);
         self.active_item = insertion_index;
-        self.tab_scroll_handle.scroll_to_item(insertion_index);
+        self.reveal_tab(insertion_index);
         self.pending_close_item = None;
         cx.notify();
     }
@@ -7801,6 +7844,11 @@ impl gpui::Render for Pane {
             .tab_rename
             .as_ref()
             .map(|rename| (rename.item_id, rename.input.clone()));
+        let visible_tabs = self.visible_tab_range();
+        let virtualized_tabs = self.items.len() > TAB_VIRTUALIZATION_THRESHOLD;
+        let hidden_tab_width_before = visible_tabs.start as f32 * VIRTUALIZED_TAB_WIDTH;
+        let hidden_tab_width_after =
+            self.items.len().saturating_sub(visible_tabs.end) as f32 * VIRTUALIZED_TAB_WIDTH;
         div()
             .id(("pane", self.id as usize))
             .relative()
@@ -7949,7 +7997,15 @@ impl gpui::Render for Pane {
                                     .h_full()
                                     .overflow_x_scroll()
                                     .track_scroll(&self.tab_scroll_handle)
-                                    .children(self.items.iter().enumerate().map(|(index, item)| {
+                                    .children(
+                                        (hidden_tab_width_before > 0.0).then(|| {
+                                            div()
+                                                .flex_none()
+                                                .w(px(hidden_tab_width_before))
+                                                .h_full()
+                                        }),
+                                    )
+                                    .children(self.items.iter().enumerate().skip(visible_tabs.start).take(visible_tabs.len()).map(|(index, item)| {
                                         let selected = index == self.active_item;
                                         let item_id = item.id;
                                         let staged = self
@@ -7961,27 +8017,28 @@ impl gpui::Render for Pane {
                                         let tab_debug = format!("tab-{item_id}");
                                         let context_menu_open =
                                             self.tab_context_menu == Some(item_id);
-                                        let other_item_ids = self
-                                            .items
-                                            .iter()
-                                            .filter_map(|candidate| {
-                                                (candidate.id != item_id).then_some(candidate.id)
-                                            })
-                                            .collect::<Vec<_>>();
-                                        let right_item_ids = self.items[index + 1..]
-                                            .iter()
-                                            .map(|candidate| candidate.id)
-                                            .collect::<Vec<_>>();
-                                        let all_item_ids = self
-                                            .items
-                                            .iter()
-                                            .map(|candidate| candidate.id)
-                                            .collect::<Vec<_>>();
+                                        let context_targets = context_menu_open.then(|| {
+                                            let all = self
+                                                .items
+                                                .iter()
+                                                .map(|candidate| candidate.id)
+                                                .collect::<Vec<_>>();
+                                            let others = all
+                                                .iter()
+                                                .copied()
+                                                .filter(|candidate| *candidate != item_id)
+                                                .collect::<Vec<_>>();
+                                            let right = all[index + 1..].to_vec();
+                                            (others, right, all)
+                                        });
                                         let rename_input = tab_rename
                                             .as_ref()
                                             .filter(|(rename_id, _)| *rename_id == item_id)
                                             .map(|(_, input)| input.clone());
                                         PaneTab::new(("tab", item.id as usize))
+                                            .when(virtualized_tabs, |tab| {
+                                                tab.width(px(VIRTUALIZED_TAB_WIDTH))
+                                            })
                                             .compact(self.object_browsers.contains_key(&item.id))
                                             .selected_background(active_tab_background)
                                             .debug_selector(move || tab_debug.clone())
@@ -8168,7 +8225,8 @@ impl gpui::Render for Pane {
                                                     )
                                                 },
                                             ))
-                                            .children(context_menu_open.then(|| {
+                                            .children(context_targets.map(
+                                                |(other_item_ids, right_item_ids, all_item_ids)| {
                                                 div()
                                                     .absolute()
                                                     .bottom_0()
@@ -8189,8 +8247,17 @@ impl gpui::Render for Pane {
                                                         )
                                                         .with_priority(3),
                                                     )
-                                            }))
+                                                },
+                                            ))
                                     }))
+                                    .children(
+                                        (hidden_tab_width_after > 0.0).then(|| {
+                                            div()
+                                                .flex_none()
+                                                .w(px(hidden_tab_width_after))
+                                                .h_full()
+                                        }),
+                                    )
                                     .child(
                                         div()
                                             .id(("tab-bar-drop-target", pane_id as usize))
@@ -47234,6 +47301,58 @@ mod tests {
         assert!(handle.offset().x < px(0.));
         assert!(tab.left() >= viewport.left());
         assert!(tab.right() <= viewport.right());
+    }
+
+    #[gpui::test]
+    fn many_open_query_tables_keep_activation_and_rendering_bounded(cx: &mut TestAppContext) {
+        let mut state = PresentationState::default();
+        state.workspace.panes[0]
+            .items
+            .extend((2..=200).map(|id| ItemPresentation {
+                id,
+                kind: ItemKind::Query,
+                title: format!("table-result-{id}.sql"),
+                dirty: false,
+                source: None,
+                last_result: None,
+            }));
+        state.workspace.panes[0].active_item = 199;
+        let window = shell_with_state(state, cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tab-200").is_some());
+
+        let pane = workspace.read_with(&cx, |shell, _| shell.panes[0].clone());
+        for (index, selector) in [
+            (199, "tab-200"),
+            (0, "tab-1"),
+            (99, "tab-100"),
+            (149, "tab-150"),
+            (49, "tab-50"),
+        ] {
+            pane.update(&mut cx, |pane, cx| {
+                pane.activate_item(index, true);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert_eq!(pane.read_with(&cx, |pane, _| pane.active_item), index);
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "active tab must be inside the culled render window"
+            );
+        }
+
+        assert_eq!(
+            pane.read_with(&cx, |pane, _| pane.results.len()),
+            200,
+            "inactive result tables remain owned without being mounted"
+        );
+        assert!(cx.debug_bounds("pane-body-1").is_some());
+        assert!(
+            cx.debug_bounds("tab-200").is_none(),
+            "far-off tabs stay out of the element tree"
+        );
     }
 
     #[gpui::test]

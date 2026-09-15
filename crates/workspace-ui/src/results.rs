@@ -1271,7 +1271,7 @@ pub struct ResultsView {
     benchmark_report: Option<sift_protocol::BenchmarkReport>,
     benchmark_baseline: Option<sift_protocol::BenchmarkReport>,
     benchmark_error: Option<String>,
-    benchmark_inputs: [Entity<TextInput>; 5],
+    benchmark_inputs: Option<[Entity<TextInput>; 5]>,
     _benchmark_subscriptions: Vec<Subscription>,
     rendered_plan_nodes: Vec<RenderedPlanNode>,
     plan_scroll_handle: UniformListScrollHandle,
@@ -1281,32 +1281,7 @@ pub struct ResultsView {
 
 impl ResultsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let benchmark_inputs = [
-            ("2", "Warm-ups"),
-            ("10", "Measured runs"),
-            ("30000", "Timeout (ms)"),
-            ("120000", "Total budget (ms)"),
-            ("0", "Delay (ms)"),
-        ]
-        .map(|(value, label)| cx.new(|cx| TextInput::new(value, label, cx).aria_label(label)));
-        let benchmark_subscriptions = benchmark_inputs
-            .iter()
-            .map(|input| cx.subscribe(input, |_, _, _: &TextInputEvent, cx| cx.notify()))
-            .collect();
         let focus_handle = cx.focus_handle();
-        for (index, input) in benchmark_inputs.iter().enumerate() {
-            let previous = index
-                .checked_sub(1)
-                .map(|i| benchmark_inputs[i].read(cx).focus_handle(cx))
-                .unwrap_or_else(|| focus_handle.clone());
-            let next = benchmark_inputs
-                .get(index + 1)
-                .map(|input| input.read(cx).focus_handle(cx))
-                .unwrap_or_else(|| focus_handle.clone());
-            input.update(cx, |input, cx| {
-                input.set_tab_targets(Some(previous), Some(next), cx)
-            });
-        }
         let row_json_filter_input = cx.new(|cx| {
             TextInput::new("", "Filter keys or /regex/", cx).aria_label("Filter selected row JSON")
         });
@@ -1412,8 +1387,8 @@ impl ResultsView {
             benchmark_report: None,
             benchmark_baseline: None,
             benchmark_error: None,
-            benchmark_inputs,
-            _benchmark_subscriptions: benchmark_subscriptions,
+            benchmark_inputs: None,
+            _benchmark_subscriptions: Vec::new(),
             rendered_plan_nodes: Vec::new(),
             plan_scroll_handle: UniformListScrollHandle::new(),
             large_view: false,
@@ -5933,8 +5908,41 @@ impl ResultsView {
     }
 
     pub(crate) fn show_performance(&mut self, cx: &mut Context<Self>) {
+        self.ensure_benchmark_inputs(cx);
         self.collapsed = false;
         self.select_tab(ResultTab::Performance, cx);
+    }
+
+    fn ensure_benchmark_inputs(&mut self, cx: &mut Context<Self>) {
+        if self.benchmark_inputs.is_some() {
+            return;
+        }
+        let inputs = [
+            ("2", "Warm-ups"),
+            ("10", "Measured runs"),
+            ("30000", "Timeout (ms)"),
+            ("120000", "Total budget (ms)"),
+            ("0", "Delay (ms)"),
+        ]
+        .map(|(value, label)| cx.new(|cx| TextInput::new(value, label, cx).aria_label(label)));
+        self._benchmark_subscriptions = inputs
+            .iter()
+            .map(|input| cx.subscribe(input, |_, _, _: &TextInputEvent, cx| cx.notify()))
+            .collect();
+        for (index, input) in inputs.iter().enumerate() {
+            let previous = index
+                .checked_sub(1)
+                .map(|i| inputs[i].read(cx).focus_handle(cx))
+                .unwrap_or_else(|| self.focus_handle.clone());
+            let next = inputs
+                .get(index + 1)
+                .map(|input| input.read(cx).focus_handle(cx))
+                .unwrap_or_else(|| self.focus_handle.clone());
+            input.update(cx, |input, cx| {
+                input.set_tab_targets(Some(previous), Some(next), cx)
+            });
+        }
+        self.benchmark_inputs = Some(inputs);
     }
 
     fn run_benchmark(&mut self, _: &RunBenchmark, window: &mut Window, cx: &mut Context<Self>) {
@@ -5968,20 +5976,22 @@ impl ResultsView {
         cx: &mut Context<Self>,
     ) {
         if self.benchmark_pending.is_none() {
-            let next = match self.benchmark_inputs[1].read(cx).text() {
+            self.ensure_benchmark_inputs(cx);
+            let inputs = self.benchmark_inputs.as_ref().expect("benchmark inputs");
+            let next = match inputs[1].read(cx).text() {
                 "1" => "10",
                 "10" => "100",
                 _ => "1",
             };
-            self.benchmark_inputs[1].update(cx, |input, cx| input.set_text(next, cx));
+            inputs[1].update(cx, |input, cx| input.set_text(next, cx));
             cx.notify();
         }
     }
     fn benchmark_limits(&self, cx: &App) -> Result<sift_protocol::BenchmarkLimits, String> {
-        let values = self
-            .benchmark_inputs
-            .each_ref()
-            .map(|input| input.read(cx).text());
+        let Some(inputs) = self.benchmark_inputs.as_ref() else {
+            return Ok(sift_protocol::BenchmarkLimits::default());
+        };
+        let values = inputs.each_ref().map(|input| input.read(cx).text());
         parse_benchmark_limits(values)
     }
 
@@ -5992,7 +6002,8 @@ impl ResultsView {
         cx: &mut Context<Self>,
     ) {
         if self.benchmark_pending.is_none() {
-            self.benchmark_inputs[0]
+            self.ensure_benchmark_inputs(cx);
+            self.benchmark_inputs.as_ref().expect("benchmark inputs")[0]
                 .read(cx)
                 .focus_handle(cx)
                 .focus(window, cx);
@@ -6104,7 +6115,7 @@ impl ResultsView {
                 .child(Button::new("benchmark-save", "[s] Save privately").disabled(self.benchmark_report.is_none() || pending)
                     .on_click(cx.listener(|view, _, window, cx| view.save_benchmark_report(&SaveBenchmarkReport, window, cx)))))
             .children((!pending).then(|| div().flex().flex_wrap().gap_2().children(
-                self.benchmark_inputs.iter().zip(["Warm-ups", "Measured runs", "Timeout (ms)", "Total budget (ms)", "Delay (ms)"]).map(|(input, label)|
+                self.benchmark_inputs.as_ref().into_iter().flatten().zip(["Warm-ups", "Measured runs", "Timeout (ms)", "Total budget (ms)", "Delay (ms)"]).map(|(input, label)|
                     div().w(px(145.)).flex().flex_col().gap_1().child(div().text_xs().child(label)).child(input.clone())))))
             .child(div().text_sm().text_color(colors.muted_text).child(
                 "Current statement or selection · warm-ups excluded · full result drain, no retained rows. Total budget may stop a run early. Repeated reads can load production databases and invoke side effects. Use a read-only account. Tab/Shift-Tab navigates settings; Tab after delay returns to run controls. p95 needs 100 successful samples; p99 needs 1,000."))
@@ -8287,11 +8298,17 @@ mod tests {
         let host = window.root(&mut cx).unwrap();
         let view = host.read_with(&cx, |host, _| host.0.clone());
         view.update(&mut cx, |view, cx| {
+            assert!(
+                view.benchmark_inputs.is_none(),
+                "ordinary result tables do not allocate benchmark controls"
+            );
             view.collapsed = true;
             view.show_performance(cx);
+            assert!(view.benchmark_inputs.is_some());
             assert!(!view.collapsed);
             assert_eq!(view.active_tab(), ResultTab::Performance);
-            view.benchmark_inputs[1].update(cx, |input, cx| input.set_text("0", cx));
+            view.benchmark_inputs.as_ref().unwrap()[1]
+                .update(cx, |input, cx| input.set_text("0", cx));
         });
         cx.run_until_parked();
         let run = cx
@@ -8302,8 +8319,10 @@ mod tests {
         view.update(&mut cx, |view, cx| {
             assert!(view.benchmark_pending.is_none());
             assert!(view.benchmark_error.is_some());
-            view.benchmark_inputs[1].update(cx, |input, cx| input.set_text("37", cx));
-            view.benchmark_inputs[0].update(cx, |input, cx| input.set_text("5", cx));
+            view.benchmark_inputs.as_ref().unwrap()[1]
+                .update(cx, |input, cx| input.set_text("37", cx));
+            view.benchmark_inputs.as_ref().unwrap()[0]
+                .update(cx, |input, cx| input.set_text("5", cx));
             let limits = view.benchmark_limits(cx).unwrap();
             assert_eq!((limits.warmups, limits.iterations), (5, 37));
         });
