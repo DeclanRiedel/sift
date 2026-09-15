@@ -127,6 +127,7 @@ pub fn shell_key_bindings() -> Vec<KeyBinding> {
     let standard_context = Some("SiftWorkspace && keymap_profile != vim");
     let mut bindings = vec![
         KeyBinding::new("escape", DismissModal, context),
+        KeyBinding::new("escape", DismissModal, Some("SiftModal")),
         KeyBinding::new("up", PaletteUp, context),
         KeyBinding::new("down", PaletteDown, context),
         KeyBinding::new("ctrl-k", PaletteUp, Some("SiftModal")),

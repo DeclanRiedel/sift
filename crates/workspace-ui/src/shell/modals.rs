@@ -3178,6 +3178,18 @@ impl WorkspaceShell {
                                         .on_click(cx.listener(|shell, _, window, cx| {
                                             shell.open_user_keymaps(window, cx)
                                         })),
+                                )
+                                .child(
+                                    IconButton::new(
+                                        "close-keymaps",
+                                        IconName::Close,
+                                        "Close keymaps",
+                                    )
+                                    .debug_selector("close-keymaps")
+                                    .square(px(24.))
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.dismiss_modal(&DismissModal, window, cx)
+                                    })),
                                 ),
                         )
                         .child(
@@ -3221,65 +3233,80 @@ impl WorkspaceShell {
                                 .child(div().w(px(112.)).child("DEFAULT")),
                         )
                         .child(
-                            div()
-                                .id("keymap-bindings-scroll")
-                                .max_h(px(360.))
-                                .overflow_y_scroll()
-                                .children(
-                                    CommandRegistry::definitions()
-                                        .iter()
-                                        .filter(|definition| {
-                                            definition.language.starts_with("<leader>")
-                                        })
-                                        .filter_map(|definition| {
-                                            let input =
-                                                self.keymap_inputs.get(&definition.id)?.clone();
-                                            Some(
-                                                div()
-                                                    .h(px(34.))
-                                                    .px_2()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_2()
-                                                    .border_t_1()
-                                                    .border_color(colors.subtle_border)
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap_2()
-                                                            .child(
-                                                                div()
-                                                                    .min_w_0()
-                                                                    .truncate()
-                                                                    .child(definition.label),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .min_w_0()
-                                                                    .truncate()
-                                                                    .text_xs()
-                                                                    .text_color(
-                                                                        colors.disabled_text,
-                                                                    )
-                                                                    .child(definition.id.as_str()),
-                                                            ),
-                                                    )
-                                                    .child(div().w(px(205.)).child(input))
-                                                    .child(
-                                                        div()
-                                                            .w(px(112.))
-                                                            .truncate()
-                                                            .font_family("monospace")
-                                                            .text_xs()
-                                                            .text_color(colors.muted_text)
-                                                            .child(definition.language),
-                                                    ),
-                                            )
-                                        }),
+                            uniform_list(
+                                "keymap-bindings-scroll",
+                                CommandRegistry::definitions()
+                                    .iter()
+                                    .filter(|definition| {
+                                        definition.language.starts_with("<leader>")
+                                    })
+                                    .count(),
+                                cx.processor(
+                                    move |shell, range: Range<usize>, _, _cx| {
+                                        CommandRegistry::definitions()
+                                            .iter()
+                                            .filter(|definition| {
+                                                definition.language.starts_with("<leader>")
+                                            })
+                                            .skip(range.start)
+                                            .take(range.len())
+                                            .filter_map(|definition| {
+                                                let input = shell
+                                                    .keymap_inputs
+                                                    .get(&definition.id)?
+                                                    .clone();
+                                                Some(
+                                                    div()
+                                                        .h(px(34.))
+                                                        .px_2()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .border_t_1()
+                                                        .border_color(colors.subtle_border)
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_2()
+                                                                .child(
+                                                                    div()
+                                                                        .min_w_0()
+                                                                        .truncate()
+                                                                        .child(definition.label),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .min_w_0()
+                                                                        .truncate()
+                                                                        .text_xs()
+                                                                        .text_color(
+                                                                            colors.disabled_text,
+                                                                        )
+                                                                        .child(
+                                                                            definition.id.as_str(),
+                                                                        ),
+                                                                ),
+                                                        )
+                                                        .child(div().w(px(205.)).child(input))
+                                                        .child(
+                                                            div()
+                                                                .w(px(112.))
+                                                                .truncate()
+                                                                .font_family("monospace")
+                                                                .text_xs()
+                                                                .text_color(colors.muted_text)
+                                                                .child(definition.language),
+                                                        ),
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    },
                                 ),
+                            )
+                            .h(px(360.)),
                         )
                         .child(
                             div()

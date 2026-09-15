@@ -20708,7 +20708,7 @@ impl WorkspaceShell {
         }
     }
 
-    fn open_keymaps_modal(&mut self, cx: &mut Context<Self>) {
+    fn open_keymaps_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let keymaps_file_is_open = self.keymaps_item.is_some_and(|item_id| {
             self.panes
                 .iter()
@@ -20725,6 +20725,7 @@ impl WorkspaceShell {
         self.sync_keymap_inputs(&keymaps, cx);
         self.keymaps_error = None;
         self.modal = Some(Modal::Keymaps);
+        self.focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -27745,7 +27746,6 @@ impl WorkspaceShell {
         }
     }
 
-    #[cfg(test)]
     fn active_editor_focused(&self, window: &Window, cx: &App) -> bool {
         self.panes
             .get(self.active_pane)
@@ -29148,6 +29148,11 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.unparse();
+        if self.modal.is_some() && key == "escape" && !event.keystroke.modifiers.modified() {
+            self.dismiss_modal(&DismissModal, window, cx);
+            cx.stop_propagation();
+            return;
+        }
         // Route Objects before the workspace's Vim Enter handling consumes it.
         if self.modal.is_none()
             && self.ide_input.is_none()
@@ -29176,14 +29181,6 @@ impl WorkspaceShell {
             && !event.keystroke.modifiers.modified()
         {
             self.palette_confirm(&PaletteConfirm, window, cx);
-            cx.stop_propagation();
-            return;
-        }
-        if self.modal == Some(Modal::WorkspaceReconcile)
-            && key == "escape"
-            && !event.keystroke.modifiers.modified()
-        {
-            self.dismiss_modal(&DismissModal, window, cx);
             cx.stop_propagation();
             return;
         }
@@ -34140,7 +34137,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             CommandId::OpenKeymaps => {
-                self.open_keymaps_modal(cx);
+                self.open_keymaps_modal(window, cx);
             }
             CommandId::ViewMetadata => {
                 self.send_instance_command(InstanceCommand::ViewMetadata, cx)
@@ -40634,6 +40631,11 @@ impl gpui::Render for PaneLayoutView {
 
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A scrim must own focus unless one of its controls already does.
+        // Otherwise editor caret and key handling remain active behind dialog.
+        if self.modal.is_some() && self.active_editor_focused(window, cx) {
+            self.focus_handle.focus(window, cx);
+        }
         self.sync_result_plan_support(cx);
         if self.modal_position_kind != self.modal || !self.settings.ui.unpin_modals {
             self.modal_position_kind = self.modal.clone();
@@ -46544,6 +46546,24 @@ mod tests {
                 .map(String::as_str),
             Some("<leader> z q")
         );
+    }
+
+    #[gpui::test]
+    fn keymaps_dialog_takes_focus_and_escape_closes(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.run_command(CommandId::OpenKeymaps, window, cx)
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("close-keymaps").is_some());
+        assert!(!cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
+        cx.simulate_keystrokes("escape");
+        assert!(workspace.read_with(&cx, |shell, _| shell.modal().is_none()));
+        assert!(cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
     }
 
     #[gpui::test]
