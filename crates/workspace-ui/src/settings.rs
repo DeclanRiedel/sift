@@ -64,6 +64,7 @@ pub struct DataSettings {
 pub struct UiSettings {
     pub unpin_modals: bool,
     pub recent_objects: bool,
+    pub file_change_indicators: bool,
     pub navigation_hints: NavigationHints,
 }
 
@@ -72,6 +73,7 @@ impl Default for UiSettings {
         Self {
             unpin_modals: true,
             recent_objects: true,
+            file_change_indicators: true,
             navigation_hints: NavigationHints::Always,
         }
     }
@@ -732,6 +734,38 @@ impl SettingsStore {
         Ok(settings)
     }
 
+    pub fn save_file_change_indicators(&self, enabled: bool) -> Result<UserSettings, String> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| "settings write lock poisoned".to_string())?;
+        let source = std::fs::read_to_string(&self.path)
+            .map_err(|error| format!("reading {} failed: {error}", self.path.display()))?;
+        let mut document = source
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("settings.toml is invalid: {error}"))?;
+        if document.get("ui").is_none() {
+            document["ui"] = Item::Table(toml_edit::Table::new());
+        }
+        let ui = document
+            .get_mut("ui")
+            .and_then(Item::as_table_mut)
+            .ok_or_else(|| "settings.toml [ui] must be a table".to_owned())?;
+        let decor = ui
+            .get("file_change_indicators")
+            .and_then(Item::as_value)
+            .map(|value| value.decor().clone());
+        let mut enabled_value = Value::from(enabled);
+        if let Some(decor) = decor {
+            *enabled_value.decor_mut() = decor;
+        }
+        ui.insert("file_change_indicators", Item::Value(enabled_value));
+        let updated = document.to_string();
+        let settings = UserSettings::decode(&updated)?;
+        self.write_source(&updated)?;
+        Ok(settings)
+    }
+
     pub fn save_unpin_modals(&self, enabled: bool) -> Result<UserSettings, String> {
         let _guard = self
             .write_lock
@@ -926,6 +960,7 @@ mod tests {
         assert!(source.contains("selection_aggregates = false"));
         assert!(source.contains("query_results_placement = \"right\""));
         assert!(source.contains("recent_objects = true"));
+        assert!(source.contains("file_change_indicators = true"));
         assert!(source.contains("navigation_hints = \"always\""));
         assert_eq!(UserSettings::decode(&source).unwrap(), settings);
     }
@@ -1008,6 +1043,22 @@ mod tests {
             .read_text()
             .unwrap()
             .contains("recent_objects = false"));
+    }
+
+    #[test]
+    fn file_change_indicator_update_preserves_unrelated_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(directory.path().join("settings.toml"));
+        store.save(&UserSettings::default()).unwrap();
+
+        let settings = store.save_file_change_indicators(false).unwrap();
+
+        assert!(!settings.ui.file_change_indicators);
+        assert_eq!(settings.appearance.theme, "ayu-dark");
+        assert!(store
+            .read_text()
+            .unwrap()
+            .contains("file_change_indicators = false"));
     }
 
     #[test]

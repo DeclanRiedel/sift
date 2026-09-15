@@ -2829,6 +2829,17 @@ impl WorkspaceShell {
                                 },
                             )) as sift_ui::ClickHandler,
                         ))
+                        .child(toggle_row(
+                            "settings-file-change-indicators",
+                            "File change indicators",
+                            "Mark edited, added, and deleted lines in JSON and TOML files.",
+                            self.settings.ui.file_change_indicators,
+                            Box::new(cx.listener(
+                                |shell: &mut WorkspaceShell, _, _, cx| {
+                                    shell.toggle_file_change_indicators(cx)
+                                },
+                            )) as sift_ui::ClickHandler,
+                        ))
                         .child(
                             div()
                                 .min_h(px(64.))

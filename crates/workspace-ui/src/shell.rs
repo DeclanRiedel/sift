@@ -10352,6 +10352,7 @@ impl WorkspaceShell {
             .map(|pane| cx.new(|cx| Pane::from_presentation(pane, true, cx)))
             .collect::<Vec<_>>();
         let selection_aggregates = settings.data.selection_aggregates;
+        let file_change_indicators = settings.ui.file_change_indicators;
         let result_placement = result_placement(settings.data.query_results_placement);
         let restored_results = panes
             .iter()
@@ -10361,6 +10362,15 @@ impl WorkspaceShell {
             results.update(cx, |results, cx| {
                 results.set_selection_aggregates_visible(selection_aggregates, cx);
                 results.set_placement(result_placement, cx);
+            });
+        }
+        for pane in &panes {
+            pane.update(cx, |pane, cx| {
+                for editor in pane.editors.values() {
+                    editor.update(cx, |editor, cx| {
+                        editor.set_file_change_indicators(file_change_indicators, cx)
+                    });
+                }
             });
         }
         for pane in &panes {
@@ -10696,6 +10706,7 @@ impl WorkspaceShell {
         let instance_configuration_editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(""), cx)
                 .with_language(EditorLanguage::Toml)
+                .with_file_change_indicators(file_change_indicators)
                 .with_keymap(EditorKeymap::Vim)
         });
         // Re-render the palette as the search text changes so its list filters.
@@ -12401,12 +12412,14 @@ impl WorkspaceShell {
                         )
                     })
                     .unwrap_or((false, 0));
+                let file_change_indicators = self.settings.ui.file_change_indicators;
                 let editor = cx.new(|cx| {
                     let mut editor = QueryEditor::new(
                         QueryDocument::with_random_peer(&configuration.manifest),
                         cx,
                     )
                     .with_language(EditorLanguage::Toml)
+                    .with_file_change_indicators(file_change_indicators)
                     .with_manifest_schema()
                     .with_keymap(EditorKeymap::Vim);
                     editor.set_manifest_lifecycle(lifecycle.0, lifecycle.1, cx);
@@ -20652,9 +20665,11 @@ impl WorkspaceShell {
         let item_id = self.next_id;
         self.next_id += 1;
         let keymap = EditorKeymap::Vim;
+        let file_change_indicators = self.settings.ui.file_change_indicators;
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
                 .with_language(EditorLanguage::Toml)
+                .with_file_change_indicators(file_change_indicators)
                 .with_keymap(keymap)
         });
         if let Some(pane) = self.panes.get(self.active_pane) {
@@ -20775,9 +20790,11 @@ impl WorkspaceShell {
         let item_id = self.next_id;
         self.next_id += 1;
         let keymap = EditorKeymap::Vim;
+        let file_change_indicators = self.settings.ui.file_change_indicators;
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
                 .with_language(EditorLanguage::Json)
+                .with_file_change_indicators(file_change_indicators)
                 .with_json_schema(JsonSchema::keymaps(
                     CommandRegistry::definitions()
                         .iter()
@@ -26116,9 +26133,11 @@ impl WorkspaceShell {
         }
         let item_id = self.next_id;
         self.next_id += 1;
+        let file_change_indicators = self.settings.ui.file_change_indicators;
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
                 .with_language(EditorLanguage::Toml)
+                .with_file_change_indicators(file_change_indicators)
                 .with_keymap(EditorKeymap::Vim)
         });
         if let Some(pane) = self.panes.get(self.active_pane) {
@@ -26313,6 +26332,44 @@ impl WorkspaceShell {
         }
         self.settings = settings;
         self.invalidate_connection_projection();
+        cx.notify();
+    }
+
+    fn toggle_file_change_indicators(&mut self, cx: &mut Context<Self>) {
+        let settings_is_open = self.settings_item.is_some_and(|item_id| {
+            self.panes
+                .iter()
+                .any(|pane| pane.read(cx).contains_item(item_id))
+        });
+        if settings_is_open {
+            self.show_toast(
+                "Save or close settings.toml before changing this preference here".into(),
+                cx,
+            );
+            return;
+        }
+        let enabled = !self.settings.ui.file_change_indicators;
+        let mut settings = self.settings.clone();
+        settings.ui.file_change_indicators = enabled;
+        if let Some(store) = &self.settings_store {
+            settings = match store.save_file_change_indicators(enabled) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    self.show_toast(error, cx);
+                    return;
+                }
+            };
+        }
+        self.settings = settings;
+        for pane in &self.panes {
+            pane.update(cx, |pane, cx| {
+                for editor in pane.editors.values() {
+                    editor.update(cx, |editor, cx| {
+                        editor.set_file_change_indicators(enabled, cx)
+                    });
+                }
+            });
+        }
         cx.notify();
     }
 
@@ -31655,9 +31712,11 @@ impl WorkspaceShell {
         }
         let item_id = self.next_id;
         self.next_id += 1;
+        let file_change_indicators = self.settings.ui.file_change_indicators;
         let editor = cx.new(|cx| {
             QueryEditor::new(QueryDocument::with_random_peer(&source), cx)
                 .with_language(EditorLanguage::Toml)
+                .with_file_change_indicators(file_change_indicators)
                 .with_keymap(EditorKeymap::Vim)
                 .read_only()
         });

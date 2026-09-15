@@ -1273,6 +1273,7 @@ pub struct QueryEditor {
     replace_query: Entity<TextInput>,
     find_case_sensitive: bool,
     find_cache: RefCell<FindMatchCache>,
+    file_change_indicators: bool,
     change_baseline: Option<String>,
     line_change_cache: RefCell<LineChangeCache>,
     snippet_tabstops: Vec<Range<usize>>,
@@ -1336,6 +1337,7 @@ impl QueryEditor {
             replace_query,
             find_case_sensitive: false,
             find_cache: RefCell::new(FindMatchCache::default()),
+            file_change_indicators: true,
             change_baseline: None,
             line_change_cache: RefCell::new(LineChangeCache::default()),
             snippet_tabstops: Vec::new(),
@@ -1346,9 +1348,23 @@ impl QueryEditor {
 
     pub fn with_language(mut self, language: EditorLanguage) -> Self {
         self.language = language;
-        if language == EditorLanguage::Json {
+        if matches!(language, EditorLanguage::Json | EditorLanguage::Toml) {
             self.change_baseline = Some(self.document.text().to_owned());
         }
+        self
+    }
+
+    pub(crate) fn set_file_change_indicators(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.file_change_indicators == enabled {
+            return;
+        }
+        self.file_change_indicators = enabled;
+        self.line_cache.borrow_mut().lines.clear();
+        cx.notify();
+    }
+
+    pub(crate) fn with_file_change_indicators(mut self, enabled: bool) -> Self {
+        self.file_change_indicators = enabled;
         self
     }
 
@@ -1362,7 +1378,9 @@ impl QueryEditor {
     }
 
     fn line_change_markers(&self) -> Arc<Vec<Option<LineChangeKind>>> {
-        if self.language != EditorLanguage::Json {
+        if !self.file_change_indicators
+            || !matches!(self.language, EditorLanguage::Json | EditorLanguage::Toml)
+        {
             return Arc::default();
         }
         let Some(baseline) = self.change_baseline.as_deref() else {
@@ -4722,6 +4740,7 @@ impl Element for QueryEditorElement {
             } else {
                 source_line
             };
+            let line_change = line_changes.get(line_index).copied().flatten();
             let cached = (!folded)
                 .then(|| {
                     editor
@@ -4735,7 +4754,12 @@ impl Element for QueryEditorElement {
             let shaped = if let Some(line) = cached {
                 line
             } else {
-                let runs = editor_text_runs(line, style.font(), theme, language, diff_language);
+                let mut runs = editor_text_runs(line, style.font(), theme, language, diff_language);
+                if line_change == Some(LineChangeKind::Deleted) {
+                    for run in &mut runs {
+                        run.color = theme.colors.disabled_text;
+                    }
+                }
                 let shaped = window.text_system().shape_line(
                     line.to_string().into(),
                     font_size,
@@ -4798,21 +4822,14 @@ impl Element for QueryEditorElement {
                     sift_protocol::DiagnosticSeverity::Warning => theme.colors.warning,
                     _ => theme.colors.muted_text,
                 });
-            let change_color = line_changes
-                .get(line_index)
-                .copied()
-                .flatten()
-                .map(|change| match change {
-                    LineChangeKind::Modified => theme.colors.accent,
-                    LineChangeKind::Added => theme.colors.success,
-                    LineChangeKind::Deleted => theme.colors.warning,
-                });
+            let change_color = line_change.map(|change| match change {
+                LineChangeKind::Modified => theme.colors.accent,
+                LineChangeKind::Added => theme.colors.success,
+                LineChangeKind::Deleted => theme.colors.danger,
+            });
             if let Some(color) = diagnostic_color.or(change_color) {
                 gutter_diagnostic_quads.push(fill(
-                    Bounds::new(
-                        point(bounds.left() + px(4.), top),
-                        size(px(3.), line_height),
-                    ),
+                    Bounds::new(point(bounds.left(), top), size(px(3.), line_height)),
                     color,
                 ));
             }
@@ -5887,6 +5904,23 @@ mod tests {
             line_change_markers("{\n  \"a\": 1,\n}", "{\n}"),
             vec![None, Some(LineChangeKind::Deleted)]
         );
+    }
+
+    #[gpui::test]
+    fn json_and_toml_change_indicators_can_be_disabled(cx: &mut TestAppContext) {
+        for language in [EditorLanguage::Json, EditorLanguage::Toml] {
+            let editor = cx.new(|cx| QueryEditor::new(doc("key = 1"), cx).with_language(language));
+            editor.update(cx, |editor, cx| {
+                editor.document.replace_range(6..7, "2");
+                editor.edited_with_auto_completion(false, cx);
+                assert_eq!(
+                    editor.line_change_markers().as_slice(),
+                    &[Some(LineChangeKind::Modified)]
+                );
+                editor.set_file_change_indicators(false, cx);
+                assert!(editor.line_change_markers().is_empty());
+            });
+        }
     }
 
     #[test]

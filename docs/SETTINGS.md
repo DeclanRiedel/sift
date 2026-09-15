@@ -22,6 +22,7 @@ query_results_placement = "right"
 
 [ui]
 recent_objects = true
+file_change_indicators = true
 navigation_hints = "always"
 
 [repository]
@@ -53,6 +54,7 @@ listed defaults.
 | `data.selection_aggregates` | Boolean | `false` | Shows sum and average for numeric Data-tab selections. Cell count remains visible when off. |
 | `data.query_results_placement` | `right`, `bottom` | `right` | Places query results beside the SQL editor or below it. |
 | `ui.recent_objects` | Boolean | `true` | Remembers and shows up to five recently opened database objects. When off, objects are neither shown nor collected. |
+| `ui.file_change_indicators` | Boolean | `true` | Shows Git-style edited, added, and deleted line markers in JSON and TOML editors. |
 | `ui.navigation_hints` | `always`, `hold`, `hidden` | `always` | Shows navigation shortcut hints, reveals them only while Alt is held, or keeps them hidden. |
 | `repository.grouping` | `staging`, `file_state` | `staging` | Groups source-control changes by staging state or file state. |
 | `repository.sort` | `path`, `file_name` | `path` | Sorts source-control paths by full path or file name. |
