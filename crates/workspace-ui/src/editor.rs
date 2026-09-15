@@ -46,6 +46,7 @@ fn shared_vim_store(cx: &mut App) -> SharedStore<EmptyInfo> {
 }
 
 const EDITOR_LINE_HEIGHT: Pixels = px(20.);
+const EDITOR_FONT_SIZE: Pixels = px(15.);
 const BLOCK_CURSOR_FALLBACK_WIDTH: Pixels = px(7.);
 pub(crate) const EDITOR_GUTTER_WIDTH: Pixels = px(48.);
 const EDITOR_TEXT_INSET: Pixels = px(12.);
@@ -1283,6 +1284,7 @@ fn wrapped_line_ranges(line: &str, shaped: &ShapedLine, available: Pixels) -> Ve
 #[derive(Default)]
 struct LineLayoutCache {
     lines: HashMap<usize, ShapedLine>,
+    line_numbers: HashMap<(usize, bool), ShapedLine>,
 }
 
 #[derive(Default)]
@@ -1688,6 +1690,15 @@ impl QueryEditor {
 
     pub fn document(&self) -> &QueryDocument {
         &self.document
+    }
+
+    #[cfg(feature = "benchmark")]
+    pub fn scroll_by_benchmark(&mut self, delta: Pixels, cx: &mut Context<Self>) {
+        let current = self.scroll_handle.offset();
+        let max = self.scroll_handle.max_offset();
+        let next = point(current.x, (current.y + delta).clamp(-max.y, px(0.)));
+        self.scroll_handle.set_offset(next);
+        cx.notify();
     }
 
     /// Apply authoritative room text without emitting `DocumentChanged`,
@@ -2389,6 +2400,7 @@ impl QueryEditor {
             cache.rows = Arc::default();
             cache.dirty_line = None;
             cache.style = Some(style_key);
+            self.line_cache.borrow_mut().line_numbers.clear();
         }
         if cache.width == f32::from(available)
             && cache.revision == self.revision
@@ -4773,6 +4785,7 @@ impl gpui::Render for QueryEditor {
             .flex()
             .flex_col()
             .font_family("monospace")
+            .text_size(EDITOR_FONT_SIZE)
             .text_color(colors.text)
             .on_hover(cx.listener(|editor, hovered: &bool, _, cx| {
                 if !*hovered
@@ -5169,12 +5182,25 @@ impl Element for QueryEditorElement {
                     underline: None,
                     strikethrough: None,
                 }];
-                line_numbers.push((
-                    display_index,
-                    window
-                        .text_system()
-                        .shape_line("".into(), font_size, &number_runs, None),
-                ));
+                let cached_number = editor
+                    .line_cache
+                    .borrow()
+                    .line_numbers
+                    .get(&(0, false))
+                    .cloned();
+                let shaped_number = cached_number.unwrap_or_else(|| {
+                    let shaped =
+                        window
+                            .text_system()
+                            .shape_line("".into(), font_size, &number_runs, None);
+                    editor
+                        .line_cache
+                        .borrow_mut()
+                        .line_numbers
+                        .insert((0, false), shaped.clone());
+                    shaped
+                });
+                line_numbers.push((display_index, shaped_number));
                 let top = text_top + line_height * display_index as f32;
                 gutter_diagnostic_quads.push(fill(
                     Bounds::new(point(bounds.left(), top), size(px(3.), line_height)),
@@ -5183,18 +5209,23 @@ impl Element for QueryEditorElement {
                 lines.push((display_index, shaped));
                 continue;
             }
-            let number_color = if cursor >= offset
+            let active = cursor >= offset
                 && (cursor < line_end
                     || (cursor == line_end
                         && (line_end == text.len()
-                            || text.as_bytes().get(line_end) == Some(&b'\n'))))
-            {
+                            || text.as_bytes().get(line_end) == Some(&b'\n'))));
+            let number_color = if active {
                 theme.colors.accent
             } else {
                 theme.colors.disabled_text
             };
-            let number = if offset == line_starts[line_index] {
-                (line_index + 1).to_string()
+            let number_value = if offset == line_starts[line_index] {
+                line_index + 1
+            } else {
+                0
+            };
+            let number = if number_value != 0 {
+                number_value.to_string()
             } else {
                 String::new()
             };
@@ -5206,12 +5237,26 @@ impl Element for QueryEditorElement {
                 underline: None,
                 strikethrough: None,
             }];
-            line_numbers.push((
-                display_index,
-                window
-                    .text_system()
-                    .shape_line(number.into(), font_size, &number_runs, None),
-            ));
+            let number_key = (number_value, active);
+            let cached_number = editor
+                .line_cache
+                .borrow()
+                .line_numbers
+                .get(&number_key)
+                .cloned();
+            let shaped_number = cached_number.unwrap_or_else(|| {
+                let shaped =
+                    window
+                        .text_system()
+                        .shape_line(number.into(), font_size, &number_runs, None);
+                editor
+                    .line_cache
+                    .borrow_mut()
+                    .line_numbers
+                    .insert(number_key, shaped.clone());
+                shaped
+            });
+            line_numbers.push((display_index, shaped_number));
             let top = text_top + line_height * display_index as f32;
 
             let diagnostic_color = editor
@@ -5401,6 +5446,13 @@ impl Element for QueryEditorElement {
                     ..(visible_end + 128).min(displayed_lines.len()))
                     .collect::<HashSet<_>>();
                 cache.lines.retain(|line, _| keep.contains(line));
+            }
+            if cache.line_numbers.len() > 512 {
+                let first = displayed_lines[visible_start].source + 1;
+                let last = displayed_lines[visible_end.saturating_sub(1)].source + 1;
+                cache.line_numbers.retain(|(line, _), _| {
+                    *line == 0 || (*line >= first.saturating_sub(128) && *line <= last + 128)
+                });
             }
         }
 

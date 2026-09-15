@@ -134,6 +134,20 @@ fn vim_typing_large_document(cx: &mut BenchAppContext) {
     });
 }
 
+#[gpui::bench(fps = 120)]
+fn editor_scroll_large_document(cx: &mut BenchAppContext) {
+    let mut window = cx.add_empty_window();
+    let editor = window
+        .replace_root_view(|_, cx| {
+            QueryEditor::new(QueryDocument::with_random_peer(&large_sql()), cx)
+                .with_keymap(EditorKeymap::Vim)
+        })
+        .unwrap();
+    cx.bench_renderer(editor, move |editor, _, cx| {
+        editor.scroll_by_benchmark(gpui::px(-7.5), cx);
+    });
+}
+
 /// Replay rapid keyword acceptance, not just ordinary Insert/backspace.
 /// Resetting the fixture is outside the measured interval.
 #[gpui::bench(fps = 120)]
@@ -592,6 +606,7 @@ fn git_panel_steady_refresh(cx: &mut BenchAppContext) {
 gpui::bench_group!(
     benches,
     vim_typing_large_document,
+    editor_scroll_large_document,
     vim_rapid_completion_large_document,
     first_result_page,
     retained_grid_navigation,
