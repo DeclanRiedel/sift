@@ -2453,6 +2453,46 @@ pub enum DatabaseBreadcrumbLevel {
     Object,
 }
 
+fn database_breadcrumb_matches(
+    action: &ConnectionTreeAction,
+    source: &DatabaseObjectSource,
+    level: DatabaseBreadcrumbLevel,
+) -> bool {
+    match (action, level) {
+        (ConnectionTreeAction::Connection(connection), DatabaseBreadcrumbLevel::Connection) => {
+            connection.id == source.profile_id
+        }
+        (
+            ConnectionTreeAction::Catalog {
+                profile_id,
+                catalog,
+            },
+            DatabaseBreadcrumbLevel::Catalog,
+        ) => {
+            *profile_id == source.profile_id && source.catalog.as_deref() == Some(catalog.as_str())
+        }
+        (
+            ConnectionTreeAction::Schema {
+                profile_id,
+                catalog,
+                schema,
+            },
+            DatabaseBreadcrumbLevel::Schema,
+        ) => {
+            *profile_id == source.profile_id
+                && source.catalog.as_deref() == Some(catalog.as_str())
+                && schema == &source.schema
+        }
+        (ConnectionTreeAction::Object(target), DatabaseBreadcrumbLevel::Object) => {
+            target.connection.id == source.profile_id
+                && source.catalog.as_deref() == Some(target.catalog.as_str())
+                && target.schema == source.schema
+                && target.object == source.object
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DatabaseItemState {
     Live,
@@ -27162,49 +27202,10 @@ impl WorkspaceShell {
             }
         }
         self.invalidate_connection_projection();
-        let selected =
-            self.visible_connection_items()
-                .iter()
-                .position(|item| match (&item.action, level) {
-                    (
-                        ConnectionTreeAction::Connection(connection),
-                        DatabaseBreadcrumbLevel::Connection,
-                    ) => connection.id == source.profile_id,
-                    (
-                        ConnectionTreeAction::Catalog {
-                            profile_id,
-                            catalog,
-                        },
-                        DatabaseBreadcrumbLevel::Catalog,
-                    ) => {
-                        *profile_id == source.profile_id
-                            && source.catalog.as_deref() == Some(catalog.as_str())
-                    }
-                    (
-                        ConnectionTreeAction::Schema {
-                            profile_id,
-                            catalog,
-                            schema,
-                        },
-                        DatabaseBreadcrumbLevel::Schema,
-                    ) => {
-                        *profile_id == source.profile_id
-                            && source.catalog.as_deref() == Some(catalog.as_str())
-                            && schema == &source.schema
-                    }
-                    (
-                        ConnectionTreeAction::Object(target)
-                        | ConnectionTreeAction::FavoriteObject(target)
-                        | ConnectionTreeAction::RecentObject(target),
-                        DatabaseBreadcrumbLevel::Object,
-                    ) => {
-                        target.connection.id == source.profile_id
-                            && source.catalog.as_deref() == Some(target.catalog.as_str())
-                            && target.schema == source.schema
-                            && target.object == source.object
-                    }
-                    _ => false,
-                });
+        let selected = self
+            .visible_connection_items()
+            .iter()
+            .position(|item| database_breadcrumb_matches(&item.action, source, level));
         if let Some(selected) = selected {
             self.connection_nav_selected = selected;
         }
@@ -43255,6 +43256,40 @@ mod tests {
                 Some(item_id)
             );
         });
+    }
+
+    #[test]
+    fn object_breadcrumb_ignores_favorite_and_recent_aliases() {
+        let source = object_source(sift_protocol::ObjectKind::Table);
+        let target = DatabaseObjectTarget {
+            connection: ConnectionNavEntry {
+                id: source.profile_id,
+                tenant_id: source.tenant_id,
+                name: source.profile_name.clone(),
+                provider_id: source.provider_id.clone(),
+                tags: Vec::new(),
+            },
+            catalog: source.catalog.clone().unwrap(),
+            schema: source.schema.clone(),
+            object: source.object.clone(),
+            object_kind: source.object_kind,
+        };
+
+        assert!(database_breadcrumb_matches(
+            &ConnectionTreeAction::Object(target.clone()),
+            &source,
+            DatabaseBreadcrumbLevel::Object
+        ));
+        assert!(!database_breadcrumb_matches(
+            &ConnectionTreeAction::FavoriteObject(target.clone()),
+            &source,
+            DatabaseBreadcrumbLevel::Object
+        ));
+        assert!(!database_breadcrumb_matches(
+            &ConnectionTreeAction::RecentObject(target),
+            &source,
+            DatabaseBreadcrumbLevel::Object
+        ));
     }
 
     #[gpui::test]
