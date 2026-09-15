@@ -9586,7 +9586,7 @@ fn staged_result_row_index(edits: &[StagedResultEdit], edit_index: usize) -> usi
 const SEMANTIC_ANALYZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1200);
 /// Automatic completion is responsive but still coalesces a burst into one
 /// cached server lookup. Manual Ctrl+Space bypasses this delay.
-const SEMANTIC_COMPLETION_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
+const SEMANTIC_COMPLETION_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(80);
 
 fn repository_diff_text(
     path: &sift_protocol::WorkspacePath,
@@ -46157,6 +46157,84 @@ mod tests {
         assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.ide_key_buffer()),
             ""
+        );
+    }
+
+    #[gpui::test]
+    #[ignore = "wall-clock benchmark; run alone to avoid parallel-test contention"]
+    fn editor_keystroke_frames_stay_responsive_in_a_large_workspace(cx: &mut TestAppContext) {
+        const KEY_COUNT: usize = 96;
+        const PER_KEY_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let editor = workspace.read_with(&cx, |workspace, cx| {
+            let pane = workspace.panes[workspace.active_pane].read(cx);
+            let item_id = pane.active_item().expect("active query item").id;
+            pane.editor(item_id).expect("active query editor")
+        });
+        let source = (0..2_000)
+            .map(|index| format!("select {index} from benchmark_table where enabled = true;\n"))
+            .collect::<String>();
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.replace_text_from_owner(&source, cx);
+            editor.focus_handle(cx).focus(window, cx);
+        });
+        cx.simulate_keystrokes("i");
+        cx.run_until_parked();
+
+        let typing_started = std::time::Instant::now();
+        for _ in 0..KEY_COUNT {
+            editor.update_in(&mut cx, |editor, window, cx| {
+                editor.replace_text_in_range(None, "x", window, cx);
+            });
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_micros(8_333));
+            cx.run_until_parked();
+        }
+        let typing = typing_started.elapsed();
+
+        let focus = editor.read_with(&cx, |editor, cx| editor.focus_handle(cx));
+        let deleting_started = std::time::Instant::now();
+        for _ in 0..KEY_COUNT {
+            cx.update(|window, cx| focus.dispatch_action(&crate::editor::Backspace, window, cx));
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_micros(8_333));
+            cx.run_until_parked();
+        }
+        let deleting = deleting_started.elapsed();
+
+        let plain_typing_started = std::time::Instant::now();
+        for _ in 0..KEY_COUNT {
+            editor.update_in(&mut cx, |editor, window, cx| {
+                editor.replace_text_in_range(None, " ", window, cx);
+            });
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_micros(8_333));
+            cx.run_until_parked();
+        }
+        let plain_typing = plain_typing_started.elapsed();
+
+        eprintln!(
+            "rendered editor keystrokes: completing={:?}/key, plain={:?}/key, backspace={:?}/key",
+            typing / KEY_COUNT as u32,
+            plain_typing / KEY_COUNT as u32,
+            deleting / KEY_COUNT as u32,
+        );
+        assert!(
+            typing < PER_KEY_BUDGET * KEY_COUNT as u32,
+            "typing took {:?} per rendered key",
+            typing / KEY_COUNT as u32,
+        );
+        assert!(
+            plain_typing < PER_KEY_BUDGET * KEY_COUNT as u32,
+            "plain typing took {:?} per rendered key",
+            plain_typing / KEY_COUNT as u32,
+        );
+        assert!(
+            deleting < PER_KEY_BUDGET * KEY_COUNT as u32,
+            "backspace took {:?} per rendered key",
+            deleting / KEY_COUNT as u32,
         );
     }
 

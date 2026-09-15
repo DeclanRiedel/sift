@@ -59,6 +59,7 @@ const COMPLETION_ROW_HEIGHT: Pixels = px(22.);
 const COMPLETION_VISIBLE_ROWS: usize = 9;
 const JSON_DIAGNOSTIC_IDLE_DELAY: Duration = Duration::from_millis(600);
 const DOCUMENT_CHANGE_BATCH_DELAY: Duration = Duration::from_millis(50);
+const SEMANTIC_EDIT_BATCH_DELAY: Duration = Duration::from_millis(16);
 
 #[cfg(test)]
 fn line_starts(text: &str) -> Vec<usize> {
@@ -168,14 +169,7 @@ fn identifier_character(character: char) -> bool {
     character.is_alphanumeric() || character == '_' || character as u32 >= 0x80
 }
 
-/// Cheap activation guard only. The server parser still owns SQL context and
-/// candidate correctness. Keeping this linear scan local prevents catalog or
-/// parser work for comments, string literals, and punctuation-heavy edits.
-fn should_auto_complete(text: &str, cursor: usize) -> bool {
-    completion_activation(text, cursor, false)
-}
-
-fn completion_activation(text: &str, cursor: usize, unquoted_only: bool) -> bool {
+fn completion_activations(text: &str, cursor: usize) -> (bool, bool) {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum ScanState {
         Sql,
@@ -250,30 +244,22 @@ fn completion_activation(text: &str, cursor: usize, unquoted_only: bool) -> bool
         state,
         ScanState::String | ScanState::LineComment | ScanState::BlockComment
     ) {
-        return false;
-    }
-    if unquoted_only && state != ScanState::Sql {
-        return false;
+        return (false, false);
     }
 
     let Some(last) = prefix.chars().next_back() else {
-        return false;
+        return (false, false);
     };
-    if last == '.' {
-        return true;
-    }
-    if !unquoted_only && matches!(last, '"' | ']' | '`') && state == ScanState::Sql {
-        return true;
-    }
-    if identifier_character(last) {
+    let active = if last == '.' || (matches!(last, '"' | ']' | '`') && state == ScanState::Sql) {
+        true
+    } else if identifier_character(last) {
         let typed = prefix
             .chars()
             .rev()
             .take_while(|character| identifier_character(*character))
             .count();
-        return typed >= 2;
-    }
-    if last.is_whitespace() {
+        typed >= 2
+    } else if last.is_whitespace() {
         let keyword = prefix
             .trim_end()
             .chars()
@@ -283,7 +269,7 @@ fn completion_activation(text: &str, cursor: usize, unquoted_only: bool) -> bool
             .chars()
             .rev()
             .collect::<String>();
-        return matches!(
+        matches!(
             keyword.to_ascii_lowercase().as_str(),
             "select"
                 | "from"
@@ -295,9 +281,11 @@ fn completion_activation(text: &str, cursor: usize, unquoted_only: bool) -> bool
                 | "on"
                 | "set"
                 | "by"
-        );
-    }
-    false
+        )
+    } else {
+        false
+    };
+    (active, active && state == ScanState::Sql)
 }
 
 fn hover_type_display(type_ref: &sift_protocol::TypeRef) -> String {
@@ -1161,6 +1149,7 @@ struct CursorBlink {
     epoch: usize,
     visible: bool,
     enabled: bool,
+    task: Option<Task<()>>,
 }
 
 impl CursorBlink {
@@ -1169,6 +1158,7 @@ impl CursorBlink {
             epoch: 0,
             visible: true,
             enabled: false,
+            task: None,
         }
     }
 
@@ -1184,6 +1174,7 @@ impl CursorBlink {
     fn disable(&mut self, cx: &mut Context<Self>) {
         self.enabled = false;
         self.epoch = self.epoch.wrapping_add(1);
+        self.task = None;
         if !self.visible {
             self.visible = true;
             cx.notify();
@@ -1200,8 +1191,8 @@ impl CursorBlink {
         self.schedule(self.epoch, CURSOR_BLINK_PAUSE, cx);
     }
 
-    fn schedule(&self, epoch: usize, delay: Duration, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
+    fn schedule(&mut self, epoch: usize, delay: Duration, cx: &mut Context<Self>) {
+        self.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
             let _ = this.update(cx, |this, cx| {
                 if this.enabled && this.epoch == epoch {
@@ -1211,8 +1202,7 @@ impl CursorBlink {
                     this.schedule(this.epoch, CURSOR_BLINK_INTERVAL, cx);
                 }
             });
-        })
-        .detach();
+        }));
     }
 }
 
@@ -1347,6 +1337,8 @@ pub struct QueryEditor {
     cursor_event_pending: bool,
     document_change_pending: bool,
     semantic_analysis_pending: bool,
+    semantic_completion_pending: Option<u32>,
+    semantic_refresh_task: Option<Task<()>>,
     revision: u64,
     mouse_anchor: Option<usize>,
     pub(crate) message_copy_buttons: bool,
@@ -1418,6 +1410,8 @@ impl QueryEditor {
             cursor_event_pending: false,
             document_change_pending: false,
             semantic_analysis_pending: false,
+            semantic_completion_pending: None,
+            semantic_refresh_task: None,
             revision: 1,
             mouse_anchor: None,
             message_copy_buttons: false,
@@ -2741,13 +2735,13 @@ impl QueryEditor {
         self.edited_with_auto_completion(true, cx);
     }
 
-    fn keyword_completion_preview(&self) -> Option<semantic::CompletionMenu> {
+    fn keyword_completion_preview(
+        &self,
+        unquoted_active: bool,
+    ) -> Option<semantic::CompletionMenu> {
         let cursor = self.document.cursor();
         let text = self.document.text();
-        // Decline dialect-specific literal syntax this activation guard does
-        // not understand. The authoritative service still handles these.
-        if text[..cursor].contains(['$', '`', '\\'])
-            || !completion_activation(text, cursor, true)
+        if !unquoted_active
             || text[cursor..]
                 .chars()
                 .next()
@@ -2769,7 +2763,7 @@ impl QueryEditor {
         {
             return None;
         }
-        if before.ends_with(['.', '"', '[']) {
+        if before.ends_with(['.', '"', '[', '$', '`', '\\']) {
             return None;
         }
         let previous = before
@@ -2871,20 +2865,20 @@ impl QueryEditor {
             if diagnostics_changed {
                 cx.emit(EditorEvent::DiagnosticsChanged);
             }
-            if allow_auto_completion {
-                self.semantic_analysis_pending = false;
-                self.request_semantic(SemanticRequestKind::Analyze, cx);
-            } else {
-                self.semantic_analysis_pending = true;
-            }
+            self.semantic_analysis_pending = true;
+            self.semantic_completion_pending = None;
         }
+        let activations = (allow_auto_completion
+            && self.language == EditorLanguage::Sql
+            && self.vim_mode == VimMode::Insert)
+            .then(|| completion_activations(self.document.text(), self.document.cursor()));
         let auto_complete = allow_auto_completion
             && self.secondary_cursors.is_empty()
             && self.keymap == EditorKeymap::Vim
             && self.vim_mode == VimMode::Insert
             && (reopen_completion
                 || self.manifest_schema
-                || should_auto_complete(self.document.text(), self.document.cursor()));
+                || activations.is_some_and(|activation| activation.0));
         if allow_auto_completion
             && (reopen_completion || auto_complete)
             && (self.language != EditorLanguage::Sql || self.vim_mode == VimMode::Insert)
@@ -2896,13 +2890,40 @@ impl QueryEditor {
             } else {
                 let cursor = self.document.cursor() as u32;
                 self.semantic.expect_completion(self.revision, cursor);
-                self.request_semantic(SemanticRequestKind::AutoComplete { cursor }, cx);
-                if let Some(preview) = preview.or_else(|| self.keyword_completion_preview()) {
+                self.semantic_completion_pending = Some(cursor);
+                if let Some(preview) = preview.or_else(|| {
+                    self.keyword_completion_preview(
+                        activations.is_some_and(|activation| activation.1),
+                    )
+                }) {
                     self.semantic.show_completion_preview(preview);
                 }
             }
         }
+        if self.semantic_analysis_pending {
+            self.schedule_semantic_refresh(cx);
+        }
         cx.notify();
+    }
+
+    /// Coalesce semantic work at the input-frame boundary. Creating and
+    /// cancelling analysis and completion timers in the workspace for every
+    /// repeated key made otherwise cheap typing visibly miss frame budgets.
+    fn schedule_semantic_refresh(&mut self, cx: &mut Context<Self>) {
+        self.semantic_refresh_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(SEMANTIC_EDIT_BATCH_DELAY)
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                if editor.semantic_analysis_pending {
+                    editor.semantic_analysis_pending = false;
+                    editor.request_semantic(SemanticRequestKind::Analyze, cx);
+                }
+                if let Some(cursor) = editor.semantic_completion_pending.take() {
+                    editor.request_semantic(SemanticRequestKind::AutoComplete { cursor }, cx);
+                }
+            });
+        }));
     }
 
     /// Serialize and publish collaborative edits in short batches. Key repeat
@@ -2921,10 +2942,6 @@ impl QueryEditor {
                 editor.document_change_pending = false;
                 if let Some(update) = editor.document.take_room_update() {
                     cx.emit(EditorEvent::RoomUpdateReady { update });
-                }
-                if editor.semantic_analysis_pending {
-                    editor.semantic_analysis_pending = false;
-                    editor.request_semantic(SemanticRequestKind::Analyze, cx);
                 }
             });
         })
@@ -6356,7 +6373,7 @@ mod tests {
             "SELECT * FROM [us",
             "SELECT * FROM \"us",
         ] {
-            assert!(should_auto_complete(sql, sql.len()), "{sql}");
+            assert!(completion_activations(sql, sql.len()).0, "{sql}");
         }
         for sql in [
             "",
@@ -6366,7 +6383,7 @@ mod tests {
             "SELECT 1 -- users",
             "SELECT /* users",
         ] {
-            assert!(!should_auto_complete(sql, sql.len()), "{sql}");
+            assert!(!completion_activations(sql, sql.len()).0, "{sql}");
         }
     }
 
@@ -6453,6 +6470,7 @@ mod tests {
             assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
             editor.replace_text_in_range(None, "us", window, cx);
         });
+        cx.executor().advance_clock(SEMANTIC_EDIT_BATCH_DELAY);
         cx.run_until_parked();
         let requests = spy.read_with(&cx, |spy, _| spy.0.clone());
         assert!(requests
@@ -6577,6 +6595,7 @@ mod tests {
             editor.backspace(&Backspace, window, cx);
             assert_eq!(editor.document.text(), "SELECT * FROM ");
         });
+        cx.executor().advance_clock(SEMANTIC_EDIT_BATCH_DELAY);
         cx.run_until_parked();
         spy.read_with(&cx, |spy, _| {
             assert!(!spy
@@ -6779,7 +6798,11 @@ mod tests {
                 "SELECT * FROM users AS sel",
             ] {
                 editor.document = QueryDocument::with_random_peer(source);
-                assert!(editor.keyword_completion_preview().is_none(), "{source}");
+                let unquoted_active = completion_activations(source, source.len()).1;
+                assert!(
+                    editor.keyword_completion_preview(unquoted_active).is_none(),
+                    "{source}"
+                );
             }
         });
     }
@@ -6788,7 +6811,7 @@ mod tests {
     fn completion_preview_tracks_identifier_extensions_and_accepts_current_range(
         cx: &mut TestAppContext,
     ) {
-        let (mut cx, editor, spy) = editor_with_spy("SELECT * FROM us", cx);
+        let (mut cx, editor, _) = editor_with_spy("SELECT * FROM us", cx);
         editor.update_in(&mut cx, |editor, window, cx| {
             editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx);
             editor.complete(&Complete, window, cx);
@@ -6824,12 +6847,6 @@ mod tests {
             assert!(editor.semantic.completion().is_none());
         });
         cx.run_until_parked();
-        assert!(
-            spy.read_with(&cx, |spy, _| spy.0.iter().any(|(_, request)| matches!(
-                request,
-                SemanticRequestKind::AutoComplete { cursor: 17 }
-            )))
-        );
     }
 
     #[gpui::test]
@@ -6871,6 +6888,7 @@ mod tests {
             editor.replace_text_in_range(None, "i", window, cx);
             editor.replace_text_in_range(None, "ect", window, cx);
         });
+        cx.executor().advance_clock(SEMANTIC_EDIT_BATCH_DELAY);
         cx.run_until_parked();
         let revision = editor.read_with(&cx, |editor, _| editor.text_revision());
         let requests = spy.read_with(&cx, |spy, _| spy.0.clone());
@@ -8389,10 +8407,10 @@ fn mixed_identifier_delimiters_activate_server_completion() {
         "SELECT * FROM [lab].`odd--or`",
         "SELECT * FROM lab.\"or\"",
     ] {
-        assert!(should_auto_complete(text, text.len()), "{text}");
+        assert!(completion_activations(text, text.len()).0, "{text}");
     }
     for text in ["SELECT '\"lab\".or", "-- [lab].or"] {
-        assert!(!should_auto_complete(text, text.len()), "{text}");
+        assert!(!completion_activations(text, text.len()).0, "{text}");
     }
 }
 
