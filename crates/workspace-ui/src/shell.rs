@@ -4728,7 +4728,7 @@ impl Pane {
                 cx.emit(PaneEvent::EditorStateChanged {
                     item_id,
                     dirty: Some(dirty),
-                    problems_changed: true,
+                    problems_changed: false,
                 });
                 cx.emit(PaneEvent::RoomUpdateRequested {
                     item_id,
@@ -6618,7 +6618,6 @@ impl Pane {
         };
         if requested <= DRAG_COLLAPSE_EXTENT {
             self.live_result_extents.remove(&drag.item_id);
-            self.set_result_resize_active(drag.item_id, false, cx);
             self.results[&drag.item_id].update(cx, |result, cx| {
                 result.collapsed = true;
                 cx.notify();
@@ -6659,7 +6658,6 @@ impl Pane {
         if current == Some(extent) {
             return;
         }
-        self.set_result_resize_active(item_id, true, cx);
         self.live_result_extents.insert(item_id, extent);
 
         if self.result_resize_frame_pending {
@@ -6672,25 +6670,12 @@ impl Pane {
         });
     }
 
-    fn set_result_resize_active(&self, item_id: u64, active: bool, cx: &mut Context<Self>) {
-        let horizontal = self
-            .results
-            .get(&item_id)
-            .is_some_and(|results| results.read(cx).placement() == ResultPlacement::Right);
-        if let Some(editor) = self.editors.get(&item_id) {
-            editor.update(cx, |editor, cx| {
-                editor.suspend_wrap_updates(active && horizontal, cx)
-            });
-        }
-    }
-
     fn finish_results_resize(
         &mut self,
         drag: &ResultResizeDrag,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_result_resize_active(drag.item_id, false, cx);
         let Some(extent) = self.live_result_extents.remove(&drag.item_id) else {
             return;
         };
@@ -53333,7 +53318,6 @@ mod tests {
                 results.set_placement(ResultPlacement::Right, cx)
             });
             pane.queue_result_resize(1, 360.0, window, cx);
-            assert!(pane.editors[&1].read(cx).wrap_updates_suspended());
             pane.finish_results_resize(
                 &ResultResizeDrag {
                     item_id: 1,
@@ -53342,7 +53326,7 @@ mod tests {
                 window,
                 cx,
             );
-            assert!(!pane.editors[&1].read(cx).wrap_updates_suspended());
+            assert_eq!(pane.results[&1].read(cx).extent(), 360.0);
         });
     }
 

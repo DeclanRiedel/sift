@@ -1161,8 +1161,48 @@ struct WrapCache {
 
 struct WrappedLine {
     text: String,
+    shaped: ShapedLine,
     /// Relative offsets survive edits on preceding source lines.
     ranges: Vec<Range<usize>>,
+}
+
+fn wrapped_line_ranges(line: &str, shaped: &ShapedLine, available: Pixels) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    while offset < line.len() {
+        let x = shaped.x_for_index(offset);
+        let mut next = if shaped.width() - x <= available {
+            line.len()
+        } else {
+            shaped.index_for_x(x + available).unwrap_or(line.len())
+        };
+        while next > offset && shaped.x_for_index(next) - x > available {
+            next = line[..next]
+                .char_indices()
+                .last()
+                .map_or(offset, |(index, _)| index);
+        }
+        if next <= offset {
+            next = offset + line[offset..].chars().next().unwrap().len_utf8();
+        }
+        if next < line.len() {
+            if let Some((index, character)) = line[offset..next]
+                .char_indices()
+                .rev()
+                .find(|(_, ch)| ch.is_whitespace())
+            {
+                if index > (next - offset) / 2 {
+                    next = offset + index + character.len_utf8();
+                }
+            }
+        }
+        ranges.push(offset..next);
+        offset = next;
+    }
+    if line.is_empty() {
+        ranges.push(0..0);
+    }
+    ranges
 }
 
 #[derive(Default)]
@@ -1211,10 +1251,6 @@ pub struct QueryEditor {
     revision: u64,
     mouse_anchor: Option<usize>,
     pub(crate) message_copy_buttons: bool,
-    /// Keep the last wrap layout while a horizontal split is being dragged.
-    /// Re-shaping every line for every intermediate width makes the pointer
-    /// trail the resize handle; the final width is applied when the drag ends.
-    suspend_wrap_updates: bool,
     line_cache: RefCell<LineLayoutCache>,
     wraps: RefCell<WrapCache>,
     marked_range: Option<Range<usize>>,
@@ -1278,7 +1314,6 @@ impl QueryEditor {
             revision: 1,
             mouse_anchor: None,
             message_copy_buttons: false,
-            suspend_wrap_updates: false,
             line_cache: RefCell::new(LineLayoutCache::default()),
             wraps: RefCell::new(WrapCache::default()),
             marked_range: None,
@@ -1396,21 +1431,6 @@ impl QueryEditor {
         }
     }
 
-    pub(crate) fn suspend_wrap_updates(&mut self, suspend: bool, cx: &mut Context<Self>) {
-        if self.suspend_wrap_updates == suspend {
-            return;
-        }
-        self.suspend_wrap_updates = suspend;
-        if !suspend {
-            cx.notify();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn wrap_updates_suspended(&self) -> bool {
-        self.suspend_wrap_updates
-    }
-
     /// Replace the complete document from its owning surface without emitting
     /// a collaborative edit. Used for read-only feeds and generated SQL views.
     pub fn replace_text_from_owner(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -1424,7 +1444,11 @@ impl QueryEditor {
         self.marked_range = None;
         self.revision = self.revision.wrapping_add(1);
         self.line_cache.borrow_mut().lines.clear();
+        let diagnostics_changed = !self.semantic.diagnostics().is_empty();
         self.semantic.invalidate();
+        if diagnostics_changed {
+            cx.emit(EditorEvent::DiagnosticsChanged);
+        }
         if self.manifest_schema {
             self.refresh_manifest_diagnostics();
         } else if self.language == EditorLanguage::Json {
@@ -2214,7 +2238,8 @@ impl QueryEditor {
             self.language,
             self.diff_language,
         );
-        if cache.width != f32::from(available) || cache.style.as_ref() != Some(&style_key) {
+        let width_changed = cache.width != f32::from(available);
+        if cache.style.as_ref() != Some(&style_key) {
             cache.lines.clear();
             cache.rows = Arc::default();
             cache.style = Some(style_key);
@@ -2239,6 +2264,7 @@ impl QueryEditor {
                 .lines
                 .get(&source)
                 .filter(|cached| cached.text == line)
+                .filter(|_| !width_changed)
             {
                 let old_start = cache.rows.partition_point(|row| row.source < source);
                 let same_position = old_start == rows.len()
@@ -2253,64 +2279,37 @@ impl QueryEditor {
                 reusable_paint.resize(rows.len(), same_position);
                 continue;
             }
-            let mut ranges = Vec::new();
-            let runs =
-                editor_text_runs(line, style.font(), theme, self.language, self.diff_language);
-            let shaped =
-                window
-                    .text_system()
-                    .shape_line(line.to_owned().into(), font_size, &runs, None);
-            let mut offset = 0;
-            while offset < line.len() {
-                let x = shaped.x_for_index(offset);
-                let mut next = if shaped.width() - x <= available {
-                    line.len()
-                } else {
-                    shaped.index_for_x(x + available).unwrap_or(line.len())
-                };
-                while next > offset && shaped.x_for_index(next) - x > available {
-                    next = line[..next]
-                        .char_indices()
-                        .last()
-                        .map_or(offset, |(index, _)| index);
-                }
-                if next <= offset {
-                    next = offset + line[offset..].chars().next().unwrap().len_utf8();
-                }
-                // Prefer word boundaries, but always wrap long tokens too.
-                if next < line.len() {
-                    if let Some((index, character)) = line[offset..next]
-                        .char_indices()
-                        .rev()
-                        .find(|(_, ch)| ch.is_whitespace())
-                    {
-                        if index > (next - offset) / 2 {
-                            next = offset + index + character.len_utf8();
-                        }
-                    }
-                }
-                rows.push(VisualRow {
-                    source,
-                    range: start + offset..start + next,
+            let shaped = cache
+                .lines
+                .get(&source)
+                .filter(|cached| cached.text == line)
+                .map(|cached| cached.shaped.clone())
+                .unwrap_or_else(|| {
+                    let runs = editor_text_runs(
+                        line,
+                        style.font(),
+                        theme,
+                        self.language,
+                        self.diff_language,
+                    );
+                    window
+                        .text_system()
+                        .shape_line(line.to_owned().into(), font_size, &runs, None)
                 });
-                ranges.push(offset..next);
-                offset = next;
-            }
-            if line.is_empty() {
-                rows.push(VisualRow {
-                    source,
-                    range: start..end,
-                });
-                ranges.push(0..0);
-            }
+            let ranges = wrapped_line_ranges(line, &shaped, available);
+            rows.extend(ranges.iter().map(|range| VisualRow {
+                source,
+                range: start + range.start..start + range.end,
+            }));
+            reusable_paint.resize(rows.len(), false);
             cache.lines.insert(
                 source,
                 WrappedLine {
                     text: line.to_owned(),
+                    shaped,
                     ranges,
                 },
             );
-            reusable_paint.resize(rows.len(), false);
         }
         cache.revision = self.revision;
         cache.width = available.into();
@@ -2588,12 +2587,20 @@ impl QueryEditor {
         } else {
             None
         };
+        let diagnostics_changed = !self.semantic.diagnostics().is_empty();
         self.semantic.invalidate();
         if self.manifest_schema {
+            if diagnostics_changed {
+                cx.emit(EditorEvent::DiagnosticsChanged);
+            }
             self.schedule_manifest_diagnostics(cx);
         } else if self.language == EditorLanguage::Json {
             self.refresh_local_diagnostics();
+            cx.emit(EditorEvent::DiagnosticsChanged);
         } else {
+            if diagnostics_changed {
+                cx.emit(EditorEvent::DiagnosticsChanged);
+            }
             self.request_semantic(SemanticRequestKind::Analyze, cx);
         }
         let auto_complete = allow_auto_completion
@@ -4600,9 +4607,7 @@ impl Element for QueryEditorElement {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let editor = self.editor.read(cx);
-        if !editor.suspend_wrap_updates
-            && editor.update_wraps(editor.scroll_handle.bounds().size.width, cx.theme(), window)
-        {
+        if editor.update_wraps(editor.scroll_handle.bounds().size.width, cx.theme(), window) {
             editor.reveal_cursor();
         }
         let line_count = editor.visual_rows().len();
@@ -4646,8 +4651,7 @@ impl Element for QueryEditorElement {
         let mut lines = Vec::new();
         let mut line_numbers = Vec::new();
         let line_starts = editor.document.line_starts();
-        let wraps_changed =
-            !editor.suspend_wrap_updates && editor.update_wraps(bounds.size.width, theme, window);
+        let wraps_changed = editor.update_wraps(bounds.size.width, theme, window);
         let displayed_lines = editor.visual_rows();
         if wraps_changed
             && bounds.size.height
