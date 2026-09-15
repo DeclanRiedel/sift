@@ -15,7 +15,7 @@ use gpui::{
     actions, div, fill, outline, point, prelude::*, px, size, App, BorderStyle, Bounds,
     ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, IntoElement,
-    LayoutId, MouseButton, PaintQuad, Pixels, Role, ScrollHandle, ShapedLine, Style, TextRun,
+    LayoutId, MouseButton, PaintQuad, Pixels, Role, ScrollHandle, ShapedLine, Style, Task, TextRun,
     UTF16Selection, Window,
 };
 use modalkit::editing::{application::EmptyInfo, store::SharedStore};
@@ -57,6 +57,7 @@ const EMPTY_SPAN_WIDTH: Pixels = px(6.);
 const COMPLETION_MENU_WIDTH: Pixels = px(440.);
 const COMPLETION_ROW_HEIGHT: Pixels = px(22.);
 const COMPLETION_VISIBLE_ROWS: usize = 9;
+const JSON_DIAGNOSTIC_IDLE_DELAY: Duration = Duration::from_millis(600);
 
 #[cfg(test)]
 fn line_starts(text: &str) -> Vec<usize> {
@@ -77,21 +78,23 @@ fn line_indices(text: &str) -> (Vec<usize>, Vec<usize>) {
     (starts, char_starts)
 }
 
-fn line_change_markers(baseline: &str, current: &str) -> Vec<Option<LineChangeKind>> {
+fn line_changes(baseline: &str, current: &str) -> LineChanges {
     let line_count = line_indices(current).0.len();
     let mut markers = vec![None; line_count];
+    let mut deletions = Vec::new();
     let mut current_line = 0usize;
-    let mut removed = 0usize;
+    let mut removed = Vec::new();
     let mut added = 0usize;
 
     let flush_hunk = |markers: &mut [Option<LineChangeKind>],
+                      deletions: &mut Vec<DeletedLine>,
                       current_line: &mut usize,
-                      removed: &mut usize,
+                      removed: &mut Vec<String>,
                       added: &mut usize| {
-        if *removed == 0 && *added == 0 {
+        if removed.is_empty() && *added == 0 {
             return;
         }
-        let paired = (*removed).min(*added);
+        let paired = removed.len().min(*added);
         for marker in markers.iter_mut().skip(*current_line).take(paired) {
             *marker = Some(LineChangeKind::Modified);
         }
@@ -102,27 +105,39 @@ fn line_change_markers(baseline: &str, current: &str) -> Vec<Option<LineChangeKi
         {
             *marker = Some(LineChangeKind::Added);
         }
-        if *removed > *added && !markers.is_empty() {
-            let deletion_line = (*current_line + *added).min(markers.len() - 1);
-            markers[deletion_line] = Some(LineChangeKind::Deleted);
+        let before = *current_line + *added;
+        for text in removed.drain(paired..) {
+            deletions.push(DeletedLine { before, text });
         }
         *current_line += *added;
-        *removed = 0;
+        removed.clear();
         *added = 0;
     };
 
     for change in diff::lines(baseline, current) {
         match change {
-            diff::Result::Left(_) => removed += 1,
+            diff::Result::Left(line) => removed.push(line.to_owned()),
             diff::Result::Right(_) => added += 1,
             diff::Result::Both(_, _) => {
-                flush_hunk(&mut markers, &mut current_line, &mut removed, &mut added);
+                flush_hunk(
+                    &mut markers,
+                    &mut deletions,
+                    &mut current_line,
+                    &mut removed,
+                    &mut added,
+                );
                 current_line += 1;
             }
         }
     }
-    flush_hunk(&mut markers, &mut current_line, &mut removed, &mut added);
-    markers
+    flush_hunk(
+        &mut markers,
+        &mut deletions,
+        &mut current_line,
+        &mut removed,
+        &mut added,
+    );
+    LineChanges { markers, deletions }
 }
 
 fn identifier_hover_position(text: &str, offset: usize) -> Option<u32> {
@@ -1141,6 +1156,7 @@ impl CursorBlink {
 struct VisualRow {
     source: usize,
     range: Range<usize>,
+    ghost: Option<Arc<str>>,
 }
 
 #[derive(Default)]
@@ -1225,10 +1241,22 @@ enum LineChangeKind {
     Deleted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeletedLine {
+    before: usize,
+    text: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct LineChanges {
+    markers: Vec<Option<LineChangeKind>>,
+    deletions: Vec<DeletedLine>,
+}
+
 #[derive(Default)]
 struct LineChangeCache {
     revision: Option<u64>,
-    markers: Arc<Vec<Option<LineChangeKind>>>,
+    changes: Arc<LineChanges>,
 }
 
 /// Multi-line GPUI editor over a [`QueryDocument`]. Character and IME input flow
@@ -1268,6 +1296,8 @@ pub struct QueryEditor {
     manifest_analysis_epoch: u64,
     manifest_lifecycle: Option<ManifestLifecycle>,
     json_schema: Option<JsonSchema>,
+    json_analysis_epoch: u64,
+    json_diagnostic_task: Option<Task<()>>,
     find_open: bool,
     find_query: Entity<TextInput>,
     replace_query: Entity<TextInput>,
@@ -1332,6 +1362,8 @@ impl QueryEditor {
             manifest_analysis_epoch: 0,
             manifest_lifecycle: None,
             json_schema: None,
+            json_analysis_epoch: 0,
+            json_diagnostic_task: None,
             find_open: false,
             find_query,
             replace_query,
@@ -1377,7 +1409,7 @@ impl QueryEditor {
         cx.notify();
     }
 
-    fn line_change_markers(&self) -> Arc<Vec<Option<LineChangeKind>>> {
+    fn line_changes(&self) -> Arc<LineChanges> {
         if !self.file_change_indicators
             || !matches!(self.language, EditorLanguage::Json | EditorLanguage::Toml)
         {
@@ -1388,10 +1420,10 @@ impl QueryEditor {
         };
         let mut cache = self.line_change_cache.borrow_mut();
         if cache.revision != Some(self.revision) {
-            cache.markers = Arc::new(line_change_markers(baseline, self.document.text()));
+            cache.changes = Arc::new(line_changes(baseline, self.document.text()));
             cache.revision = Some(self.revision);
         }
-        cache.markers.clone()
+        cache.changes.clone()
     }
 
     pub fn with_diff_language(mut self, language: EditorLanguage) -> Self {
@@ -1455,6 +1487,7 @@ impl QueryEditor {
         if self.document.text() == text {
             return;
         }
+        self.cancel_json_diagnostics();
         let length = self.document.text().len();
         self.document.replace_range(0..length, text);
         let _ = self.document.take_room_update();
@@ -1504,6 +1537,7 @@ impl QueryEditor {
         if self.language == language && self.diff_language.is_none() {
             return;
         }
+        self.cancel_json_diagnostics();
         self.language = language;
         self.diff_language = None;
         self.semantic.invalidate();
@@ -2231,6 +2265,7 @@ impl QueryEditor {
                         ..starts
                             .get(source + 1)
                             .map_or(self.document.text().len(), |end| end - 1),
+                    ghost: None,
                 })
                 .collect(),
         )
@@ -2238,9 +2273,12 @@ impl QueryEditor {
 
     fn visual_position(&self, offset: usize) -> (usize, usize) {
         let rows = self.visual_rows();
-        let index = rows
+        let mut index = rows
             .partition_point(|row| row.range.start <= offset)
             .saturating_sub(1);
+        while index > 0 && rows[index].ghost.is_some() {
+            index -= 1;
+        }
         (index, rows.get(index).map_or(0, |row| row.range.start))
     }
 
@@ -2271,6 +2309,7 @@ impl QueryEditor {
         }
         let text = self.document.text();
         let starts = self.document.line_starts();
+        let line_changes = self.line_changes();
         cache.lines.retain(|source, _| *source < starts.len());
         let mut rows = Vec::new();
         let mut reusable_paint = Vec::new();
@@ -2278,6 +2317,18 @@ impl QueryEditor {
             let start = starts[source];
             let end = starts.get(source + 1).map_or(text.len(), |end| end - 1);
             let line = &text[start..end];
+            for deletion in line_changes
+                .deletions
+                .iter()
+                .filter(|deletion| deletion.before == source)
+            {
+                rows.push(VisualRow {
+                    source,
+                    range: start..start,
+                    ghost: Some(Arc::from(deletion.text.as_str())),
+                });
+                reusable_paint.push(false);
+            }
             if let Some(cached) = cache
                 .lines
                 .get(&source)
@@ -2293,6 +2344,7 @@ impl QueryEditor {
                 rows.extend(cached.ranges.iter().map(|range| VisualRow {
                     source,
                     range: start + range.start..start + range.end,
+                    ghost: None,
                 }));
                 reusable_paint.resize(rows.len(), same_position);
                 continue;
@@ -2318,6 +2370,7 @@ impl QueryEditor {
             rows.extend(ranges.iter().map(|range| VisualRow {
                 source,
                 range: start + range.start..start + range.end,
+                ghost: None,
             }));
             reusable_paint.resize(rows.len(), false);
             cache.lines.insert(
@@ -2328,6 +2381,19 @@ impl QueryEditor {
                     ranges,
                 },
             );
+        }
+        let eof_source = starts.len().saturating_sub(1);
+        for deletion in line_changes
+            .deletions
+            .iter()
+            .filter(|deletion| deletion.before >= starts.len())
+        {
+            rows.push(VisualRow {
+                source: eof_source,
+                range: text.len()..text.len(),
+                ghost: Some(Arc::from(deletion.text.as_str())),
+            });
+            reusable_paint.push(false);
         }
         cache.revision = self.revision;
         cache.width = available.into();
@@ -2613,8 +2679,10 @@ impl QueryEditor {
             }
             self.schedule_manifest_diagnostics(cx);
         } else if self.language == EditorLanguage::Json {
-            self.refresh_local_diagnostics();
-            cx.emit(EditorEvent::DiagnosticsChanged);
+            if diagnostics_changed {
+                cx.emit(EditorEvent::DiagnosticsChanged);
+            }
+            self.schedule_json_diagnostics(cx);
         } else {
             if diagnostics_changed {
                 cx.emit(EditorEvent::DiagnosticsChanged);
@@ -2657,6 +2725,54 @@ impl QueryEditor {
             diagnostics,
             false,
         );
+    }
+
+    fn cancel_json_diagnostics(&mut self) {
+        self.json_analysis_epoch = self.json_analysis_epoch.wrapping_add(1);
+        self.json_diagnostic_task.take();
+    }
+
+    fn schedule_json_diagnostics(&mut self, cx: &mut Context<Self>) {
+        self.json_analysis_epoch = self.json_analysis_epoch.wrapping_add(1);
+        let epoch = self.json_analysis_epoch;
+        self.json_diagnostic_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(JSON_DIAGNOSTIC_IDLE_DELAY)
+                .await;
+            let Ok(Some((source, schema, revision))) = this.update(cx, |editor, _| {
+                (editor.language == EditorLanguage::Json && editor.json_analysis_epoch == epoch)
+                    .then(|| {
+                        (
+                            editor.document.text().to_owned(),
+                            editor.json_schema.clone(),
+                            editor.revision,
+                        )
+                    })
+            }) else {
+                return;
+            };
+            let analyzed_source = source.clone();
+            let diagnostics = cx
+                .background_executor()
+                .spawn(async move { json_schema_diagnostics(&source, schema.as_ref()) })
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                if editor.language == EditorLanguage::Json
+                    && editor.json_analysis_epoch == epoch
+                    && editor.revision == revision
+                {
+                    editor.semantic.set_diagnostics(
+                        &analyzed_source,
+                        revision,
+                        revision,
+                        diagnostics,
+                        false,
+                    );
+                    cx.emit(EditorEvent::DiagnosticsChanged);
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn schedule_manifest_diagnostics(&mut self, cx: &mut Context<Self>) {
@@ -3495,6 +3611,9 @@ impl QueryEditor {
         }
         let display_line = (f32::from(content_y) / f32::from(EDITOR_LINE_HEIGHT)) as usize;
         let row = displayed_lines.get(display_line)?;
+        if row.ghost.is_some() {
+            return Some(row.range.start);
+        }
         let line_start = row.range.start;
         let line_end = row.range.end;
         let line_text = &self.document.text()[line_start..line_end];
@@ -3534,7 +3653,12 @@ impl QueryEditor {
             return None;
         }
         let display_line = (f32::from(content_y) / f32::from(EDITOR_LINE_HEIGHT)) as usize;
-        let line = self.visual_rows().get(display_line)?.source;
+        let rows = self.visual_rows();
+        let row = rows.get(display_line)?;
+        if row.ghost.is_some() {
+            return None;
+        }
+        let line = row.source;
         let starts = self.document.line_starts();
         let start = *starts.get(line)?;
         let end = starts
@@ -3857,6 +3981,8 @@ impl QueryEditor {
                     .absolute()
                     .right(px(8.))
                     .top(y)
+                    .occlude()
+                    .cursor_pointer()
                     .on_mouse_move(|_, _, cx| cx.stop_propagation())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
@@ -4119,30 +4245,23 @@ impl QueryEditor {
     fn semantic_status(&self) -> Option<(String, bool)> {
         let errors = self.semantic.error_count();
         let warnings = self.semantic.warning_count();
-        let counts = format!("{errors} errors, {warnings} warnings");
-        if let Some(diagnostic) = self.semantic.diagnostic_at(self.document.cursor()) {
-            let suffix = if diagnostic.quick_fix_ids.is_empty() {
-                String::new()
-            } else {
-                " · quick fix available".into()
-            };
-            return Some((
-                format!(
-                    "{}: {}{suffix} · {counts}",
-                    diagnostic.code, diagnostic.message,
-                ),
-                diagnostic.severity == sift_protocol::DiagnosticSeverity::Error,
-            ));
-        }
         if errors == 0 && warnings == 0 {
             return None;
         }
-        let incomplete = if self.semantic.diagnostics_incomplete() {
-            " · catalog checks incomplete"
-        } else {
-            ""
-        };
-        Some((format!("{counts}{incomplete}"), errors > 0))
+        let mut counts = Vec::with_capacity(2);
+        if errors > 0 {
+            counts.push(format!(
+                "{errors} {}",
+                if errors == 1 { "error" } else { "errors" }
+            ));
+        }
+        if warnings > 0 {
+            counts.push(format!(
+                "{warnings} {}",
+                if warnings == 1 { "warning" } else { "warnings" }
+            ));
+        }
+        Some((counts.join(" · "), errors > 0))
     }
 
     pub(crate) fn format_problem(&self, diagnostic: &EditorDiagnostic) -> String {
@@ -4159,13 +4278,6 @@ impl QueryEditor {
         )
     }
 
-    fn current_problem_text(&self) -> Option<String> {
-        self.semantic
-            .diagnostic_at(self.document.cursor())
-            .or_else(|| self.semantic.diagnostics().first())
-            .map(|diagnostic| self.format_problem(diagnostic))
-    }
-
     fn all_problems_text(&self) -> Option<String> {
         (!self.semantic.diagnostics().is_empty()).then(|| {
             self.semantic
@@ -4175,17 +4287,6 @@ impl QueryEditor {
                 .collect::<Vec<_>>()
                 .join("\n")
         })
-    }
-
-    fn copy_current_problem(
-        &mut self,
-        _: &gpui::ClickEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(problem) = self.current_problem_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(problem));
-        }
     }
 
     fn copy_all_problems(&mut self, _: &gpui::ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -4342,7 +4443,6 @@ impl gpui::Render for QueryEditor {
             }
         };
         let focused = self.focus_handle.is_focused(window);
-        let has_current_problem = self.current_problem_text().is_some();
         let problem_count = self.semantic.diagnostics().len();
         let blink_enabled = self.cursor_blink.read(cx).enabled;
         if focused != blink_enabled {
@@ -4535,35 +4635,18 @@ impl gpui::Render for QueryEditor {
                     })
                     .child(div().flex_1().min_w_0().truncate().child(message))
                     .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                IconButton::new(
-                                    "editor-copy-current-problem",
-                                    IconName::Document,
-                                    "Copy current problem",
-                                )
-                                .debug_selector("editor-copy-current-problem")
-                                .square(px(20.))
-                                .disabled(!has_current_problem)
-                                .tooltip("Copy current problem with line number")
-                                .on_click(cx.listener(Self::copy_current_problem)),
+                        div().flex_none().flex().items_center().gap_1().child(
+                            IconButton::new(
+                                "editor-copy-problems",
+                                IconName::Copy,
+                                "Copy errors and warnings",
                             )
-                            .children((problem_count > 1).then(|| {
-                                IconButton::new(
-                                    "editor-copy-all-problems",
-                                    IconName::Copy,
-                                    "Copy all problems",
-                                )
-                                .debug_selector("editor-copy-all-problems")
-                                .square(px(20.))
-                                .disabled(problem_count == 0)
-                                .tooltip("Copy all problems with line numbers")
-                                .on_click(cx.listener(Self::copy_all_problems))
-                            })),
+                            .debug_selector("editor-copy-problems")
+                            .square(px(20.))
+                            .disabled(problem_count == 0)
+                            .tooltip("Copy errors and warnings with line numbers")
+                            .on_click(cx.listener(Self::copy_all_problems)),
+                        ),
                     )
             }))
     }
@@ -4660,7 +4743,7 @@ impl Element for QueryEditorElement {
         } else {
             Arc::new(Vec::new())
         };
-        let line_changes = editor.line_change_markers();
+        let line_changes = editor.line_changes();
         let viewport = editor.scroll_handle.bounds();
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -4729,19 +4812,27 @@ impl Element for QueryEditorElement {
             let offset = row.range.start;
             let line_end = row.range.end;
             let source_line = &text[offset..line_end];
-            let folded = editor
-                .folded_lines
-                .iter()
-                .any(|range| range.start == line_index);
+            let ghost = row.ghost.as_deref();
+            let folded = ghost.is_none()
+                && editor
+                    .folded_lines
+                    .iter()
+                    .any(|range| range.start == line_index);
             let folded_line;
-            let line = if folded {
+            let line = if let Some(ghost) = ghost {
+                ghost
+            } else if folded {
                 folded_line = format!("{}  …", source_line.trim_end());
                 folded_line.as_str()
             } else {
                 source_line
             };
-            let line_change = line_changes.get(line_index).copied().flatten();
-            let cached = (!folded)
+            let line_change = if ghost.is_some() {
+                Some(LineChangeKind::Deleted)
+            } else {
+                line_changes.markers.get(line_index).copied().flatten()
+            };
+            let cached = (!folded && ghost.is_none())
                 .then(|| {
                     editor
                         .line_cache
@@ -4766,7 +4857,7 @@ impl Element for QueryEditorElement {
                     &runs,
                     None,
                 );
-                if !folded {
+                if !folded && ghost.is_none() {
                     editor
                         .line_cache
                         .borrow_mut()
@@ -4775,6 +4866,29 @@ impl Element for QueryEditorElement {
                 }
                 shaped
             };
+            if ghost.is_some() {
+                let number_runs = [TextRun {
+                    len: 0,
+                    font: style.font(),
+                    color: theme.colors.disabled_text,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }];
+                line_numbers.push((
+                    display_index,
+                    window
+                        .text_system()
+                        .shape_line("".into(), font_size, &number_runs, None),
+                ));
+                let top = text_top + line_height * display_index as f32;
+                gutter_diagnostic_quads.push(fill(
+                    Bounds::new(point(bounds.left(), top), size(px(3.), line_height)),
+                    theme.colors.danger,
+                ));
+                lines.push((display_index, shaped));
+                continue;
+            }
             let number_color = if cursor >= offset
                 && (cursor < line_end
                     || (cursor == line_end
@@ -5893,16 +6007,28 @@ mod tests {
     #[test]
     fn json_line_changes_distinguish_modification_addition_and_deletion() {
         assert_eq!(
-            line_change_markers("{\n  \"a\": 1\n}", "{\n  \"a\": 2\n}"),
-            vec![None, Some(LineChangeKind::Modified), None]
+            line_changes("{\n  \"a\": 1\n}", "{\n  \"a\": 2\n}"),
+            LineChanges {
+                markers: vec![None, Some(LineChangeKind::Modified), None],
+                deletions: Vec::new(),
+            }
         );
         assert_eq!(
-            line_change_markers("{\n}", "{\n  \"a\": 1,\n}"),
-            vec![None, Some(LineChangeKind::Added), None]
+            line_changes("{\n}", "{\n  \"a\": 1,\n}"),
+            LineChanges {
+                markers: vec![None, Some(LineChangeKind::Added), None],
+                deletions: Vec::new(),
+            }
         );
         assert_eq!(
-            line_change_markers("{\n  \"a\": 1,\n}", "{\n}"),
-            vec![None, Some(LineChangeKind::Deleted)]
+            line_changes("{\n  \"a\": 1,\n}", "{\n}"),
+            LineChanges {
+                markers: vec![None, None],
+                deletions: vec![DeletedLine {
+                    before: 1,
+                    text: "  \"a\": 1,".into(),
+                }],
+            }
         );
     }
 
@@ -5914,13 +6040,38 @@ mod tests {
                 editor.document.replace_range(6..7, "2");
                 editor.edited_with_auto_completion(false, cx);
                 assert_eq!(
-                    editor.line_change_markers().as_slice(),
+                    editor.line_changes().markers.as_slice(),
                     &[Some(LineChangeKind::Modified)]
                 );
                 editor.set_file_change_indicators(false, cx);
-                assert!(editor.line_change_markers().is_empty());
+                assert!(editor.line_changes().markers.is_empty());
             });
         }
+    }
+
+    #[gpui::test]
+    fn json_diagnostics_wait_for_typing_to_settle(cx: &mut TestAppContext) {
+        let editor = cx.new(|cx| {
+            QueryEditor::new(doc("{\n  \"enabled\": true\n}"), cx)
+                .with_language(EditorLanguage::Json)
+        });
+        editor.update(cx, |editor, cx| {
+            let quote = editor.document.text().find("\":").unwrap();
+            editor.document.replace_range(quote..quote + 1, "");
+            editor.edited_with_auto_completion(false, cx);
+            assert_eq!(editor.semantic.error_count(), 0);
+        });
+
+        cx.executor()
+            .advance_clock(JSON_DIAGNOSTIC_IDLE_DELAY - Duration::from_millis(1));
+        cx.run_until_parked();
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.semantic.error_count()),
+            0
+        );
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(editor.read_with(cx, |editor, _| editor.semantic.error_count()) > 0);
     }
 
     #[test]
@@ -5972,6 +6123,33 @@ mod tests {
             editor.update_wraps(px(900.), cx.theme(), window);
             assert!(editor.visual_rows().len() < narrow.len());
             assert_eq!(editor.document.text(), text);
+        });
+    }
+
+    #[gpui::test]
+    fn deleted_json_field_is_a_phantom_row_not_the_following_live_row(cx: &mut TestAppContext) {
+        let source = "{\n  \"a\": 1,\n}";
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| QueryEditor::new(doc(source), cx).with_language(EditorLanguage::Json))
+            })
+            .unwrap()
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut visual).unwrap();
+        editor.update_in(&mut visual, |editor, window, cx| {
+            let start = source.find("  \"a\"").unwrap();
+            let end = source[start..].find('\n').unwrap() + start + 1;
+            editor.document.replace_range(start..end, "");
+            editor.edited_with_auto_completion(false, cx);
+            editor.update_wraps(px(600.), cx.theme(), window);
+
+            let rows = editor.visual_rows();
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[1].ghost.as_deref(), Some("  \"a\": 1,"));
+            assert!(rows[2].ghost.is_none());
+            assert_eq!(editor.line_changes().markers, vec![None, None]);
+            assert_eq!(&editor.document.text()[rows[2].range.clone()], "}");
         });
     }
 
@@ -6442,10 +6620,6 @@ mod tests {
             ));
             editor.document.set_selection(16..16, false);
             assert_eq!(
-                editor.current_problem_text().as_deref(),
-                Some("Line 2 [warning] SQL002: unqualified object")
-            );
-            assert_eq!(
                 editor.all_problems_text().as_deref(),
                 Some(
                     "Line 1 [error] SQL001: unknown table\n\
@@ -6458,26 +6632,23 @@ mod tests {
         });
         cx.run_until_parked();
         let copy = cx
-            .debug_bounds("editor-copy-current-problem")
-            .expect("current problem button");
+            .debug_bounds("editor-copy-problems")
+            .expect("copy problems button");
         cx.simulate_click(copy.center(), gpui::Modifiers::default());
-        assert_eq!(
-            cx.read_from_clipboard().and_then(|item| item.text()),
-            Some("Line 1 [error] SQL001: unknown table".into())
-        );
+        let copied = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .expect("problem text copied");
+        assert!(copied.contains("Line 1 [error] SQL001"));
+        assert!(copied.contains("Line 2 [warning] SQL002"));
         assert_eq!(
             editor.read_with(&cx, |editor, _| editor.document.cursor()),
             10
         );
-        let copy = cx
-            .debug_bounds("editor-copy-all-problems")
-            .expect("all problems button");
-        cx.simulate_click(copy.center(), gpui::Modifiers::default());
-        assert!(cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .unwrap()
-            .contains("Line 2 [warning] SQL002"));
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| editor.semantic_status()),
+            Some(("1 error · 1 warning".into(), true))
+        );
     }
 
     #[gpui::test]

@@ -692,7 +692,9 @@ impl RenderOnce for IconButton {
             if let Some(on_click) = self.on_click {
                 button = button.on_click(on_click);
             }
-            button = button.hover(move |el| el.bg(hover_background).text_color(colors.text));
+            button = button
+                .cursor_pointer()
+                .hover(move |el| el.bg(hover_background).text_color(colors.text));
         }
         button
     }
