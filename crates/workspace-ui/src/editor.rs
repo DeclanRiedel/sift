@@ -6173,58 +6173,28 @@ fn toml_text_runs(line: &str, font: gpui::Font, theme: Theme) -> Vec<TextRun> {
 }
 
 fn is_sql_keyword(word: &str) -> bool {
-    matches!(
-        word.to_ascii_uppercase().as_str(),
-        "SELECT"
-            | "FROM"
-            | "WHERE"
-            | "JOIN"
-            | "INNER"
-            | "LEFT"
-            | "RIGHT"
-            | "FULL"
-            | "OUTER"
-            | "ON"
-            | "AS"
-            | "AND"
-            | "OR"
-            | "NOT"
-            | "NULL"
-            | "IS"
-            | "IN"
-            | "LIKE"
-            | "GROUP"
-            | "BY"
-            | "ORDER"
-            | "HAVING"
-            | "LIMIT"
-            | "OFFSET"
-            | "INSERT"
-            | "INTO"
-            | "VALUES"
-            | "UPDATE"
-            | "SET"
-            | "DELETE"
-            | "CREATE"
-            | "ALTER"
-            | "DROP"
-            | "TABLE"
-            | "VIEW"
-            | "WITH"
-            | "UNION"
-            | "ALL"
-            | "DISTINCT"
-            | "CASE"
-            | "WHEN"
-            | "THEN"
-            | "ELSE"
-            | "END"
-            | "BEGIN"
-            | "COMMIT"
-            | "ROLLBACK"
-            | "RETURNING"
-            | "OUTPUT"
-    )
+    let candidates: &[&str] = match word.len() {
+        2 => &["ON", "AS", "OR", "IS", "IN", "BY"],
+        3 => &["AND", "NOT", "SET", "ALL", "END"],
+        4 => &[
+            "FROM", "JOIN", "LEFT", "FULL", "NULL", "LIKE", "INTO", "DROP", "VIEW", "WITH", "CASE",
+            "WHEN", "THEN", "ELSE",
+        ],
+        5 => &[
+            "WHERE", "INNER", "RIGHT", "OUTER", "GROUP", "ORDER", "LIMIT", "ALTER", "TABLE",
+            "UNION", "BEGIN",
+        ],
+        6 => &[
+            "SELECT", "HAVING", "OFFSET", "INSERT", "VALUES", "UPDATE", "DELETE", "CREATE",
+            "COMMIT", "OUTPUT",
+        ],
+        8 => &["DISTINCT", "ROLLBACK"],
+        9 => &["RETURNING"],
+        _ => return false,
+    };
+    candidates
+        .iter()
+        .any(|keyword| word.eq_ignore_ascii_case(keyword))
 }
 
 fn offset_from_utf16(text: &str, offset: usize) -> usize {
