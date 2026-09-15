@@ -1,6 +1,6 @@
 //! Bounded, process-local parsed SQL document state (ADR-032 K0).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -407,7 +407,7 @@ impl SemanticRegistry {
             &dialect_id,
             revision,
         ));
-        let mut binder = bind_catalog_references(&source, revision, catalog);
+        let mut binder = bind_catalog_references(&source, &statements, revision, catalog);
         let incomplete = !catalog.complete;
         diagnostics.append(&mut binder);
         diagnostics.truncate(MAX_DIAGNOSTICS);
@@ -1586,11 +1586,12 @@ fn inspect_table_with_joins(
     inspect_nested_factor(&table.relation, range, revision, diagnostics);
     for join in &table.joins {
         inspect_nested_factor(&join.relation, range, revision, diagnostics);
-        let cartesian = matches!(join.join_operator, JoinOperator::CrossJoin)
-            || matches!(
-                join_constraint(&join.join_operator),
-                Some(JoinConstraint::None)
-            );
+        // CROSS JOIN is explicit intent. Warn only when ordinary JOIN syntax
+        // silently omits its matching condition.
+        let cartesian = matches!(
+            join_constraint(&join.join_operator),
+            Some(JoinConstraint::None)
+        );
         if cartesian {
             push_safety_diagnostic(
                 diagnostics,
@@ -1628,81 +1629,102 @@ fn push_safety_diagnostic(
 
 fn bind_catalog_references(
     source: &str,
+    statements: &[SemanticStatement],
     revision: u64,
     catalog: &CatalogBindingView,
 ) -> Vec<SemanticDiagnostic> {
-    let tokens = binding_tokens(source);
+    let document_tokens = binding_tokens(source);
     let mut diagnostics = Vec::new();
-    let mut index = 0usize;
-    while index < tokens.len() {
-        if !tokens[index].is_word()
-            || !matches_ci(&tokens[index].text, &["FROM", "JOIN", "UPDATE", "INTO"])
-        {
-            index += 1;
-            continue;
-        }
-        let Some(first) = tokens.get(index + 1).filter(|token| token.is_word()) else {
-            index += 1;
-            continue;
-        };
-        let (schema, object, range, qualified) =
-            if tokens.get(index + 2).is_some_and(BindingToken::is_dot) {
-                let Some(second) = tokens.get(index + 3).filter(|token| token.is_word()) else {
-                    index += 1;
-                    continue;
-                };
-                (
-                    Some((first.text.as_str(), first.quoted)),
-                    (second.text.as_str(), second.quoted),
-                    TextRange {
-                        start: first.range.start,
-                        end: second.range.end,
-                    },
-                    true,
-                )
-            } else {
-                (
-                    None,
-                    (first.text.as_str(), first.quoted),
-                    first.range,
-                    false,
-                )
+    for statement in statements.iter().filter(|statement| !statement.recovered) {
+        let tokens = document_tokens
+            .iter()
+            .filter(|token| {
+                statement.executable_range.start <= token.range.start
+                    && token.range.end <= statement.executable_range.end
+            })
+            .collect::<Vec<_>>();
+        let local_relations = outline_cte_definitions(&tokens)
+            .into_iter()
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        let mut index = 0usize;
+        while index < tokens.len() {
+            if !tokens[index].is_word()
+                || !matches_ci(&tokens[index].text, &["FROM", "JOIN", "UPDATE", "INTO"])
+            {
+                index += 1;
+                continue;
+            }
+            let Some(first) = tokens.get(index + 1).filter(|token| token.is_word()) else {
+                index += 1;
+                continue;
             };
-        let matches = catalog.matching_objects(schema, object);
-        let ordinal = diagnostics.len();
-        if matches.is_empty() {
-            if catalog.complete {
+            let (schema, object, range, qualified) =
+                if tokens.get(index + 2).is_some_and(|token| token.is_dot()) {
+                    let Some(second) = tokens.get(index + 3).filter(|token| token.is_word()) else {
+                        index += 1;
+                        continue;
+                    };
+                    (
+                        Some((first.text.as_str(), first.quoted)),
+                        (second.text.as_str(), second.quoted),
+                        TextRange {
+                            start: first.range.start,
+                            end: second.range.end,
+                        },
+                        true,
+                    )
+                } else {
+                    (
+                        None,
+                        (first.text.as_str(), first.quoted),
+                        first.range,
+                        false,
+                    )
+                };
+            if !qualified && local_relations.contains(&object.0.to_ascii_lowercase()) {
+                index += 2;
+                continue;
+            }
+            let matches = catalog.matching_objects(schema, object);
+            let ordinal = diagnostics.len();
+            if matches.is_empty() {
+                if catalog.complete {
+                    diagnostics.push(SemanticDiagnostic {
+                        id: format!("{revision}:binder:{ordinal}"),
+                        severity: DiagnosticSeverity::Error,
+                        code: "undefined_object".into(),
+                        message: format!("catalog object `{}` was not found", object.0),
+                        range,
+                        related_ranges: Vec::new(),
+                        source: "binder".into(),
+                        quick_fix_ids: Vec::new(),
+                    });
+                }
+            } else if !qualified && matches.len() == 1 {
+                let candidate = matches[0];
                 diagnostics.push(SemanticDiagnostic {
                     id: format!("{revision}:binder:{ordinal}"),
-                    severity: DiagnosticSeverity::Error,
-                    code: "undefined_object".into(),
-                    message: format!("catalog object `{}` was not found", object.0),
+                    severity: DiagnosticSeverity::Hint,
+                    code: "unqualified_object".into(),
+                    message: format!(
+                        "object resolves uniquely to `{}.{}`",
+                        candidate.schema, candidate.name
+                    ),
                     range,
                     related_ranges: Vec::new(),
                     source: "binder".into(),
-                    quick_fix_ids: Vec::new(),
+                    quick_fix_ids: vec![format!(
+                        "qualify:{}:{}:{}",
+                        range.start, range.end, candidate.id.0
+                    )],
                 });
             }
-        } else if !qualified && matches.len() == 1 {
-            let candidate = matches[0];
-            diagnostics.push(SemanticDiagnostic {
-                id: format!("{revision}:binder:{ordinal}"),
-                severity: DiagnosticSeverity::Hint,
-                code: "unqualified_object".into(),
-                message: format!(
-                    "object resolves uniquely to `{}.{}`",
-                    candidate.schema, candidate.name
-                ),
-                range,
-                related_ranges: Vec::new(),
-                source: "binder".into(),
-                quick_fix_ids: vec![format!(
-                    "qualify:{}:{}:{}",
-                    range.start, range.end, candidate.id.0
-                )],
-            });
+            index += if qualified { 4 } else { 2 };
+            if diagnostics.len() >= MAX_DIAGNOSTICS {
+                return diagnostics;
+            }
         }
-        index += if qualified { 4 } else { 2 };
     }
     diagnostics
 }
@@ -3918,6 +3940,17 @@ mod tests {
         sift_protocol::DialectId::new(value).unwrap()
     }
 
+    fn postgres_statements(source: &str) -> Vec<SemanticStatement> {
+        parse(
+            &dialect("sift/postgresql"),
+            1,
+            source,
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .statements
+    }
+
     fn hover_catalog() -> CatalogBindingView {
         let object = |id: &str, name: &str, columns: &[(&str, sift_protocol::PrimitiveType)]| {
             CatalogBindingObject {
@@ -4490,11 +4523,10 @@ mod tests {
                 }],
             }],
         );
-        let diagnostics = bind_catalog_references(
-            "select * from users; select * from missing; -- from ignored\nselect $$from hidden$$",
-            1,
-            &catalog,
-        );
+        let source =
+            "select * from users; select * from missing; -- from ignored\nselect $$from hidden$$";
+        let diagnostics =
+            bind_catalog_references(source, &postgres_statements(source), 1, &catalog);
         let users = catalog.resolve("mock.public.users").unwrap();
         assert_eq!(users.columns[0].name, "id");
         assert_eq!(
@@ -4515,12 +4547,69 @@ mod tests {
 
     #[test]
     fn partial_catalog_does_not_claim_an_object_is_missing() {
+        let source = "select * from maybe_hidden";
         let diagnostics = bind_catalog_references(
-            "select * from maybe_hidden",
+            source,
+            &postgres_statements(source),
             1,
             &CatalogBindingView::new(sift_protocol::CatalogRevision(1), false, Vec::new()),
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn long_demo_query_accepts_ctes_and_explicit_cross_joins() {
+        let source = include_str!(
+            "../../../examples/reproducible-instance/sql/postgres-long-saved-query.sql"
+        );
+        let registry = SemanticRegistry::default();
+        let scope = DocumentScope {
+            session: 23,
+            connection: 7,
+        };
+        let state = registry
+            .create(
+                scope,
+                dialect("sift/postgresql"),
+                source.into(),
+                None,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let objects = [
+            "order_items",
+            "orders",
+            "customers",
+            "people",
+            "departments",
+            "audit_events",
+        ]
+        .into_iter()
+        .map(|name| CatalogBindingObject {
+            id: sift_protocol::CatalogObjectId(format!("lab-{name}")),
+            catalog: "sifttest".into(),
+            schema: "lab".into(),
+            name: name.into(),
+            qualified_name: format!("sifttest.lab.{name}"),
+            kind: sift_protocol::CatalogNodeKind::Table,
+            complete: true,
+            comment: None,
+            routine_args: None,
+            return_type: None,
+            columns: Vec::new(),
+        })
+        .collect();
+        let diagnostics = registry
+            .diagnostics_with_catalog(
+                scope,
+                state.document_id,
+                state.revision,
+                &CatalogBindingView::new(sift_protocol::CatalogRevision(1), true, objects),
+            )
+            .unwrap()
+            .diagnostics;
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
     }
 
     #[test]
@@ -4537,6 +4626,7 @@ mod tests {
             "delete from users using orders cross join accounts;",
             "select * from users cross join orders;",
             "select * from users, orders;",
+            "select * from users join orders;",
             "update users set email = 'safe' where id = 1;",
             "select * from users join orders on users.id = orders.id;"
         );
@@ -4578,7 +4668,7 @@ mod tests {
                 .iter()
                 .filter(|diagnostic| diagnostic.code == "cartesian_join")
                 .count(),
-            4
+            2
         );
         assert!(diagnostics
             .iter()
