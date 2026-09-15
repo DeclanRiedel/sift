@@ -4726,6 +4726,22 @@ impl Pane {
     fn on_editor_event(&mut self, item_id: u64, event: &EditorEvent, cx: &mut Context<Self>) {
         match event {
             EditorEvent::DocumentEdited => {
+                let already_dirty = self
+                    .items
+                    .iter()
+                    .find(|item| item.id == item_id)
+                    .is_some_and(|item| item.dirty);
+                if already_dirty {
+                    let definitely_still_dirty = self.editors.get(&item_id).is_some_and(|editor| {
+                        let current_len = editor.read(cx).document().text().len();
+                        self.clean_documents
+                            .get(&item_id)
+                            .is_none_or(|clean| clean.len() != current_len)
+                    });
+                    if definitely_still_dirty {
+                        return;
+                    }
+                }
                 let dirty = self.editors.get(&item_id).is_some_and(|editor| {
                     self.clean_documents
                         .get(&item_id)

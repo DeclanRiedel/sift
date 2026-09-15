@@ -3126,9 +3126,10 @@ impl QueryEditor {
         code: modalkit::crossterm::event::KeyCode,
         cx: &mut Context<Self>,
     ) -> bool {
-        let clipboard = (self.vim_mode != VimMode::Insert)
-            .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
-            .flatten();
+        let clipboard = (self.vim_mode != VimMode::Insert
+            && matches!(code, modalkit::crossterm::event::KeyCode::Char('p' | 'P')))
+        .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+        .flatten();
         let Some(vim) = self.vim.as_mut() else {
             return false;
         };
@@ -3171,9 +3172,10 @@ impl QueryEditor {
                 return true;
             }
         }
-        let clipboard = (self.vim_mode != VimMode::Insert)
-            .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
-            .flatten();
+        let clipboard = (self.vim_mode != VimMode::Insert
+            && text.chars().any(|character| matches!(character, 'p' | 'P')))
+        .then(|| cx.read_from_clipboard().and_then(|item| item.text()))
+        .flatten();
         let Some(vim) = self.vim.as_mut() else {
             return false;
         };
@@ -3539,6 +3541,13 @@ impl QueryEditor {
         // press never both closes the menu and leaves insert mode.
         if self.semantic.cancel_completion() || self.semantic.clear_star_expansion() {
             cx.notify();
+            return;
+        }
+        if self.vim_mode == VimMode::Normal && self.vim_entered.is_empty() {
+            if self.semantic.clear_hover() {
+                self.hover_anchor = None;
+                cx.notify();
+            }
             return;
         }
         self.vim_key(modalkit::crossterm::event::KeyCode::Esc, cx);
@@ -6351,6 +6360,21 @@ mod tests {
         cx.executor().advance_clock(DOCUMENT_CHANGE_BATCH_DELAY);
         cx.run_until_parked();
         assert_eq!(changes.read_with(&cx, |spy, _| spy.0.len()), 1);
+    }
+
+    #[gpui::test]
+    fn held_escape_is_a_no_op_after_reaching_normal_mode(cx: &mut TestAppContext) {
+        let (mut cx, editor, _) = editor_with_spy("select 1", cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            assert_eq!(editor.vim_mode, VimMode::Normal);
+            assert!(!editor.cursor_event_pending);
+            for _ in 0..128 {
+                editor.exit_insert_mode(&ExitInsertMode, window, cx);
+            }
+            assert_eq!(editor.vim_mode, VimMode::Normal);
+            assert!(editor.vim_entered.is_empty());
+            assert!(!editor.cursor_event_pending);
+        });
     }
 
     #[gpui::test]
