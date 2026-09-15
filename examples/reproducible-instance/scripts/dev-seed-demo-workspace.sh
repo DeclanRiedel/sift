@@ -7,6 +7,7 @@
 # Idempotent: existing named resources and bindings are reused.
 set -eu
 
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 base_url="${1:?usage: dev-seed-demo-workspace.sh <base_url> <profile_id> [root_handle]}"
 profile_id="${2:?usage: dev-seed-demo-workspace.sh <base_url> <profile_id> [root_handle]}"
 root_handle="${3:-demo-postgres}"
@@ -83,9 +84,34 @@ if [ -z "$repository_id" ]; then
       '{projection_id:$projection,initialize:true}')" | jq -er .id)"
 fi
 
+# Seed one substantial, executable query for editor and saved-query stress
+# testing. Reusing by name preserves any edits made during prior demo runs.
+saved_query_name="Demo: customer revenue deep dive"
+saved_queries="$(api_get "/v1/metadata/saved-queries?tenant=$tenant_id&scope=all")"
+saved_query_id="$(printf '%s' "$saved_queries" | jq -er --arg name "$saved_query_name" \
+  'first(.[] | select(.name == $name and .owner_principal_id == null) | .id) // empty' \
+  2>/dev/null || true)"
+if [ -z "$saved_query_id" ]; then
+  saved_query_payload="$(jq -cn \
+    --argjson tenant "$tenant_id" \
+    --argjson profile "$profile_id" \
+    --arg name "$saved_query_name" \
+    --rawfile sql "$script_dir/../sql/postgres-long-saved-query.sql" \
+    '{
+      tenant_id:$tenant,
+      owner_principal_id:null,
+      name:$name,
+      sql_text:$sql,
+      connection_profile_id:$profile,
+      tags:["demo","performance","reporting","long-query"]
+    }')"
+  saved_query_id="$(api_post /v1/metadata/saved-queries "$saved_query_payload" | jq -er .id)"
+fi
+
 jq -cn \
   --argjson room_id "$room_id" \
   --argjson workspace_id "$workspace_id" \
   --argjson projection_id "$projection_id" \
   --argjson repository_id "$repository_id" \
-  '{room_id:$room_id,workspace_id:$workspace_id,projection_id:$projection_id,repository_id:$repository_id}'
+  --argjson saved_query_id "$saved_query_id" \
+  '{room_id:$room_id,workspace_id:$workspace_id,projection_id:$projection_id,repository_id:$repository_id,saved_query_id:$saved_query_id}'
