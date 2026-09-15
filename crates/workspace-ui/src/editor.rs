@@ -58,6 +58,7 @@ const COMPLETION_MENU_WIDTH: Pixels = px(440.);
 const COMPLETION_ROW_HEIGHT: Pixels = px(22.);
 const COMPLETION_VISIBLE_ROWS: usize = 9;
 const JSON_DIAGNOSTIC_IDLE_DELAY: Duration = Duration::from_millis(600);
+const DOCUMENT_CHANGE_BATCH_DELAY: Duration = Duration::from_millis(50);
 
 #[cfg(test)]
 fn line_starts(text: &str) -> Vec<usize> {
@@ -403,7 +404,6 @@ pub struct QueryDocument {
     active_undo_group: Option<u64>,
     next_undo_group: u64,
     last_change: Option<DocumentChange>,
-    pending_room_update: Option<Vec<u8>>,
     pending_room_frontier: Option<Vec<u8>>,
 }
 
@@ -430,7 +430,6 @@ impl QueryDocument {
             active_undo_group: None,
             next_undo_group: 1,
             last_change: None,
-            pending_room_update: None,
             pending_room_frontier: None,
         }
     }
@@ -458,7 +457,6 @@ impl QueryDocument {
             active_undo_group: None,
             next_undo_group: 1,
             last_change: None,
-            pending_room_update: None,
             pending_room_frontier: None,
         })
     }
@@ -600,17 +598,14 @@ impl QueryDocument {
                 *char_start = char_start.saturating_add_signed(char_delta);
             }
         }
-        self.pending_room_frontier.get_or_insert(since.clone());
-        self.pending_room_update = self
-            .replica
-            .updates_since_if_any(&since)
-            .expect("export local editor update");
+        self.pending_room_frontier.get_or_insert(since);
     }
 
     fn take_room_update(&mut self) -> Option<Vec<u8>> {
-        let update = self.pending_room_update.take();
-        self.pending_room_frontier = None;
-        update
+        let since = self.pending_room_frontier.take()?;
+        self.replica
+            .updates_since_if_any(&since)
+            .expect("export local editor update")
     }
 
     fn begin_undo_group(&mut self) {
@@ -1048,8 +1043,10 @@ fn find_ci(original: &str, lowered: &str, needle: &str) -> Vec<Range<usize>> {
 /// talks to the SDK directly; it reports intent and the workspace dispatches.
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
-    /// Document text changed and the owning tab must become dirty.
-    DocumentChanged {
+    /// Document text changed; refresh the owning tab's dirty state now.
+    DocumentEdited,
+    /// A short batch of local edits is ready for room replication.
+    RoomUpdateReady {
         update: Vec<u8>,
     },
     /// Cursor or modal state changed; parent chrome may refresh lazily.
@@ -1343,6 +1340,7 @@ pub struct QueryEditor {
     vim: Option<VimEngine>,
     cursor_blink: Entity<CursorBlink>,
     cursor_event_pending: bool,
+    document_change_pending: bool,
     revision: u64,
     mouse_anchor: Option<usize>,
     pub(crate) message_copy_buttons: bool,
@@ -1409,6 +1407,7 @@ impl QueryEditor {
             vim: Some(vim),
             cursor_blink,
             cursor_event_pending: false,
+            document_change_pending: false,
             revision: 1,
             mouse_anchor: None,
             message_copy_buttons: false,
@@ -2701,6 +2700,7 @@ impl QueryEditor {
         self.marked_range = None;
         self.folded_lines.clear();
         self.revision = self.revision.wrapping_add(1);
+        cx.emit(EditorEvent::DocumentEdited);
         let change = self.document.last_change.take();
         let mut cache = self.line_cache.borrow_mut();
         if let Some(change) = change.filter(|change| !change.structural) {
@@ -2717,9 +2717,7 @@ impl QueryEditor {
         drop(cache);
         self.reveal_cursor();
         self.cursor_blink.update(cx, CursorBlink::pause);
-        if let Some(update) = self.document.take_room_update() {
-            cx.emit(EditorEvent::DocumentChanged { update });
-        }
+        self.schedule_document_changed(cx);
         // Preserve a bounded preview for an exact identifier extension while
         // requesting authoritative candidates for the new revision.
         let reopen_completion = self.semantic.completion().is_some();
@@ -2784,6 +2782,28 @@ impl QueryEditor {
             }
         }
         cx.notify();
+    }
+
+    /// Serialize and publish collaborative edits in short batches. Key repeat
+    /// can otherwise export a fresh CRDT update and run the room transport
+    /// pipeline synchronously for every deleted byte.
+    fn schedule_document_changed(&mut self, cx: &mut Context<Self>) {
+        if self.document_change_pending {
+            return;
+        }
+        self.document_change_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(DOCUMENT_CHANGE_BATCH_DELAY)
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                editor.document_change_pending = false;
+                if let Some(update) = editor.document.take_room_update() {
+                    cx.emit(EditorEvent::RoomUpdateReady { update });
+                }
+            });
+        })
+        .detach();
     }
 
     fn refresh_local_diagnostics(&mut self) {
@@ -3175,8 +3195,9 @@ impl QueryEditor {
             return false;
         }
         let selection = self.document.selection();
+        let selection_empty = selection.is_empty();
         let cursor = self.document.cursor();
-        let range = if !selection.is_empty() {
+        let range = if !selection_empty {
             selection
         } else if backward {
             self.document.prev_boundary(cursor)..cursor
@@ -3190,6 +3211,20 @@ impl QueryEditor {
             return true;
         }
         self.adjust_snippet_tabstops(range.clone(), 0);
+        if backward && selection_empty {
+            let (snapshot, deleted) = self
+                .vim
+                .as_mut()
+                .expect("plain Insert mode requires a Vim engine")
+                .input_backspace();
+            if deleted {
+                self.document.replace_range(range, "");
+                self.apply_vim_snapshot_with_edit(snapshot, true, false, cx);
+            } else {
+                self.apply_vim_snapshot_with_edit(snapshot, false, false, cx);
+            }
+            return true;
+        }
         self.replace_completion_text(range, "", cx);
         self.edited_with_auto_completion(false, cx);
         true
@@ -6287,6 +6322,35 @@ mod tests {
         assert!(requests
             .iter()
             .all(|(_, request)| !matches!(request, SemanticRequestKind::AutoComplete { .. })));
+    }
+
+    #[gpui::test]
+    fn held_insert_backspace_batches_document_events(cx: &mut TestAppContext) {
+        struct ChangeSpy(Vec<Vec<u8>>);
+
+        let source = "x".repeat(256);
+        let (mut cx, editor, _) = editor_with_spy(&source, cx);
+        let changes = cx.new(|_| ChangeSpy(Vec::new()));
+        changes.update(&mut cx, |_, cx| {
+            cx.subscribe(&editor, |spy: &mut ChangeSpy, _, event, _| {
+                if let EditorEvent::RoomUpdateReady { update } = event {
+                    spy.0.push(update.clone());
+                }
+            })
+            .detach();
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            assert!(editor.vim_key(modalkit::crossterm::event::KeyCode::Char('i'), cx));
+            for _ in 0..128 {
+                editor.backspace(&Backspace, window, cx);
+            }
+            assert_eq!(editor.document.text(), "x".repeat(128));
+            assert!(editor.document_change_pending);
+            assert!(changes.read(cx).0.is_empty());
+        });
+        cx.executor().advance_clock(DOCUMENT_CHANGE_BATCH_DELAY);
+        cx.run_until_parked();
+        assert_eq!(changes.read_with(&cx, |spy, _| spy.0.len()), 1);
     }
 
     #[gpui::test]

@@ -4725,7 +4725,7 @@ impl Pane {
 
     fn on_editor_event(&mut self, item_id: u64, event: &EditorEvent, cx: &mut Context<Self>) {
         match event {
-            EditorEvent::DocumentChanged { update } => {
+            EditorEvent::DocumentEdited => {
                 let dirty = self.editors.get(&item_id).is_some_and(|editor| {
                     self.clean_documents
                         .get(&item_id)
@@ -4736,6 +4736,8 @@ impl Pane {
                     dirty: Some(dirty),
                     problems_changed: false,
                 });
+            }
+            EditorEvent::RoomUpdateReady { update } => {
                 cx.emit(PaneEvent::RoomUpdateRequested {
                     item_id,
                     update: update.clone(),

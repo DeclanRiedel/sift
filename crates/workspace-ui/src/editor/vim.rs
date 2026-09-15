@@ -270,6 +270,21 @@ impl VimEngine {
         )
     }
 
+    /// Execute Insert-mode Backspace without materializing the complete buffer.
+    /// The caller mirrors the one-character deletion into its canonical model.
+    pub fn input_backspace(&mut self) -> (VimSnapshot, bool) {
+        let before = self.buffer.get().len();
+        let (changed, clipboard_changed) =
+            self.input_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        let deleted = changed
+            && self.bindings.mode() == ModalVimMode::Insert
+            && self.buffer.get().len().saturating_add(1) == before;
+        (
+            self.snapshot(changed && !deleted, false, clipboard_changed),
+            deleted,
+        )
+    }
+
     pub fn input_key(&mut self, code: KeyCode) -> VimSnapshot {
         if code == KeyCode::Char(':') && self.bindings.mode() == ModalVimMode::Normal {
             self.entered.clear();
@@ -537,6 +552,20 @@ mod tests {
                 super::VimMode::Insert
             );
         }
+    }
+
+    #[test]
+    fn insert_backspace_returns_only_incremental_state() {
+        let mut engine = super::VimEngine::new("select users", "select users".len());
+        engine.input_text("i");
+        let (snapshot, deleted) = engine.input_backspace();
+        assert!(deleted);
+        assert!(snapshot.text.is_none());
+        assert_eq!(snapshot.cursor, (0, 11));
+        assert_eq!(
+            engine.snapshot(true, false, false).text.as_deref(),
+            Some("select user")
+        );
     }
     use super::*;
 
