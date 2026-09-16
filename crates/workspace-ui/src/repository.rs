@@ -115,6 +115,8 @@ impl RepositoryOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RepositoryFailureKind {
     UnavailableRoot,
+    NotRepository,
+    CorruptRepository,
     UntrustedOwnership,
     Disabled,
     StaleBinding,
@@ -131,6 +133,8 @@ impl RepositoryFailureKind {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::UnavailableRoot => "Workspace root unavailable",
+            Self::NotRepository => "Not a Git repository",
+            Self::CorruptRepository => "Git repository is corrupt",
             Self::UntrustedOwnership => "Repository ownership is not trusted",
             Self::Disabled => "Git is disabled",
             Self::StaleBinding => "Repository binding is stale",
@@ -732,6 +736,13 @@ impl RepositoryProjection {
     }
 
     pub(crate) fn repair_target(&self) -> Option<(i64, u64)> {
+        if !self
+            .error
+            .as_ref()
+            .is_some_and(|failure| failure.kind == RepositoryFailureKind::StaleBinding)
+        {
+            return None;
+        }
         self.status
             .as_ref()
             .map(|status| (status.binding_id.0, status.binding_revision))
@@ -1066,6 +1077,12 @@ fn classify_failure(message: String) -> RepositoryFailure {
     let normalized = message.to_ascii_lowercase();
     let kind = if normalized.contains("ownership") || normalized.contains("dubious") {
         RepositoryFailureKind::UntrustedOwnership
+    } else if normalized.contains("not a git repository") {
+        RepositoryFailureKind::NotRepository
+    } else if normalized.contains("repository metadata is invalid")
+        || normalized.contains("repository is corrupt")
+    {
+        RepositoryFailureKind::CorruptRepository
     } else if normalized.contains("disabled") {
         RepositoryFailureKind::Disabled
     } else if normalized.contains("root") && normalized.contains("unavailable") {
@@ -1446,5 +1463,29 @@ mod tests {
         assert!(projection.shared_operation().is_none());
         assert!(!projection.loading());
         assert!(projection.begin_commit().is_some());
+    }
+
+    #[test]
+    fn repair_is_offered_only_for_stale_bindings() {
+        let mut projection = RepositoryProjection::new(Some(7));
+        let (_, request_id) = projection.begin_refresh().unwrap();
+        projection.apply_status_result(7, request_id, Ok(Some(status(serde_json::json!([])))));
+
+        projection.set_error("Git adapter observation changed; rebind the repository");
+        assert_eq!(projection.repair_target(), Some((9, 4)));
+
+        projection.set_error("the projection is not a Git repository");
+        assert_eq!(
+            projection.error().unwrap().kind,
+            RepositoryFailureKind::NotRepository
+        );
+        assert_eq!(projection.repair_target(), None);
+
+        projection.set_error("the Git repository metadata is invalid or corrupt");
+        assert_eq!(
+            projection.error().unwrap().kind,
+            RepositoryFailureKind::CorruptRepository
+        );
+        assert_eq!(projection.repair_target(), None);
     }
 }

@@ -12123,7 +12123,13 @@ impl WorkspaceShell {
                             shell
                                 .repository
                                 .apply_shared_operation(actor, action, phase);
-                            if phase == sift_protocol::RepositoryOperationPhase::Succeeded
+                            let is_local_actor = shell
+                                .lifecycle
+                                .identity
+                                .as_ref()
+                                .is_some_and(|identity| identity.principal.id == actor);
+                            if !is_local_actor
+                                && phase == sift_protocol::RepositoryOperationPhase::Succeeded
                                 && matches!(
                                     action,
                                     sift_protocol::VcsAction::Commit
@@ -12143,14 +12149,20 @@ impl WorkspaceShell {
                                     ),
                                     cx,
                                 );
-                            } else if phase == sift_protocol::RepositoryOperationPhase::Failed {
-                                shell.show_toast(
-                                    format!(
-                                        "Principal {actor}'s {} failed",
-                                        vcs_action_label(action)
-                                    ),
+                            } else if !is_local_actor
+                                && phase == sift_protocol::RepositoryOperationPhase::Failed
+                            {
+                                let message = format!(
+                                    "Principal {actor}'s {} failed",
+                                    vcs_action_label(action)
+                                );
+                                shell.record_runtime_error(
+                                    None,
+                                    "Shared Git operation",
+                                    message.clone(),
                                     cx,
                                 );
+                                shell.push_toast(message, ToastTone::Error, cx);
                             }
                         }
                         if workspace_changed {
@@ -14781,7 +14793,7 @@ impl WorkspaceShell {
                         }
                         Err(message) => {
                             self.repository.set_error(message.clone());
-                            self.show_toast(format!("{action} failed: {message}"), cx);
+                            self.push_toast(message, ToastTone::Error, cx);
                         }
                     }
                     cx.notify();
@@ -15549,7 +15561,7 @@ impl WorkspaceShell {
     /// Keep inline failures available after their dialog closes. Observe state
     /// transitions so redraws do not repeatedly publish the same error.
     fn report_inline_errors(&mut self, cx: &mut Context<Self>) {
-        let current: std::collections::BTreeMap<_, _> = [
+        let mut current: std::collections::BTreeMap<_, _> = [
             ("Theme", &self.theme_error),
             ("Keymaps", &self.keymaps_error),
             ("Room members", &self.room_members_error),
@@ -15583,6 +15595,9 @@ impl WorkspaceShell {
             message.as_ref().map(|message| (operation, message.clone()))
         })
         .collect();
+        if let Some(failure) = self.repository.error() {
+            current.insert(failure.kind.label(), failure.message.clone());
+        }
         let previous = std::mem::replace(&mut self.reported_inline_errors, current.clone());
         for (operation, message) in current {
             if previous.get(operation) == Some(&message) {
@@ -50031,6 +50046,63 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("account-github-profile").is_some());
+    }
+
+    #[gpui::test]
+    fn repository_failures_reach_problems_with_error_toasts(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        workspace.update(cx, |shell, cx| {
+            shell.selected_workspace_id = Some(7);
+            shell.repository.select_workspace(Some(7));
+            let (_, request_id) = shell.repository.begin_refresh().unwrap();
+            let status_error =
+                "loading repository status failed: projection is not a Git repository";
+            assert!(shell
+                .repository
+                .apply_status_result(7, request_id, Err(status_error.into())));
+
+            shell.report_inline_errors(cx);
+            assert_eq!(shell.global_problems.len(), 1);
+            assert_eq!(shell.global_problems[0].title, "Not a Git repository");
+            assert_eq!(shell.global_problems[0].message, status_error);
+            assert_eq!(
+                shell.notification_history.last().unwrap().tone,
+                ToastTone::Error
+            );
+
+            shell.report_inline_errors(cx);
+            assert_eq!(shell.global_problems.len(), 1);
+
+            let repair_error =
+                "repairing repository binding failed: projection is not a Git repository";
+            shell.on_executor_event(
+                ExecutorEvent::RepositoryConflictMutationFinished {
+                    workspace_id: 7,
+                    action: "Repository binding repaired",
+                    manual_path: None,
+                    result: Err(repair_error.into()),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell.notification_history.last().unwrap().message,
+                repair_error
+            );
+            assert_eq!(
+                shell.notification_history.last().unwrap().tone,
+                ToastTone::Error
+            );
+            assert!(!shell
+                .notification_history
+                .iter()
+                .any(|notification| notification.message.contains("repaired failed")));
+
+            shell.report_inline_errors(cx);
+            assert!(shell.global_problems.iter().any(|problem| {
+                problem.title == "Not a Git repository" && problem.message == repair_error
+            }));
+        });
     }
 
     #[gpui::test]
