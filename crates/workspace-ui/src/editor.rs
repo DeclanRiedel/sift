@@ -45,8 +45,8 @@ fn shared_vim_store(cx: &mut App) -> SharedStore<EmptyInfo> {
     store
 }
 
-const EDITOR_LINE_HEIGHT: Pixels = px(20.);
-const EDITOR_FONT_SIZE: Pixels = px(15.);
+const EDITOR_LINE_HEIGHT: Pixels = px(22.);
+const EDITOR_FONT_SIZE: Pixels = px(16.);
 const BLOCK_CURSOR_FALLBACK_WIDTH: Pixels = px(7.);
 pub(crate) const EDITOR_GUTTER_WIDTH: Pixels = px(48.);
 const EDITOR_TEXT_INSET: Pixels = px(12.);
