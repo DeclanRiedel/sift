@@ -11717,55 +11717,25 @@ impl WorkspaceShell {
         self.panes.len()
     }
 
-    /// Label for the workspace switcher: the open workspace's name, or a local
-    /// fallback before any server workspace is selected.
-    fn workspace_label(&self) -> String {
-        self.selected_workspace_id
-            .and_then(|selected| {
-                self.lifecycle
-                    .tenants
-                    .iter()
-                    .flat_map(|tenant| &tenant.rooms)
-                    .flat_map(|room| &room.workspaces)
-                    .find(|workspace| workspace.id == selected)
-                    .map(|workspace| workspace.name.clone())
-            })
-            .unwrap_or_else(|| "Local workspace".into())
-    }
-
-    fn workspace_context_label(&self) -> String {
-        let workspace = self.workspace_label();
-        self.selected_workspace_id
-            .and_then(|selected| {
-                self.lifecycle
-                    .tenants
-                    .iter()
-                    .flat_map(|tenant| &tenant.rooms)
-                    .find(|room| room.workspaces.iter().any(|entry| entry.id == selected))
-                    .map(|room| format!("{} / {workspace}", room.name))
-            })
-            .unwrap_or(workspace)
-    }
-
     fn workspace_git_context_label(&self) -> Option<String> {
-        self.selected_workspace()?.git_enabled.then(|| {
-            if let Some(status) = self.repository.status() {
-                if let Some(branch) = &status.branch {
-                    return branch.clone();
-                }
-                if let Some(head) = &status.head_oid {
-                    return format!("Detached @ {}", head.chars().take(7).collect::<String>());
-                }
-                return "No commits".into();
+        if !self.selected_workspace()?.git_enabled {
+            return None;
+        }
+        if let Some(status) = self.repository.status() {
+            if let Some(branch) = &status.branch {
+                return Some(branch.clone());
             }
-            if self.repository.error().is_some() {
-                "Git unavailable".into()
-            } else if self.repository.loaded() {
-                "No repository".into()
-            } else {
-                "Git…".into()
+            if let Some(head) = &status.head_oid {
+                return Some(format!(
+                    "Detached @ {}",
+                    head.chars().take(7).collect::<String>()
+                ));
             }
-        })
+            return Some("No commits".into());
+        }
+        self.repository
+            .error()
+            .map(|error| error.kind.label().into())
     }
 
     fn active_server_name(&self) -> String {
@@ -34797,11 +34767,10 @@ impl WorkspaceShell {
             .into_any_element()
     }
 
-    /// Global application context: commands, Sift instance, workspace, updates,
-    /// identity, and the active database object breadcrumb.
+    /// Global application context: commands, Sift instance, updates, identity,
+    /// and the active database object breadcrumb.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
-        let workspace_label = self.workspace_context_label();
         let active_database_source = self.panes.get(self.active_pane).and_then(|pane| {
             let pane = pane.read(cx);
             let item = pane.active_item()?;
@@ -34974,13 +34943,7 @@ impl WorkspaceShell {
                 .text_center()
                 .text_sm()
                 .text_color(colors.muted_text)
-                .child(database_context.unwrap_or_else(|| {
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(workspace_label)
-                        .into_any_element()
-                }))
+                .children(database_context)
                 .children(git_context_label.map(|label| {
                     div()
                         .id("toolbar-git-context")
@@ -49950,7 +49913,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn app_bar_uses_identity_workspace_and_git_context(cx: &mut TestAppContext) {
+    fn app_bar_shows_only_real_or_failed_git_context(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -50027,12 +49990,36 @@ mod tests {
             "Team Sift"
         );
         assert_eq!(
-            workspace.read_with(&cx, |shell, _| shell.workspace_context_label()),
-            "Research / Reporting"
-        );
-        assert_eq!(
             workspace.read_with(&cx, |shell, _| shell.workspace_git_context_label()),
             Some("feature/app-bar".into())
+        );
+        assert!(cx.debug_bounds("toolbar-git-context").is_some());
+        workspace.update(&mut cx, |shell, cx| {
+            let (_, request_id) = shell.repository.begin_refresh().unwrap();
+            assert!(shell
+                .repository
+                .apply_status_result(12, request_id, Ok(None)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.workspace_git_context_label()),
+            None
+        );
+        assert!(cx.debug_bounds("toolbar-git-context").is_none());
+        workspace.update(&mut cx, |shell, cx| {
+            let (_, request_id) = shell.repository.begin_refresh().unwrap();
+            assert!(shell.repository.apply_status_result(
+                12,
+                request_id,
+                Err("git operation failed".into())
+            ));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.workspace_git_context_label()),
+            Some("Git command failed".into())
         );
         assert!(cx.debug_bounds("toolbar-git-context").is_some());
         assert_eq!(
