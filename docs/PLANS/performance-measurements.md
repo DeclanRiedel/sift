@@ -145,3 +145,23 @@ Network, workspace shell, GPU submission and compositor latency remain excluded.
 Fixture construction makes wall-clock benchmark execution much longer than the
 measured individual edits. Behaviour tests separately cover completion suppression,
 Unicode/newline/selection deletion, boundary no-ops, undo and native Replace mode.
+
+## Large SQL editor scrolling (2026-09-15)
+
+Revision `fdbe197` added an 8,000-line steady-scroll fixture after bounding the
+line-number glyph cache and pinning editor typography. Ten Criterion samples,
+one-second warmup and one-second requested measurement ran in the optimized
+bench profile on Linux x86_64, Intel Core i7-13620H, Rust 1.96.1. Other desktop
+applications were running, so this is a diagnostic local baseline.
+
+Across 3,147 observed frames, dirty-to-draw mean was 0.914 ms, p50 0.537 ms,
+p90 1.568 ms, p95 1.674 ms, p99 2.224 ms and maximum 3.727 ms. No frame exceeded
+the 8.33 ms 120 Hz CPU-frame budget. Criterion measured the scroll iteration at
+0.863–0.908 ms. The fixture includes headless renderer submission but excludes
+compositor, physical display and input-device latency.
+
+```sh
+cargo bench -p sift-workspace-ui --bench frame_budget --features benchmark \
+  editor_scroll_large_document -- --sample-size 10 --measurement-time 1 \
+  --warm-up-time 1
+```

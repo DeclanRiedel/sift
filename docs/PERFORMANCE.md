@@ -29,6 +29,7 @@ renderer submission rather than timing isolated model functions.
 | Benchmark | Representative fixture | Graduation budget |
 | --- | --- | --- |
 | `vim_typing_large_document` | 8,000-line SQL document, Vim insert/backspace cycle | p95 draw ≤ 8.3 ms; no p99 draw above 16.7 ms |
+| `editor_scroll_large_document` | sub-row scrolling through 8,000 SQL lines | p95 draw ≤ 8.3 ms; zero steady-state budget overruns |
 | `first_result_page` | 500 rows × 20 typed display cells | p95 draw ≤ 16.7 ms; update-to-frame ≤ 50 ms |
 | `retained_grid_navigation` | 10,000 retained rows × 20 columns | p95 draw ≤ 8.3 ms; offscreen cells remain unshaped |
 | `git_panel_first_frame` | 20,000 changed paths (adapter response cap) | record first materialization separately from steady refresh |
@@ -45,6 +46,40 @@ Benchmarks are comparison gates, not portable absolute scores. Record CPU, GPU,
 display server, compositor, build revision, and benchmark output when publishing
 a baseline. Compare release builds on the same machine. Do not use the ordinary
 debug profile for product feel claims.
+
+### Captured runs and local comparisons
+
+Use the performance wrapper for repeatable `release-dev` runs:
+
+```sh
+nix develop --command ./scripts/performance.sh run
+nix develop --command ./scripts/performance.sh run editor_scroll_large_document
+```
+
+Each run writes an untracked directory below `target/performance/` containing:
+
+- `metadata.txt` — commit, dirty state, toolchain, OS, CPU and optional display Hz;
+- `command.txt` — exact command;
+- `benchmark.log` — Criterion output and GPUI frame histograms.
+
+Set `SIFT_PERF_DISPLAY_HZ=120` when display context matters. Sample count,
+warmup and measurement time are configurable through `SIFT_PERF_SAMPLES`,
+`SIFT_PERF_WARMUP` and `SIFT_PERF_MEASUREMENT`.
+
+Create and compare a local Criterion baseline:
+
+```sh
+nix develop --command ./scripts/performance.sh baseline editor-scroll editor_scroll_large_document
+# change code
+nix develop --command ./scripts/performance.sh compare editor-scroll editor_scroll_large_document
+```
+
+Compare only on the same machine, power mode, toolchain and build profile.
+Criterion state stays below `target/`; controlled conclusions worth retaining
+belong in `docs/PLANS/performance-measurements.md` with hardware, commit,
+fixture, profile, sample settings and limitations. Track iteration confidence
+interval, dirty-to-draw p50/p95/p99/max, budget overruns, invalidations per frame
+and peak resident memory when relevant. Tail latency matters more than mean.
 
 ### Initial headless baseline
 
@@ -169,3 +204,75 @@ Two findings are structural rather than a matter of degree:
 Outline navigation is comparable to outline first paint, which points the same
 way: `filtered_query_outline_entries` is recomputed per keystroke and again per
 `uniform_list` batch.
+
+## Profiling workflow
+
+Use four layers:
+
+1. Reproduce one user-visible slowdown in `release-dev`.
+2. Measure a stable fixture and retain its raw report.
+3. Sample CPU stacks to locate expensive work.
+4. Add narrow tracing only when sampling cannot explain tail latency.
+
+`release-dev` keeps line-table symbols with optimized code and avoids release
+LTO, making it the default for feel tests and profiles. Record document size,
+row/column count, open-tab count, connection type, display refresh rate and
+competing heavy processes. “Hold Backspace in an 8,000-line SQL buffer” is an
+actionable reproduction; “editor feels slow” is not yet one.
+
+### CPU flamecharts
+
+[Samply](https://github.com/mstange/samply) provides interactive flamecharts
+with local symbols. Install it, then profile the desktop:
+
+```sh
+nix develop --command ./scripts/performance.sh profile
+```
+
+Reproduce the interaction, stop recording, then inspect the main thread. Start
+with wide stacks and repeated leaf work. Check allocations, text shaping,
+layout, paint, serialization and lock contention before adding instrumentation.
+Profiles may contain SQL, file paths, connection names or other private runtime
+data; inspect before sharing and never commit captures.
+
+For server-only CPU work:
+
+```sh
+nix develop --command cargo build -p sift-server --profile release-dev
+nix develop --command samply record target/release-dev/sift-server
+```
+
+### Tracing and async work
+
+Use existing `tracing` spans for scheduling, waiting and rare tail latency.
+Prefer `#[tracing::instrument(skip_all)]`; add only bounded, non-secret
+identifiers or counts. Never record SQL, credentials, secret bytes, cell values
+or complete connection configuration.
+
+Server logging accepts `RUST_LOG` or `SIFT_LOG__FILTER`. HTTP request spans can
+be exported with `SIFT_LOG__OTLP_ENDPOINT`; `docs/BACKEND-OPERATIONS.md`
+documents the bounded best-effort exporter. Traces support diagnosis, not audit
+or benchmark truth.
+
+### Memory capture
+
+Measure a built process, not Cargo compilation:
+
+```sh
+nix develop --command cargo build -p sift-desktop --profile release-dev
+/usr/bin/time -v target/release-dev/sift-desktop
+```
+
+Warm the exact workload, record steady and peak resident memory, then close
+tabs/connections and verify resources return toward baseline. Separate fixture
+payload memory from leaks. Stress many query tabs, large schema trees, retained
+result windows, repeated connection cycles and large repository status sets.
+
+## Adding a performance fixture
+
+A useful fixture reproduces a real interaction, fixes input size, asserts that
+the operation happened, keeps setup outside measurement, exercises the rendered
+tree for UI feel, and remains bounded enough for repetition. UI fixtures report
+the 120 Hz budget with `#[gpui::bench(fps = 120)]`. Avoid network/database
+variance unless it is the subject. Add behavior tests separately: benchmarks
+detect cost regressions; tests protect correctness.

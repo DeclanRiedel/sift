@@ -25,6 +25,9 @@
 - Local desktop and self-hosted team workflows
 - Versioned API 
 
+Development performance measurement and profiling are documented in
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
 ## License
 
 Copyright © 2026 Declan Riedel. Licensed under
