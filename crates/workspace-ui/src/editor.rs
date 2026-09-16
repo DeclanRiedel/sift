@@ -1287,6 +1287,38 @@ struct LineLayoutCache {
     line_numbers: HashMap<(usize, bool), ShapedLine>,
 }
 
+fn remap_cached_visual_row(
+    row: usize,
+    start: usize,
+    end: usize,
+    replacement_len: usize,
+) -> Option<usize> {
+    if row < start {
+        Some(row)
+    } else if row >= end {
+        let delta = replacement_len as isize - end.saturating_sub(start) as isize;
+        Some(row.saturating_add_signed(delta))
+    } else {
+        None
+    }
+}
+
+impl LineLayoutCache {
+    fn replace_visual_rows(&mut self, start: usize, end: usize, replacement_len: usize) {
+        let removed_len = end.saturating_sub(start);
+        if removed_len == replacement_len {
+            self.lines.retain(|row, _| *row < start || *row >= end);
+            return;
+        }
+        self.lines = std::mem::take(&mut self.lines)
+            .into_iter()
+            .filter_map(|(row, shaped)| {
+                remap_cached_visual_row(row, start, end, replacement_len).map(|row| (row, shaped))
+            })
+            .collect();
+    }
+}
+
 #[derive(Default)]
 struct FindMatchCache {
     revision: u64,
@@ -2468,8 +2500,7 @@ impl QueryEditor {
             }
             self.line_cache
                 .borrow_mut()
-                .lines
-                .retain(|row, _| *row < row_start);
+                .replace_visual_rows(row_start, row_end, replacement_len);
             return true;
         }
         cache.dirty_line = None;
@@ -8159,6 +8190,20 @@ mod tests {
         assert_eq!(document.text(), "select 1");
         assert_eq!(document.replica.text(), "select 1");
         assert_eq!(document.selection(), 8..8);
+    }
+
+    #[test]
+    fn visual_row_cache_remap_preserves_only_unaffected_layouts() {
+        assert_eq!(remap_cached_visual_row(1, 2, 3, 1), Some(1));
+        assert_eq!(remap_cached_visual_row(2, 2, 3, 1), None);
+        assert_eq!(remap_cached_visual_row(3, 2, 3, 1), Some(3));
+
+        assert_eq!(remap_cached_visual_row(2, 2, 3, 2), None);
+        assert_eq!(remap_cached_visual_row(3, 2, 3, 2), Some(4));
+
+        assert_eq!(remap_cached_visual_row(2, 2, 4, 1), None);
+        assert_eq!(remap_cached_visual_row(3, 2, 4, 1), None);
+        assert_eq!(remap_cached_visual_row(4, 2, 4, 1), Some(3));
     }
 
     #[gpui::test]
