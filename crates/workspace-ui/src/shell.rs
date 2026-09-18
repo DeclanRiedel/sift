@@ -26747,9 +26747,6 @@ impl WorkspaceShell {
     pub fn set_palette_filter_benchmark(&mut self, text: &str, cx: &mut Context<Self>) {
         self.query_input
             .update(cx, |input, cx| input.set_text(text, cx));
-        self.palette_selected = 0;
-        self.palette_paint_selection.set(0);
-        cx.notify();
     }
 
     #[cfg(feature = "benchmark")]
