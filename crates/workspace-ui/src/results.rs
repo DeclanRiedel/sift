@@ -5649,6 +5649,8 @@ impl ResultsView {
                             |_, _, _| (),
                             move |bounds, _, window, cx| {
                                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                                    let mut borders = gpui::PathBuilder::stroke(px(1.));
+                                    let mut staged_borders = gpui::PathBuilder::stroke(px(1.));
                                     for (_, _, left, width, is_selected, is_staged) in
                                         &painted_cells
                                     {
@@ -5667,20 +5669,20 @@ impl ResultsView {
                                                 colors.selected_surface,
                                             ));
                                         }
-                                        window.paint_quad(gpui::fill(
-                                            gpui::Bounds::new(
-                                                gpui::point(
-                                                    cell_bounds.right() - px(1.),
-                                                    cell_bounds.top(),
-                                                ),
-                                                gpui::size(px(1.), cell_bounds.size.height),
-                                            ),
-                                            if *is_staged {
-                                                colors.staged
-                                            } else {
-                                                colors.subtle_border
-                                            },
-                                        ));
+                                        let border = if *is_staged {
+                                            &mut staged_borders
+                                        } else {
+                                            &mut borders
+                                        };
+                                        let x = cell_bounds.right() - px(0.5);
+                                        border.move_to(gpui::point(x, cell_bounds.top()));
+                                        border.line_to(gpui::point(x, cell_bounds.bottom()));
+                                    }
+                                    if let Ok(path) = borders.build() {
+                                        window.paint_path(path, colors.subtle_border);
+                                    }
+                                    if let Ok(path) = staged_borders.build() {
+                                        window.paint_path(path, colors.staged);
                                     }
                                     for (line, is_number, left, width, _, _) in &painted_cells {
                                         let content_width = px((width - 16.0).max(0.0));
