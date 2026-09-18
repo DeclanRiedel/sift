@@ -3644,6 +3644,24 @@ impl ResultsView {
         }
     }
 
+    fn result_column_at_position(&self, position: Point<Pixels>) -> Option<usize> {
+        let viewport = self.grid_scroll_handle.bounds();
+        let content_x =
+            f32::from(position.x - viewport.left() - self.grid_scroll_handle.offset().x);
+        if content_x < 0.0 {
+            return None;
+        }
+        let mut right = 0.0;
+        self.visible_column_indices().into_iter().find(|column| {
+            right += self
+                .column_widths
+                .get(*column)
+                .copied()
+                .unwrap_or(DEFAULT_COLUMN_WIDTH);
+            content_x < right
+        })
+    }
+
     fn select_cell_from_pointer(
         &mut self,
         row: usize,
@@ -5417,13 +5435,15 @@ impl ResultsView {
                     .filter_map(|display_row| {
                         let row_index = *view.display_rows.get(display_row)?;
                         let mut painted_cells = Vec::new();
+                        let needs_cell_elements =
+                            view.inline_cell_edit.is_some() || view.editing_cell.is_some();
                         let mut cell_left = lead_width;
                         let cells = row_columns
                             .iter()
                             .copied()
                             .enumerate()
                             .filter(|(display_column, _)| row_span.contains(display_column))
-                            .map(|(display_column, source_column)| {
+                            .filter_map(|(display_column, source_column)| {
                                 let cell_width = row_widths[display_column];
                                 let cell_left_before = cell_left;
                                 let is_selected = match selected {
@@ -5490,10 +5510,15 @@ impl ResultsView {
                                             is_number,
                                             cell_left_before,
                                             cell_width,
+                                            is_selected,
+                                            is_staged,
                                         ));
                                     }
                                 }
                                 cell_left += cell_width;
+                                if !needs_cell_elements {
+                                    return None;
+                                }
                                 let cell = div()
                                     .id(("cell", display_row * column_count + display_column))
                                     .flex_none()
@@ -5566,7 +5591,7 @@ impl ResultsView {
                                                 },
                                             ))
                                     });
-                                if let Some((input, error)) = inline_edit {
+                                Some(if let Some((input, error)) = inline_edit {
                                     let input_focus = input.focus_handle(cx);
                                     cell.border_1()
                                         .border_color(if error {
@@ -5617,14 +5642,47 @@ impl ResultsView {
                                         )
                                 } else {
                                     cell.px_2()
-                                }
+                                })
                             })
                             .collect::<Vec<_>>();
                         let text_layer = canvas(
                             |_, _, _| (),
                             move |bounds, _, window, cx| {
                                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                                    for (line, is_number, left, width) in &painted_cells {
+                                    for (_, _, left, width, is_selected, is_staged) in
+                                        &painted_cells
+                                    {
+                                        let cell_bounds = gpui::Bounds::new(
+                                            bounds.origin + gpui::point(px(*left), px(0.)),
+                                            gpui::size(px(*width), bounds.size.height),
+                                        );
+                                        if *is_staged {
+                                            window.paint_quad(gpui::fill(
+                                                cell_bounds,
+                                                colors.staged_muted,
+                                            ));
+                                        } else if *is_selected {
+                                            window.paint_quad(gpui::fill(
+                                                cell_bounds,
+                                                colors.selected_surface,
+                                            ));
+                                        }
+                                        window.paint_quad(gpui::fill(
+                                            gpui::Bounds::new(
+                                                gpui::point(
+                                                    cell_bounds.right() - px(1.),
+                                                    cell_bounds.top(),
+                                                ),
+                                                gpui::size(px(1.), cell_bounds.size.height),
+                                            ),
+                                            if *is_staged {
+                                                colors.staged
+                                            } else {
+                                                colors.subtle_border
+                                            },
+                                        ));
+                                    }
+                                    for (line, is_number, left, width, _, _) in &painted_cells {
                                         let content_width = px((width - 16.0).max(0.0));
                                         let origin =
                                             bounds.origin + gpui::point(px(*left + 8.0), px(0.0));
@@ -5692,9 +5750,7 @@ impl ResultsView {
                                         .flex_1()
                                         .min_w_0()
                                         .h_full()
-                                        .overflow_x_scroll()
-                                        .restrict_scroll_to_axis()
-                                        .track_scroll(&view.grid_scroll_handle)
+                                        .overflow_hidden()
                                         .child(
                                             div()
                                                 .debug_selector(move || {
@@ -5702,6 +5758,7 @@ impl ResultsView {
                                                 })
                                                 .flex()
                                                 .relative()
+                                                .left(view.grid_scroll_handle.offset().x)
                                                 .flex_none()
                                                 .h_full()
                                                 .w(scrollable_min_width)
@@ -5714,7 +5771,9 @@ impl ResultsView {
                                                         div().flex_none().w(px(lead_width))
                                                     }),
                                                 )
-                                                .children(cells)
+                                                .when(needs_cell_elements, |row| {
+                                                    row.children(cells)
+                                                })
                                                 .children(
                                                     (trail_width > 0.0).then(|| {
                                                         div().flex_none().w(px(trail_width))
@@ -5722,6 +5781,70 @@ impl ResultsView {
                                                 ),
                                         ),
                                 )
+                                .when(!needs_cell_elements, |row| {
+                                    row.on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(
+                                            move |view,
+                                                  event: &gpui::MouseDownEvent,
+                                                  window,
+                                                  cx| {
+                                                let Some(column) =
+                                                    view.result_column_at_position(event.position)
+                                                else {
+                                                    return;
+                                                };
+                                                view.open_cell_context_menu(
+                                                    row_index,
+                                                    column,
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                                cx.stop_propagation();
+                                            },
+                                        ),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(
+                                            move |view,
+                                                  event: &gpui::MouseDownEvent,
+                                                  window,
+                                                  cx| {
+                                                let Some(column) =
+                                                    view.result_column_at_position(event.position)
+                                                else {
+                                                    return;
+                                                };
+                                                view.focus_handle.focus(window, cx);
+                                                view.select_cell_from_pointer(
+                                                    row_index,
+                                                    column,
+                                                    event.modifiers.shift,
+                                                    event.click_count,
+                                                    cx,
+                                                );
+                                                cx.stop_propagation();
+                                            },
+                                        ),
+                                    )
+                                    .on_mouse_move(
+                                        cx.listener(
+                                            move |view, event: &gpui::MouseMoveEvent, _, cx| {
+                                                if !event.dragging() {
+                                                    return;
+                                                }
+                                                let Some(column) =
+                                                    view.result_column_at_position(event.position)
+                                                else {
+                                                    return;
+                                                };
+                                                view.drag_cell_selection(row_index, column, cx);
+                                            },
+                                        ),
+                                    )
+                                })
                                 .into_any_element(),
                         )
                     })
