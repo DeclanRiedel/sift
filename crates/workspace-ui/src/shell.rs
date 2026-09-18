@@ -7,11 +7,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    actions, anchored, deferred, div, img, prelude::*, px, relative, uniform_list, Anchor,
-    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, DefiniteLength, Div, Entity,
-    EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeystrokeEvent, MouseButton,
-    PathPromptOptions, Pixels, ResizeEdge, Role, ScrollHandle, ScrollStrategy, SharedString,
-    Subscription, Task, UniformListScrollHandle, Window, WindowBounds, WindowControlArea,
+    actions, anchored, canvas, deferred, div, img, prelude::*, px, relative, uniform_list, Anchor,
+    AnyElement, App, Bounds, ClickEvent, ContentMask, Context, CursorStyle, DefiniteLength, Div,
+    Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeystrokeEvent, MouseButton,
+    PathPromptOptions, Pixels, ResizeEdge, Role, ScrollHandle, ScrollStrategy, ShapedLine,
+    SharedString, Subscription, Task, TextAlign, TextRun, UniformListScrollHandle, Window,
+    WindowBounds, WindowControlArea,
 };
 use regex::{Regex, RegexBuilder};
 use sift_api_types::RoomId;
@@ -913,6 +914,16 @@ impl ObjectGroupKind {
             | ObjectKind::Synonym
             | ObjectKind::Type
             | ObjectKind::Extension => Self::Other,
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Tables => 0,
+            Self::Views => 1,
+            Self::Functions => 2,
+            Self::Sequences => 3,
+            Self::Other => 4,
         }
     }
 }
@@ -2602,6 +2613,14 @@ enum QueryOutlineEntry {
     },
     Statement(sift_protocol::SemanticStatement),
     Symbol(sift_protocol::SemanticOutlineSymbol),
+}
+
+#[derive(Clone)]
+struct CachedPanelLine {
+    text: SharedString,
+    line: ShapedLine,
+    run: TextRun,
+    font_size: Pixels,
 }
 
 impl QueryOutlineEntry {
@@ -9992,6 +10011,7 @@ pub struct WorkspaceShell {
     pending_repository_diff: Option<(sift_protocol::WorkspacePath, sift_protocol::VcsDiffSide)>,
     change_ledger_filter: sift_protocol::ChangeLedgerFilter,
     change_ledger_entries: Vec<sift_protocol::ChangeLedgerEntry>,
+    change_ledger_line_cache: RefCell<HashMap<String, ShapedLine>>,
     change_ledger_scroll_handle: UniformListScrollHandle,
     change_ledger_next_before_id: Option<i64>,
     change_ledger_chain_verified: bool,
@@ -10079,6 +10099,7 @@ pub struct WorkspaceShell {
     query_outline_projection_revision: u64,
     query_outline_projection_cache:
         RefCell<Option<(OutlineProjectionKey, Arc<Vec<QueryOutlineEntry>>)>>,
+    query_outline_line_cache: RefCell<HashMap<String, (CachedPanelLine, CachedPanelLine)>>,
     pending_semantic_rename: Option<PendingSemanticRename>,
     next_execution_id: u64,
     running_explains: HashMap<u64, u64>,
@@ -10859,6 +10880,9 @@ impl WorkspaceShell {
             shell.connections_find_query = input.read(cx).text().trim().to_lowercase();
             shell.connection_nav_selected = 0;
             shell.invalidate_connection_projection();
+            // Materialize the catalog projection before invalidating the
+            // window so the next frame only lays out visible rows.
+            let _ = shell.visible_connection_items();
             shell
                 .connections_scroll_handle
                 .scroll_to_item(0, ScrollStrategy::Top);
@@ -11243,6 +11267,7 @@ impl WorkspaceShell {
             pending_repository_diff,
             change_ledger_filter: sift_protocol::ChangeLedgerFilter::default(),
             change_ledger_entries: Vec::new(),
+            change_ledger_line_cache: RefCell::new(HashMap::new()),
             change_ledger_scroll_handle: UniformListScrollHandle::new(),
             change_ledger_next_before_id: None,
             change_ledger_chain_verified: false,
@@ -11337,6 +11362,7 @@ impl WorkspaceShell {
             query_outline_error: None,
             query_outline_projection_revision: 0,
             query_outline_projection_cache: RefCell::new(None),
+            query_outline_line_cache: RefCell::new(HashMap::new()),
             pending_semantic_rename: None,
             next_execution_id: 1,
             running_explains: HashMap::new(),
@@ -17920,13 +17946,18 @@ impl WorkspaceShell {
                         {
                             continue;
                         }
+                        let mut objects_by_group: [Vec<_>; 5] = std::array::from_fn(|_| Vec::new());
+                        for object in &schema.objects {
+                            objects_by_group
+                                [ObjectGroupKind::from_object_kind(object.kind).index()]
+                            .push(object);
+                        }
                         for group in ObjectGroupKind::CANONICAL {
                             if !self.schema_search_filters.contains(&group) {
                                 continue;
                             }
-                            if !schema.objects.iter().any(|object| {
-                                ObjectGroupKind::from_object_kind(object.kind) == group
-                            }) {
+                            let group_objects = &objects_by_group[group.index()];
+                            if group_objects.is_empty() {
                                 continue;
                             }
                             items.push(ConnectionTreeItem {
@@ -17948,9 +17979,7 @@ impl WorkspaceShell {
                             {
                                 continue;
                             }
-                            for object in schema.objects.iter().filter(|object| {
-                                ObjectGroupKind::from_object_kind(object.kind) == group
-                            }) {
+                            for object in group_objects {
                                 // Filter borrowed metadata before cloning profile, catalog,
                                 // schema, and object strings for each visible tree row.
                                 if self.connections_find_open
@@ -26774,6 +26803,7 @@ impl WorkspaceShell {
         self.connections_find_query = query.to_lowercase();
         self.connection_nav_selected = 0;
         self.invalidate_connection_projection();
+        let _ = self.visible_connection_items();
         cx.notify();
     }
 
@@ -33384,6 +33414,100 @@ impl WorkspaceShell {
         self.query_outline_projection_revision =
             self.query_outline_projection_revision.wrapping_add(1);
         self.query_outline_projection_cache.get_mut().take();
+        self.query_outline_line_cache.get_mut().clear();
+    }
+
+    fn shape_panel_line(
+        cached: Option<&CachedPanelLine>,
+        text: SharedString,
+        color: Hsla,
+        monospace: bool,
+        window: &Window,
+    ) -> CachedPanelLine {
+        let mut style = window.text_style();
+        style.color = color;
+        style.font_size = px(12.0).into();
+        if monospace {
+            style.font_family = "monospace".into();
+        }
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let run = style.to_run(text.len());
+        if let Some(cached) = cached.filter(|cached| {
+            cached.text == text && cached.run == run && cached.font_size == font_size
+        }) {
+            return cached.clone();
+        }
+        CachedPanelLine {
+            line: window.text_system().shape_line(
+                text.clone(),
+                font_size,
+                std::slice::from_ref(&run),
+                None,
+            ),
+            text,
+            run,
+            font_size,
+        }
+    }
+
+    fn shape_palette_line(
+        text: &str,
+        ranges: &[(u32, u32)],
+        base: Hsla,
+        accent: Hsla,
+        window: &Window,
+    ) -> ShapedLine {
+        let mut style = window.text_style();
+        style.font_size = px(13.0).into();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let mut runs = Vec::new();
+        let mut cursor = 0usize;
+        for &(start, end) in ranges {
+            let start = start as usize;
+            let end = end as usize;
+            if start < cursor
+                || start > end
+                || end > text.len()
+                || !text.is_char_boundary(start)
+                || !text.is_char_boundary(end)
+            {
+                continue;
+            }
+            if start > cursor {
+                let mut run = style.to_run(start - cursor);
+                run.color = base;
+                runs.push(run);
+            }
+            if end > start {
+                let mut run = style.to_run(end - start);
+                run.color = accent;
+                runs.push(run);
+            }
+            cursor = end;
+        }
+        if cursor < text.len() || runs.is_empty() {
+            let mut run = style.to_run(text.len() - cursor);
+            run.color = base;
+            runs.push(run);
+        }
+        window
+            .text_system()
+            .shape_line(text.to_owned().into(), font_size, &runs, None)
+    }
+
+    fn shape_monospace_line(text: &str, color: Hsla, window: &Window) -> ShapedLine {
+        let mut style = window.text_style();
+        style.color = color;
+        style.font_family = "monospace".into();
+        style.font_size = px(12.0).into();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let run = style.to_run(text.len());
+        window.text_system().shape_line(
+            text.to_owned().into(),
+            font_size,
+            std::slice::from_ref(&run),
+            None,
+        )
     }
 
     fn filtered_query_outline_entries(&self, cx: &App) -> Arc<Vec<QueryOutlineEntry>> {
@@ -39293,7 +39417,7 @@ impl WorkspaceShell {
                             uniform_list(
                                 "query-outline-scroll",
                                 outline_count,
-                                cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                cx.processor(move |shell, range: Range<usize>, window, cx| {
                                     let entries = shell.filtered_query_outline_entries(cx);
                                     let cursor = shell
                                         .active_query_outline_editor(cx)
@@ -39303,6 +39427,7 @@ impl WorkspaceShell {
                                             entries.get(index).cloned().map(|entry| (index, entry))
                                         })
                                         .map(|(index, entry)| {
+                                            let entry_key = entry.key();
                                             let selected = index == shell.query_outline_selected;
                                             let (contains_cursor, heading, detail, tone) =
                                                 match &entry {
@@ -39388,11 +39513,32 @@ impl WorkspaceShell {
                                                         )
                                                     }
                                                 };
+                                            let (heading_line, detail_line) = {
+                                                let mut cache = shell.query_outline_line_cache.borrow_mut();
+                                                let cached = cache.get(&entry_key);
+                                                let heading_line = Self::shape_panel_line(
+                                                    cached.map(|lines| &lines.0),
+                                                    heading.into(),
+                                                    tone,
+                                                    false,
+                                                    window,
+                                                );
+                                                let detail_line = Self::shape_panel_line(
+                                                    cached.map(|lines| &lines.1),
+                                                    detail.into(),
+                                                    colors.muted_text,
+                                                    true,
+                                                    window,
+                                                );
+                                                cache.insert(entry_key, (heading_line.clone(), detail_line.clone()));
+                                                (heading_line.line, detail_line.line)
+                                            };
                                             div()
                                                 .id(("query-outline-row", index))
                                                 .debug_selector(move || format!("query-outline-row-{index}"))
                                                 .h(px(52.))
                                                 .w_full()
+                                                .relative()
                                                 .flex()
                                                 .items_stretch()
                                                 .border_b_1()
@@ -39417,31 +39563,22 @@ impl WorkspaceShell {
                                                     |marker| marker.bg(colors.accent),
                                                 ))
                                                 .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .px_3()
-                                                        .py_1()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .justify_center()
-                                                        .gap_1()
-                                                        .child(
-                                                            div()
-                                                                .min_w_0()
-                                                                .truncate()
-                                                                .text_xs()
-                                                                .text_color(tone)
-                                                                .child(heading),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .min_w_0()
-                                                                .truncate()
-                                                                .font_family("monospace")
-                                                                .text_color(colors.muted_text)
-                                                                .child(detail),
-                                                        ),
+                                                    canvas(
+                                                        |_, _, _| (),
+                                                        move |bounds, _, window, cx| {
+                                                            window.with_content_mask(
+                                                                Some(ContentMask { bounds }),
+                                                                |window| {
+                                                                    let width = (bounds.size.width - px(24.)).max(px(0.));
+                                                                    let origin = bounds.origin + gpui::point(px(12.), px(2.));
+                                                                    let _ = heading_line.paint(origin, px(22.), TextAlign::Left, Some(width), window, cx);
+                                                                    let _ = detail_line.paint(origin + gpui::point(px(0.), px(23.)), px(22.), TextAlign::Left, Some(width), window, cx);
+                                                                },
+                                                            );
+                                                        },
+                                                    )
+                                                    .flex_1()
+                                                    .h_full(),
                                                 )
                                                 .into_any_element()
                                         })

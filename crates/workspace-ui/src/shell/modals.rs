@@ -5611,7 +5611,7 @@ impl WorkspaceShell {
                             .child(uniform_list(
                                 "change-ledger-rows",
                                 ledger_count,
-                                cx.processor(move |shell, range: Range<usize>, _, cx| {
+                                cx.processor(move |shell, range: Range<usize>, window, cx| {
                                     let colors = cx.theme().colors;
                                     range
                                         .filter_map(|index| {
@@ -5620,15 +5620,33 @@ impl WorkspaceShell {
                                         .map(|(index, entry)| {
                                             let object = entry.affected_object.as_deref().unwrap_or("database");
                                             let commit = entry.git_commit.as_deref().map(|oid| oid.chars().take(8).collect::<String>());
+                                            let summary = format!(
+                                                "{:<25}  {:<12}  {:<18}  {:<32}  {:>10}  {:<8}  {:?}",
+                                                entry.at.to_rfc3339(),
+                                                format!("user:{}", entry.executed_by),
+                                                format!("{:?}", entry.operation),
+                                                object,
+                                                entry.row_count.map(|count| format!("{count} rows")).unwrap_or_default(),
+                                                commit.unwrap_or_default(),
+                                                entry.outcome,
+                                            );
+                                            let line = {
+                                                let mut cache = shell.change_ledger_line_cache.borrow_mut();
+                                                if cache.len() > 2_048 {
+                                                    cache.clear();
+                                                }
+                                                cache.entry(summary.clone()).or_insert_with(|| {
+                                                    Self::shape_monospace_line(&summary, colors.text, window)
+                                                }).clone()
+                                            };
                                             div().id(("change-ledger-row", index)).h(px(34.)).px_2().flex().items_center().gap_3()
                                                 .border_b_1().border_color(colors.subtle_border)
-                                                .child(div().w(px(150.)).text_xs().text_color(colors.muted_text).child(entry.at.to_rfc3339()))
-                                                .child(div().w(px(92.)).font_family("monospace").text_xs().child(format!("user:{}", entry.executed_by)))
-                                                .child(div().w(px(118.)).child(format!("{:?}", entry.operation)))
-                                                .child(div().flex_1().min_w_0().truncate().child(object.to_owned()))
-                                                .child(div().w(px(70.)).text_xs().text_color(colors.muted_text).child(entry.row_count.map(|count| format!("{count} rows")).unwrap_or_default()))
-                                                .child(div().w(px(74.)).font_family("monospace").text_xs().text_color(colors.muted_text).child(commit.unwrap_or_default()))
-                                                .child(div().w(px(90.)).text_xs().child(format!("{:?}", entry.outcome)))
+                                                .child(canvas(
+                                                    |_, _, _| (),
+                                                    move |bounds, _, window, cx| {
+                                                        let _ = line.paint(bounds.origin, bounds.size.height, TextAlign::Left, Some(bounds.size.width), window, cx);
+                                                    },
+                                                ).flex_1().h_full())
                                                 .into_any_element()
                                         })
                                         .collect()
