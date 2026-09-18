@@ -5416,12 +5416,16 @@ impl ResultsView {
                 range
                     .filter_map(|display_row| {
                         let row_index = *view.display_rows.get(display_row)?;
+                        let mut painted_cells = Vec::new();
+                        let mut cell_left = lead_width;
                         let cells = row_columns
                             .iter()
                             .copied()
                             .enumerate()
                             .filter(|(display_column, _)| row_span.contains(display_column))
                             .map(|(display_column, source_column)| {
+                                let cell_width = row_widths[display_column];
+                                let cell_left_before = cell_left;
                                 let is_selected = match selected {
                                     Some(GridSelection::Cell { row, column }) => {
                                         row == row_index && column == source_column
@@ -5454,7 +5458,7 @@ impl ResultsView {
                                     .rendered_rows
                                     .get_mut(row_index)
                                     .and_then(|row| row.get_mut(source_column));
-                                let (shaped, color, is_number) = match rendered {
+                                let (mut shaped, color, is_number) = match rendered {
                                     Some(cell) => {
                                         let color = Self::cell_color(colors, cell.class);
                                         let is_number = matches!(cell.class, CellClass::Number);
@@ -5479,6 +5483,17 @@ impl ResultsView {
                                         )
                                     });
                                 let is_inline_edit = inline_edit.is_some();
+                                if !is_inline_edit && mirror.is_none() {
+                                    if let Some(line) = shaped.take() {
+                                        painted_cells.push((
+                                            line,
+                                            is_number,
+                                            cell_left_before,
+                                            cell_width,
+                                        ));
+                                    }
+                                }
+                                cell_left += cell_width;
                                 let cell = div()
                                     .id(("cell", display_row * column_count + display_column))
                                     .flex_none()
@@ -5601,35 +5616,36 @@ impl ResultsView {
                                                 .child(after),
                                         )
                                 } else {
-                                    cell.px_2().children(shaped.map(|line| {
-                                        canvas(
-                                            |_, _, _| (),
-                                            move |bounds, _, window, cx| {
-                                                let align = if is_number {
-                                                    TextAlign::Right
-                                                } else {
-                                                    TextAlign::Left
-                                                };
-                                                window.with_content_mask(
-                                                    Some(ContentMask { bounds }),
-                                                    |window| {
-                                                        let _ = line.paint(
-                                                            bounds.origin,
-                                                            bounds.size.height,
-                                                            align,
-                                                            Some(bounds.size.width),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                );
-                                            },
-                                        )
-                                        .size_full()
-                                    }))
+                                    cell.px_2()
                                 }
                             })
                             .collect::<Vec<_>>();
+                        let text_layer = canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, cx| {
+                                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                                    for (line, is_number, left, width) in &painted_cells {
+                                        let content_width = px((width - 16.0).max(0.0));
+                                        let origin =
+                                            bounds.origin + gpui::point(px(*left + 8.0), px(0.0));
+                                        let _ = line.paint(
+                                            origin,
+                                            bounds.size.height,
+                                            if *is_number {
+                                                TextAlign::Right
+                                            } else {
+                                                TextAlign::Left
+                                            },
+                                            Some(content_width),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                });
+                            },
+                        )
+                        .absolute()
+                        .size_full();
                         let row_number = view.window_start + row_index + 1;
                         let pinned_row = div()
                             .id(("result-row-number", display_row))
@@ -5685,12 +5701,14 @@ impl ResultsView {
                                                     format!("result-row-fields-{display_row}")
                                                 })
                                                 .flex()
+                                                .relative()
                                                 .flex_none()
                                                 .h_full()
                                                 .w(scrollable_min_width)
                                                 .when(display_row % 2 == 1, |el| {
                                                     el.bg(colors.grid_stripe)
                                                 })
+                                                .child(text_layer)
                                                 .children(
                                                     (lead_width > 0.0).then(|| {
                                                         div().flex_none().w(px(lead_width))
