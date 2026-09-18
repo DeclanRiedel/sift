@@ -665,6 +665,7 @@ struct CommandProjectionKey {
     query: String,
     context: CommandContext,
     revision: u64,
+    recents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9903,6 +9904,9 @@ pub struct WorkspaceShell {
     show_recent_database_objects: bool,
     command_projection_revision: u64,
     command_projection_cache: RefCell<Option<(CommandProjectionKey, Arc<Vec<CommandSpec>>)>>,
+    command_palette_items_cache:
+        RefCell<Option<(CommandProjectionKey, Arc<Vec<CommandPaletteMatch>>)>>,
+    command_palette_line_cache: RefCell<HashMap<String, (ShapedLine, ShapedLine)>>,
     dark_theme: bool,
     show_frame_metrics: bool,
     navigation_hint_modifier_held: bool,
@@ -11161,6 +11165,8 @@ impl WorkspaceShell {
             show_recent_database_objects,
             command_projection_revision: 0,
             command_projection_cache: RefCell::new(None),
+            command_palette_items_cache: RefCell::new(None),
+            command_palette_line_cache: RefCell::new(HashMap::new()),
             dark_theme: theme.appearance == ThemeAppearance::Dark,
             show_frame_metrics: false,
             navigation_hint_modifier_held: false,
@@ -32831,6 +32837,7 @@ impl WorkspaceShell {
     fn invalidate_command_projection(&mut self) {
         self.command_projection_revision = self.command_projection_revision.wrapping_add(1);
         self.command_projection_cache.get_mut().take();
+        self.command_palette_items_cache.get_mut().take();
     }
 
     fn filtered_commands(&self, cx: &App) -> Arc<Vec<CommandSpec>> {
@@ -32841,6 +32848,7 @@ impl WorkspaceShell {
             query: query.clone(),
             context: self.command_context(cx),
             revision: self.command_projection_revision,
+            recents: self.palette_recents.clone(),
         };
         if let Some((cached_key, commands)) = self.command_projection_cache.borrow().as_ref() {
             if cached_key == &key {
@@ -32877,17 +32885,30 @@ impl WorkspaceShell {
         commands
     }
 
-    fn command_palette_items(&self, cx: &App) -> Vec<CommandPaletteMatch> {
+    fn command_palette_items(&self, cx: &App) -> Arc<Vec<CommandPaletteMatch>> {
         let input = self.query_input.read(cx).text();
         let (mode, query) = CommandPaletteMode::parse(input);
         let query = query.trim().to_lowercase();
+        let cache_key = (mode == CommandPaletteMode::Commands).then(|| CommandProjectionKey {
+            query: query.clone(),
+            context: self.command_context(cx),
+            revision: self.command_projection_revision,
+            recents: self.palette_recents.clone(),
+        });
+        if let Some(key) = cache_key.as_ref() {
+            if let Some((cached_key, items)) = self.command_palette_items_cache.borrow().as_ref() {
+                if cached_key == key {
+                    return items.clone();
+                }
+            }
+        }
         if mode == CommandPaletteMode::Commands {
             if let Ok(line) = query.parse::<usize>() {
                 if line > 0 {
-                    return vec![CommandPaletteMatch {
+                    return Arc::new(vec![CommandPaletteMatch {
                         item: CommandPaletteItem::Line(line),
                         ranges: Vec::new(),
-                    }];
+                    }]);
                 }
             }
         }
@@ -33140,6 +33161,10 @@ impl WorkspaceShell {
                     .unwrap_or(usize::MAX)
             });
         }
+        let items = Arc::new(items);
+        if let Some(key) = cache_key {
+            *self.command_palette_items_cache.borrow_mut() = Some((key, items.clone()));
+        }
         items
     }
 
@@ -33187,6 +33212,7 @@ impl WorkspaceShell {
         self.palette_recents.retain(|recent| recent != &key);
         self.palette_recents.insert(0, key);
         self.palette_recents.truncate(PALETTE_RECENT_LIMIT);
+        self.invalidate_command_projection();
         self.persist(cx);
     }
 
@@ -41176,59 +41202,6 @@ impl gpui::Render for WorkspaceShell {
     }
 }
 
-/// Render fuzzy-match byte ranges in the accent color.
-fn highlight_fuzzy_ranges(
-    label: impl Into<SharedString>,
-    ranges: &[(u32, u32)],
-    accent: gpui::Hsla,
-) -> impl IntoElement {
-    let label = label.into();
-    let base = div()
-        .flex()
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap();
-    if ranges.is_empty() {
-        return base.child(label);
-    }
-    let mut previous_end = 0;
-    let valid = ranges.iter().all(|(start, end)| {
-        let start = *start as usize;
-        let end = *end as usize;
-        let valid = previous_end <= start
-            && start <= end
-            && end <= label.len()
-            && label.is_char_boundary(start)
-            && label.is_char_boundary(end);
-        previous_end = end;
-        valid
-    });
-    if !valid {
-        return base.child(label);
-    }
-    let mut output = base;
-    let mut cursor = 0;
-    for &(start, end) in ranges {
-        let start = start as usize;
-        let end = end as usize;
-        if cursor < start {
-            output = output.child(SharedString::from(&label[cursor..start]));
-        }
-        output = output.child(
-            div()
-                .text_color(accent)
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(SharedString::from(&label[start..end])),
-        );
-        cursor = end;
-    }
-    if cursor < label.len() {
-        output = output.child(SharedString::from(&label[cursor..]));
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41437,10 +41410,12 @@ mod tests {
         let (recent_id, recent_key) = workspace.read_with(&cx, |shell, cx| {
             let recent = shell
                 .command_palette_items(cx)
-                .into_iter()
+                .iter()
                 .rev()
-                .find_map(|matched| match matched.item {
-                    CommandPaletteItem::Command(command) if command.enabled() => Some(command),
+                .find_map(|matched| match &matched.item {
+                    CommandPaletteItem::Command(command) if command.enabled() => {
+                        Some(command.clone())
+                    }
                     _ => None,
                 })
                 .unwrap();
@@ -41455,8 +41430,8 @@ mod tests {
         let first = workspace.read_with(&cx, |shell, cx| {
             shell
                 .command_palette_items(cx)
-                .into_iter()
-                .find_map(|matched| match matched.item {
+                .iter()
+                .find_map(|matched| match &matched.item {
                     CommandPaletteItem::Command(command) => Some(command.id),
                     _ => None,
                 })

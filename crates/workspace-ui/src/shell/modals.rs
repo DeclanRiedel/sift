@@ -133,8 +133,8 @@ impl WorkspaceShell {
                                 uniform_list(
                                     "command-list",
                                     item_count,
-                                    cx.processor(move |shell, range: Range<usize>, _, cx| {
-                                        let items = shell.command_palette_items(cx);
+                                    cx.processor(move |shell, range: Range<usize>, window, cx| {
+                                        let items = items.clone();
                                         let selected_idx = shell
                                             .palette_selected
                                             .min(items.len().saturating_sub(1));
@@ -147,7 +147,7 @@ impl WorkspaceShell {
                                             })
                                             .map(|(idx, matched)| {
                                                 let ranges = matched.ranges;
-                                                let (label, right, enabled, key_binding) = match matched.item {
+                                                let (label, right, enabled, _key_binding) = match matched.item {
                                                     CommandPaletteItem::Command(command) => {
                                                         let right = command.disabled_reason.clone().unwrap_or_else(|| {
                                                             if command.language.is_empty() {
@@ -237,6 +237,33 @@ impl WorkspaceShell {
                                                         )
                                                     }
                                                 };
+                                                let cache_key = format!(
+                                                    "{label}\u{0}{right}\u{0}{ranges:?}\u{0}{enabled}"
+                                                );
+                                                let (label_line, right_line) = {
+                                                    let mut cache = shell.command_palette_line_cache.borrow_mut();
+                                                    if cache.len() > 512 {
+                                                        cache.clear();
+                                                    }
+                                                    cache.entry(cache_key).or_insert_with(|| {
+                                                        (
+                                                            Self::shape_palette_line(
+                                                                &label,
+                                                                &ranges,
+                                                                if enabled { colors.text } else { colors.muted_text },
+                                                                colors.accent,
+                                                                window,
+                                                            ),
+                                                            Self::shape_palette_line(
+                                                                &right,
+                                                                &[],
+                                                                colors.muted_text,
+                                                                colors.accent,
+                                                                window,
+                                                            ),
+                                                        )
+                                                    }).clone()
+                                                };
                                                 let selected = idx == selected_idx;
                                                 let mut row = div()
                                                     .id(SharedString::from(format!("command-palette-item-{idx}")))
@@ -254,30 +281,33 @@ impl WorkspaceShell {
                                                     .when(!enabled, |row| {
                                                         row.text_color(colors.muted_text)
                                                     })
-                                                    .child(highlight_fuzzy_ranges(
-                                                        label,
-                                                        &ranges,
-                                                        colors.accent,
-                                                    ))
-                                                    .when_some(
-                                                        (!right.is_empty()).then_some(right),
-                                                        |row, right| {
-                                                            if enabled && key_binding {
-                                                                row.child(KeyBinding::new(right))
-                                                            } else {
-                                                                row.child(
-                                                                    div()
-                                                                        .flex_none()
-                                                                        .max_w(px(220.))
-                                                                        .truncate()
-                                                                        .text_xs()
-                                                                        .text_color(
-                                                                            colors.muted_text,
-                                                                        )
-                                                                        .child(right),
-                                                                )
-                                                            }
-                                                        },
+                                                    .child(
+                                                        canvas(
+                                                            |_, _, _| (),
+                                                            move |bounds, _, window, cx| {
+                                                                let label_width = (bounds.size.width - px(224.)).max(px(0.));
+                                                                let _ = label_line.paint(
+                                                                    bounds.origin,
+                                                                    bounds.size.height,
+                                                                    TextAlign::Left,
+                                                                    Some(label_width),
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                                if !right.is_empty() {
+                                                                    let _ = right_line.paint(
+                                                                        bounds.origin,
+                                                                        bounds.size.height,
+                                                                        TextAlign::Right,
+                                                                        Some(bounds.size.width),
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                }
+                                                            },
+                                                        )
+                                                        .flex_1()
+                                                        .h_full(),
                                                     );
                                                 if enabled {
                                                     row = row
