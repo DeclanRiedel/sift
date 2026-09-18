@@ -18049,7 +18049,14 @@ impl WorkspaceShell {
             }
         }
         if self.connections_find_open && !self.connections_find_query.is_empty() {
-            items.retain(|item| self.connection_item_matches(item));
+            items.retain(|item| {
+                // Schema objects were matched against borrowed catalog data
+                // before their owned navigation targets were constructed.
+                // Do not format and lowercase every accepted path a second
+                // time here; the remaining row kinds still need this pass.
+                matches!(item.action, ConnectionTreeAction::Object(_))
+                    || self.connection_item_matches(item)
+            });
         }
         items
     }
