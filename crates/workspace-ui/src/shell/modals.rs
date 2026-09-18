@@ -37,6 +37,7 @@ impl WorkspaceShell {
                     let (mode, _) = CommandPaletteMode::parse(input);
                     let show_prefix_guide = input.trim().is_empty();
                     let items = self.command_palette_items(cx);
+                    let paint_selection = self.palette_paint_selection.clone();
                     let item_count = items.len();
                     let palette_height =
                         item_count.min(PALETTE_VISIBLE_ROWS) as f32 * PALETTE_ROW_HEIGHT;
@@ -135,9 +136,7 @@ impl WorkspaceShell {
                                     item_count,
                                     cx.processor(move |shell, range: Range<usize>, window, cx| {
                                         let items = items.clone();
-                                        let selected_idx = shell
-                                            .palette_selected
-                                            .min(items.len().saturating_sub(1));
+                                        let paint_selection = paint_selection.clone();
                                         range
                                             .filter_map(|idx| {
                                                 items
@@ -264,7 +263,7 @@ impl WorkspaceShell {
                                                         )
                                                     }).clone()
                                                 };
-                                                let selected = idx == selected_idx;
+                                                let paint_selection = paint_selection.clone();
                                                 let mut row = div()
                                                     .id(SharedString::from(format!("command-palette-item-{idx}")))
                                                     .w_full()
@@ -275,9 +274,6 @@ impl WorkspaceShell {
                                                     .h(px(PALETTE_ROW_HEIGHT))
                                                     .px_2()
                                                     .rounded_sm()
-                                                    .when(selected && enabled, |row| {
-                                                        row.bg(colors.active_surface)
-                                                    })
                                                     .when(!enabled, |row| {
                                                         row.text_color(colors.muted_text)
                                                     })
@@ -285,6 +281,14 @@ impl WorkspaceShell {
                                                         canvas(
                                                             |_, _, _| (),
                                                             move |bounds, _, window, cx| {
+                                                                if enabled
+                                                                    && paint_selection.get() == idx
+                                                                {
+                                                                    window.paint_quad(gpui::fill(
+                                                                        bounds,
+                                                                        colors.active_surface,
+                                                                    ));
+                                                                }
                                                                 let label_width = (bounds.size.width - px(224.)).max(px(0.));
                                                                 let _ = label_line.paint(
                                                                     bounds.origin,

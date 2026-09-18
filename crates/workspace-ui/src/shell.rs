@@ -1,9 +1,10 @@
 #[cfg(test)]
 use crate::settings::EditorMode;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
@@ -9896,6 +9897,7 @@ pub struct WorkspaceShell {
     instance_secret_input: Entity<TextInput>,
     instance_configuration_editor: Entity<QueryEditor>,
     palette_selected: usize,
+    palette_paint_selection: Rc<Cell<usize>>,
     palette_scroll_handle: UniformListScrollHandle,
     palette_recents: Vec<String>,
     favorite_database_objects: Vec<crate::presentation::DatabaseObjectBookmark>,
@@ -10822,6 +10824,7 @@ impl WorkspaceShell {
         // Re-render the palette as the search text changes so its list filters.
         cx.observe(&query_input, |shell, input, cx| {
             shell.palette_selected = 0;
+            shell.palette_paint_selection.set(0);
             shell.repository_modal_selected = 0;
             shell.invalidate_command_projection();
             shell
@@ -11157,6 +11160,7 @@ impl WorkspaceShell {
             instance_secret_input,
             instance_configuration_editor,
             palette_selected: 0,
+            palette_paint_selection: Rc::new(Cell::new(0)),
             palette_scroll_handle: UniformListScrollHandle::new(),
             palette_recents,
             favorite_database_objects,
@@ -26737,6 +26741,7 @@ impl WorkspaceShell {
         self.query_input
             .update(cx, |input, cx| input.set_text(text, cx));
         self.palette_selected = 0;
+        self.palette_paint_selection.set(0);
         cx.notify();
     }
 
@@ -29231,6 +29236,7 @@ impl WorkspaceShell {
         self.command_palette_origin = self.focused_surface;
         self.modal = Some(Modal::CommandPalette);
         self.palette_selected = 0;
+        self.palette_paint_selection.set(0);
         self.query_input
             .update(cx, |input, cx| input.set_text(query, cx));
         self.palette_scroll_handle
@@ -33929,29 +33935,45 @@ impl WorkspaceShell {
         })
     }
 
-    fn palette_up(&mut self, _: &PaletteUp, _: &mut Window, cx: &mut Context<Self>) {
+    fn refresh_palette_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_paint_selection.set(self.palette_selected);
+        let scroll_state = self.palette_scroll_handle.0.borrow();
+        let viewport_height = scroll_state.base_handle.bounds().size.height;
+        let visible_top = -scroll_state.base_handle.offset().y;
+        let visible_bottom = visible_top + viewport_height;
+        let row_top = px(PALETTE_ROW_HEIGHT * self.palette_selected as f32);
+        let row_bottom = row_top + px(PALETTE_ROW_HEIGHT);
+        let needs_reveal =
+            viewport_height <= px(0.) || row_top < visible_top || row_bottom > visible_bottom;
+        drop(scroll_state);
+        if needs_reveal {
+            self.palette_scroll_handle
+                .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
+            cx.notify();
+        } else {
+            window.refresh();
+        }
+    }
+
+    fn palette_up(&mut self, _: &PaletteUp, window: &mut Window, cx: &mut Context<Self>) {
         match self.modal {
             Some(Modal::CommandPalette) => {
                 self.palette_selected = self.palette_selected.saturating_sub(1);
-                self.palette_scroll_handle
-                    .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
             }
             _ => return,
         }
-        cx.notify();
+        self.refresh_palette_selection(window, cx);
     }
 
-    fn palette_down(&mut self, _: &PaletteDown, _: &mut Window, cx: &mut Context<Self>) {
+    fn palette_down(&mut self, _: &PaletteDown, window: &mut Window, cx: &mut Context<Self>) {
         match self.modal {
             Some(Modal::CommandPalette) => {
                 let last = self.command_palette_items(cx).len().saturating_sub(1);
                 self.palette_selected = (self.palette_selected + 1).min(last);
-                self.palette_scroll_handle
-                    .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
             }
             _ => return,
         }
-        cx.notify();
+        self.refresh_palette_selection(window, cx);
     }
 
     fn palette_confirm(&mut self, _: &PaletteConfirm, window: &mut Window, cx: &mut Context<Self>) {
