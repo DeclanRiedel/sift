@@ -445,7 +445,9 @@ impl RepositoryProjection {
             operation: RepositoryOperation::Refresh,
             request_id: Some(request_id),
         });
-        self.error = None;
+        if self.status.is_none() {
+            self.error = None;
+        }
         Some((workspace_id, request_id))
     }
 
@@ -657,15 +659,30 @@ impl RepositoryProjection {
         request_id: u64,
         result: Result<Option<VcsStatus>, String>,
     ) -> bool {
+        self.apply_status_result_with_change(workspace_id, request_id, result)
+            .0
+    }
+
+    /// Apply a status response and report both request acceptance and whether
+    /// the repository's visible projection changed. Background refreshes use
+    /// the second value to avoid repainting an unchanged 20k-path tree.
+    pub(crate) fn apply_status_result_with_change(
+        &mut self,
+        workspace_id: i64,
+        request_id: u64,
+        result: Result<Option<VcsStatus>, String>,
+    ) -> (bool, bool) {
         if self.workspace_id != Some(workspace_id)
             || self.activity.and_then(|activity| activity.request_id) != Some(request_id)
         {
-            return false;
+            return (false, false);
         }
+        let was_loaded = self.load_state == RepositoryLoadState::Loaded;
+        let had_error = self.error.is_some();
         self.activity = None;
         self.load_state = RepositoryLoadState::Loaded;
         self.pending_paths.clear();
-        match result {
+        let visible_changed = match result {
             Ok(status) => {
                 let mut rebuild_rows = false;
                 let stale = status.as_ref().is_some_and(|next| {
@@ -696,12 +713,14 @@ impl RepositoryProjection {
                 if rebuild_rows {
                     self.rebuild_visible_rows();
                 }
+                rebuild_rows || !was_loaded || had_error
             }
             Err(error) => {
                 self.error = Some(classify_failure(error));
+                true
             }
-        }
-        true
+        };
+        (true, visible_changed)
     }
 
     pub(crate) fn take_queued_refresh(&mut self) -> bool {
@@ -1393,7 +1412,11 @@ mod tests {
             "modified",
             "unstaged"
         )]));
-        projection.apply_status_result(7, refresh_request, Ok(Some(unchanged)));
+        assert_eq!(
+            projection.apply_status_result_with_change(7, refresh_request, Ok(Some(unchanged)),),
+            (true, false),
+            "an identical background refresh must not invalidate the Git panel"
+        );
         assert!(projection
             .cached_diff(VcsDiffSide::IndexToWorktree, Some(&path))
             .is_some());
@@ -1405,7 +1428,10 @@ mod tests {
             "unstaged"
         )]));
         changed.head_oid = Some("new-head".into());
-        projection.apply_status_result(7, refresh_request, Ok(Some(changed)));
+        assert_eq!(
+            projection.apply_status_result_with_change(7, refresh_request, Ok(Some(changed))),
+            (true, true)
+        );
         assert!(projection
             .cached_diff(VcsDiffSide::IndexToWorktree, Some(&path))
             .is_none());

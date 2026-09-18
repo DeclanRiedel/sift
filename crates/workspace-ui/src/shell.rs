@@ -14488,10 +14488,12 @@ impl WorkspaceShell {
                 result,
             } => {
                 self.repository.set_observed_binding(binding);
-                if self
-                    .repository
-                    .apply_status_result(workspace_id, request_id, result)
-                {
+                let (accepted, visible_changed) = self.repository.apply_status_result_with_change(
+                    workspace_id,
+                    request_id,
+                    result,
+                );
+                if accepted {
                     if let Some((path, side)) = self.pending_repository_diff.take() {
                         self.repository.select_path(path.clone());
                         if self.repository.selected_path() == Some(&path) {
@@ -14502,7 +14504,9 @@ impl WorkspaceShell {
                     if self.repository.take_queued_refresh() {
                         self.request_repository_status(cx);
                     }
-                    cx.notify();
+                    if visible_changed {
+                        cx.notify();
+                    }
                 }
             }
             ExecutorEvent::RepositorySetupFinished {
@@ -22318,6 +22322,7 @@ impl WorkspaceShell {
             cx.notify();
             return;
         }
+        let initial_load = self.repository.status().is_none();
         let Some((workspace_id, request_id)) = self.repository.begin_refresh() else {
             cx.notify();
             return;
@@ -22338,7 +22343,9 @@ impl WorkspaceShell {
             self.repository
                 .fail_to_send(request_id, "Source control is unavailable");
         }
-        cx.notify();
+        if initial_load {
+            cx.notify();
+        }
     }
 
     fn open_repository_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -26831,12 +26838,14 @@ impl WorkspaceShell {
             .repository
             .begin_refresh()
             .expect("benchmark workspace must be selected");
-        let _ = self
-            .repository
-            .apply_status_result(1, request_id, Ok(Some(status)));
+        let (_, visible_changed) =
+            self.repository
+                .apply_status_result_with_change(1, request_id, Ok(Some(status)));
         self.left_dock.presentation.open = true;
         self.active_left_panel = LeftPanel::Git;
-        cx.notify();
+        if cold || visible_changed {
+            cx.notify();
+        }
     }
 
     fn current_repository_presentation(&self, cx: &App) -> RepositoryWorkspacePresentation {
