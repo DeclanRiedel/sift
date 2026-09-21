@@ -79,6 +79,7 @@ const COLUMN_RESIZE_HANDLE_WIDTH: f32 = 7.0;
 pub(crate) const ROW_NUMBER_WIDTH: f32 = 46.0;
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
 const HEADER_HEIGHT: f32 = 40.0;
+const COLD_ROW_SHAPE_BUDGET: usize = 12;
 const INITIAL_GRID_VIEWPORT_WIDTH: f32 = 1_024.0;
 /// Hard UI retention bound. WebSocket ACK backpressure limits pages in flight;
 /// this separately prevents an arbitrarily large completed query from growing
@@ -117,7 +118,7 @@ pub struct CellRender {
 struct CachedCellRender {
     text: SharedString,
     paint_text: SharedString,
-    filter_text: String,
+    lowercase_text: Option<String>,
     class: CellClass,
     shaped: Option<CachedShapedCell>,
 }
@@ -126,7 +127,7 @@ struct CachedCellRender {
 pub struct PreparedCellRender {
     text: SharedString,
     paint_text: SharedString,
-    filter_text: String,
+    lowercase_text: Option<String>,
     class: CellClass,
 }
 
@@ -135,7 +136,7 @@ impl From<PreparedCellRender> for CachedCellRender {
         Self {
             text: cell.text,
             paint_text: cell.paint_text,
-            filter_text: cell.filter_text,
+            lowercase_text: cell.lowercase_text,
             class: cell.class,
             shaped: None,
         }
@@ -146,7 +147,7 @@ impl From<PreparedCellRender> for CachedCellRender {
 #[derive(Debug, Clone)]
 pub struct PreparedResultPage {
     page: Page,
-    rows: Option<Vec<Vec<PreparedCellRender>>>,
+    rows: Option<Vec<Vec<CachedCellRender>>>,
 }
 
 impl PreparedResultPage {
@@ -160,11 +161,13 @@ impl PreparedResultPage {
                             .map(|value| {
                                 let rendered = render_value(value);
                                 let text: SharedString = rendered.text.into();
-                                PreparedCellRender {
+                                let lowercase = text.to_lowercase();
+                                CachedCellRender {
                                     paint_text: single_line_text(&text),
-                                    filter_text: text.to_lowercase(),
+                                    lowercase_text: (lowercase != text).then_some(lowercase),
                                     text,
                                     class: rendered.class,
+                                    shaped: None,
                                 }
                             })
                             .collect()
@@ -174,6 +177,12 @@ impl PreparedResultPage {
             _ => None,
         };
         Self { page, rows }
+    }
+}
+
+impl CachedCellRender {
+    fn filter_text(&self) -> &str {
+        self.lowercase_text.as_deref().unwrap_or(&self.text)
     }
 }
 
@@ -1926,7 +1935,10 @@ impl ResultsView {
         let text: SharedString = rendered.text.into();
         *cell = CachedCellRender {
             paint_text: single_line_text(&text),
-            filter_text: text.to_lowercase(),
+            lowercase_text: {
+                let lowercase = text.to_lowercase();
+                (lowercase != text).then_some(lowercase)
+            },
             text,
             class: rendered.class,
             shaped: None,
@@ -2273,7 +2285,10 @@ impl ResultsView {
                             let text: SharedString = rendered.text.into();
                             CachedCellRender {
                                 paint_text: single_line_text(&text),
-                                filter_text: text.to_lowercase(),
+                                lowercase_text: {
+                                    let lowercase = text.to_lowercase();
+                                    (lowercase != text).then_some(lowercase)
+                                },
                                 text,
                                 class: rendered.class,
                                 shaped: None,
@@ -2569,6 +2584,32 @@ impl ResultsView {
         self.select_result_set(index, cx);
     }
 
+    /// Swap an already-prepared page into the active result without allocating
+    /// another benchmark fixture. Shape caches are cleared so the next draw is
+    /// still a cold first paint, matching an executor-owned page arrival.
+    #[cfg(feature = "benchmark")]
+    pub fn swap_first_result_page_benchmark(
+        &mut self,
+        prepared: &mut PreparedResultPage,
+        cx: &mut Context<Self>,
+    ) {
+        let Page::Rows { rows } = &mut prepared.page else {
+            panic!("first-result benchmark requires a row page");
+        };
+        let prepared_rows = prepared
+            .rows
+            .as_mut()
+            .expect("first-result benchmark rows are prepared");
+        let (ResultState::Streaming(data) | ResultState::Ready(data)) = &mut self.state else {
+            panic!("first-result benchmark requires an active result");
+        };
+        std::mem::swap(&mut data.rows, rows);
+        std::mem::swap(&mut self.rendered_rows, prepared_rows);
+        self.row_shape_cache.clear();
+        self.header_shape_cache.clear();
+        cx.notify();
+    }
+
     /// Consume one server page.
     ///
     /// A page is taken whole or not at all. Splitting one would mean carrying a
@@ -2671,12 +2712,11 @@ impl ResultsView {
                 let prepared_rows = prepared_rows
                     .expect("row pages are prepared before they enter the results surface");
                 debug_assert_eq!(rows.len(), prepared_rows.len());
-                for (row, rendered) in rows.into_iter().zip(prepared_rows) {
-                    Arc::make_mut(&mut self.display_rows).push(data.rows.len());
-                    self.rendered_rows
-                        .push(rendered.into_iter().map(Into::into).collect());
-                    data.rows.push(row);
-                }
+                let first = data.rows.len();
+                let row_count = rows.len();
+                Arc::make_mut(&mut self.display_rows).extend(first..first + row_count);
+                self.rendered_rows.extend(prepared_rows);
+                data.rows.extend(rows);
                 if transforms_active {
                     self.rebuild_display_rows(cx);
                 } else {
@@ -2876,6 +2916,10 @@ impl ResultsView {
             self.analyze_supported = supported;
             cx.notify();
         }
+    }
+
+    pub(crate) fn analyze_supported(&self) -> bool {
+        self.analyze_supported
     }
 
     fn request_explain(&mut self, analyze: bool, cx: &mut Context<Self>) {
@@ -3094,7 +3138,10 @@ impl ResultsView {
         let mut rows = (0..self.rendered_rows.len())
             .filter(|row| {
                 let cells = &self.rendered_rows[*row];
-                (filter.is_empty() || cells.iter().any(|cell| cell.filter_text.contains(&filter)))
+                (filter.is_empty()
+                    || cells
+                        .iter()
+                        .any(|cell| cell.filter_text().contains(&filter)))
                     && column_filters.matches(cells)
             })
             .collect::<Vec<_>>();
@@ -3309,7 +3356,7 @@ impl ResultsView {
             .flat_map(|row| columns.iter().map(move |column| (*row, *column)))
             .filter(|(row, column)| {
                 self.rendered_rows[*row][*column]
-                    .filter_text
+                    .filter_text()
                     .contains(&query)
             })
             .collect::<Vec<_>>();
@@ -7128,7 +7175,7 @@ impl Element for ResultRowsElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let colors = cx.theme().colors;
-        let result = self.view.update(cx, |view, _| {
+        let result = self.view.update(cx, |view, cx| {
             let viewport = view.row_scroll_handle.0.borrow().base_handle.bounds();
             let scroll_top = -view.row_scroll_handle.0.borrow().base_handle.offset().y;
             let first = (f32::from(scroll_top) / ROW_HEIGHT).floor().max(0.) as usize;
@@ -7138,6 +7185,9 @@ impl Element for ResultRowsElement {
             let mut quads = Vec::new();
             let mut borders = Vec::new();
             let mut lines = Vec::new();
+            let mut new_shapes = 0usize;
+            let mut deferred_shapes = false;
+            let cold_rows = view.row_shape_cache.len() < last.saturating_sub(first);
             let selected = view.selected;
             let mut text_style = window.text_style();
             text_style.color = colors.disabled_text;
@@ -7207,21 +7257,24 @@ impl Element for ResultRowsElement {
                         colors.selected_surface,
                     ));
                 }
-                let number: SharedString = (view.window_start + row_index + 1).to_string().into();
-                let run = text_style.to_run(number.len());
-                let number = window.text_system().shape_line(
-                    number,
-                    font_size,
-                    std::slice::from_ref(&run),
-                    None,
-                );
-                lines.push(ResultPaintLine {
-                    colors: vec![(number.len(), colors.disabled_text)],
-                    line: number,
-                    origin: gpui::point(row_bounds.left() + px(4.), top),
-                    width: px(ROW_NUMBER_WIDTH - 12.),
-                    alignment: TextAlign::Right,
-                });
+                if !cold_rows {
+                    let number: SharedString =
+                        (view.window_start + row_index + 1).to_string().into();
+                    let run = text_style.to_run(number.len());
+                    let number = window.text_system().shape_line(
+                        number,
+                        font_size,
+                        std::slice::from_ref(&run),
+                        None,
+                    );
+                    lines.push(ResultPaintLine {
+                        colors: vec![(number.len(), colors.disabled_text)],
+                        line: number,
+                        origin: gpui::point(row_bounds.left() + px(4.), top),
+                        width: px(ROW_NUMBER_WIDTH - 12.),
+                        alignment: TextAlign::Right,
+                    });
+                }
                 borders.push((
                     row_bounds.left() + px(ROW_NUMBER_WIDTH - 0.5),
                     top,
@@ -7327,16 +7380,17 @@ impl Element for ResultRowsElement {
                                 && cached.font_size == font_size
                         })
                         .map(|cached| cached.line.clone())
-                        .unwrap_or_else(|| {
+                        .or_else(|| {
+                            if new_shapes >= COLD_ROW_SHAPE_BUDGET {
+                                deferred_shapes = true;
+                                return None;
+                            }
                             let line = window.text_system().shape_line(
                                 text.clone(),
                                 font_size,
                                 &row_runs,
                                 None,
                             );
-                            if view.row_shape_cache.len() >= 256 {
-                                view.row_shape_cache.clear();
-                            }
                             view.row_shape_cache.insert(
                                 row_index,
                                 CachedShapedResultRow {
@@ -7346,16 +7400,22 @@ impl Element for ResultRowsElement {
                                     line: line.clone(),
                                 },
                             );
-                            line
+                            new_shapes += 1;
+                            Some(line)
                         });
-                    lines.push(ResultPaintLine {
-                        line,
-                        origin: gpui::point(row_text_left, top),
-                        width: px(row_text_width),
-                        alignment: TextAlign::Left,
-                        colors: line_colors,
-                    });
+                    if let Some(line) = line {
+                        lines.push(ResultPaintLine {
+                            line,
+                            origin: gpui::point(row_text_left, top),
+                            width: px(row_text_width),
+                            alignment: TextAlign::Left,
+                            colors: line_colors,
+                        });
+                    }
                 }
+            }
+            if deferred_shapes {
+                cx.notify();
             }
             ResultRowsPrepaint {
                 quads,

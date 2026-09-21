@@ -485,6 +485,14 @@ fn change_ledger_first_frame(cx: &mut BenchAppContext) {
             )
         })
         .unwrap();
+    // Production opens and focuses the loading shell before the asynchronous
+    // ledger page arrives. Prime that shell outside the measured interval so
+    // this benchmark isolates the first 1,000-row result frame.
+    window.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.seed_change_ledger_benchmark(Vec::new(), window, cx);
+        });
+    });
     cx.bench_renderer(shell, move |shell, window, cx| {
         shell.seed_change_ledger_benchmark(entries.clone(), window, cx);
     });
@@ -495,7 +503,15 @@ fn first_result_page(cx: &mut BenchAppContext) {
     // Match production: the executor prepares display strings before the page
     // reaches GPUI. This benchmark measures the UI-thread append and first
     // paint, not work deliberately moved to the background executor.
-    let data = result_data(FIRST_PAGE_ROWS);
+    let rows = (0..FIRST_PAGE_ROWS)
+        .map(|row| {
+            Row::new(
+                (0..RESULT_COLUMNS)
+                    .map(|column| Value::Int64((row * RESULT_COLUMNS + column) as i64))
+                    .collect(),
+            )
+        })
+        .collect();
     let columns = PreparedResultPage::new(Page::NextResult {
         columns: (0..RESULT_COLUMNS)
             .map(|column| {
@@ -506,16 +522,20 @@ fn first_result_page(cx: &mut BenchAppContext) {
             })
             .collect(),
     });
-    let rows = PreparedResultPage::new(Page::Rows { rows: data.rows });
+    let mut rows = PreparedResultPage::new(Page::Rows { rows });
     let mut window = cx.add_empty_window();
     let results = window
         .replace_root_view(|_, cx| ResultsView::new(cx))
         .unwrap();
-
+    window.update(|_, cx| {
+        results.update(cx, |results, cx| {
+            results.begin_stream(cx);
+            results.apply_stream_page(columns.clone(), cx);
+            results.apply_stream_page(rows.clone(), cx);
+        });
+    });
     cx.bench_renderer(results, move |results, _, cx| {
-        results.begin_stream(cx);
-        results.apply_stream_page(columns.clone(), cx);
-        results.apply_stream_page(rows.clone(), cx);
+        results.swap_first_result_page_benchmark(&mut rows, cx);
     });
 }
 
@@ -530,6 +550,19 @@ fn retained_grid_navigation(cx: &mut BenchAppContext) {
         })
         .unwrap();
     window.focus(&results).unwrap();
+
+    // This is the steady-navigation benchmark. Let the bounded cold-paint
+    // pipeline finish before collecting movement frames.
+    for down in [true, false].into_iter().cycle().take(8) {
+        window.update(|window, cx| {
+            let action = if down {
+                MoveCellDown.boxed_clone()
+            } else {
+                MoveCellUp.boxed_clone()
+            };
+            window.dispatch_action(action, cx);
+        });
+    }
 
     let mut down = true;
     cx.bench_iter(|_| {

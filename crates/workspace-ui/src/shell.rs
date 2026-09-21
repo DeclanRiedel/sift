@@ -13,8 +13,8 @@ use gpui::{
     Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, KeystrokeEvent, LayoutId, MouseButton, PathPromptOptions,
     Pixels, ResizeEdge, Role, ScrollHandle, ScrollStrategy, ShapedLine, SharedString, Style,
-    Subscription, Task, TextAlign, TextRun, UniformListScrollHandle, Window, WindowBounds,
-    WindowControlArea,
+    StyleRefinement, Subscription, Task, TextAlign, TextRun, UniformListScrollHandle, Window,
+    WindowBounds, WindowControlArea,
 };
 use regex::{Regex, RegexBuilder};
 use sift_api_types::RoomId;
@@ -87,7 +87,7 @@ use catalog_diagram::CatalogDiagramState;
 use database_monitor::{DatabaseAlertKind, DatabaseMonitorState, DatabaseMonitorView};
 pub use pane_layout::SplitDirection;
 
-const PALETTE_VISIBLE_ROWS: usize = 10;
+const PALETTE_VISIBLE_ROWS: usize = 4;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
 const PALETTE_RECENT_LIMIT: usize = 32;
 const RECENT_DATABASE_OBJECT_LIMIT: usize = 5;
@@ -699,20 +699,6 @@ impl CommandPaletteMode {
             _ => (Self::Commands, input),
         }
     }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Commands => "COMMAND",
-            Self::WorkspaceFiles => "FILE",
-            Self::Schema => "SCHEMA",
-            Self::Data => "DATA",
-            Self::Checkpoints => "CHECKPOINT",
-            Self::OpenTabs => "TAB",
-            Self::SavedQueries => "SAVED",
-            Self::SharedQueries => "SHARED",
-            Self::QueryHistory => "HISTORY",
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -788,7 +774,6 @@ struct ConnectionProjectionKey {
     room_count: usize,
     workspace_count: usize,
     document_count: usize,
-    schema_object_count: usize,
     expanded_count: usize,
     find_open: bool,
     find_query: String,
@@ -1498,9 +1483,9 @@ struct ObjectBrowserRow {
 struct ObjectBrowserLineCache {
     name: CachedPanelLine,
     type_label: CachedPanelLine,
-    rows: CachedPanelLine,
-    modified: CachedPanelLine,
-    comment: CachedPanelLine,
+    rows: Option<CachedPanelLine>,
+    modified: Option<CachedPanelLine>,
+    comment: Option<CachedPanelLine>,
 }
 
 #[derive(Debug, Clone)]
@@ -1748,27 +1733,33 @@ impl Element for ObjectBrowserRowsElement {
                         false,
                         window,
                     ),
-                    rows: WorkspaceShell::shape_panel_line(
-                        cached.as_ref().map(|cache| &cache.rows),
-                        row.rows_label.clone(),
-                        colors.text,
-                        false,
-                        window,
-                    ),
-                    modified: WorkspaceShell::shape_panel_line(
-                        cached.as_ref().map(|cache| &cache.modified),
-                        row.modified_label.clone(),
-                        colors.text,
-                        false,
-                        window,
-                    ),
-                    comment: WorkspaceShell::shape_panel_line(
-                        cached.as_ref().map(|cache| &cache.comment),
-                        row.comment_label.clone(),
-                        colors.muted_text,
-                        false,
-                        window,
-                    ),
+                    rows: (row.rows_label.as_ref() != "—").then(|| {
+                        WorkspaceShell::shape_panel_line(
+                            cached.as_ref().and_then(|cache| cache.rows.as_ref()),
+                            row.rows_label.clone(),
+                            colors.text,
+                            false,
+                            window,
+                        )
+                    }),
+                    modified: (row.modified_label.as_ref() != "—").then(|| {
+                        WorkspaceShell::shape_panel_line(
+                            cached.as_ref().and_then(|cache| cache.modified.as_ref()),
+                            row.modified_label.clone(),
+                            colors.text,
+                            false,
+                            window,
+                        )
+                    }),
+                    comment: (row.comment_label.as_ref() != "—").then(|| {
+                        WorkspaceShell::shape_panel_line(
+                            cached.as_ref().and_then(|cache| cache.comment.as_ref()),
+                            row.comment_label.clone(),
+                            colors.muted_text,
+                            false,
+                            window,
+                        )
+                    }),
                 };
                 {
                     let mut cache = browser.row_line_cache.borrow_mut();
@@ -1796,24 +1787,25 @@ impl Element for ObjectBrowserRowsElement {
                     px(110.),
                     TextAlign::Left,
                 ));
-                lines.push((
-                    shaped.rows,
-                    gpui::point(rows_left, top),
-                    px(80.),
-                    TextAlign::Right,
-                ));
-                lines.push((
-                    shaped.modified,
-                    gpui::point(modified_left, top),
-                    px(155.),
-                    TextAlign::Left,
-                ));
-                lines.push((
-                    shaped.comment,
-                    gpui::point(comment_left, top),
-                    px(220.),
-                    TextAlign::Left,
-                ));
+                if let Some(line) = shaped.rows {
+                    lines.push((line, gpui::point(rows_left, top), px(80.), TextAlign::Right));
+                }
+                if let Some(line) = shaped.modified {
+                    lines.push((
+                        line,
+                        gpui::point(modified_left, top),
+                        px(155.),
+                        TextAlign::Left,
+                    ));
+                }
+                if let Some(line) = shaped.comment {
+                    lines.push((
+                        line,
+                        gpui::point(comment_left, top),
+                        px(220.),
+                        TextAlign::Left,
+                    ));
+                }
             }
             ObjectBrowserRowsPrepaint { quads, lines }
         }
@@ -6273,7 +6265,9 @@ impl Pane {
         if projection_changed || matches!(event.keystroke.key.as_str(), "c" | "escape") {
             cx.notify();
         } else if selection_changed {
-            window.refresh();
+            // Invalidate only this pane. A whole-window refresh explicitly
+            // bypasses cached editor, result, and sibling-pane subtrees.
+            cx.notify();
         }
     }
 
@@ -6444,35 +6438,42 @@ impl Pane {
             .enumerate()
             .map(|(index, group)| {
                 let enabled = browser.enabled_groups.contains(&group);
-                Button::new(
-                    ("object-browser-filter", index),
-                    format!("{}  {}", index + 1, group.label()),
-                )
-                .debug_selector(format!(
-                    "object-browser-filter-{}",
-                    group.label().to_lowercase()
-                ))
-                .tone(if enabled {
-                    ButtonTone::Neutral
-                } else {
-                    ButtonTone::Ghost
-                })
-                .start_icon(group.icon())
-                .start_icon_color(if enabled {
-                    group.color(colors)
-                } else {
-                    colors.muted_text
-                })
-                .on_click(cx.listener(move |pane, _, _, cx| {
-                    if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
-                        if !browser.enabled_groups.remove(&group) {
-                            browser.enabled_groups.insert(group);
+                let debug = format!("object-browser-filter-{}", group.label().to_lowercase());
+                div()
+                    .id(("object-browser-filter", index))
+                    .debug_selector(move || debug)
+                    .role(Role::Button)
+                    .aria_label(format!("Toggle {}", group.label()))
+                    .h(px(24.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(if enabled {
+                        group.color(colors)
+                    } else {
+                        colors.subtle_border
+                    })
+                    .text_xs()
+                    .text_color(if enabled {
+                        colors.text
+                    } else {
+                        colors.muted_text
+                    })
+                    .when(enabled, |button| button.bg(colors.active_surface))
+                    .hover(|button| button.bg(colors.hovered_surface))
+                    .on_click(cx.listener(move |pane, _, _, cx| {
+                        if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
+                            if !browser.enabled_groups.remove(&group) {
+                                browser.enabled_groups.insert(group);
+                            }
+                            browser.selected = 0;
+                            browser.rebuild_visible_indices();
                         }
-                        browser.selected = 0;
-                        browser.rebuild_visible_indices();
-                    }
-                    cx.notify();
-                }))
+                        cx.notify();
+                    }))
+                    .child(format!("{} {}", index + 1, group.label()))
             })
             .collect::<Vec<_>>();
         let toolbar_action = |id: &'static str,
@@ -6480,24 +6481,42 @@ impl Pane {
                               action: char,
                               disabled: bool,
                               source: Option<DatabaseObjectSource>| {
-            Button::new((id, item_id as usize), label)
-                .debug_selector(id)
-                .tone(ButtonTone::Ghost)
-                .disabled(disabled)
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    if let Some(source) = source.clone() {
-                        let event = match action {
-                            'o' => PaneEvent::ObjectBrowserOpenRequested { source },
-                            'n' => PaneEvent::ObjectBrowserNewTableRequested { source },
-                            'd' => PaneEvent::ObjectBrowserDesignRequested { source },
-                            'x' => PaneEvent::ObjectBrowserDeleteRequested { source },
-                            'i' => PaneEvent::ObjectBrowserImportRequested { source },
-                            'e' => PaneEvent::ObjectBrowserExportRequested { source },
-                            _ => return,
-                        };
-                        cx.emit(event);
-                    }
-                }))
+            div()
+                .id((id, item_id as usize))
+                .debug_selector(move || id.into())
+                .role(Role::Button)
+                .aria_label(label)
+                .h(px(24.))
+                .px_2()
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .text_xs()
+                .text_color(if disabled {
+                    colors.disabled_text
+                } else {
+                    colors.muted_text
+                })
+                .when(!disabled, |button| {
+                    button
+                        .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            let Some(source) = source.clone() else {
+                                return;
+                            };
+                            let event = match action {
+                                'o' => PaneEvent::ObjectBrowserOpenRequested { source },
+                                'n' => PaneEvent::ObjectBrowserNewTableRequested { source },
+                                'd' => PaneEvent::ObjectBrowserDesignRequested { source },
+                                'x' => PaneEvent::ObjectBrowserDeleteRequested { source },
+                                'i' => PaneEvent::ObjectBrowserImportRequested { source },
+                                'e' => PaneEvent::ObjectBrowserExportRequested { source },
+                                _ => return,
+                            };
+                            cx.emit(event);
+                        }))
+                })
+                .child(label)
         };
         div()
             .size_full()
@@ -6531,17 +6550,22 @@ impl Pane {
                                     .relative()
                                     .flex_none()
                                     .child(
-                                        Button::new(
-                                            (
-                                                "object-browser-connection-picker",
-                                                item_id as usize,
-                                            ),
-                                            connection_name,
-                                        )
-                                                                                .debug_selector("object-browser-connection-picker")
-                                        .tone(ButtonTone::Neutral)
-                                        .start_icon(IconName::Database)
-                                        .start_icon_color(colors.success)
+                                        div()
+                                        .id(("object-browser-connection-picker", item_id as usize))
+                                        .debug_selector(|| "object-browser-connection-picker".into())
+                                        .role(Role::Button)
+                                        .aria_label("Choose connection")
+                                        .h(px(24.))
+                                        .max_w(px(180.))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(colors.subtle_border)
+                                        .text_xs()
+                                        .truncate()
+                                        .hover(|button| button.bg(colors.hovered_surface))
                                         .on_click(cx.listener(
                                             move |pane, _, _, cx| {
                                                 if let Some(browser) =
@@ -6554,7 +6578,8 @@ impl Pane {
                                                 }
                                                 cx.notify();
                                             },
-                                        )),
+                                        ))
+                                        .child(connection_name),
                                     )
                                     .when(connection_picker_open, |trigger| {
                                         trigger.child(
@@ -6606,15 +6631,23 @@ impl Pane {
                                     .relative()
                                     .flex_none()
                                     .child(
-                                        Button::new(
-                                            ("object-browser-catalog-picker", item_id as usize),
-                                            catalog_name,
-                                        )
-                                        .debug_selector("object-browser-catalog-picker")
-                                        .tone(ButtonTone::Neutral)
-                                        .start_icon(IconName::Database)
-                                        .start_icon_color(colors.success)
-                                        .disabled(browser.catalogs.is_empty())
+                                        div()
+                                        .id(("object-browser-catalog-picker", item_id as usize))
+                                        .debug_selector(|| "object-browser-catalog-picker".into())
+                                        .role(Role::Button)
+                                        .aria_label("Choose database")
+                                        .h(px(24.))
+                                        .max_w(px(180.))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(colors.subtle_border)
+                                        .text_xs()
+                                        .truncate()
+                                        .text_color(if browser.catalogs.is_empty() { colors.disabled_text } else { colors.text })
+                                        .hover(|button| button.bg(colors.hovered_surface))
                                         .on_click(cx.listener(move |pane, _, _, cx| {
                                             if let Some(browser) =
                                                 pane.object_browsers.get_mut(&item_id)
@@ -6625,7 +6658,8 @@ impl Pane {
                                                 browser.schema_picker_open = false;
                                             }
                                             cx.notify();
-                                        })),
+                                        }))
+                                        .child(catalog_name),
                                     )
                                     .when(catalog_picker_open, |trigger| {
                                         trigger.child(
@@ -6676,15 +6710,23 @@ impl Pane {
                                     .relative()
                                     .flex_none()
                                     .child(
-                                        Button::new(
-                                            ("object-browser-schema-picker", item_id as usize),
-                                            schema_name,
-                                        )
-                                        .debug_selector("object-browser-schema-picker")
-                                        .tone(ButtonTone::Neutral)
-                                        .start_icon(IconName::Folder)
-                                        .start_icon_color(colors.accent)
-                                        .disabled(browser.schemas.is_empty())
+                                        div()
+                                        .id(("object-browser-schema-picker", item_id as usize))
+                                        .debug_selector(|| "object-browser-schema-picker".into())
+                                        .role(Role::Button)
+                                        .aria_label("Choose schema")
+                                        .h(px(24.))
+                                        .max_w(px(180.))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(colors.subtle_border)
+                                        .text_xs()
+                                        .truncate()
+                                        .text_color(if browser.schemas.is_empty() { colors.disabled_text } else { colors.text })
+                                        .hover(|button| button.bg(colors.hovered_surface))
                                         .on_click(cx.listener(move |pane, _, _, cx| {
                                             if let Some(browser) =
                                                 pane.object_browsers.get_mut(&item_id)
@@ -6695,7 +6737,8 @@ impl Pane {
                                                 browser.catalog_picker_open = false;
                                             }
                                             cx.notify();
-                                        })),
+                                        }))
+                                        .child(schema_name),
                                     )
                                     .when(schema_picker_open, |trigger| {
                                         trigger.child(
@@ -6764,47 +6807,47 @@ impl Pane {
                             .border_t_1()
                             .border_color(colors.subtle_border)
                             .child(toolbar_action(
-                        "object-browser-open",
-                        "Open",
-                        'o',
-                        selected_source.is_none(),
-                        selected_source.clone(),
-                    ))
-                    .child(toolbar_action(
-                        "object-browser-new-table",
-                        "New table",
-                        'n',
-                        false,
-                        Some(new_table_source),
-                    ))
-                    .child(toolbar_action(
-                        "object-browser-design",
-                        "Design",
-                        'd',
-                        selected_source.is_none(),
-                        selected_source.clone(),
-                    ))
-                    .child(toolbar_action(
-                        "object-browser-delete",
-                        "Delete",
-                        'x',
-                        !table_selected,
-                        selected_source.clone(),
-                    ))
-                    .child(toolbar_action(
-                        "object-browser-import",
-                        "Import…",
-                        'i',
-                        !table_selected,
-                        selected_source.clone(),
-                    ))
-                    .child(toolbar_action(
-                        "object-browser-export",
-                        "Export…",
-                        'e',
-                        !table_selected,
-                        selected_source,
-                    )),
+                                "object-browser-open",
+                                "Open",
+                                'o',
+                                selected_source.is_none(),
+                                selected_source.clone(),
+                            ))
+                            .child(toolbar_action(
+                                "object-browser-new-table",
+                                "New table",
+                                'n',
+                                false,
+                                Some(new_table_source),
+                            ))
+                            .child(toolbar_action(
+                                "object-browser-design",
+                                "Design",
+                                'd',
+                                selected_source.is_none(),
+                                selected_source.clone(),
+                            ))
+                            .child(toolbar_action(
+                                "object-browser-delete",
+                                "Delete",
+                                'x',
+                                !table_selected,
+                                selected_source.clone(),
+                            ))
+                            .child(toolbar_action(
+                                "object-browser-import",
+                                "Import…",
+                                'i',
+                                !table_selected,
+                                selected_source.clone(),
+                            ))
+                            .child(toolbar_action(
+                                "object-browser-export",
+                                "Export…",
+                                'e',
+                                !table_selected,
+                                selected_source,
+                            )),
                     ),
             )
             .child(
@@ -6901,7 +6944,7 @@ impl Pane {
                                 if index < browser.visible_row_count() {
                                     browser.selected = index;
                                     pane.focus_handle.focus(window, cx);
-                                    window.refresh();
+                                    cx.notify();
                                 }
                             }),
                         ),
@@ -10128,7 +10171,6 @@ pub struct WorkspaceShell {
     instance_configuration_editor: Entity<QueryEditor>,
     palette_selected: usize,
     palette_paint_selection: Rc<Cell<usize>>,
-    palette_scroll_handle: UniformListScrollHandle,
     palette_recents: Vec<String>,
     favorite_database_objects: Vec<crate::presentation::DatabaseObjectBookmark>,
     recent_database_objects: Vec<crate::presentation::DatabaseObjectBookmark>,
@@ -11058,9 +11100,6 @@ impl WorkspaceShell {
             shell.palette_paint_selection.set(0);
             shell.repository_modal_selected = 0;
             shell.invalidate_command_projection();
-            shell
-                .palette_scroll_handle
-                .scroll_to_item(0, ScrollStrategy::Top);
             let text = input.read(cx).text();
             let (mode, query) = CommandPaletteMode::parse(text);
             if shell.modal == Some(Modal::CommandPalette) {
@@ -11098,7 +11137,13 @@ impl WorkspaceShell {
                     _ => {}
                 }
             }
-            cx.notify();
+            // Build the small retained projection while handling the edit, so
+            // the next frame only lays out and paints the visible palette rows.
+            let _ = shell.command_palette_items(cx);
+            // `TextInput` notifies after emitting this change. Because it is a
+            // rendered descendant, GPUI dirties the shell ancestor as part of
+            // that same invalidation; notifying the shell here only counted a
+            // duplicate frame invalidation while filtering the palette.
         })
         .detach();
         cx.observe(&repository_commit_input, |shell, input, cx| {
@@ -11124,7 +11169,8 @@ impl WorkspaceShell {
             shell
                 .connections_scroll_handle
                 .scroll_to_item(0, ScrollStrategy::Top);
-            cx.notify();
+            // TextInput already invalidates its rendered shell ancestor. A
+            // second shell notification turns one keystroke into two frames.
         })
         .detach();
         cx.observe(&repository_filter_input, |shell, input, cx| {
@@ -11392,7 +11438,6 @@ impl WorkspaceShell {
             instance_configuration_editor,
             palette_selected: 0,
             palette_paint_selection: Rc::new(Cell::new(0)),
-            palette_scroll_handle: UniformListScrollHandle::new(),
             palette_recents,
             favorite_database_objects,
             recent_database_objects,
@@ -18037,15 +18082,6 @@ impl WorkspaceShell {
                 document_count += room.documents.len();
             }
         }
-        let schema_object_count = match &self.connection_schema {
-            ConnectionSchemaState::Ready { snapshot, .. } => snapshot
-                .trees
-                .iter()
-                .flat_map(|catalog| &catalog.schemas)
-                .map(|schema| schema.objects.len())
-                .sum(),
-            _ => 0,
-        };
         let key = ConnectionProjectionKey {
             revision: self.connection_projection_revision,
             tenant_count: self.lifecycle.tenants.len(),
@@ -18053,7 +18089,6 @@ impl WorkspaceShell {
             room_count,
             workspace_count,
             document_count,
-            schema_object_count,
             expanded_count: self.expanded_tenants.len()
                 + self.expanded_connections.len()
                 + self.expanded_rooms.len()
@@ -18191,9 +18226,23 @@ impl WorkspaceShell {
                         }
                         let mut objects_by_group: [Vec<_>; 5] = std::array::from_fn(|_| Vec::new());
                         for object in &schema.objects {
-                            objects_by_group
-                                [ObjectGroupKind::from_object_kind(object.kind).index()]
-                            .push(object);
+                            let group = ObjectGroupKind::from_object_kind(object.kind);
+                            if !self.schema_search_filters.contains(&group) {
+                                continue;
+                            }
+                            if self.connections_find_open
+                                && !explorer_filter::matches_object(
+                                    &catalog.name,
+                                    &schema.name,
+                                    &object.name,
+                                    object.kind,
+                                    &self.connections_find_query,
+                                    &mut search_buffer,
+                                )
+                            {
+                                continue;
+                            }
+                            objects_by_group[group.index()].push(object);
                         }
                         for group in ObjectGroupKind::CANONICAL {
                             if !self.schema_search_filters.contains(&group) {
@@ -18223,20 +18272,6 @@ impl WorkspaceShell {
                                 continue;
                             }
                             for object in group_objects {
-                                // Filter borrowed metadata before cloning profile, catalog,
-                                // schema, and object strings for each visible tree row.
-                                if self.connections_find_open
-                                    && !explorer_filter::matches_object(
-                                        &catalog.name,
-                                        &schema.name,
-                                        &object.name,
-                                        object.kind,
-                                        &self.connections_find_query,
-                                        &mut search_buffer,
-                                    )
-                                {
-                                    continue;
-                                }
                                 items.push(ConnectionTreeItem {
                                     depth: 5,
                                     action: ConnectionTreeAction::Object(DatabaseObjectTarget {
@@ -27069,11 +27104,8 @@ impl WorkspaceShell {
     #[doc(hidden)]
     pub fn set_schema_filter_benchmark(&mut self, query: &str, cx: &mut Context<Self>) {
         self.connections_find_open = true;
-        self.connections_find_query = query.to_lowercase();
-        self.connection_nav_selected = 0;
-        self.invalidate_connection_projection();
-        let _ = self.visible_connection_items();
-        cx.notify();
+        self.connections_find_input
+            .update(cx, |input, cx| input.set_text(query, cx));
     }
 
     #[cfg(feature = "benchmark")]
@@ -27094,13 +27126,13 @@ impl WorkspaceShell {
     pub fn step_object_browser_benchmark(
         &mut self,
         down: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(pane) = self.panes.get(self.active_pane) else {
             return;
         };
-        pane.update(cx, |pane, _| {
+        pane.update(cx, |pane, cx| {
             let Some(item_id) = pane.active_item().map(|item| item.id) else {
                 return;
             };
@@ -27118,7 +27150,7 @@ impl WorkspaceShell {
                     .scroll_handle
                     .scroll_to_item(browser.selected, ScrollStrategy::Nearest);
             }
-            window.refresh();
+            cx.notify();
         });
     }
 
@@ -27160,8 +27192,13 @@ impl WorkspaceShell {
         self.change_ledger_error = None;
         self.change_ledger_chain_verified = true;
         self.modal = Some(Modal::ChangeLedger);
-        self.focus_handle.focus(window, cx);
-        cx.notify();
+        let focus_changed = !self.focus_handle.is_focused(window);
+        if focus_changed {
+            self.focus_handle.focus(window, cx);
+        }
+        if !focus_changed {
+            cx.notify();
+        }
     }
 
     /// Headless renderer benchmark hook. Product code receives the same state
@@ -29536,17 +29573,86 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.modal == Some(Modal::CommandPalette)
+            && self.palette_selected == 0
+            && self.query_input.read(cx).text() == query
+        {
+            // Key-repeat can dispatch the open action again while the palette
+            // is already in its initial state. Keep that path to one local
+            // repaint instead of re-running focus and projection setup.
+            cx.notify();
+            return;
+        }
+        let reset_scroll = self.modal != Some(Modal::CommandPalette) || self.palette_selected != 0;
         self.ide_input = None;
         self.command_palette_origin = self.focused_surface;
         self.modal = Some(Modal::CommandPalette);
         self.palette_selected = 0;
         self.palette_paint_selection.set(0);
-        self.query_input
-            .update(cx, |input, cx| input.set_text(query, cx));
-        self.palette_scroll_handle
-            .scroll_to_item(0, ScrollStrategy::Top);
-        self.query_input.focus_handle(cx).focus(window, cx);
-        cx.notify();
+        let input_changed = self.query_input.read(cx).text() != query;
+        if input_changed {
+            self.query_input
+                .update(cx, |input, cx| input.set_text(query, cx));
+        }
+        if (reset_scroll || input_changed)
+            && CommandPaletteMode::parse(query).0 == CommandPaletteMode::Commands
+        {
+            let colors = cx.theme().colors;
+            for matched in self
+                .command_palette_items(cx)
+                .iter()
+                .take(PALETTE_VISIBLE_ROWS)
+            {
+                let CommandPaletteItem::Command(command) = &matched.item else {
+                    continue;
+                };
+                let right = command.disabled_reason.clone().unwrap_or_else(|| {
+                    if command.language.is_empty() {
+                        command.shortcut.into()
+                    } else {
+                        command.language.clone()
+                    }
+                });
+                let cache_key = format!(
+                    "{}\u{0}{}\u{0}{:?}\u{0}{}",
+                    command.label,
+                    right,
+                    matched.ranges,
+                    command.enabled()
+                );
+                let mut cache = self.command_palette_line_cache.borrow_mut();
+                cache.entry(cache_key).or_insert_with(|| {
+                    (
+                        Self::shape_palette_line(
+                            command.label,
+                            &matched.ranges,
+                            if command.enabled() {
+                                colors.text
+                            } else {
+                                colors.muted_text
+                            },
+                            colors.accent,
+                            window,
+                        ),
+                        Self::shape_palette_line(
+                            &right,
+                            &[],
+                            colors.muted_text,
+                            colors.accent,
+                            window,
+                        ),
+                    )
+                });
+            }
+        }
+        let input_focus = self.query_input.focus_handle(cx);
+        let focus_changed = !input_focus.is_focused(window);
+        if focus_changed {
+            input_focus.focus(window, cx);
+        }
+        if !input_changed && !focus_changed && !reset_scroll {
+            cx.notify();
+        }
     }
 
     fn open_saved_query_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -33150,6 +33256,7 @@ impl WorkspaceShell {
         self.command_palette_items_cache.get_mut().take();
     }
 
+    #[cfg(any(test, feature = "benchmark"))]
     fn filtered_commands(&self, cx: &App) -> Arc<Vec<CommandSpec>> {
         let input = self.query_input.read(cx).text();
         let (_, query) = CommandPaletteMode::parse(input);
@@ -33223,20 +33330,46 @@ impl WorkspaceShell {
             }
         }
         let mut items: Vec<CommandPaletteMatch> = match mode {
-            CommandPaletteMode::Commands => self
-                .filtered_commands(cx)
-                .iter()
-                .cloned()
-                .map(|command| {
-                    let ranges = fuzzy_palette_match(&query, command.label, std::iter::empty())
-                        .map(|(_, ranges)| ranges)
-                        .unwrap_or_default();
-                    CommandPaletteMatch {
-                        item: CommandPaletteItem::Command(command),
-                        ranges,
-                    }
-                })
-                .collect(),
+            CommandPaletteMode::Commands => {
+                let mut ranked = self
+                    .command_specs(cx)
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(original_index, command)| {
+                        if query == "w" {
+                            return (command.id == CommandId::SaveItem).then_some((
+                                original_index,
+                                i32::MAX,
+                                CommandPaletteMatch {
+                                    item: CommandPaletteItem::Command(command),
+                                    ranges: Vec::new(),
+                                },
+                            ));
+                        }
+                        fuzzy_palette_match(
+                            &query,
+                            command.label,
+                            [
+                                command.id.as_str().to_owned(),
+                                command.language.replace("<leader>", ""),
+                            ],
+                        )
+                        .map(|(score, ranges)| {
+                            (
+                                original_index,
+                                score,
+                                CommandPaletteMatch {
+                                    item: CommandPaletteItem::Command(command),
+                                    ranges,
+                                },
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                ranked
+                    .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+                ranked.into_iter().map(|(_, _, item)| item).collect()
+            }
             CommandPaletteMode::WorkspaceFiles => {
                 let mut matches = self
                     .workspace_files
@@ -34254,24 +34387,12 @@ impl WorkspaceShell {
         })
     }
 
-    fn refresh_palette_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn refresh_palette_selection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.palette_paint_selection.set(self.palette_selected);
-        let scroll_state = self.palette_scroll_handle.0.borrow();
-        let viewport_height = scroll_state.base_handle.bounds().size.height;
-        let visible_top = -scroll_state.base_handle.offset().y;
-        let visible_bottom = visible_top + viewport_height;
-        let row_top = px(PALETTE_ROW_HEIGHT * self.palette_selected as f32);
-        let row_bottom = row_top + px(PALETTE_ROW_HEIGHT);
-        let needs_reveal =
-            viewport_height <= px(0.) || row_top < visible_top || row_bottom > visible_bottom;
-        drop(scroll_state);
-        if needs_reveal {
-            self.palette_scroll_handle
-                .scroll_to_item(self.palette_selected, ScrollStrategy::Nearest);
-            cx.notify();
-        } else {
-            window.refresh();
-        }
+        // Keep this a reactive shell invalidation. `Window::refresh` bypasses
+        // every cached view in the window, turning a one-row selection repaint
+        // into a full editor/results layout and paint.
+        cx.notify();
     }
 
     fn palette_up(&mut self, _: &PaletteUp, window: &mut Window, cx: &mut Context<Self>) {
@@ -35286,6 +35407,110 @@ impl WorkspaceShell {
     /// and the active database object breadcrumb.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors;
+        let command_palette_active = self.modal == Some(Modal::CommandPalette);
+        let blocking_modal = self.modal.as_ref().is_some_and(|modal| {
+            !matches!(
+                modal,
+                Modal::ServerPicker
+                    | Modal::ServerConnection
+                    | Modal::Account
+                    | Modal::CommandPalette
+            )
+        });
+        if blocking_modal {
+            // Full-screen dialogs occlude and disable the workspace chrome.
+            // Preserve its geometry without rebuilding controls that cannot be
+            // seen or interacted with beneath the scrim.
+            return div()
+                .id("integrated-titlebar")
+                .h(cx.theme().metrics.toolbar_height)
+                .w_full()
+                .bg(colors.toolbar);
+        }
+        if command_palette_active {
+            return div()
+                .id("integrated-titlebar")
+                .debug_selector(|| "integrated-titlebar".into())
+                .key_context("SiftWindow")
+                .h(cx.theme().metrics.toolbar_height)
+                .relative()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px_2()
+                .bg(colors.toolbar)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .w(px(96.))
+                        .flex_none()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(colors.muted_text)
+                        .child("Sift"),
+                )
+                .child(
+                    div()
+                        .id("app-bar-command-palette")
+                        .debug_selector(|| "app-bar-command-palette".into())
+                        .h(px(28.))
+                        .w(gpui::relative(0.48))
+                        .min_w(px(320.))
+                        .max_w(px(680.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(colors.accent)
+                        .bg(colors.surface)
+                        .shadow_sm()
+                        .child(icon(IconName::Search, colors.muted_text, 14.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(self.query_input.clone()),
+                        )
+                        .child(KeyBinding::new("Esc")),
+                )
+                .child(
+                    div()
+                        .w(px(96.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .child(
+                            IconButton::new(
+                                "window-minimize",
+                                IconName::Minimize,
+                                "Minimize window",
+                            )
+                            .square(px(26.))
+                            .icon_size(16.)
+                            .on_click(|_, window, _| window.minimize_window()),
+                        )
+                        .child(
+                            IconButton::new(
+                                "window-size-toggle",
+                                IconName::Maximize,
+                                "Maximize or restore window",
+                            )
+                            .square(px(26.))
+                            .icon_size(16.)
+                            .on_click(|_, window, _| window.zoom_window()),
+                        )
+                        .child(
+                            IconButton::new("window-close", IconName::Close, "Close window")
+                                .square(px(26.))
+                                .icon_size(16.)
+                                .on_click(|_, window, _| window.remove_window()),
+                        ),
+                );
+        }
         let active_database_source = self.panes.get(self.active_pane).and_then(|pane| {
             let pane = pane.read(cx);
             let item = pane.active_item()?;
@@ -35372,7 +35597,6 @@ impl WorkspaceShell {
             Some(Modal::ServerPicker | Modal::ServerConnection)
         );
         let account_active = self.modal == Some(Modal::Account);
-        let command_palette_active = self.modal == Some(Modal::CommandPalette);
         let navigation_expanded = self.app_bar_navigation_expanded();
         let launcher_content = if navigation_expanded {
             div()
@@ -36545,12 +36769,12 @@ impl WorkspaceShell {
                 Some(connection.id) == profile && connection.provider_id.as_str() == "sift/postgres"
             });
         for pane in &self.panes {
-            let views = {
+            let updates = {
                 let pane = pane.read(cx);
                 pane.results
                     .iter()
-                    .map(|(id, view)| {
-                        let analyze_supported = pane
+                    .filter_map(|(id, view)| {
+                        let supported = pane
                             .items
                             .iter()
                             .find(|item| item.id == *id)
@@ -36562,11 +36786,12 @@ impl WorkspaceShell {
                                 _ => None,
                             })
                             .unwrap_or(analyze_supported);
-                        (view.clone(), analyze_supported)
+                        (view.read(cx).analyze_supported() != supported)
+                            .then(|| (view.clone(), supported))
                     })
                     .collect::<Vec<_>>()
             };
-            for (view, supported) in views {
+            for (view, supported) in updates {
                 view.update(cx, |view, cx| view.set_analyze_supported(supported, cx));
             }
         }
@@ -38297,10 +38522,11 @@ impl WorkspaceShell {
                 | (DockId::Inspector, WorkspaceSurface::Inspector)
         );
         let has_embedded_header = dock.id == DockId::Left
-            && matches!(
+            && (matches!(
                 self.active_left_panel,
                 LeftPanel::QueryOutline | LeftPanel::SavedQueries | LeftPanel::QueryHistory
-            );
+            ) || (self.active_left_panel == LeftPanel::Connections
+                && self.connections_find_open));
         div()
             .id(title)
             .debug_selector(move || debug_selector.to_owned())
@@ -38439,7 +38665,9 @@ impl WorkspaceShell {
                 )
             })
             .when(
-                dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
+                dock.id == DockId::Left
+                    && self.active_left_panel == LeftPanel::Connections
+                    && !self.connections_find_open,
                 |dock_view| {
                 dock_view.child(
                     div()
@@ -38648,7 +38876,12 @@ impl WorkspaceShell {
                             }
                         }
                     }
-                    let row_count = rows.len() + CONNECTIONS_SCROLL_TAIL_ROWS;
+                    let row_count = rows.len()
+                        + if self.connections_find_open && rows.is_empty() {
+                            0
+                        } else {
+                            CONNECTIONS_SCROLL_TAIL_ROWS
+                        };
                     dock_view
                         .child(
                             uniform_list(
@@ -38683,7 +38916,10 @@ impl WorkspaceShell {
                             .w_full()
                             .track_scroll(&self.connections_scroll_handle),
                         )
-                        .child(self.render_connections_footer(cx))
+                        .children(
+                            (!self.connections_find_open)
+                                .then(|| self.render_connections_footer(cx)),
+                        )
                 },
             )
             .when(
@@ -41281,7 +41517,27 @@ impl gpui::Render for WorkspaceShell {
             .presentation
             .open
             .then(|| dock_resize_separator(DockId::Bottom, colors.subtle_border));
-        let pane_elements = self.pane_layout_view.clone();
+        let pane_elements = self
+            .pane_layout_view
+            .clone()
+            .cached(StyleRefinement::default().size_full());
+        let status_bar = if self.modal.as_ref().is_some_and(|modal| {
+            !matches!(
+                modal,
+                Modal::ServerPicker | Modal::ServerConnection | Modal::Account
+            )
+        }) {
+            div()
+                .h(cx.theme().metrics.status_height)
+                .w_full()
+                .flex_none()
+                .border_t_1()
+                .border_color(colors.subtle_border)
+                .bg(colors.toolbar)
+                .into_any_element()
+        } else {
+            status_bar::render_status_bar(self, cx)
+        };
         let (pane_preview_tint, pane_preview_border) = pane_drop_preview_colors(&cx.theme());
         let root_tab_drop_preview = self.root_tab_drop_target.map(|target| {
             div()
@@ -41450,7 +41706,7 @@ impl gpui::Render for WorkspaceShell {
                     .children(right_dock_separator)
                     .children(right_dock),
             )
-            .child(status_bar::render_status_bar(self, cx))
+            .child(status_bar)
             .children((!self.toasts.is_empty()).then(|| {
                 div()
                     .id("toast-stack")
@@ -52149,8 +52405,6 @@ mod tests {
         assert!(input.center().y >= app_bar.top() && input.center().y <= app_bar.bottom());
         assert!(results.top() >= app_bar.bottom());
         assert!(cx.debug_bounds("close-command-palette").is_none());
-        assert!(cx.debug_bounds("palette-mode-heading").is_some());
-        assert!(cx.debug_bounds("palette-prefix-guide").is_some());
 
         workspace.update(&mut cx, |shell, cx| {
             shell
@@ -52158,8 +52412,6 @@ mod tests {
                 .update(cx, |input, cx| input.set_text("#", cx));
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("palette-mode-heading").is_some());
-        assert!(cx.debug_bounds("palette-prefix-guide").is_none());
     }
 
     #[gpui::test]

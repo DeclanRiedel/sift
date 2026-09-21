@@ -27,21 +27,22 @@ impl ColumnFilter {
             return false;
         }
         let value = self.value.as_str();
+        let filter_text = cell.filter_text();
         // Text predicates need neither numeric parsing nor a comparison.
         match operator {
-            ResultFilterOperator::Contains => return cell.filter_text.contains(value),
-            ResultFilterOperator::NotContains => return !cell.filter_text.contains(value),
-            ResultFilterOperator::StartsWith => return cell.filter_text.starts_with(value),
-            ResultFilterOperator::EndsWith => return cell.filter_text.ends_with(value),
+            ResultFilterOperator::Contains => return filter_text.contains(value),
+            ResultFilterOperator::NotContains => return !filter_text.contains(value),
+            ResultFilterOperator::StartsWith => return filter_text.starts_with(value),
+            ResultFilterOperator::EndsWith => return filter_text.ends_with(value),
             _ => {}
         }
         let ordering = if cell.class == CellClass::Number {
             match (cell.text.parse::<f64>(), self.number) {
                 (Ok(left), Some(right)) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
-                _ => cell.filter_text.as_str().cmp(value),
+                _ => filter_text.cmp(value),
             }
         } else {
-            cell.filter_text.as_str().cmp(value)
+            filter_text.cmp(value)
         };
         match operator {
             ResultFilterOperator::Equals => ordering == Ordering::Equal,
@@ -125,7 +126,7 @@ mod tests {
             PreparedCellRender {
                 text: text.to_owned().into(),
                 paint_text: text.to_owned().into(),
-                filter_text: text.to_lowercase(),
+                lowercase_text: Some(text.to_lowercase()),
                 class,
             }
             .into()

@@ -35,7 +35,6 @@ impl WorkspaceShell {
                 Modal::CommandPalette => {
                     let input = self.query_input.read(cx).text();
                     let (mode, _) = CommandPaletteMode::parse(input);
-                    let show_prefix_guide = input.trim().is_empty();
                     let items = self.command_palette_items(cx);
                     let paint_selection = self.palette_paint_selection.clone();
                     let item_count = items.len();
@@ -83,40 +82,6 @@ impl WorkspaceShell {
                     div()
                         .flex()
                         .flex_col()
-                        .child(
-                            div()
-                                .h(px(28.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .border_b_1()
-                                .border_color(colors.subtle_border)
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child(
-                                    div()
-                                        .debug_selector(|| "palette-mode-heading".into())
-                                        .child(mode.label()),
-                                )
-                                .when(show_prefix_guide, |heading| {
-                                    heading.child(
-                                        div()
-                                            .debug_selector(|| "palette-prefix-guide".into())
-                                            .flex()
-                                            .items_center()
-                                            .gap_3()
-                                            .child("/ files")
-                                            .child("@ schema")
-                                            .child("$ data")
-                                            .child("^ checkpoints")
-                                            .child("# tabs")
-                                            .child("? saved")
-                                            .child("& shared")
-                                            .child("! history"),
-                                    )
-                                }),
-                        )
                         .when(items.is_empty(), |palette| {
                             palette.child(
                                 div()
@@ -130,208 +95,200 @@ impl WorkspaceShell {
                             )
                         })
                         .when(item_count > 0, |palette| {
-                            palette.child(
-                                uniform_list(
-                                    "command-list",
-                                    item_count,
-                                    cx.processor(move |shell, range: Range<usize>, window, cx| {
-                                        let items = items.clone();
-                                        let paint_selection = paint_selection.clone();
-                                        range
-                                            .filter_map(|idx| {
-                                                items
-                                                    .get(idx)
-                                                    .cloned()
-                                                    .map(|item| (idx, item))
-                                            })
-                                            .map(|(idx, matched)| {
-                                                let ranges = matched.ranges;
-                                                let (label, right, enabled, _key_binding) = match matched.item {
-                                                    CommandPaletteItem::Command(command) => {
-                                                        let right = command.disabled_reason.clone().unwrap_or_else(|| {
-                                                            if command.language.is_empty() {
-                                                                command.shortcut.into()
-                                                            } else {
-                                                                command.language.clone()
-                                                            }
-                                                        });
-                                                        (command.label.to_owned(), right, command.enabled(), true)
-                                                    }
-                                                    CommandPaletteItem::Line(line) => {
-                                                        let target = if shell.command_palette_origin
-                                                            == WorkspaceSurface::Results
-                                                        {
-                                                            "ROW"
-                                                        } else {
-                                                            "LINE"
-                                                        };
-                                                        (format!("Go to {} {line}", target.to_lowercase()), target.into(), true, false)
-                                                    }
-                                                    CommandPaletteItem::WorkspaceFile(_, path) => (path, "FILE".into(), true, false),
-                                                    CommandPaletteItem::Schema(hit) => {
-                                                        let right = hit.type_display.unwrap_or_else(|| "SCHEMA".into());
-                                                        (hit.display, right, true, false)
-                                                    }
-                                                    CommandPaletteItem::Data(hit) => {
-                                                        let table = [
-                                                            hit.table.schema.as_deref(),
-                                                            Some(hit.table.name.as_str()),
-                                                        ]
-                                                        .into_iter()
-                                                        .flatten()
-                                                        .collect::<Vec<_>>()
-                                                        .join(".");
-                                                        let label = hit
-                                                            .columns
-                                                            .iter()
-                                                            .zip(hit.row.values.iter())
-                                                            .take(4)
-                                                            .map(|(column, value)| format!(
-                                                                "{column}: {}",
-                                                                render_value(value).text
-                                                            ))
-                                                            .collect::<Vec<_>>()
-                                                            .join(" · ");
-                                                        (label, table, true, false)
-                                                    }
-                                                    CommandPaletteItem::Checkpoint(checkpoint) => {
-                                                        let label = checkpoint.name.unwrap_or_else(|| {
-                                                            format!("{:?}", checkpoint.reason)
-                                                        });
-                                                        (
-                                                            label,
-                                                            format!("REV {}", checkpoint.workspace_revision.0),
-                                                            true,
-                                                            false,
-                                                        )
-                                                    }
-                                                    CommandPaletteItem::OpenTab { pane_index, title, .. } => {
-                                                        (title, format!("PANE {}", pane_index + 1), true, false)
-                                                    }
-                                                    CommandPaletteItem::SavedQuery(saved) => {
-                                                        let right = if saved.tags.is_empty() {
-                                                            "SAVED".into()
-                                                        } else {
-                                                            saved.tags.join(", ")
-                                                        };
-                                                        (saved.name, right, true, false)
-                                                    }
-                                                    CommandPaletteItem::SharedQuery(document, room) => {
-                                                        (document.title, room, true, false)
-                                                    }
-                                                    CommandPaletteItem::QueryHistory(entry) => {
-                                                        let status = match entry.status {
-                                                            sift_api_types::QueryStatus::Ok => "OK",
-                                                            sift_api_types::QueryStatus::Error => "ERROR",
-                                                            sift_api_types::QueryStatus::Canceled => "CANCELED",
-                                                        };
-                                                        let connection = shell.query_history_connection_name(
-                                                            entry.connection_profile_id.map(|profile| profile.0),
-                                                        );
-                                                        (
-                                                            entry.sql_text.replace(['\n', '\r'], " "),
-                                                            format!("{status} · {connection}"),
-                                                            true,
-                                                            false,
-                                                        )
-                                                    }
-                                                };
-                                                let cache_key = format!(
-                                                    "{label}\u{0}{right}\u{0}{ranges:?}\u{0}{enabled}"
-                                                );
-                                                let (label_line, right_line) = {
-                                                    let mut cache = shell.command_palette_line_cache.borrow_mut();
-                                                    if cache.len() > 512 {
-                                                        cache.clear();
-                                                    }
-                                                    cache.entry(cache_key).or_insert_with(|| {
-                                                        (
-                                                            Self::shape_palette_line(
-                                                                &label,
-                                                                &ranges,
-                                                                if enabled { colors.text } else { colors.muted_text },
-                                                                colors.accent,
-                                                                window,
-                                                            ),
-                                                            Self::shape_palette_line(
-                                                                &right,
-                                                                &[],
-                                                                colors.muted_text,
-                                                                colors.accent,
-                                                                window,
-                                                            ),
-                                                        )
-                                                    }).clone()
-                                                };
-                                                let paint_selection = paint_selection.clone();
-                                                let mut row = div()
-                                                    .id(SharedString::from(format!("command-palette-item-{idx}")))
-                                                    .w_full()
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .gap_2()
-                                                    .h(px(PALETTE_ROW_HEIGHT))
-                                                    .px_2()
-                                                    .rounded_sm()
-                                                    .when(!enabled, |row| {
-                                                        row.text_color(colors.muted_text)
-                                                    })
-                                                    .child(
-                                                        canvas(
-                                                            |_, _, _| (),
-                                                            move |bounds, _, window, cx| {
-                                                                if enabled
-                                                                    && paint_selection.get() == idx
-                                                                {
-                                                                    window.paint_quad(gpui::fill(
-                                                                        bounds,
-                                                                        colors.active_surface,
-                                                                    ));
-                                                                }
-                                                                let label_width = (bounds.size.width - px(224.)).max(px(0.));
-                                                                let _ = label_line.paint(
-                                                                    bounds.origin,
-                                                                    bounds.size.height,
-                                                                    TextAlign::Left,
-                                                                    Some(label_width),
-                                                                    window,
-                                                                    cx,
-                                                                );
-                                                                if !right.is_empty() {
-                                                                    let _ = right_line.paint(
-                                                                        bounds.origin,
-                                                                        bounds.size.height,
-                                                                        TextAlign::Right,
-                                                                        Some(bounds.size.width),
-                                                                        window,
-                                                                        cx,
-                                                                    );
-                                                                }
-                                                            },
-                                                        )
-                                                        .flex_1()
-                                                        .h_full(),
-                                                    );
-                                                if enabled {
-                                                    row = row
-                                                        .hover(|row| {
-                                                            row.bg(colors.hovered_surface)
-                                                        })
-                                                        .on_click(cx.listener(
-                                                            move |shell, _, window, cx| {
-                                                                shell.activate_command_palette_item(idx, window, cx)
-                                                            },
-                                                        ));
+                            let visible_start = self
+                                .palette_selected
+                                .saturating_add(1)
+                                .saturating_sub(PALETTE_VISIBLE_ROWS);
+                            let visible_end = (visible_start + PALETTE_VISIBLE_ROWS).min(item_count);
+                            let rows = (visible_start..visible_end)
+                                .filter_map(|idx| {
+                                    items.get(idx).cloned().map(|item| (idx, item))
+                                })
+                                .map(|(idx, matched)| {
+                                    let ranges = matched.ranges;
+                                    let (label, right, enabled, _key_binding) = match matched.item {
+                                        CommandPaletteItem::Command(command) => {
+                                            let right = command.disabled_reason.clone().unwrap_or_else(|| {
+                                                if command.language.is_empty() {
+                                                    command.shortcut.into()
+                                                } else {
+                                                    command.language.clone()
                                                 }
-                                                row
-                                            })
-                                            .collect()
-                                    }),
-                                )
+                                            });
+                                            (command.label.to_owned(), right, command.enabled(), true)
+                                        }
+                                        CommandPaletteItem::Line(line) => {
+                                            let target = if self.command_palette_origin
+                                                == WorkspaceSurface::Results
+                                            {
+                                                "ROW"
+                                            } else {
+                                                "LINE"
+                                            };
+                                            (format!("Go to {} {line}", target.to_lowercase()), target.into(), true, false)
+                                        }
+                                        CommandPaletteItem::WorkspaceFile(_, path) => (path, "FILE".into(), true, false),
+                                        CommandPaletteItem::Schema(hit) => {
+                                            let right = hit.type_display.unwrap_or_else(|| "SCHEMA".into());
+                                            (hit.display, right, true, false)
+                                        }
+                                        CommandPaletteItem::Data(hit) => {
+                                            let table = [
+                                                hit.table.schema.as_deref(),
+                                                Some(hit.table.name.as_str()),
+                                            ]
+                                            .into_iter()
+                                            .flatten()
+                                            .collect::<Vec<_>>()
+                                            .join(".");
+                                            let label = hit
+                                                .columns
+                                                .iter()
+                                                .zip(hit.row.values.iter())
+                                                .take(4)
+                                                .map(|(column, value)| format!(
+                                                    "{column}: {}",
+                                                    render_value(value).text
+                                                ))
+                                                .collect::<Vec<_>>()
+                                                .join(" · ");
+                                            (label, table, true, false)
+                                        }
+                                        CommandPaletteItem::Checkpoint(checkpoint) => {
+                                            let label = checkpoint.name.unwrap_or_else(|| {
+                                                format!("{:?}", checkpoint.reason)
+                                            });
+                                            (
+                                                label,
+                                                format!("REV {}", checkpoint.workspace_revision.0),
+                                                true,
+                                                false,
+                                            )
+                                        }
+                                        CommandPaletteItem::OpenTab { pane_index, title, .. } => {
+                                            (title, format!("PANE {}", pane_index + 1), true, false)
+                                        }
+                                        CommandPaletteItem::SavedQuery(saved) => {
+                                            let right = if saved.tags.is_empty() {
+                                                "SAVED".into()
+                                            } else {
+                                                saved.tags.join(", ")
+                                            };
+                                            (saved.name, right, true, false)
+                                        }
+                                        CommandPaletteItem::SharedQuery(document, room) => {
+                                            (document.title, room, true, false)
+                                        }
+                                        CommandPaletteItem::QueryHistory(entry) => {
+                                            let status = match entry.status {
+                                                sift_api_types::QueryStatus::Ok => "OK",
+                                                sift_api_types::QueryStatus::Error => "ERROR",
+                                                sift_api_types::QueryStatus::Canceled => "CANCELED",
+                                            };
+                                            let connection = self.query_history_connection_name(
+                                                entry.connection_profile_id.map(|profile| profile.0),
+                                            );
+                                            (
+                                                entry.sql_text.replace(['\n', '\r'], " "),
+                                                format!("{status} · {connection}"),
+                                                true,
+                                                false,
+                                            )
+                                        }
+                                    };
+                                    let cache_key = format!(
+                                        "{label}\u{0}{right}\u{0}{ranges:?}\u{0}{enabled}"
+                                    );
+                                    let (label_line, right_line) = {
+                                        let mut cache = self.command_palette_line_cache.borrow_mut();
+                                        if cache.len() > 512 {
+                                            cache.clear();
+                                        }
+                                        cache.entry(cache_key).or_insert_with(|| {
+                                            (
+                                                Self::shape_palette_line(
+                                                    &label,
+                                                    &ranges,
+                                                    if enabled { colors.text } else { colors.muted_text },
+                                                    colors.accent,
+                                                    window,
+                                                ),
+                                                Self::shape_palette_line(
+                                                    &right,
+                                                    &[],
+                                                    colors.muted_text,
+                                                    colors.accent,
+                                                    window,
+                                                ),
+                                            )
+                                        }).clone()
+                                    };
+                                    let paint_selection = paint_selection.clone();
+                                    let mut row = div()
+                                        .id(SharedString::from(format!("command-palette-item-{idx}")))
+                                        .w_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .h(px(PALETTE_ROW_HEIGHT))
+                                        .px_2()
+                                        .rounded_sm()
+                                        .when(!enabled, |row| {
+                                            row.text_color(colors.muted_text)
+                                        })
+                                        .child(
+                                            canvas(
+                                                |_, _, _| (),
+                                                move |bounds, _, window, cx| {
+                                                    if enabled && paint_selection.get() == idx {
+                                                        window.paint_quad(gpui::fill(
+                                                            bounds,
+                                                            colors.active_surface,
+                                                        ));
+                                                    }
+                                                    let label_width =
+                                                        (bounds.size.width - px(224.)).max(px(0.));
+                                                    let _ = label_line.paint(
+                                                        bounds.origin,
+                                                        bounds.size.height,
+                                                        TextAlign::Left,
+                                                        Some(label_width),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                    if !right.is_empty() {
+                                                        let _ = right_line.paint(
+                                                            bounds.origin,
+                                                            bounds.size.height,
+                                                            TextAlign::Right,
+                                                            Some(bounds.size.width),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            )
+                                            .flex_1()
+                                            .h_full(),
+                                        );
+                                    if enabled {
+                                        row = row
+                                            .hover(|row| row.bg(colors.hovered_surface))
+                                            .on_click(cx.listener(move |shell, _, window, cx| {
+                                                shell.activate_command_palette_item(idx, window, cx)
+                                            }));
+                                    }
+                                    row
+                                });
+                            palette.child(
+                                div()
+                                .id("command-list")
                                 .h(px(palette_height))
                                 .w_full()
-                                .track_scroll(&self.palette_scroll_handle),
+                                .flex()
+                                .flex_col()
+                                .children(rows),
                             )
                         })
                         .into_any_element()
@@ -5630,7 +5587,7 @@ impl WorkspaceShell {
                         self.change_ledger_filter.affected_object.clone(),
                         self.change_ledger_filter.git_commit.as_deref().map(|oid| format!("commit {}", oid.chars().take(8).collect::<String>())),
                     ].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-                    div().debug_selector(|| "change-ledger-modal".into()).w_full().h(px(690.)).flex().flex_col().gap_3()
+                    div().debug_selector(|| "change-ledger-modal".into()).w_full().h(px(560.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between()
                             .child(div().flex().flex_col()
                                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Database change ledger"))
