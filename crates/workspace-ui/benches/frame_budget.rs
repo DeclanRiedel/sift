@@ -412,8 +412,11 @@ fn object_browser_navigation(cx: &mut BenchAppContext) {
         });
     });
     let mut down = true;
-    cx.bench_renderer(shell, move |shell, window, cx| {
-        shell.step_object_browser_benchmark(down, window, cx);
+    cx.bench_iter(move |_| {
+        window.update(|window, cx| {
+            let key = if down { "j" } else { "k" };
+            window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx);
+        });
         down = !down;
     });
 }

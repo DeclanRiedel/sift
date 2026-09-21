@@ -1616,6 +1616,38 @@ struct ObjectBrowserRowsElement {
     item_id: u64,
 }
 
+struct ObjectBrowserRowsView {
+    pane: gpui::WeakEntity<Pane>,
+    item_id: u64,
+    selection: Entity<ObjectBrowserSelectionView>,
+    actions: Entity<ObjectBrowserActionsView>,
+}
+
+struct ObjectBrowserSelectionView {
+    pane: gpui::WeakEntity<Pane>,
+    item_id: u64,
+}
+
+struct ObjectBrowserActionsView {
+    buttons: Vec<Entity<ObjectBrowserActionButtonView>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObjectBrowserActionRequirement {
+    Never,
+    Selection,
+    Table,
+}
+
+struct ObjectBrowserActionButtonView {
+    pane: gpui::WeakEntity<Pane>,
+    item_id: u64,
+    id: &'static str,
+    label: &'static str,
+    action: char,
+    requirement: ObjectBrowserActionRequirement,
+}
+
 struct ObjectBrowserRowsPrepaint {
     quads: Vec<gpui::PaintQuad>,
     lines: Vec<(CachedPanelLine, gpui::Point<Pixels>, Pixels, TextAlign)>,
@@ -1700,9 +1732,6 @@ impl Element for ObjectBrowserRowsElement {
                     gpui::point(bounds.left(), top),
                     gpui::size(bounds.size.width, px(34.)),
                 );
-                if browser.selected == index {
-                    quads.push(gpui::fill(row_bounds, colors.active_surface));
-                }
                 quads.push(gpui::fill(
                     Bounds::new(
                         gpui::point(row_bounds.left(), row_bounds.bottom() - px(1.)),
@@ -1764,7 +1793,7 @@ impl Element for ObjectBrowserRowsElement {
                 {
                     let mut cache = browser.row_line_cache.borrow_mut();
                     if cache.len() >= 512 && !cache.contains_key(&row_index) {
-                        cache.clear();
+                        cache.retain(|cached_index, _| cached_index.abs_diff(row_index) <= 256);
                     }
                     cache.insert(row_index, shaped.clone());
                 }
@@ -1829,6 +1858,176 @@ impl Element for ObjectBrowserRowsElement {
                 paint_cached_panel_line(&line, origin, px(34.), alignment, width, window);
             }
         });
+    }
+}
+
+impl Render for ObjectBrowserRowsView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        let Some(pane) = self.pane.upgrade() else {
+            return div().flex_1().min_h_0().into_any_element();
+        };
+        let Some(browser) = pane.read(cx).object_browsers.get(&self.item_id) else {
+            return div().flex_1().min_h_0().into_any_element();
+        };
+        let row_count = browser.visible_row_count();
+        let empty_message = if let Some(message) = &browser.load_error {
+            message.clone()
+        } else if browser.loading {
+            format!("Loading objects from {}…", browser.context.profile_name)
+        } else if browser.enabled_groups.is_empty() {
+            "Enable at least one object type above".into()
+        } else {
+            "No matching objects in this schema".into()
+        };
+        let vertical = browser.scroll_handle.0.borrow().base_handle.clone();
+        let item_id = self.item_id;
+        let selection = self.selection.clone();
+
+        div()
+            .id(("object-browser-rows-retained", item_id as usize))
+            .debug_selector(|| "object-browser-rows-retained".into())
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .when(row_count == 0, |view| {
+                view.flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(colors.muted_text)
+                    .child(empty_message)
+            })
+            .when(row_count > 0, |view| {
+                view.overflow_y_scroll()
+                    .track_scroll(&vertical)
+                    .child(
+                        div()
+                            .relative()
+                            .child(selection)
+                            .child(ObjectBrowserRowsElement {
+                                pane: pane.clone(),
+                                item_id,
+                            }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |rows_view, event: &gpui::MouseDownEvent, window, cx| {
+                            let Some(pane) = rows_view.pane.upgrade() else {
+                                return;
+                            };
+                            pane.update(cx, |pane, cx| {
+                                let Some(browser) = pane.object_browsers.get_mut(&item_id) else {
+                                    return;
+                                };
+                                let scroll = browser.scroll_handle.0.borrow();
+                                let viewport = scroll.base_handle.bounds();
+                                let content_y = f32::from(
+                                    event.position.y
+                                        - viewport.top()
+                                        - scroll.base_handle.offset().y,
+                                )
+                                .max(0.);
+                                drop(scroll);
+                                let index = (content_y / 34.).floor() as usize;
+                                if index < browser.visible_row_count() {
+                                    browser.selected = index;
+                                    pane.focus_handle.focus(window, cx);
+                                }
+                            });
+                            rows_view.selection.update(cx, |_, cx| cx.notify());
+                            let buttons = rows_view.actions.read(cx).buttons.clone();
+                            for button in buttons.into_iter().skip(3) {
+                                button.update(cx, |_, cx| cx.notify());
+                            }
+                        }),
+                    )
+            })
+            .into_any_element()
+    }
+}
+
+impl Render for ObjectBrowserSelectionView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self
+            .pane
+            .upgrade()
+            .and_then(|pane| {
+                pane.read(cx)
+                    .object_browsers
+                    .get(&self.item_id)
+                    .map(|browser| browser.selected)
+            })
+            .unwrap_or_default();
+        div()
+            .absolute()
+            .left_0()
+            .top(px(selected as f32 * 34.))
+            .w(px(3.))
+            .h(px(34.))
+            .bg(cx.theme().colors.accent)
+    }
+}
+
+impl Render for ObjectBrowserActionsView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        div()
+            .h(px(33.))
+            .w_full()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .border_t_1()
+            .border_color(colors.subtle_border)
+            .children(self.buttons.clone())
+    }
+}
+
+impl Render for ObjectBrowserActionButtonView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        let selected = self.pane.upgrade().and_then(|pane| {
+            pane.read(cx)
+                .object_browsers
+                .get(&self.item_id)
+                .and_then(ObjectBrowserState::selected_row)
+                .map(|row| row.source.object_kind)
+        });
+        let disabled = match self.requirement {
+            ObjectBrowserActionRequirement::Never => false,
+            ObjectBrowserActionRequirement::Selection => selected.is_none(),
+            ObjectBrowserActionRequirement::Table => !selected.is_some_and(is_table_like_object),
+        };
+        let id = self.id;
+        let label = self.label;
+        let action = self.action;
+        div()
+            .id((id, self.item_id as usize))
+            .debug_selector(move || id.into())
+            .role(Role::Button)
+            .aria_label(label)
+            .h(px(24.))
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .text_xs()
+            .text_color(if disabled {
+                colors.disabled_text
+            } else {
+                colors.muted_text
+            })
+            .when(!disabled, |button| {
+                button
+                    .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        if let Some(pane) = view.pane.upgrade() {
+                            pane.update(cx, |pane, cx| pane.object_browser_action(action, cx));
+                        }
+                    }))
+            })
+            .child(label)
     }
 }
 
@@ -4716,6 +4915,7 @@ pub struct Pane {
     database_json_texts: HashMap<u64, String>,
     database_json_baselines: HashMap<u64, String>,
     object_browsers: HashMap<u64, ObjectBrowserState>,
+    object_browser_rows: HashMap<u64, Entity<ObjectBrowserRowsView>>,
     /// Transient wrapper sizes while dragging. Keeping these on the pane avoids
     /// invalidating and repainting the result grid for every pointer event.
     live_result_extents: HashMap<u64, f32>,
@@ -4868,6 +5068,7 @@ impl Pane {
             database_json_texts: HashMap::new(),
             database_json_baselines: HashMap::new(),
             object_browsers: HashMap::new(),
+            object_browser_rows: HashMap::new(),
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
             tab_drop_target: None,
@@ -5529,6 +5730,7 @@ impl Pane {
         self.database_json_texts.remove(&item_id);
         self.database_json_baselines.remove(&item_id);
         self.object_browsers.remove(&item_id);
+        self.object_browser_rows.remove(&item_id);
         if self.pending_close_item == Some(item_id) {
             self.pending_close_item = None;
         }
@@ -6081,7 +6283,9 @@ impl Pane {
             .keys()
             .find_map(|id| self.items.iter().position(|item| item.id == *id))
         {
-            self.object_browsers.insert(self.items[index].id, state);
+            let retained_item_id = self.items[index].id;
+            self.object_browsers.insert(retained_item_id, state);
+            self.ensure_object_browser_rows(retained_item_id, cx);
             self.items[index].title = "objs".into();
             if index != 0 {
                 let item = self.items.remove(index);
@@ -6098,10 +6302,97 @@ impl Pane {
             self.items.insert(0, item);
             self.active_item = 0;
             self.object_browsers.insert(item_id, state);
+            self.ensure_object_browser_rows(item_id, cx);
         }
         self.subscribe_object_browser_search(self.items[0].id, cx);
         self.pending_close_item = None;
         cx.notify();
+    }
+
+    fn ensure_object_browser_rows(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        if self.object_browser_rows.contains_key(&item_id) {
+            self.refresh_object_browser_rows(item_id, cx);
+            return;
+        }
+        let pane = cx.entity().downgrade();
+        let selection = cx.new(|_| ObjectBrowserSelectionView {
+            pane: pane.clone(),
+            item_id,
+        });
+        let buttons = [
+            (
+                "object-browser-open",
+                "Open",
+                'o',
+                ObjectBrowserActionRequirement::Selection,
+            ),
+            (
+                "object-browser-new-table",
+                "New table",
+                'n',
+                ObjectBrowserActionRequirement::Never,
+            ),
+            (
+                "object-browser-design",
+                "Design",
+                'd',
+                ObjectBrowserActionRequirement::Selection,
+            ),
+            (
+                "object-browser-delete",
+                "Delete",
+                'x',
+                ObjectBrowserActionRequirement::Table,
+            ),
+            (
+                "object-browser-import",
+                "Import…",
+                'i',
+                ObjectBrowserActionRequirement::Table,
+            ),
+            (
+                "object-browser-export",
+                "Export…",
+                'e',
+                ObjectBrowserActionRequirement::Table,
+            ),
+        ]
+        .into_iter()
+        .map(|(id, label, action, requirement)| {
+            cx.new(|_| ObjectBrowserActionButtonView {
+                pane: pane.clone(),
+                item_id,
+                id,
+                label,
+                action,
+                requirement,
+            })
+        })
+        .collect();
+        let actions = cx.new(|_| ObjectBrowserActionsView { buttons });
+        self.object_browser_rows.insert(
+            item_id,
+            cx.new(|_| ObjectBrowserRowsView {
+                pane,
+                item_id,
+                selection,
+                actions,
+            }),
+        );
+    }
+
+    fn refresh_object_browser_rows(&self, item_id: u64, cx: &mut Context<Self>) {
+        let Some(rows) = self.object_browser_rows.get(&item_id) else {
+            return;
+        };
+        let selection = rows.read(cx).selection.clone();
+        let actions = rows.read(cx).actions.clone();
+        let buttons = actions.read(cx).buttons.clone();
+        rows.update(cx, |_, cx| cx.notify());
+        selection.update(cx, |_, cx| cx.notify());
+        for button in buttons {
+            button.update(cx, |_, cx| cx.notify());
+        }
     }
 
     fn subscribe_object_browser_search(&mut self, item_id: u64, cx: &mut Context<Self>) {
@@ -6114,8 +6405,9 @@ impl Pane {
                 browser.search = input.read(cx).text().to_lowercase();
                 browser.selected = 0;
                 browser.rebuild_visible_indices();
-                cx.notify();
             }
+            pane.refresh_object_browser_rows(item_id, cx);
+            cx.notify();
         });
         self.editor_subscriptions.insert(item_id, subscription);
     }
@@ -6193,6 +6485,9 @@ impl Pane {
         }
         let visible_row_count = browser.visible_row_count();
         let previous_selected = browser.selected;
+        let previous_table_selected = browser
+            .selected_row()
+            .is_some_and(|row| is_table_like_object(row.source.object_kind));
         let mut projection_changed = false;
         match event.keystroke.key.as_str() {
             "j" | "down" => {
@@ -6252,6 +6547,11 @@ impl Pane {
             _ => return,
         }
         let selection_changed = browser.selected != previous_selected;
+        let table_selection_changed = selection_changed
+            && previous_table_selected
+                != browser
+                    .selected_row()
+                    .is_some_and(|row| is_table_like_object(row.source.object_kind));
         if projection_changed {
             browser
                 .scroll_handle
@@ -6262,11 +6562,24 @@ impl Pane {
                 .scroll_to_item(browser.selected, ScrollStrategy::Nearest);
         }
         cx.stop_propagation();
-        if projection_changed || matches!(event.keystroke.key.as_str(), "c" | "escape") {
-            cx.notify();
+        if projection_changed {
+            self.refresh_object_browser_rows(item_id, cx);
         } else if selection_changed {
-            // Invalidate only this pane. A whole-window refresh explicitly
-            // bypasses cached editor, result, and sibling-pane subtrees.
+            let retained = self.object_browser_rows.get(&item_id).map(|rows| {
+                let rows = rows.read(cx);
+                (rows.selection.clone(), rows.actions.clone())
+            });
+            if let Some((selection, actions)) = retained {
+                selection.update(cx, |_, cx| cx.notify());
+                if table_selection_changed {
+                    let buttons = actions.read(cx).buttons.clone();
+                    for button in buttons.into_iter().skip(3) {
+                        button.update(cx, |_, cx| cx.notify());
+                    }
+                }
+            }
+        }
+        if projection_changed || matches!(event.keystroke.key.as_str(), "c" | "escape") {
             cx.notify();
         }
     }
@@ -6283,14 +6596,6 @@ impl Pane {
                 .child("Reconnect and reopen Objects to refresh this view")
                 .into_any_element();
         };
-        let selected_source = browser.selected_row().map(|row| row.source.clone());
-        let new_table_source = selected_source
-            .clone()
-            .unwrap_or_else(|| browser.context.clone());
-        let table_selected = selected_source
-            .as_ref()
-            .is_some_and(|source| is_table_like_object(source.object_kind));
-        let row_count = browser.visible_row_count();
         let connection_picker_open = browser.connection_picker_open;
         let catalog_picker_open = browser.catalog_picker_open;
         let schema_picker_open = browser.schema_picker_open;
@@ -6304,15 +6609,8 @@ impl Pane {
             .schema
             .clone()
             .unwrap_or_else(|| "Select schema".into());
-        let empty_message = if let Some(message) = &browser.load_error {
-            message.clone()
-        } else if browser.loading {
-            format!("Loading objects from {connection_name}…")
-        } else if browser.enabled_groups.is_empty() {
-            "Enable at least one object type above".into()
-        } else {
-            "No matching objects in this schema".into()
-        };
+        let rows_view = self.object_browser_rows.get(&item_id).cloned();
+        let actions_view = rows_view.as_ref().map(|rows| rows.read(cx).actions.clone());
         let connection_items = connection_picker_open
             .then(|| browser.connections.clone())
             .into_iter()
@@ -6379,6 +6677,7 @@ impl Pane {
                         if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
                             browser.select_catalog(catalog.clone());
                         }
+                        pane.refresh_object_browser_rows(item_id, cx);
                         cx.notify();
                     }))
                     .child(icon(
@@ -6418,6 +6717,7 @@ impl Pane {
                         if let Some(browser) = pane.object_browsers.get_mut(&item_id) {
                             browser.select_schema(schema.clone());
                         }
+                        pane.refresh_object_browser_rows(item_id, cx);
                         cx.notify();
                     }))
                     .child(icon(
@@ -6471,53 +6771,12 @@ impl Pane {
                             browser.selected = 0;
                             browser.rebuild_visible_indices();
                         }
+                        pane.refresh_object_browser_rows(item_id, cx);
                         cx.notify();
                     }))
                     .child(format!("{} {}", index + 1, group.label()))
             })
             .collect::<Vec<_>>();
-        let toolbar_action = |id: &'static str,
-                              label: &'static str,
-                              action: char,
-                              disabled: bool,
-                              source: Option<DatabaseObjectSource>| {
-            div()
-                .id((id, item_id as usize))
-                .debug_selector(move || id.into())
-                .role(Role::Button)
-                .aria_label(label)
-                .h(px(24.))
-                .px_2()
-                .flex()
-                .items_center()
-                .rounded_sm()
-                .text_xs()
-                .text_color(if disabled {
-                    colors.disabled_text
-                } else {
-                    colors.muted_text
-                })
-                .when(!disabled, |button| {
-                    button
-                        .hover(|button| button.bg(colors.hovered_surface).text_color(colors.text))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            let Some(source) = source.clone() else {
-                                return;
-                            };
-                            let event = match action {
-                                'o' => PaneEvent::ObjectBrowserOpenRequested { source },
-                                'n' => PaneEvent::ObjectBrowserNewTableRequested { source },
-                                'd' => PaneEvent::ObjectBrowserDesignRequested { source },
-                                'x' => PaneEvent::ObjectBrowserDeleteRequested { source },
-                                'i' => PaneEvent::ObjectBrowserImportRequested { source },
-                                'e' => PaneEvent::ObjectBrowserExportRequested { source },
-                                _ => return,
-                            };
-                            cx.emit(event);
-                        }))
-                })
-                .child(label)
-        };
         div()
             .size_full()
             .min_h_0()
@@ -6796,59 +7055,7 @@ impl Pane {
                             .child(SectionLabel::new("SHOW"))
                             .children(filter_buttons),
                     )
-                    .child(
-                        div()
-                            .h(px(33.))
-                            .w_full()
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .border_t_1()
-                            .border_color(colors.subtle_border)
-                            .child(toolbar_action(
-                                "object-browser-open",
-                                "Open",
-                                'o',
-                                selected_source.is_none(),
-                                selected_source.clone(),
-                            ))
-                            .child(toolbar_action(
-                                "object-browser-new-table",
-                                "New table",
-                                'n',
-                                false,
-                                Some(new_table_source),
-                            ))
-                            .child(toolbar_action(
-                                "object-browser-design",
-                                "Design",
-                                'd',
-                                selected_source.is_none(),
-                                selected_source.clone(),
-                            ))
-                            .child(toolbar_action(
-                                "object-browser-delete",
-                                "Delete",
-                                'x',
-                                !table_selected,
-                                selected_source.clone(),
-                            ))
-                            .child(toolbar_action(
-                                "object-browser-import",
-                                "Import…",
-                                'i',
-                                !table_selected,
-                                selected_source.clone(),
-                            ))
-                            .child(toolbar_action(
-                                "object-browser-export",
-                                "Export…",
-                                'e',
-                                !table_selected,
-                                selected_source,
-                            )),
-                    ),
+                    .children(actions_view),
             )
             .child(
                 div()
@@ -6899,57 +7106,7 @@ impl Pane {
                             .child("COMMENT"),
                     ),
             )
-            .when(row_count == 0, |view| {
-                view.child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(colors.muted_text)
-                        .child(empty_message),
-                )
-            })
-            .when(row_count > 0, |view| {
-                let vertical = browser.scroll_handle.0.borrow().base_handle.clone();
-                view.child(
-                    div()
-                        .id(("object-browser-rows-retained", item_id as usize))
-                        .debug_selector(|| "object-browser-rows-retained".into())
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&vertical)
-                        .child(ObjectBrowserRowsElement {
-                            pane: cx.entity(),
-                            item_id,
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |pane, event: &gpui::MouseDownEvent, window, cx| {
-                                let Some(browser) = pane.object_browsers.get_mut(&item_id) else {
-                                    return;
-                                };
-                                let scroll = browser.scroll_handle.0.borrow();
-                                let viewport = scroll.base_handle.bounds();
-                                let content_y = f32::from(
-                                    event.position.y
-                                        - viewport.top()
-                                        - scroll.base_handle.offset().y,
-                                )
-                                .max(0.);
-                                drop(scroll);
-                                let index = (content_y / 34.).floor() as usize;
-                                if index < browser.visible_row_count() {
-                                    browser.selected = index;
-                                    pane.focus_handle.focus(window, cx);
-                                    cx.notify();
-                                }
-                            }),
-                        ),
-                )
-            })
+            .children(rows_view)
             .into_any_element()
     }
 
@@ -7265,6 +7422,7 @@ impl Pane {
         }
         if let Some(browser) = transfer.object_browser {
             self.object_browsers.insert(item_id, browser);
+            self.ensure_object_browser_rows(item_id, cx);
             self.subscribe_object_browser_search(item_id, cx);
         }
         if let Some(results) = transfer.results {
@@ -20477,6 +20635,16 @@ impl WorkspaceShell {
                         .unwrap_or(0)
                         .min(browser.visible_row_count().saturating_sub(1));
                 }
+                let browser_ids = pane
+                    .object_browsers
+                    .iter()
+                    .filter_map(|(item_id, browser)| {
+                        (browser.profile_id == profile_id).then_some(*item_id)
+                    })
+                    .collect::<Vec<_>>();
+                for item_id in browser_ids {
+                    pane.refresh_object_browser_rows(item_id, cx);
+                }
                 cx.notify();
             });
         }
@@ -20492,6 +20660,16 @@ impl WorkspaceShell {
                 {
                     browser.loading = false;
                     browser.load_error = Some(format!("Could not load objects: {message}"));
+                }
+                let browser_ids = pane
+                    .object_browsers
+                    .iter()
+                    .filter_map(|(item_id, browser)| {
+                        (browser.profile_id == profile_id).then_some(*item_id)
+                    })
+                    .collect::<Vec<_>>();
+                for item_id in browser_ids {
+                    pane.refresh_object_browser_rows(item_id, cx);
                 }
                 cx.notify();
             });
@@ -20577,6 +20755,7 @@ impl WorkspaceShell {
                 browser.load_error = None;
                 browser.rebuild_visible_indices();
             }
+            pane.refresh_object_browser_rows(item_id, cx);
             if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
                 item.title = "objs".into();
             }
@@ -27119,39 +27298,6 @@ impl WorkspaceShell {
         self.apply_schema_snapshot_benchmark(snapshot, cx);
         self.left_dock.presentation.open = false;
         self.open_active_connection_objects(window, cx);
-    }
-
-    #[cfg(feature = "benchmark")]
-    #[doc(hidden)]
-    pub fn step_object_browser_benchmark(
-        &mut self,
-        down: bool,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(pane) = self.panes.get(self.active_pane) else {
-            return;
-        };
-        pane.update(cx, |pane, cx| {
-            let Some(item_id) = pane.active_item().map(|item| item.id) else {
-                return;
-            };
-            let Some(browser) = pane.object_browsers.get_mut(&item_id) else {
-                return;
-            };
-            if down {
-                browser.selected =
-                    (browser.selected + 1).min(browser.visible_row_count().saturating_sub(1));
-            } else {
-                browser.selected = browser.selected.saturating_sub(1);
-            }
-            if browser.selected_row_needs_reveal() {
-                browser
-                    .scroll_handle
-                    .scroll_to_item(browser.selected, ScrollStrategy::Nearest);
-            }
-            cx.notify();
-        });
     }
 
     #[cfg(feature = "benchmark")]
