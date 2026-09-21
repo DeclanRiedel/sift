@@ -54,7 +54,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Arc<gpui::RenderImage>, String> {
         .decode()
         .map_err(|_| "Invalid image or preview exceeds 4096×4096 / 64 MiB limit".to_string())?
         .into_rgba8();
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Ok(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
