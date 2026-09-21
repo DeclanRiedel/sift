@@ -731,8 +731,8 @@ async fn shallow_tree(
                     c.relname AS object_name,
                     c.relkind AS relkind,
                     CASE
-                        WHEN GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1)) < 0 THEN NULL
-                        ELSE GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1))
+                        WHEN GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1), COALESCE(s.n_ins_since_vacuum, -1)) < 0 THEN NULL
+                        ELSE GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1), COALESCE(s.n_ins_since_vacuum, -1))
                     END AS estimated_rows,
                     obj_description(c.oid, 'pg_class') AS comment
              FROM pg_class c
@@ -754,8 +754,8 @@ async fn shallow_tree(
                     c.relname AS object_name,
                     c.relkind AS relkind,
                     CASE
-                        WHEN GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1)) < 0 THEN NULL
-                        ELSE GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1))
+                        WHEN GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1), COALESCE(s.n_ins_since_vacuum, -1)) < 0 THEN NULL
+                        ELSE GREATEST(c.reltuples::bigint, COALESCE(s.n_live_tup, -1), COALESCE(s.n_ins_since_vacuum, -1))
                     END AS estimated_rows,
                     obj_description(c.oid, 'pg_class') AS comment
              FROM pg_class c
