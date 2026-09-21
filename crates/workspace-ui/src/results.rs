@@ -11,9 +11,10 @@ use std::sync::Arc;
 
 use gpui::{
     actions, anchored, canvas, deferred, div, prelude::*, px, rems, uniform_list, App,
-    ClipboardItem, ContentMask, Context, CursorStyle, Div, DragMoveEvent, Entity, FocusHandle,
-    Focusable, IntoElement, ListHorizontalSizingBehavior, MouseButton, Pixels, Point,
-    ScrollStrategy, ShapedLine, SharedString, Stateful, Subscription, TextAlign, TextRun,
+    ClipboardItem, ContentMask, Context, CursorStyle, Div, DragMoveEvent, Element, ElementId,
+    Entity, FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
+    ListHorizontalSizingBehavior, MouseButton, PaintQuad, Pixels, Point, ScrollStrategy,
+    ShapedLine, SharedString, Stateful, Style, Subscription, TextAlign, TextRun,
     UniformListScrollHandle, Window,
 };
 use sift_api_types::QueryHistory;
@@ -187,6 +188,14 @@ struct CachedShapedCell {
     line: ShapedLine,
     run: TextRun,
     font_size: Pixels,
+}
+
+#[derive(Debug, Clone)]
+struct CachedShapedResultRow {
+    text: SharedString,
+    runs: Vec<TextRun>,
+    font_size: Pixels,
+    line: ShapedLine,
 }
 
 #[derive(Debug, Clone)]
@@ -1199,6 +1208,7 @@ pub struct ResultsView {
     /// for every visible row during scroll and selection paints.
     rendered_columns: Vec<CachedColumnRender>,
     rendered_rows: Vec<Vec<CachedCellRender>>,
+    row_shape_cache: HashMap<usize, CachedShapedResultRow>,
     /// Display-order projection into source rows. Selection and edits remain
     /// source-indexed when loaded-row transforms reorder the grid.
     display_rows: Arc<Vec<usize>>,
@@ -1327,6 +1337,7 @@ impl ResultsView {
             state: ResultState::Idle,
             rendered_columns: Vec::new(),
             rendered_rows: Vec::new(),
+            row_shape_cache: HashMap::new(),
             display_rows: Arc::new(Vec::new()),
             sorts: Vec::new(),
             column_filters: Vec::new(),
@@ -3590,8 +3601,7 @@ impl ResultsView {
         // uniform list resolve a deferred scroll request and relayout its rows
         // until selection actually crosses a visible edge.
         if row != previous_row && self.row_needs_reveal(display_row) {
-            self.row_scroll_handle
-                .scroll_to_item(display_row, ScrollStrategy::Nearest);
+            self.reveal_result_row(display_row, cx);
         }
         if column != previous_column {
             self.reveal_column(column, cx);
@@ -3660,6 +3670,15 @@ impl ResultsView {
                 .unwrap_or(DEFAULT_COLUMN_WIDTH);
             content_x < right
         })
+    }
+
+    fn result_row_at_position(&self, position: Point<Pixels>) -> Option<usize> {
+        let handle = self.row_scroll_handle.0.borrow();
+        let scroll = &handle.base_handle;
+        let viewport = scroll.bounds();
+        let content_y = f32::from(position.y - viewport.top() - scroll.offset().y).max(0.0);
+        let display_row = (content_y / ROW_HEIGHT).floor() as usize;
+        self.display_rows.get(display_row).copied()
     }
 
     fn select_cell_from_pointer(
@@ -3765,6 +3784,32 @@ impl ResultsView {
         let row_top = px(ROW_HEIGHT * row as f32);
         let row_bottom = row_top + px(ROW_HEIGHT);
         row_top < visible_top || row_bottom > visible_bottom
+    }
+
+    fn reveal_result_row(&self, row: usize, cx: &mut Context<Self>) {
+        let state = self.row_scroll_handle.0.borrow();
+        let scroll = &state.base_handle;
+        let viewport_height = scroll.bounds().size.height;
+        if viewport_height <= px(0.) {
+            return;
+        }
+        let current = scroll.offset();
+        let visible_top = -current.y;
+        let visible_bottom = visible_top + viewport_height;
+        let row_top = px(ROW_HEIGHT * row as f32);
+        let row_bottom = row_top + px(ROW_HEIGHT);
+        let target = if row_top < visible_top {
+            row_top
+        } else if row_bottom > visible_bottom {
+            row_bottom - viewport_height
+        } else {
+            return;
+        };
+        let next = gpui::point(current.x, (-target).clamp(-scroll.max_offset().y, px(0.)));
+        if next != current {
+            scroll.set_offset(next);
+            cx.notify();
+        }
     }
 
     fn move_cell_left(&mut self, _: &MoveCellLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -5391,11 +5436,15 @@ impl ResultsView {
         let row_count = self.display_rows.len();
         let grid_scroll_handle = self.grid_scroll_handle.clone();
         let row_scroll_handle = self.row_scroll_handle.clone();
+        let retained_grid_scroll_handle = grid_scroll_handle.clone();
+        let retained_row_scroll_handle = row_scroll_handle.clone();
         let row_columns = visible_columns.clone();
         let row_widths = visible_widths;
+        let processor_columns = row_columns.clone();
+        let processor_widths = row_widths.clone();
         let row_span = column_span.clone();
         let entity_id = cx.entity().entity_id();
-        let list = uniform_list(
+        let interactive_list = uniform_list(
             "result-rows",
             row_count,
             cx.processor(move |view, range: Range<usize>, window, cx| {
@@ -5403,7 +5452,7 @@ impl ResultsView {
                 if view.state.ready().is_none() {
                     return Vec::new();
                 }
-                let column_count = row_columns.len();
+                let column_count = processor_columns.len();
                 let selected = view.selected;
                 let selected_range = match selected {
                     Some(GridSelection::Range {
@@ -5414,11 +5463,11 @@ impl ResultsView {
                     }) => {
                         let anchor_row = view.display_position(anchor_row).unwrap_or(0);
                         let focus_row = view.display_position(focus_row).unwrap_or(anchor_row);
-                        let anchor_column = row_columns
+                        let anchor_column = processor_columns
                             .iter()
                             .position(|column| *column == anchor_column)
                             .unwrap_or(0);
-                        let focus_column = row_columns
+                        let focus_column = processor_columns
                             .iter()
                             .position(|column| *column == focus_column)
                             .unwrap_or(anchor_column);
@@ -5438,13 +5487,13 @@ impl ResultsView {
                         let needs_cell_elements =
                             view.inline_cell_edit.is_some() || view.editing_cell.is_some();
                         let mut cell_left = lead_width;
-                        let cells = row_columns
+                        let cells = processor_columns
                             .iter()
                             .copied()
                             .enumerate()
                             .filter(|(display_column, _)| row_span.contains(display_column))
                             .filter_map(|(display_column, source_column)| {
-                                let cell_width = row_widths[display_column];
+                                let cell_width = processor_widths[display_column];
                                 let cell_left_before = cell_left;
                                 let is_selected = match selected {
                                     Some(GridSelection::Cell { row, column }) => {
@@ -5522,7 +5571,7 @@ impl ResultsView {
                                 let cell = div()
                                     .id(("cell", display_row * column_count + display_column))
                                     .flex_none()
-                                    .w(px(row_widths[display_column]))
+                                    .w(px(processor_widths[display_column]))
                                     .h(px(ROW_HEIGHT))
                                     .flex()
                                     .items_center()
@@ -5885,8 +5934,96 @@ impl ResultsView {
             // scroller from also consuming an unmodified vertical wheel.
             cx.stop_propagation();
         });
+        let list = if self.inline_cell_edit.is_none() && self.editing_cell.is_none() {
+            let vertical = retained_row_scroll_handle.0.borrow().base_handle.clone();
+            let retained_entity_id = entity_id;
+            div()
+                .id("retained-result-rows")
+                .debug_selector(|| "retained-result-rows".into())
+                .size_full()
+                .overflow_hidden()
+                .track_scroll(&vertical)
+                .child(ResultRowsElement {
+                    view: cx.entity(),
+                    columns: row_columns,
+                    widths: row_widths,
+                })
+                .on_scroll_wheel(move |event, window, cx| {
+                    let delta = event.delta.pixel_delta(window.line_height());
+                    let scroll = if event.modifiers.shift {
+                        &retained_grid_scroll_handle
+                    } else {
+                        &retained_row_scroll_handle.0.borrow().base_handle
+                    };
+                    let current = scroll.offset();
+                    let max = scroll.max_offset();
+                    let next = if event.modifiers.shift {
+                        let horizontal_delta = if delta.y == px(0.) { delta.x } else { delta.y };
+                        gpui::point(
+                            (current.x + horizontal_delta).clamp(-max.x, px(0.)),
+                            current.y,
+                        )
+                    } else {
+                        gpui::point(current.x, (current.y + delta.y).clamp(-max.y, px(0.)))
+                    };
+                    if next != current {
+                        scroll.set_offset(next);
+                        cx.notify(retained_entity_id);
+                    }
+                    cx.stop_propagation();
+                })
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|view, event: &gpui::MouseDownEvent, window, cx| {
+                        let Some(row) = view.result_row_at_position(event.position) else {
+                            return;
+                        };
+                        let Some(column) = view.result_column_at_position(event.position) else {
+                            return;
+                        };
+                        view.open_cell_context_menu(row, column, event.position, window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, event: &gpui::MouseDownEvent, window, cx| {
+                        let Some(row) = view.result_row_at_position(event.position) else {
+                            return;
+                        };
+                        view.focus_handle.focus(window, cx);
+                        if let Some(column) = view.result_column_at_position(event.position) {
+                            view.select_cell_from_pointer(
+                                row,
+                                column,
+                                event.modifiers.shift,
+                                event.click_count,
+                                cx,
+                            );
+                        } else {
+                            view.select_row(row, cx);
+                        }
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_move(cx.listener(|view, event: &gpui::MouseMoveEvent, _, cx| {
+                    if !event.dragging() {
+                        return;
+                    }
+                    let Some(row) = view.result_row_at_position(event.position) else {
+                        return;
+                    };
+                    let Some(column) = view.result_column_at_position(event.position) else {
+                        return;
+                    };
+                    view.drag_cell_selection(row, column, cx);
+                }))
+                .into_any_element()
+        } else {
+            interactive_list.into_any_element()
+        };
 
-        div()
+        let element = div()
             .id("result-grid")
             .flex_1()
             .w_full()
@@ -5907,7 +6044,8 @@ impl ResultsView {
                     .overflow_hidden()
                     .child(list),
             )
-            .into_any_element()
+            .into_any_element();
+        element
     }
 
     /// Window strip for a result larger than the retained bound. It states the
@@ -6738,6 +6876,388 @@ impl Focusable for ResultsView {
     }
 }
 
+struct ResultRowsElement {
+    view: Entity<ResultsView>,
+    columns: Vec<usize>,
+    widths: Vec<f32>,
+}
+
+struct ResultRowsPrepaint {
+    quads: Vec<PaintQuad>,
+    borders: Vec<(Pixels, Pixels, Pixels, bool)>,
+    lines: Vec<ResultPaintLine>,
+}
+
+struct ResultPaintLine {
+    line: ShapedLine,
+    origin: Point<Pixels>,
+    width: Pixels,
+    alignment: TextAlign,
+    colors: Vec<(usize, gpui::Hsla)>,
+}
+
+impl IntoElement for ResultRowsElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ResultRowsElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ResultRowsPrepaint;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let row_count = self.view.read(cx).display_rows.len().max(1);
+        let mut style = Style::default();
+        style.size.width = gpui::relative(1.).into();
+        style.size.height = px(ROW_HEIGHT * row_count as f32).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let colors = cx.theme().colors;
+        let result = self.view.update(cx, |view, _| {
+            let viewport = view.row_scroll_handle.0.borrow().base_handle.bounds();
+            let scroll_top = -view.row_scroll_handle.0.borrow().base_handle.offset().y;
+            let first = (f32::from(scroll_top) / ROW_HEIGHT).floor().max(0.) as usize;
+            let visible = (f32::from(viewport.size.height) / ROW_HEIGHT).ceil() as usize + 2;
+            let last = (first + visible).min(view.display_rows.len());
+            let horizontal = view.grid_scroll_handle.offset().x;
+            let mut quads = Vec::new();
+            let mut borders = Vec::new();
+            let mut lines = Vec::new();
+            let selected = view.selected;
+            let mut text_style = window.text_style();
+            text_style.color = colors.disabled_text;
+            text_style.font_size = rems(0.75).into();
+            let font_size = text_style.font_size.to_pixels(window.rem_size());
+            let mut grid_text_style = text_style.clone();
+            grid_text_style.font_family = "monospace".into();
+            let width_run = grid_text_style.to_run(1);
+            let character_width = window
+                .text_system()
+                .shape_line(
+                    "0".into(),
+                    font_size,
+                    std::slice::from_ref(&width_run),
+                    None,
+                )
+                .width();
+            let character_width = f32::from(character_width).max(1.);
+            let selected_range = match selected {
+                Some(GridSelection::Range {
+                    anchor_row,
+                    anchor_column,
+                    focus_row,
+                    focus_column,
+                }) => {
+                    let anchor_row = view.display_position(anchor_row).unwrap_or(0);
+                    let focus_row = view.display_position(focus_row).unwrap_or(anchor_row);
+                    let anchor_column = self
+                        .columns
+                        .iter()
+                        .position(|column| *column == anchor_column)
+                        .unwrap_or(0);
+                    let focus_column = self
+                        .columns
+                        .iter()
+                        .position(|column| *column == focus_column)
+                        .unwrap_or(anchor_column);
+                    Some((
+                        anchor_row.min(focus_row),
+                        anchor_row.max(focus_row),
+                        anchor_column.min(focus_column),
+                        anchor_column.max(focus_column),
+                    ))
+                }
+                _ => None,
+            };
+            for display_row in first..last {
+                let Some(&row_index) = view.display_rows.get(display_row) else {
+                    continue;
+                };
+                let top = bounds.top() + px(ROW_HEIGHT * display_row as f32);
+                let row_bounds = gpui::Bounds::new(
+                    gpui::point(bounds.left(), top),
+                    gpui::size(bounds.size.width, px(ROW_HEIGHT)),
+                );
+                if display_row % 2 == 1 {
+                    quads.push(gpui::fill(row_bounds, colors.grid_stripe));
+                }
+                let row_selected = selected
+                    .is_some_and(|selection| view.selection_highlights_row(selection, row_index));
+                if row_selected {
+                    quads.push(gpui::fill(
+                        gpui::Bounds::new(
+                            row_bounds.origin,
+                            gpui::size(px(ROW_NUMBER_WIDTH), row_bounds.size.height),
+                        ),
+                        colors.selected_surface,
+                    ));
+                }
+                let number: SharedString = (view.window_start + row_index + 1).to_string().into();
+                let run = text_style.to_run(number.len());
+                let number = window.text_system().shape_line(
+                    number,
+                    font_size,
+                    std::slice::from_ref(&run),
+                    None,
+                );
+                lines.push(ResultPaintLine {
+                    colors: vec![(number.len(), colors.disabled_text)],
+                    line: number,
+                    origin: gpui::point(row_bounds.left() + px(4.), top),
+                    width: px(ROW_NUMBER_WIDTH - 12.),
+                    alignment: TextAlign::Right,
+                });
+                borders.push((
+                    row_bounds.left() + px(ROW_NUMBER_WIDTH - 0.5),
+                    top,
+                    top + px(ROW_HEIGHT),
+                    false,
+                ));
+                let mut left = f32::from(bounds.left()) + ROW_NUMBER_WIDTH + f32::from(horizontal);
+                let mut row_text = String::new();
+                let mut row_runs = Vec::new();
+                let mut row_text_left = None;
+                let mut row_text_width = 0.;
+                for (display_column, (&source_column, &width)) in
+                    self.columns.iter().zip(&self.widths).enumerate()
+                {
+                    let cell_left = px(left);
+                    left += width;
+                    if cell_left + px(width) < bounds.left() + px(ROW_NUMBER_WIDTH)
+                        || cell_left > bounds.right()
+                    {
+                        continue;
+                    }
+                    let is_selected = match selected {
+                        Some(GridSelection::Cell { row, column }) => {
+                            row == row_index && column == source_column
+                        }
+                        Some(GridSelection::Range { .. }) => selected_range.is_some_and(
+                            |(row_start, row_end, column_start, column_end)| {
+                                (row_start..=row_end).contains(&display_row)
+                                    && (column_start..=column_end).contains(&display_column)
+                            },
+                        ),
+                        Some(GridSelection::Row(row)) => row == row_index,
+                        Some(GridSelection::Column(column)) => column == source_column,
+                        Some(GridSelection::All) => true,
+                        None => false,
+                    };
+                    let staged = view.staged_cells.contains_key(&(row_index, source_column));
+                    let cell_bounds = gpui::Bounds::new(
+                        gpui::point(cell_left, top),
+                        gpui::size(px(width), px(ROW_HEIGHT)),
+                    );
+                    if staged || is_selected {
+                        quads.push(gpui::fill(
+                            cell_bounds,
+                            if staged {
+                                colors.staged_muted
+                            } else {
+                                colors.selected_surface
+                            },
+                        ));
+                    }
+                    borders.push((
+                        cell_bounds.right() - px(0.5),
+                        top,
+                        top + px(ROW_HEIGHT),
+                        staged,
+                    ));
+                    if let Some(cell) = view
+                        .rendered_rows
+                        .get(row_index)
+                        .and_then(|row| row.get(source_column))
+                    {
+                        row_text_left.get_or_insert(cell_left);
+                        let slot = (width / character_width).round().max(1.) as usize;
+                        let inner = slot.saturating_sub(2);
+                        let mut value = cell.paint_text.chars().take(inner).collect::<String>();
+                        let value_len = value.chars().count();
+                        let remaining = inner.saturating_sub(value_len);
+                        let mut field = String::with_capacity(slot);
+                        field.push(' ');
+                        if matches!(cell.class, CellClass::Number) {
+                            field.extend(std::iter::repeat_n(' ', remaining));
+                            field.push_str(&value);
+                        } else {
+                            field.push_str(&value);
+                            field.extend(std::iter::repeat_n(' ', remaining));
+                        }
+                        field.push(' ');
+                        value.clear();
+                        let mut run = grid_text_style.to_run(field.len());
+                        run.color = ResultsView::cell_color(colors, cell.class);
+                        row_runs.push(run);
+                        row_text.push_str(&field);
+                        row_text_width += width;
+                    }
+                }
+                if let Some(row_text_left) = row_text_left {
+                    let text: SharedString = row_text.into();
+                    let mut color_end = 0;
+                    let line_colors = row_runs
+                        .iter()
+                        .map(|run| {
+                            color_end += run.len;
+                            (color_end, run.color)
+                        })
+                        .collect();
+                    let line = view
+                        .row_shape_cache
+                        .get(&row_index)
+                        .filter(|cached| {
+                            cached.text == text
+                                && cached.runs == row_runs
+                                && cached.font_size == font_size
+                        })
+                        .map(|cached| cached.line.clone())
+                        .unwrap_or_else(|| {
+                            let line = window.text_system().shape_line(
+                                text.clone(),
+                                font_size,
+                                &row_runs,
+                                None,
+                            );
+                            if view.row_shape_cache.len() >= 256 {
+                                view.row_shape_cache.clear();
+                            }
+                            view.row_shape_cache.insert(
+                                row_index,
+                                CachedShapedResultRow {
+                                    text,
+                                    runs: row_runs,
+                                    font_size,
+                                    line: line.clone(),
+                                },
+                            );
+                            line
+                        });
+                    lines.push(ResultPaintLine {
+                        line,
+                        origin: gpui::point(row_text_left, top),
+                        width: px(row_text_width),
+                        alignment: TextAlign::Left,
+                        colors: line_colors,
+                    });
+                }
+            }
+            ResultRowsPrepaint {
+                quads,
+                borders,
+                lines,
+            }
+        });
+        result
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        for quad in prepaint.quads.drain(..) {
+            window.paint_quad(quad);
+        }
+        let colors = cx.theme().colors;
+        let mut borders = gpui::PathBuilder::stroke(px(1.));
+        let mut staged_borders = gpui::PathBuilder::stroke(px(1.));
+        for (x, top, bottom, staged) in prepaint.borders.drain(..) {
+            let path = if staged {
+                &mut staged_borders
+            } else {
+                &mut borders
+            };
+            path.move_to(gpui::point(x, top));
+            path.line_to(gpui::point(x, bottom));
+        }
+        if let Ok(path) = borders.build() {
+            window.paint_path(path, colors.subtle_border);
+        }
+        if let Ok(path) = staged_borders.build() {
+            window.paint_path(path, colors.staged);
+        }
+        window.paint_layer(bounds, |window| {
+            for painted in prepaint.lines.drain(..) {
+                let line = painted.line;
+                let x = match painted.alignment {
+                    TextAlign::Right => painted.origin.x + painted.width - line.width(),
+                    TextAlign::Center => painted.origin.x + (painted.width - line.width()) / 2.,
+                    TextAlign::Left => painted.origin.x,
+                };
+                let baseline = painted.origin.y
+                    + (px(ROW_HEIGHT) - line.ascent - line.descent) / 2.
+                    + line.ascent;
+                let mut line_colors = painted.colors.into_iter();
+                let mut color_end = 0;
+                let mut color = line_colors
+                    .next()
+                    .map(|(end, color)| {
+                        color_end = end;
+                        color
+                    })
+                    .unwrap_or(colors.text);
+                for run in &line.runs {
+                    for glyph in &run.glyphs {
+                        while glyph.index >= color_end {
+                            let Some((end, next)) = line_colors.next() else {
+                                break;
+                            };
+                            color_end = end;
+                            color = next;
+                        }
+                        let origin = gpui::point(x, baseline) + glyph.position;
+                        if glyph.is_emoji {
+                            let _ =
+                                window.paint_emoji(origin, run.font_id, glyph.id, line.font_size);
+                        } else {
+                            let _ = window.paint_glyph(
+                                origin,
+                                run.font_id,
+                                glyph.id,
+                                line.font_size,
+                                color,
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
 impl gpui::Render for ResultsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if std::mem::take(&mut self.restore_grid_focus) {
@@ -6754,7 +7274,7 @@ impl gpui::Render for ResultsView {
             ResultTab::Performance => self.render_performance(cx),
         };
 
-        div()
+        let element = div()
             .id("sift-results")
             .key_context(if self.tab == ResultTab::Performance {
                 "SiftResults SiftPerformance"
@@ -6895,7 +7415,8 @@ impl gpui::Render for ResultsView {
                         ),
                 )
                 .with_priority(1)
-            }))
+            }));
+        element
     }
 }
 
@@ -8522,23 +9043,14 @@ mod tests {
             assert_eq!(view.rendered_rows[0][1].text, "1");
         });
         cx.run_until_parked();
-        view.update_in(&mut cx, |view, window, cx| {
-            let cell = &mut view.rendered_rows[0][0];
-            assert!(cell.shaped.is_some(), "visible cells should shape once");
-            let color = ResultsView::cell_color(cx.theme().colors, cell.class);
-            let (_, cache_miss) = ResultsView::shape_cell(cell, color, window);
-            assert!(!cache_miss, "unchanged cell layout should be reused");
-        });
         assert!(
-            cx.debug_bounds("result-row-0")
+            view.read_with(&cx, |view, _| view.row_shape_cache.contains_key(&0)),
+            "visible row text should shape once"
+        );
+        assert!(
+            cx.debug_bounds("retained-result-rows")
                 .is_some_and(|bounds| bounds.size.height > px(0.)),
             "ready result rows should receive a visible layout"
-        );
-        assert_eq!(
-            cx.debug_bounds("result-row-fields-0")
-                .map(|bounds| bounds.size.width),
-            Some(px(DEFAULT_COLUMN_WIDTH * 2.0)),
-            "row striping should stop after the final visible field"
         );
         assert_eq!(
             cx.debug_bounds("result-header")
@@ -8579,7 +9091,7 @@ mod tests {
             px(DEFAULT_COLUMN_WIDTH),
             "resizing one column must not resize its neighbor"
         );
-        let first_row = cx.debug_bounds("result-row-0").unwrap();
+        let first_row = cx.debug_bounds("result-row-viewport").unwrap();
         cx.simulate_mouse_down(
             gpui::point(
                 first_row.left() + px(ROW_NUMBER_WIDTH + 12.),
@@ -9060,20 +9572,14 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let shaped_count = |view: &ResultsView| {
-            view.rendered_rows
-                .iter()
-                .flatten()
-                .filter(|cell| cell.shaped.is_some())
-                .count()
-        };
+        let shaped_count = |view: &ResultsView| view.row_shape_cache.len();
         let initially_shaped = view.read_with(&cx, |view, _| shaped_count(view));
         assert!(initially_shaped > 0);
         assert!(
-            initially_shaped < 100 * 8,
+            initially_shaped < 100,
             "offscreen rows must remain unshaped"
         );
-        let row_number_left = cx.debug_bounds("result-row-number-0").unwrap().left();
+        let row_number_left = cx.debug_bounds("result-row-viewport").unwrap().left();
 
         view.update(&mut cx, |view, cx| {
             view.select_cell(0, 0, cx);
@@ -9083,7 +9589,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(
-            cx.debug_bounds("result-row-number-0").unwrap().left(),
+            cx.debug_bounds("result-row-viewport").unwrap().left(),
             row_number_left,
             "row identifiers must remain pinned during horizontal scrolling"
         );
