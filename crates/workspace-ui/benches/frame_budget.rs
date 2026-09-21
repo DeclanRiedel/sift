@@ -391,6 +391,34 @@ fn schema_tree_filter(cx: &mut BenchAppContext) {
 }
 
 #[gpui::bench(fps = 120)]
+fn object_browser_navigation(cx: &mut BenchAppContext) {
+    let snapshot = large_schema_snapshot();
+    let mut window = cx.add_empty_window();
+    let shell = window
+        .replace_root_view(|window, cx| {
+            WorkspaceShell::new(
+                PresentationState::default(),
+                UserSettings::default(),
+                None,
+                None,
+                window,
+                cx,
+            )
+        })
+        .unwrap();
+    window.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.seed_object_browser_benchmark(snapshot, window, cx);
+        });
+    });
+    let mut down = true;
+    cx.bench_renderer(shell, move |shell, window, cx| {
+        shell.step_object_browser_benchmark(down, window, cx);
+        down = !down;
+    });
+}
+
+#[gpui::bench(fps = 120)]
 fn query_outline_first_frame(cx: &mut BenchAppContext) {
     let statements = outline_statements();
     let symbols = outline_symbols();
@@ -617,6 +645,7 @@ gpui::bench_group!(
     command_palette_arrow_navigation,
     command_palette_filter_typing,
     schema_tree_filter,
+    object_browser_navigation,
     query_outline_first_frame,
     query_outline_navigation,
     change_ledger_first_frame

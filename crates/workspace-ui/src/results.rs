@@ -6023,7 +6023,7 @@ impl ResultsView {
             interactive_list.into_any_element()
         };
 
-        let element = div()
+        div()
             .id("result-grid")
             .flex_1()
             .w_full()
@@ -6044,8 +6044,7 @@ impl ResultsView {
                     .overflow_hidden()
                     .child(list),
             )
-            .into_any_element();
-        element
+            .into_any_element()
     }
 
     /// Window strip for a result larger than the retained bound. It states the

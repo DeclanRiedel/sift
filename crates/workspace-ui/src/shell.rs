@@ -10,10 +10,11 @@ use std::sync::Arc;
 use gpui::{
     actions, anchored, canvas, deferred, div, img, prelude::*, px, relative, uniform_list, Anchor,
     AnyElement, App, Bounds, ClickEvent, ContentMask, Context, CursorStyle, DefiniteLength, Div,
-    Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeystrokeEvent, MouseButton,
-    PathPromptOptions, Pixels, ResizeEdge, Role, ScrollHandle, ScrollStrategy, ShapedLine,
-    SharedString, Subscription, Task, TextAlign, TextRun, UniformListScrollHandle, Window,
-    WindowBounds, WindowControlArea,
+    Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
+    InspectorElementId, IntoElement, KeystrokeEvent, LayoutId, MouseButton, PathPromptOptions,
+    Pixels, ResizeEdge, Role, ScrollHandle, ScrollStrategy, ShapedLine, SharedString, Style,
+    Subscription, Task, TextAlign, TextRun, UniformListScrollHandle, Window, WindowBounds,
+    WindowControlArea,
 };
 use regex::{Regex, RegexBuilder};
 use sift_api_types::RoomId;
@@ -809,6 +810,12 @@ enum ConnectionDockRow {
     },
 }
 
+struct ConnectionDockProjection {
+    source: Arc<Vec<ConnectionTreeItem>>,
+    rows: Arc<Vec<ConnectionDockRow>>,
+    nav_row_indices: Vec<usize>,
+}
+
 const CONNECTIONS_SCROLL_TAIL_ROWS: usize = 4;
 
 #[derive(Debug, Clone)]
@@ -1258,6 +1265,22 @@ fn build_object_browser_rows(
         .flat_map(|catalog| {
             catalog.schemas.iter().flat_map(move |schema| {
                 schema.objects.iter().map(move |object| ObjectBrowserRow {
+                    search_name: object.name.to_lowercase(),
+                    type_label: format!("{:?}", object.kind).into(),
+                    rows_label: object
+                        .estimated_rows
+                        .map_or_else(|| "—".into(), |rows| rows.to_string().into()),
+                    modified_label: object.modified_at.clone().map_or_else(
+                        || {
+                            if connection.provider_id.as_str() == "sift/sqlite" {
+                                "Not tracked".into()
+                            } else {
+                                "—".into()
+                            }
+                        },
+                        Into::into,
+                    ),
+                    comment_label: object.comment.clone().unwrap_or_else(|| "—".into()).into(),
                     source: DatabaseObjectSource {
                         instance_id: instance_id.to_owned(),
                         tenant_id: connection.tenant_id,
@@ -1270,9 +1293,6 @@ fn build_object_browser_rows(
                         object_kind: object.kind,
                         last_refreshed_at_ms: None,
                     },
-                    estimated_rows: object.estimated_rows,
-                    modified_at: object.modified_at.clone(),
-                    comment: object.comment.clone(),
                 })
             })
         })
@@ -1466,10 +1486,21 @@ struct TabTransfer {
 
 #[derive(Debug, Clone)]
 struct ObjectBrowserRow {
+    search_name: String,
+    type_label: SharedString,
+    rows_label: SharedString,
+    modified_label: SharedString,
+    comment_label: SharedString,
     source: DatabaseObjectSource,
-    estimated_rows: Option<u64>,
-    modified_at: Option<String>,
-    comment: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ObjectBrowserLineCache {
+    name: CachedPanelLine,
+    type_label: CachedPanelLine,
+    rows: CachedPanelLine,
+    modified: CachedPanelLine,
+    comment: CachedPanelLine,
 }
 
 #[derive(Debug, Clone)]
@@ -1480,6 +1511,7 @@ struct ObjectBrowserState {
     profile_id: i64,
     context: DatabaseObjectSource,
     rows: Vec<ObjectBrowserRow>,
+    row_line_cache: RefCell<HashMap<usize, ObjectBrowserLineCache>>,
     visible_indices: Vec<usize>,
     selected: usize,
     scroll_handle: UniformListScrollHandle,
@@ -1519,7 +1551,7 @@ impl ObjectBrowserState {
             .iter()
             .enumerate()
             .filter_map(|(index, row)| {
-                (row.source.object.to_lowercase().contains(&self.search)
+                (row.search_name.contains(&self.search)
                     && self
                         .catalog
                         .as_ref()
@@ -1537,6 +1569,19 @@ impl ObjectBrowserState {
         self.selected = self
             .selected
             .min(self.visible_indices.len().saturating_sub(1));
+    }
+
+    fn selected_row_needs_reveal(&self) -> bool {
+        let scroll = self.scroll_handle.0.borrow();
+        let viewport_height = scroll.base_handle.bounds().size.height;
+        if viewport_height <= px(0.) {
+            return true;
+        }
+        let visible_top = -scroll.base_handle.offset().y;
+        let visible_bottom = visible_top + viewport_height;
+        let row_top = px(34. * self.selected as f32);
+        let row_bottom = row_top + px(34.);
+        row_top < visible_top || row_bottom > visible_bottom
     }
 
     fn select_catalog(&mut self, catalog: String) {
@@ -1578,6 +1623,220 @@ impl ObjectBrowserState {
                 self.context.schema = schema.clone();
             }
         }
+    }
+}
+
+struct ObjectBrowserRowsElement {
+    pane: Entity<Pane>,
+    item_id: u64,
+}
+
+struct ObjectBrowserRowsPrepaint {
+    quads: Vec<gpui::PaintQuad>,
+    lines: Vec<(CachedPanelLine, gpui::Point<Pixels>, Pixels, TextAlign)>,
+}
+
+impl IntoElement for ObjectBrowserRowsElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ObjectBrowserRowsElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ObjectBrowserRowsPrepaint;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let rows = self
+            .pane
+            .read(cx)
+            .object_browsers
+            .get(&self.item_id)
+            .map_or(1, ObjectBrowserState::visible_row_count)
+            .max(1);
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = px(34. * rows as f32).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let colors = cx.theme().colors;
+        {
+            let pane = self.pane.read(cx);
+            let Some(browser) = pane.object_browsers.get(&self.item_id) else {
+                return ObjectBrowserRowsPrepaint {
+                    quads: Vec::new(),
+                    lines: Vec::new(),
+                };
+            };
+            let scroll = browser.scroll_handle.0.borrow();
+            let viewport = scroll.base_handle.bounds();
+            let top = -scroll.base_handle.offset().y;
+            drop(scroll);
+            let first = (f32::from(top) / 34.).floor().max(0.) as usize;
+            let visible = (f32::from(viewport.size.height) / 34.).ceil() as usize + 2;
+            let last = (first + visible).min(browser.visible_row_count());
+            let mut quads = Vec::with_capacity(visible * 3);
+            let mut lines = Vec::with_capacity(visible * 5);
+            for index in first..last {
+                let Some(&row_index) = browser.visible_indices.get(index) else {
+                    continue;
+                };
+                let Some(row) = browser.rows.get(row_index) else {
+                    continue;
+                };
+                let top = bounds.top() + px(index as f32 * 34.);
+                let row_bounds = Bounds::new(
+                    gpui::point(bounds.left(), top),
+                    gpui::size(bounds.size.width, px(34.)),
+                );
+                if browser.selected == index {
+                    quads.push(gpui::fill(row_bounds, colors.active_surface));
+                }
+                quads.push(gpui::fill(
+                    Bounds::new(
+                        gpui::point(row_bounds.left(), row_bounds.bottom() - px(1.)),
+                        gpui::size(row_bounds.size.width, px(1.)),
+                    ),
+                    colors.subtle_border,
+                ));
+                quads.push(gpui::fill(
+                    Bounds::new(
+                        gpui::point(row_bounds.left() + px(10.), row_bounds.top() + px(9.)),
+                        gpui::size(px(2.), px(16.)),
+                    ),
+                    ObjectGroupKind::from_object_kind(row.source.object_kind).color(colors),
+                ));
+                let cached = browser.row_line_cache.borrow().get(&row_index).cloned();
+                let shaped = ObjectBrowserLineCache {
+                    name: WorkspaceShell::shape_panel_line(
+                        cached.as_ref().map(|cache| &cache.name),
+                        row.source.object.clone().into(),
+                        colors.text,
+                        false,
+                        window,
+                    ),
+                    type_label: WorkspaceShell::shape_panel_line(
+                        cached.as_ref().map(|cache| &cache.type_label),
+                        row.type_label.clone(),
+                        colors.text,
+                        false,
+                        window,
+                    ),
+                    rows: WorkspaceShell::shape_panel_line(
+                        cached.as_ref().map(|cache| &cache.rows),
+                        row.rows_label.clone(),
+                        colors.text,
+                        false,
+                        window,
+                    ),
+                    modified: WorkspaceShell::shape_panel_line(
+                        cached.as_ref().map(|cache| &cache.modified),
+                        row.modified_label.clone(),
+                        colors.text,
+                        false,
+                        window,
+                    ),
+                    comment: WorkspaceShell::shape_panel_line(
+                        cached.as_ref().map(|cache| &cache.comment),
+                        row.comment_label.clone(),
+                        colors.muted_text,
+                        false,
+                        window,
+                    ),
+                };
+                {
+                    let mut cache = browser.row_line_cache.borrow_mut();
+                    if cache.len() >= 512 && !cache.contains_key(&row_index) {
+                        cache.clear();
+                    }
+                    cache.insert(row_index, shaped.clone());
+                }
+                let left = bounds.left() + px(20.);
+                let right = bounds.right() - px(12.);
+                let gap = px(16.);
+                let comment_left = right - px(220.);
+                let modified_left = comment_left - gap - px(155.);
+                let rows_left = modified_left - gap - px(80.);
+                let type_left = rows_left - gap - px(110.);
+                lines.push((
+                    shaped.name,
+                    gpui::point(left, top),
+                    (type_left - gap - left).max(px(0.)),
+                    TextAlign::Left,
+                ));
+                lines.push((
+                    shaped.type_label,
+                    gpui::point(type_left, top),
+                    px(110.),
+                    TextAlign::Left,
+                ));
+                lines.push((
+                    shaped.rows,
+                    gpui::point(rows_left, top),
+                    px(80.),
+                    TextAlign::Right,
+                ));
+                lines.push((
+                    shaped.modified,
+                    gpui::point(modified_left, top),
+                    px(155.),
+                    TextAlign::Left,
+                ));
+                lines.push((
+                    shaped.comment,
+                    gpui::point(comment_left, top),
+                    px(220.),
+                    TextAlign::Left,
+                ));
+            }
+            ObjectBrowserRowsPrepaint { quads, lines }
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        _: &mut App,
+    ) {
+        for quad in prepaint.quads.drain(..) {
+            window.paint_quad(quad);
+        }
+        window.paint_layer(bounds, |window| {
+            for (line, origin, width, alignment) in prepaint.lines.drain(..) {
+                paint_cached_panel_line(&line, origin, px(34.), alignment, width, window);
+            }
+        });
     }
 }
 
@@ -2617,12 +2876,45 @@ enum QueryOutlineEntry {
     Symbol(sift_protocol::SemanticOutlineSymbol),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct CachedPanelLine {
     text: SharedString,
-    line: ShapedLine,
+    line: Arc<ShapedLine>,
     run: TextRun,
     font_size: Pixels,
+}
+
+fn paint_cached_panel_line(
+    cached: &CachedPanelLine,
+    origin: gpui::Point<Pixels>,
+    height: Pixels,
+    alignment: TextAlign,
+    width: Pixels,
+    window: &mut Window,
+) {
+    let line = &cached.line;
+    let x = match alignment {
+        TextAlign::Right => origin.x + width - line.width(),
+        TextAlign::Center => origin.x + (width - line.width()) / 2.,
+        TextAlign::Left => origin.x,
+    };
+    let baseline = origin.y + (height - line.ascent - line.descent) / 2. + line.ascent;
+    for run in &line.runs {
+        for glyph in &run.glyphs {
+            let origin = gpui::point(x, baseline) + glyph.position;
+            if glyph.is_emoji {
+                let _ = window.paint_emoji(origin, run.font_id, glyph.id, line.font_size);
+            } else {
+                let _ = window.paint_glyph(
+                    origin,
+                    run.font_id,
+                    glyph.id,
+                    line.font_size,
+                    cached.run.color,
+                );
+            }
+        }
+    }
 }
 
 impl QueryOutlineEntry {
@@ -5908,6 +6200,8 @@ impl Pane {
             return;
         }
         let visible_row_count = browser.visible_row_count();
+        let previous_selected = browser.selected;
+        let mut projection_changed = false;
         match event.keystroke.key.as_str() {
             "j" | "down" => {
                 browser.selected = (browser.selected + 1).min(visible_row_count.saturating_sub(1));
@@ -5934,6 +6228,7 @@ impl Pane {
                 {
                     let next = (current + 1) % browser.catalogs.len();
                     browser.select_catalog(browser.catalogs[next].clone());
+                    projection_changed = true;
                 }
             }
             "s" => {
@@ -5944,6 +6239,7 @@ impl Pane {
                 {
                     let next = (current + 1) % browser.schemas.len();
                     browser.select_schema(browser.schemas[next].clone());
+                    projection_changed = true;
                 }
             }
             "1" | "2" | "3" | "4" | "5" => {
@@ -5954,6 +6250,7 @@ impl Pane {
                 }
                 browser.selected = 0;
                 browser.rebuild_visible_indices();
+                projection_changed = true;
             }
             "escape" => {
                 browser.connection_picker_open = false;
@@ -5962,11 +6259,22 @@ impl Pane {
             }
             _ => return,
         }
-        browser
-            .scroll_handle
-            .scroll_to_item(browser.selected, ScrollStrategy::Nearest);
+        let selection_changed = browser.selected != previous_selected;
+        if projection_changed {
+            browser
+                .scroll_handle
+                .scroll_to_item(browser.selected, ScrollStrategy::Top);
+        } else if selection_changed && browser.selected_row_needs_reveal() {
+            browser
+                .scroll_handle
+                .scroll_to_item(browser.selected, ScrollStrategy::Nearest);
+        }
         cx.stop_propagation();
-        cx.notify();
+        if projection_changed || matches!(event.keystroke.key.as_str(), "c" | "escape") {
+            cx.notify();
+        } else if selection_changed {
+            window.refresh();
+        }
     }
 
     fn render_object_browser(&self, item_id: u64, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -6011,9 +6319,10 @@ impl Pane {
         } else {
             "No matching objects in this schema".into()
         };
-        let connections = browser.connections.clone();
-        let connection_items = connections
+        let connection_items = connection_picker_open
+            .then(|| browser.connections.clone())
             .into_iter()
+            .flatten()
             .enumerate()
             .map(|(index, connection)| {
                 let profile_id = connection.id;
@@ -6052,10 +6361,10 @@ impl Pane {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        let catalog_items = browser
-            .catalogs
-            .clone()
+        let catalog_items = catalog_picker_open
+            .then(|| browser.catalogs.clone())
             .into_iter()
+            .flatten()
             .enumerate()
             .map(|(index, catalog)| {
                 let selected = browser.catalog.as_ref() == Some(&catalog);
@@ -6091,10 +6400,10 @@ impl Pane {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        let schema_items = browser
-            .schemas
-            .clone()
+        let schema_items = schema_picker_open
+            .then(|| browser.schemas.clone())
             .into_iter()
+            .flatten()
             .enumerate()
             .map(|(index, schema)| {
                 let selected = browser.schema.as_ref() == Some(&schema);
@@ -6559,122 +6868,43 @@ impl Pane {
                 )
             })
             .when(row_count > 0, |view| {
+                let vertical = browser.scroll_handle.0.borrow().base_handle.clone();
                 view.child(
-                    uniform_list(
-                        ("object-browser-rows", item_id as usize),
-                        row_count,
-                        cx.processor(move |pane, range: Range<usize>, _, cx| {
-                        let colors = cx.theme().colors;
-                        let Some(browser) = pane.object_browsers.get(&item_id) else {
-                            return Vec::new();
-                        };
-                        range
-                            .filter_map(|index| {
-                                let row_index = *browser.visible_indices.get(index)?;
-                                let row = browser.rows.get(row_index)?.clone();
-                                let selected = browser.selected == index;
-                                let name = row.source.object.clone();
-                                let object_color = ObjectGroupKind::from_object_kind(
-                                    row.source.object_kind,
+                    div()
+                        .id(("object-browser-rows-retained", item_id as usize))
+                        .debug_selector(|| "object-browser-rows-retained".into())
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&vertical)
+                        .child(ObjectBrowserRowsElement {
+                            pane: cx.entity(),
+                            item_id,
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |pane, event: &gpui::MouseDownEvent, window, cx| {
+                                let Some(browser) = pane.object_browsers.get_mut(&item_id) else {
+                                    return;
+                                };
+                                let scroll = browser.scroll_handle.0.borrow();
+                                let viewport = scroll.base_handle.bounds();
+                                let content_y = f32::from(
+                                    event.position.y
+                                        - viewport.top()
+                                        - scroll.base_handle.offset().y,
                                 )
-                                .color(colors);
-                                Some(
-                                    div()
-                                        .id(("object-browser-row", index))
-                                        .debug_selector(move || {
-                                            format!("object-browser-row-{index}")
-                                        })
-                                        .h(px(34.))
-                                        .w_full()
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .gap_4()
-                                        .border_b_1()
-                                        .border_color(colors.subtle_border)
-                                        .when(selected, |row| row.bg(colors.active_surface))
-                                        .when(!selected, |row| {
-                                            row.hover(|row| row.bg(colors.hovered_surface))
-                                        })
-                                        .on_click(cx.listener(move |pane, _, window, cx| {
-                                            if let Some(browser) =
-                                                pane.object_browsers.get_mut(&item_id)
-                                            {
-                                                browser.selected = index;
-                                            }
-                                            pane.focus_handle.focus(window, cx);
-                                            cx.notify();
-                                        }))
-                                        .child(
-                                            div()
-                                                .debug_selector(move || {
-                                                    format!("object-browser-row-{index}-name")
-                                                })
-                                                .min_w_0()
-                                                .flex_1()
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .truncate()
-                                                .child(icon(
-                                                    schema_object_kind_icon(row.source.object_kind),
-                                                    object_color,
-                                                    12.,
-                                                ))
-                                                .child(name),
-                                        )
-                                        .child(
-                                            div()
-                                                .debug_selector(move || {
-                                                    format!("object-browser-row-{index}-type")
-                                                })
-                                                .w(px(110.))
-                                                .truncate()
-                                                .child(format!("{:?}", row.source.object_kind)),
-                                        )
-                                        .child(
-                                            div()
-                                                .debug_selector(move || {
-                                                    format!("object-browser-row-{index}-rows")
-                                                })
-                                                .w(px(80.))
-                                                .text_right()
-                                                .child(row.estimated_rows.map_or_else(
-                                                    || "—".into(),
-                                                    |rows| rows.to_string(),
-                                                )),
-                                        )
-                                        .child(
-                                            div()
-                                                .debug_selector(move || {
-                                                    format!("object-browser-row-{index}-modified")
-                                                })
-                                                .w(px(155.))
-                                                .truncate()
-                                                .child(
-                                                    row.modified_at.unwrap_or_else(|| if row.source.provider_id.as_str() == "sift/sqlite" { "Not tracked".into() } else { "—".into() }),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .debug_selector(move || {
-                                                    format!("object-browser-row-{index}-comment")
-                                                })
-                                                .w(px(220.))
-                                                .truncate()
-                                                .text_color(colors.muted_text)
-                                                .child(row.comment.unwrap_or_else(|| "—".into())),
-                                        )
-                                        .into_any_element(),
-                                )
-                            })
-                            .collect()
-                        }),
-                    )
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .track_scroll(&browser.scroll_handle),
+                                .max(0.);
+                                drop(scroll);
+                                let index = (content_y / 34.).floor() as usize;
+                                if index < browser.visible_row_count() {
+                                    browser.selected = index;
+                                    pane.focus_handle.focus(window, cx);
+                                    window.refresh();
+                                }
+                            }),
+                        ),
                 )
             })
             .into_any_element()
@@ -9955,6 +10185,7 @@ pub struct WorkspaceShell {
     connection_projection_revision: u64,
     connection_projection_cache:
         RefCell<Option<(ConnectionProjectionKey, Arc<Vec<ConnectionTreeItem>>)>>,
+    connection_dock_projection_cache: RefCell<Option<Arc<ConnectionDockProjection>>>,
     connection_nav_g_pending: bool,
     repository_nav_g_pending: bool,
     repository_modal_selected: usize,
@@ -11219,6 +11450,7 @@ impl WorkspaceShell {
             connection_nav_selected: 0,
             connection_projection_revision: 0,
             connection_projection_cache: RefCell::new(None),
+            connection_dock_projection_cache: RefCell::new(None),
             connection_nav_g_pending: false,
             repository_nav_g_pending: false,
             repository_modal_selected: 0,
@@ -17437,6 +17669,7 @@ impl WorkspaceShell {
     fn invalidate_connection_projection(&mut self) {
         self.connection_projection_revision = self.connection_projection_revision.wrapping_add(1);
         self.connection_projection_cache.get_mut().take();
+        self.connection_dock_projection_cache.get_mut().take();
     }
 
     fn database_object_bookmark(
@@ -18107,126 +18340,145 @@ impl WorkspaceShell {
             .contains(&self.connections_find_query)
     }
 
-    fn connection_dock_rows(&self) -> Vec<ConnectionDockRow> {
+    fn connection_dock_rows(&self) -> Arc<ConnectionDockProjection> {
         let items = self.visible_connection_items();
-        if self.connections_find_open {
-            return items
+        if let Some(projection) = self.connection_dock_projection_cache.borrow().as_ref() {
+            if Arc::ptr_eq(&projection.source, &items) {
+                return projection.clone();
+            }
+        }
+        let rows = if self.connections_find_open {
+            items
                 .iter()
                 .cloned()
                 .enumerate()
                 .map(|(nav_index, item)| ConnectionDockRow::Navigation { nav_index, item })
-                .collect();
-        }
-        let mut rows = Vec::with_capacity(items.len() + self.lifecycle.tenants.len() * 2);
-        let mut current_tenant = None;
-        let mut current_connection_section = None;
-        let mut workspace_section_rendered = false;
-        let mut favorite_objects_rendered = false;
-        let mut recent_objects_rendered = false;
+                .collect::<Vec<_>>()
+        } else {
+            let mut rows = Vec::with_capacity(items.len() + self.lifecycle.tenants.len() * 2);
+            let mut current_tenant = None;
+            let mut current_connection_section = None;
+            let mut workspace_section_rendered = false;
+            let mut favorite_objects_rendered = false;
+            let mut recent_objects_rendered = false;
 
-        for (nav_index, item) in items.iter().cloned().enumerate() {
-            match &item.action {
-                ConnectionTreeAction::FavoriteObject(_) => {
-                    if !favorite_objects_rendered {
-                        rows.push(ConnectionDockRow::Section("★ FAVORITE OBJECTS".into()));
-                        favorite_objects_rendered = true;
+            for (nav_index, item) in items.iter().cloned().enumerate() {
+                match &item.action {
+                    ConnectionTreeAction::FavoriteObject(_) => {
+                        if !favorite_objects_rendered {
+                            rows.push(ConnectionDockRow::Section("★ FAVORITE OBJECTS".into()));
+                            favorite_objects_rendered = true;
+                        }
+                        rows.push(ConnectionDockRow::Navigation { nav_index, item });
                     }
-                    rows.push(ConnectionDockRow::Navigation { nav_index, item });
-                }
-                ConnectionTreeAction::RecentObject(_) => {
-                    if !recent_objects_rendered {
-                        rows.push(ConnectionDockRow::Section("RECENT OBJECTS".into()));
-                        recent_objects_rendered = true;
+                    ConnectionTreeAction::RecentObject(_) => {
+                        if !recent_objects_rendered {
+                            rows.push(ConnectionDockRow::Section("RECENT OBJECTS".into()));
+                            recent_objects_rendered = true;
+                        }
+                        rows.push(ConnectionDockRow::Navigation { nav_index, item });
                     }
-                    rows.push(ConnectionDockRow::Navigation { nav_index, item });
-                }
-                ConnectionTreeAction::Tenant(tenant_id) => {
-                    let tenant_id = *tenant_id;
-                    current_tenant = Some(tenant_id);
-                    current_connection_section = None;
-                    workspace_section_rendered = false;
-                    rows.push(ConnectionDockRow::Navigation { nav_index, item });
-                }
-                ConnectionTreeAction::Connection(connection) => {
-                    let section = if self.show_favorite_database_objects
-                        && connection_is_favorite(&connection.tags)
-                    {
-                        "★ FAVORITES".to_owned()
-                    } else if let Some(folder) = connection_folder(&connection.tags) {
-                        folder.to_uppercase()
-                    } else {
-                        "CONNECTIONS".to_owned()
-                    };
-                    if current_connection_section.as_ref() != Some(&section) {
-                        current_connection_section = Some(section.clone());
-                        rows.push(ConnectionDockRow::Section(section));
+                    ConnectionTreeAction::Tenant(tenant_id) => {
+                        let tenant_id = *tenant_id;
+                        current_tenant = Some(tenant_id);
+                        current_connection_section = None;
+                        workspace_section_rendered = false;
+                        rows.push(ConnectionDockRow::Navigation { nav_index, item });
                     }
-                    let connected = matches!(
-                        self.connection_status,
-                        ConnectionStatus::Connected { profile_id, .. }
-                            if profile_id == connection.id
-                    );
-                    let expanded = self.expanded_connections.contains(&connection.id);
-                    let profile_id = connection.id;
-                    rows.push(ConnectionDockRow::Navigation { nav_index, item });
-                    if connected && expanded {
-                        match &self.connection_schema {
-                            ConnectionSchemaState::Loading {
-                                profile_id: loading,
-                            } if *loading == profile_id => {
-                                rows.push(ConnectionDockRow::SchemaStatus {
-                                    depth: 2,
-                                    message: "Loading schema…".into(),
-                                    failed: false,
-                                });
+                    ConnectionTreeAction::Connection(connection) => {
+                        let section = if self.show_favorite_database_objects
+                            && connection_is_favorite(&connection.tags)
+                        {
+                            "★ FAVORITES".to_owned()
+                        } else if let Some(folder) = connection_folder(&connection.tags) {
+                            folder.to_uppercase()
+                        } else {
+                            "CONNECTIONS".to_owned()
+                        };
+                        if current_connection_section.as_ref() != Some(&section) {
+                            current_connection_section = Some(section.clone());
+                            rows.push(ConnectionDockRow::Section(section));
+                        }
+                        let connected = matches!(
+                            self.connection_status,
+                            ConnectionStatus::Connected { profile_id, .. }
+                                if profile_id == connection.id
+                        );
+                        let expanded = self.expanded_connections.contains(&connection.id);
+                        let profile_id = connection.id;
+                        rows.push(ConnectionDockRow::Navigation { nav_index, item });
+                        if connected && expanded {
+                            match &self.connection_schema {
+                                ConnectionSchemaState::Loading {
+                                    profile_id: loading,
+                                } if *loading == profile_id => {
+                                    rows.push(ConnectionDockRow::SchemaStatus {
+                                        depth: 2,
+                                        message: "Loading schema…".into(),
+                                        failed: false,
+                                    });
+                                }
+                                ConnectionSchemaState::Failed {
+                                    profile_id: failed,
+                                    message,
+                                } if *failed == profile_id => {
+                                    rows.push(ConnectionDockRow::SchemaStatus {
+                                        depth: 2,
+                                        message: format!("Schema unavailable: {message}"),
+                                        failed: true,
+                                    });
+                                }
+                                ConnectionSchemaState::Ready {
+                                    profile_id: ready,
+                                    snapshot,
+                                } if *ready == profile_id && snapshot.trees.is_empty() => {
+                                    rows.push(ConnectionDockRow::SchemaStatus {
+                                        depth: 2,
+                                        message: "No schema objects found".into(),
+                                        failed: false,
+                                    });
+                                }
+                                _ => {}
                             }
-                            ConnectionSchemaState::Failed {
-                                profile_id: failed,
-                                message,
-                            } if *failed == profile_id => {
-                                rows.push(ConnectionDockRow::SchemaStatus {
-                                    depth: 2,
-                                    message: format!("Schema unavailable: {message}"),
-                                    failed: true,
-                                });
-                            }
-                            ConnectionSchemaState::Ready {
-                                profile_id: ready,
-                                snapshot,
-                            } if *ready == profile_id && snapshot.trees.is_empty() => {
-                                rows.push(ConnectionDockRow::SchemaStatus {
-                                    depth: 2,
-                                    message: "No schema objects found".into(),
-                                    failed: false,
-                                });
-                            }
-                            _ => {}
                         }
                     }
-                }
-                ConnectionTreeAction::Room(_) => {
-                    if !workspace_section_rendered {
-                        let show_section = current_tenant
-                            .and_then(|tenant_id| {
-                                self.lifecycle
-                                    .tenants
-                                    .iter()
-                                    .find(|tenant| tenant.id.0 == tenant_id)
-                            })
-                            .is_some_and(|tenant| {
-                                tenant.rooms.iter().any(|room| !room.workspaces.is_empty())
-                            });
-                        if show_section {
-                            rows.push(ConnectionDockRow::Section("WORKSPACES".into()));
+                    ConnectionTreeAction::Room(_) => {
+                        if !workspace_section_rendered {
+                            let show_section = current_tenant
+                                .and_then(|tenant_id| {
+                                    self.lifecycle
+                                        .tenants
+                                        .iter()
+                                        .find(|tenant| tenant.id.0 == tenant_id)
+                                })
+                                .is_some_and(|tenant| {
+                                    tenant.rooms.iter().any(|room| !room.workspaces.is_empty())
+                                });
+                            if show_section {
+                                rows.push(ConnectionDockRow::Section("WORKSPACES".into()));
+                            }
+                            workspace_section_rendered = true;
                         }
-                        workspace_section_rendered = true;
+                        rows.push(ConnectionDockRow::Navigation { nav_index, item });
                     }
-                    rows.push(ConnectionDockRow::Navigation { nav_index, item });
+                    _ => rows.push(ConnectionDockRow::Navigation { nav_index, item }),
                 }
-                _ => rows.push(ConnectionDockRow::Navigation { nav_index, item }),
+            }
+            rows
+        };
+        let mut nav_row_indices = vec![0; items.len()];
+        for (row_index, row) in rows.iter().enumerate() {
+            if let ConnectionDockRow::Navigation { nav_index, .. } = row {
+                nav_row_indices[*nav_index] = row_index;
             }
         }
-        rows
+        let projection = Arc::new(ConnectionDockProjection {
+            source: items,
+            rows: Arc::new(rows),
+            nav_row_indices,
+        });
+        *self.connection_dock_projection_cache.borrow_mut() = Some(projection.clone());
+        projection
     }
 
     fn render_connection_dock_row(
@@ -20089,6 +20341,7 @@ impl WorkspaceShell {
                         profile_id,
                         context,
                         rows,
+                        row_line_cache: RefCell::new(HashMap::new()),
                         visible_indices: Vec::new(),
                         selected: 0,
                         scroll_handle: UniformListScrollHandle::new(),
@@ -20160,6 +20413,7 @@ impl WorkspaceShell {
                     let selected_catalog = browser.catalog.clone();
                     let selected_schema = browser.schema.clone();
                     browser.rows = rows.clone();
+                    browser.row_line_cache.get_mut().clear();
                     browser.context = context.clone();
                     browser.connections = connections.clone();
                     browser.catalogs = catalogs.clone();
@@ -26824,6 +27078,52 @@ impl WorkspaceShell {
 
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
+    pub fn seed_object_browser_benchmark(
+        &mut self,
+        snapshot: sift_protocol::SchemaSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_schema_snapshot_benchmark(snapshot, cx);
+        self.left_dock.presentation.open = false;
+        self.open_active_connection_objects(window, cx);
+    }
+
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
+    pub fn step_object_browser_benchmark(
+        &mut self,
+        down: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.panes.get(self.active_pane) else {
+            return;
+        };
+        pane.update(cx, |pane, _| {
+            let Some(item_id) = pane.active_item().map(|item| item.id) else {
+                return;
+            };
+            let Some(browser) = pane.object_browsers.get_mut(&item_id) else {
+                return;
+            };
+            if down {
+                browser.selected =
+                    (browser.selected + 1).min(browser.visible_row_count().saturating_sub(1));
+            } else {
+                browser.selected = browser.selected.saturating_sub(1);
+            }
+            if browser.selected_row_needs_reveal() {
+                browser
+                    .scroll_handle
+                    .scroll_to_item(browser.selected, ScrollStrategy::Nearest);
+            }
+            window.refresh();
+        });
+    }
+
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
     pub fn seed_query_outline_benchmark(
         &mut self,
         statements: Vec<sift_protocol::SemanticStatement>,
@@ -33474,12 +33774,12 @@ impl WorkspaceShell {
             return cached.clone();
         }
         CachedPanelLine {
-            line: window.text_system().shape_line(
+            line: Arc::new(window.text_system().shape_line(
                 text.clone(),
                 font_size,
                 std::slice::from_ref(&run),
                 None,
-            ),
+            )),
             text,
             run,
             font_size,
@@ -33642,12 +33942,27 @@ impl WorkspaceShell {
             .filtered_query_outline_entries(cx)
             .len()
             .saturating_sub(1);
-        self.query_outline_selected = self
+        let selected = self
             .query_outline_selected
             .saturating_add_signed(delta)
             .min(last);
-        self.query_outline_scroll_handle
-            .scroll_to_item(self.query_outline_selected, ScrollStrategy::Nearest);
+        if selected == self.query_outline_selected {
+            return;
+        }
+        self.query_outline_selected = selected;
+        let scroll = self.query_outline_scroll_handle.0.borrow();
+        let viewport_height = scroll.base_handle.bounds().size.height;
+        let visible_top = -scroll.base_handle.offset().y;
+        let visible_bottom = visible_top + viewport_height;
+        let row_top = px(52. * selected as f32);
+        let row_bottom = row_top + px(52.);
+        let needs_reveal =
+            viewport_height <= px(0.) || row_top < visible_top || row_bottom > visible_bottom;
+        drop(scroll);
+        if needs_reveal {
+            self.query_outline_scroll_handle
+                .scroll_to_item(selected, ScrollStrategy::Nearest);
+        }
         cx.notify();
     }
 
@@ -38308,17 +38623,29 @@ impl WorkspaceShell {
             .when(
                 dock.id == DockId::Left && self.active_left_panel == LeftPanel::Connections,
                 |dock_view| {
-                    let rows = self.connection_dock_rows();
+                    let projection = self.connection_dock_rows();
+                    let rows = projection.rows.clone();
                     if self.focused_surface == WorkspaceSurface::Connections {
-                        if let Some(index) = rows.iter().position(|row| {
-                            matches!(
-                                row,
-                                ConnectionDockRow::Navigation { nav_index, .. }
-                                    if *nav_index == self.connection_nav_selected
-                            )
-                        }) {
-                            self.connections_scroll_handle
-                                .scroll_to_item(index, ScrollStrategy::Nearest);
+                        if let Some(index) = projection
+                            .nav_row_indices
+                            .get(self.connection_nav_selected)
+                            .copied()
+                        {
+                            let scroll = self.connections_scroll_handle.0.borrow();
+                            let viewport_height = scroll.base_handle.bounds().size.height;
+                            let visible_top = -scroll.base_handle.offset().y;
+                            let visible_bottom = visible_top + viewport_height;
+                            let row_height = cx.theme().metrics.row_height;
+                            let row_top = row_height * index as f32;
+                            let row_bottom = row_top + row_height;
+                            let needs_reveal = viewport_height <= px(0.)
+                                || row_top < visible_top
+                                || row_bottom > visible_bottom;
+                            drop(scroll);
+                            if needs_reveal {
+                                self.connections_scroll_handle
+                                    .scroll_to_item(index, ScrollStrategy::Nearest);
+                            }
                         }
                     }
                     let row_count = rows.len() + CONNECTIONS_SCROLL_TAIL_ROWS;
@@ -42922,7 +43249,9 @@ mod tests {
             assert_eq!(names, ["Favorite", "Analytics", "Operations", "Unfiled"]);
             let sections = shell
                 .connection_dock_rows()
-                .into_iter()
+                .rows
+                .iter()
+                .cloned()
                 .filter_map(|row| match row {
                     ConnectionDockRow::Section(label) => Some(label),
                     _ => None,
@@ -44111,7 +44440,9 @@ mod tests {
         let data_tab = cx
             .debug_bounds("result-set-tab-1")
             .expect("first result-set tab");
-        let result_row = cx.debug_bounds("result-row-0").expect("result row");
+        let result_row = cx
+            .debug_bounds("result-row-viewport")
+            .expect("result row viewport");
         assert!(
             data_tab.bottom() <= result_row.top(),
             "result tabs should remain above side-by-side results"
@@ -44139,7 +44470,7 @@ mod tests {
         let mut detached = VisualTestContext::from_window(native.into(), &cx);
         detached.run_until_parked();
         assert!(detached.debug_bounds("data-results-window-body").is_some());
-        assert!(detached.debug_bounds("result-row-fields-0").is_some());
+        assert!(detached.debug_bounds("result-row-viewport").is_some());
         detached.simulate_keystrokes("space g r");
         assert!(detached.update(|window, _| detached_result_focus.is_focused(window)));
         detached.simulate_keystrokes("space x s");
@@ -44171,7 +44502,7 @@ mod tests {
             );
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("result-row-0").is_some());
+        assert!(cx.debug_bounds("result-row-viewport").is_some());
         assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
         assert!(!cx.update(|window, cx| workspace.read(cx).active_editor_focused(window, cx)));
     }
@@ -44895,8 +45226,8 @@ mod tests {
         cx.run_until_parked();
 
         let row = cx
-            .debug_bounds("result-row-0")
-            .expect("selected result row");
+            .debug_bounds("result-row-viewport")
+            .expect("selected result row viewport");
         cx.simulate_mouse_down(
             point(
                 row.left() + px(crate::results::ROW_NUMBER_WIDTH + 12.0),
@@ -47366,7 +47697,9 @@ mod tests {
         );
         assert!(cx.update(|window, cx| workspace.read(cx).active_results_focused(window, cx)));
 
-        let row = cx.debug_bounds("result-row-0").expect("visible result row");
+        let row = cx
+            .debug_bounds("result-row-viewport")
+            .expect("visible result row viewport");
         cx.simulate_mouse_down(
             point(
                 row.left() + px(crate::results::ROW_NUMBER_WIDTH + 12.0),
@@ -51011,8 +51344,8 @@ mod tests {
                 .iter()
                 .find(|row| row.source.object == "jobs")
                 .unwrap();
-            assert_eq!(jobs.estimated_rows, Some(42));
-            assert_eq!(jobs.comment.as_deref(), Some("Queued work"));
+            assert_eq!(jobs.rows_label.as_ref(), "42");
+            assert_eq!(jobs.comment_label.as_ref(), "Queued work");
         });
         cx.simulate_keystrokes("/");
         cx.run_until_parked();
@@ -51033,53 +51366,17 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("object-browser-row-0").is_some(),
+            cx.debug_bounds("object-browser-rows-retained").is_some(),
             "visible object rows must receive layout space"
         );
         let header = cx
             .debug_bounds("object-browser-column-header")
             .expect("object browser header");
         let row = cx
-            .debug_bounds("object-browser-row-0")
+            .debug_bounds("object-browser-rows-retained")
             .expect("object browser row");
         assert_eq!(row.left(), header.left());
         assert_eq!(row.right(), header.right());
-        for (column, header_selector, row_selector) in [
-            (
-                "name",
-                "object-browser-header-name",
-                "object-browser-row-0-name",
-            ),
-            (
-                "type",
-                "object-browser-header-type",
-                "object-browser-row-0-type",
-            ),
-            (
-                "rows",
-                "object-browser-header-rows",
-                "object-browser-row-0-rows",
-            ),
-            (
-                "modified",
-                "object-browser-header-modified",
-                "object-browser-row-0-modified",
-            ),
-            (
-                "comment",
-                "object-browser-header-comment",
-                "object-browser-row-0-comment",
-            ),
-        ] {
-            let header = cx
-                .debug_bounds(header_selector)
-                .unwrap_or_else(|| panic!("{column} header"));
-            let row = cx
-                .debug_bounds(row_selector)
-                .unwrap_or_else(|| panic!("{column} row"));
-            assert_eq!(row.left(), header.left(), "{column} left edge");
-            assert_eq!(row.right(), header.right(), "{column} right edge");
-        }
         let schema_picker = cx
             .debug_bounds("object-browser-schema-picker")
             .expect("schema picker");
@@ -51205,7 +51502,7 @@ mod tests {
             assert_eq!(browser.context.profile_name, "Analytics");
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("object-browser-row-0").is_some());
+        assert!(cx.debug_bounds("object-browser-rows-retained").is_some());
         // Keyboard opening must not require a preliminary row click.
         cx.simulate_keystrokes("enter");
         workspace.read_with(&cx, |shell, cx| {
@@ -54626,7 +54923,9 @@ mod tests {
             (item_id, results)
         });
         cx.run_until_parked();
-        let row = cx.debug_bounds("result-row-0").expect("result row");
+        let row = cx
+            .debug_bounds("result-row-viewport")
+            .expect("result row viewport");
         let cell = point(
             row.left() + px(crate::results::ROW_NUMBER_WIDTH + 12.0),
             row.top() + px(crate::results::ROW_HEIGHT / 2.0),
