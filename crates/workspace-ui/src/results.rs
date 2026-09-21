@@ -24,7 +24,7 @@ use sift_protocol::{
 };
 use sift_ui::{
     icon, ActiveTheme, Badge, Button, ButtonTone, Clickable, Disableable, ErrorBanner, IconButton,
-    IconName, TextInput, TextInputEvent, ThemeColors, Toggleable,
+    IconName, TextInput, TextInputEvent, ThemeColors,
 };
 
 use crate::presentation::ResultReference;
@@ -196,6 +196,14 @@ struct CachedShapedResultRow {
     runs: Vec<TextRun>,
     font_size: Pixels,
     line: ShapedLine,
+}
+
+#[derive(Debug, Clone)]
+struct CachedShapedHeaderColumn {
+    max_name_chars: usize,
+    font_size: Pixels,
+    text_color: gpui::Hsla,
+    lines: [ShapedLine; 1],
 }
 
 #[derive(Debug, Clone)]
@@ -1209,6 +1217,7 @@ pub struct ResultsView {
     rendered_columns: Vec<CachedColumnRender>,
     rendered_rows: Vec<Vec<CachedCellRender>>,
     row_shape_cache: HashMap<usize, CachedShapedResultRow>,
+    header_shape_cache: HashMap<usize, CachedShapedHeaderColumn>,
     /// Display-order projection into source rows. Selection and edits remain
     /// source-indexed when loaded-row transforms reorder the grid.
     display_rows: Arc<Vec<usize>>,
@@ -1266,6 +1275,7 @@ pub struct ResultsView {
     bottom_extent_custom: bool,
     right_extent_custom: bool,
     stream_result_seen: bool,
+    stream_refresh_queued: bool,
     /// Inactive result sets retain prepared cells but never render or shape
     /// them. The active set remains in `state` and the ordinary grid fields.
     stored_result_sets: Vec<Option<StoredResultSet>>,
@@ -1338,6 +1348,7 @@ impl ResultsView {
             rendered_columns: Vec::new(),
             rendered_rows: Vec::new(),
             row_shape_cache: HashMap::new(),
+            header_shape_cache: HashMap::new(),
             display_rows: Arc::new(Vec::new()),
             sorts: Vec::new(),
             column_filters: Vec::new(),
@@ -1388,6 +1399,7 @@ impl ResultsView {
             bottom_extent_custom: false,
             right_extent_custom: false,
             stream_result_seen: false,
+            stream_refresh_queued: false,
             stored_result_sets: Vec::new(),
             active_result_set: 0,
             window_start: 0,
@@ -2246,6 +2258,9 @@ impl ResultsView {
                         && next.nullable == previous.nullable
                 });
         self.rendered_columns = rendered_columns;
+        if !preserve_field_projection {
+            self.header_shape_cache.clear();
+        }
         self.rendered_rows = match &state {
             ResultState::Streaming(data) | ResultState::Ready(data) => data
                 .rows
@@ -2410,6 +2425,20 @@ impl ResultsView {
 
     /// Reset this surface for a cursor-backed stream. Subsequent pages append
     /// incrementally and retain at most [`MAX_RETAINED_ROWS`].
+    fn schedule_stream_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.stream_refresh_queued {
+            return;
+        }
+        self.stream_refresh_queued = true;
+        let view = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = view.update(cx, |view, cx| {
+                view.stream_refresh_queued = false;
+                cx.notify();
+            });
+        });
+    }
+
     pub fn begin_stream(&mut self, cx: &mut Context<Self>) {
         self.query_started_at
             .get_or_insert_with(std::time::Instant::now);
@@ -2439,7 +2468,7 @@ impl ResultsView {
         self.staged_cells.clear();
         self.staged_undo.clear();
         self.staged_redo.clear();
-        cx.notify();
+        self.schedule_stream_refresh(cx);
     }
 
     fn take_active_result_set(&mut self) -> Option<StoredResultSet> {
@@ -2485,6 +2514,7 @@ impl ResultsView {
     fn restore_result_set(&mut self, stored: StoredResultSet) {
         self.state = ResultState::Ready(stored.data);
         self.rendered_columns = stored.rendered_columns;
+        self.header_shape_cache.clear();
         self.rendered_rows = stored.rendered_rows;
         self.display_rows = stored.display_rows;
         self.sorts = stored.sorts;
@@ -2601,6 +2631,9 @@ impl ResultsView {
                         },
                     );
                 self.rendered_columns = rendered_columns;
+                if !preserve_field_projection {
+                    self.header_shape_cache.clear();
+                }
                 self.column_widths = vec![DEFAULT_COLUMN_WIDTH; self.rendered_columns.len()];
                 if !preserve_field_projection {
                     self.column_order = (0..self.rendered_columns.len()).collect();
@@ -2615,7 +2648,7 @@ impl ResultsView {
                 self.filter_group_logics = vec![ResultFilterLogic::All];
                 self.filter_logic = ResultFilterLogic::All;
                 self.grid_transform_column = None;
-                cx.notify();
+                self.schedule_stream_refresh(cx);
                 StreamProgress::Consumed
             }
             Page::Rows { rows } => {
@@ -2632,7 +2665,7 @@ impl ResultsView {
                 if data.rows.len() + rows.len() > MAX_RETAINED_ROWS && !data.rows.is_empty() {
                     self.window_held = true;
                     data.has_more = true;
-                    cx.notify();
+                    self.schedule_stream_refresh(cx);
                     return StreamProgress::WindowFull;
                 }
                 let prepared_rows = prepared_rows
@@ -2647,7 +2680,7 @@ impl ResultsView {
                 if transforms_active {
                     self.rebuild_display_rows(cx);
                 } else {
-                    cx.notify();
+                    self.schedule_stream_refresh(cx);
                 }
                 StreamProgress::Consumed
             }
@@ -2696,7 +2729,7 @@ impl ResultsView {
                 self.selected_message = None;
                 self.stream_result_seen = false;
                 self.window_held = false;
-                cx.notify();
+                self.schedule_stream_refresh(cx);
                 StreamProgress::Terminal
             }
         }
@@ -3655,6 +3688,14 @@ impl ResultsView {
     }
 
     fn result_column_at_position(&self, position: Point<Pixels>) -> Option<usize> {
+        self.result_column_and_offset_at_position(position)
+            .map(|(column, _)| column)
+    }
+
+    fn result_column_and_offset_at_position(
+        &self,
+        position: Point<Pixels>,
+    ) -> Option<(usize, f32)> {
         let viewport = self.grid_scroll_handle.bounds();
         let content_x =
             f32::from(position.x - viewport.left() - self.grid_scroll_handle.offset().x);
@@ -3662,14 +3703,17 @@ impl ResultsView {
             return None;
         }
         let mut right = 0.0;
-        self.visible_column_indices().into_iter().find(|column| {
-            right += self
-                .column_widths
-                .get(*column)
-                .copied()
-                .unwrap_or(DEFAULT_COLUMN_WIDTH);
-            content_x < right
-        })
+        self.visible_column_indices()
+            .into_iter()
+            .find_map(|column| {
+                let left = right;
+                right += self
+                    .column_widths
+                    .get(column)
+                    .copied()
+                    .unwrap_or(DEFAULT_COLUMN_WIDTH);
+                (content_x < right).then_some((column, content_x - left))
+            })
     }
 
     fn result_row_at_position(&self, position: Point<Pixels>) -> Option<usize> {
@@ -5170,7 +5214,6 @@ impl ResultsView {
             .collect::<Vec<_>>();
         let scrollable_min_width = px(visible_widths.iter().sum::<f32>());
         let (column_span, lead_width, trail_width) = self.visible_column_span(&visible_widths);
-        let header_span = column_span.clone();
         // Right edge of each column, accumulated over every column so a culled
         // handle keeps the same absolute position as an unculled one.
         let mut resize_right = 0.0;
@@ -5187,7 +5230,8 @@ impl ResultsView {
             .enumerate()
             .filter(|(display_column, _)| column_span.contains(display_column))
             .map(|(display_column, source_column)| {
-                let resize_right = column_right_edges[display_column];
+                let resize_right = column_right_edges[display_column]
+                    + f32::from(self.grid_scroll_handle.offset().x);
                 div()
                     .id(("resize-result-column", display_column))
                     .debug_selector(move || format!("resize-result-column-{display_column}"))
@@ -5204,6 +5248,100 @@ impl ResultsView {
                         },
                         |_, _, _, cx| cx.new(|_| gpui::Empty),
                     )
+            })
+            .collect::<Vec<_>>();
+        let column_left_edges = std::iter::once(0.0)
+            .chain(column_right_edges.iter().copied())
+            .take(visible_columns.len())
+            .collect::<Vec<_>>();
+        let horizontal_offset = f32::from(self.grid_scroll_handle.offset().x);
+        let column_hit_targets = visible_columns
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(display_column, _)| column_span.contains(display_column))
+            .filter_map(|(display_column, source_column)| {
+                let column = self.rendered_columns.get(source_column)?;
+                let left = column_left_edges[display_column] + horizontal_offset;
+                let width = visible_widths[display_column];
+                Some(
+                    div()
+                        .id(("result-column", display_column))
+                        .debug_selector(move || format!("result-column-{display_column}"))
+                        .absolute()
+                        .left(px(left))
+                        .top_0()
+                        .h_full()
+                        .w(px(width))
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("Select or drag column {}", column.name))
+                        .on_drag(
+                            ColumnDrag {
+                                index: source_column,
+                                name: column.name.clone(),
+                            },
+                            |drag, _, _, cx| cx.new(|_| drag.clone()),
+                        )
+                        .drag_over::<ColumnDrag>(move |header, drag, _, cx| {
+                            if drag.index == source_column {
+                                header
+                            } else {
+                                header
+                                    .bg(cx.theme().colors.drop_target_background)
+                                    .border_color(cx.theme().colors.drop_target_border)
+                                    .border_l_2()
+                            }
+                        })
+                        .on_drop::<ColumnDrag>(cx.listener(
+                            move |view, drag: &ColumnDrag, _, cx| {
+                                view.reorder_column(drag.index, source_column, cx)
+                            },
+                        ))
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.focus_handle.focus(window, cx);
+                            view.select_column(source_column, cx);
+                        }))
+                        .child(
+                            div()
+                                .id(("filter-result-column", display_column))
+                                .debug_selector(move || {
+                                    format!("filter-result-column-{display_column}")
+                                })
+                                .absolute()
+                                .right(px(24.))
+                                .top(px(2.))
+                                .size(px(20.))
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    cx.stop_propagation();
+                                    view.open_grid_transform(
+                                        source_column,
+                                        GridTransformTab::Filter,
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id(("sort-result-column", display_column))
+                                .debug_selector(move || {
+                                    format!("sort-result-column-{display_column}")
+                                })
+                                .absolute()
+                                .right(px(4.))
+                                .top(px(2.))
+                                .size(px(20.))
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    cx.stop_propagation();
+                                    view.open_grid_transform(
+                                        source_column,
+                                        GridTransformTab::Sort,
+                                        window,
+                                        cx,
+                                    );
+                                })),
+                        ),
+                )
             })
             .collect::<Vec<_>>();
         let pinned_header = div()
@@ -5233,187 +5371,30 @@ impl ResultsView {
             )
             .child("#");
         let scrollable_header = div()
-            .debug_selector(|| "result-header".into())
+            .debug_selector(|| "result-header-viewport".into())
             .on_drag_move::<ColumnResizeDrag>(cx.listener(Self::resize_column))
             .relative()
-            .flex()
-            .h(px(HEADER_HEIGHT))
-            .flex_none()
-            .flex_none()
-            .w(scrollable_min_width)
-            .children((lead_width > 0.0).then(|| div().flex_none().w(px(lead_width))))
-            .children(
-                visible_columns
-                    .iter()
-                    .enumerate()
-                    .filter(|(display_column, _)| header_span.contains(display_column))
-                    .filter_map(|(display_column, source_column)| {
-                        let source_column = *source_column;
-                        let column = self.rendered_columns.get(source_column)?;
-                        let width = self
-                            .column_widths
-                            .get(source_column)
-                            .copied()
-                            .unwrap_or(DEFAULT_COLUMN_WIDTH);
-                        Some(
-                            div()
-                                .id(("result-column", display_column))
-                                .debug_selector(move || format!("result-column-{display_column}"))
-                                .relative()
-                                .role(gpui::Role::Button)
-                                .aria_label(format!("Select or drag column {}", column.name))
-                                .flex_none()
-                                .w(px(width))
-                                .px_2()
-                                .flex()
-                                .flex_col()
-                                .justify_center()
-                                .overflow_hidden()
-                                .border_r_1()
-                                .border_color(colors.subtle_border)
-                                .when(
-                                    self.selected.is_some_and(|selection| {
-                                        selection.highlights_column(source_column)
-                                    }),
-                                    |header| {
-                                        header.bg(colors.selected_surface).text_color(colors.text)
-                                    },
-                                )
-                                .on_drag(
-                                    ColumnDrag {
-                                        index: source_column,
-                                        name: column.name.clone(),
-                                    },
-                                    |drag, _, _, cx| cx.new(|_| drag.clone()),
-                                )
-                                .drag_over::<ColumnDrag>(move |header, drag, _, cx| {
-                                    if drag.index == source_column {
-                                        header
-                                    } else {
-                                        header
-                                            .bg(cx.theme().colors.drop_target_background)
-                                            .border_color(cx.theme().colors.drop_target_border)
-                                            .border_l_2()
-                                    }
-                                })
-                                .on_drop::<ColumnDrag>(cx.listener(
-                                    move |view, drag: &ColumnDrag, _, cx| {
-                                        view.reorder_column(drag.index, source_column, cx)
-                                    },
-                                ))
-                                .on_click(cx.listener(move |view, _, window, cx| {
-                                    view.focus_handle.focus(window, cx);
-                                    view.select_column(source_column, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(column.name.clone()),
-                                        )
-                                        .children(self.sorts.iter().enumerate().find_map(
-                                            |(priority, (sorted, direction))| {
-                                                (*sorted == source_column).then(|| {
-                                                    div().text_xs().text_color(colors.accent).child(
-                                                        format!(
-                                                            "{}{}",
-                                                            match direction {
-                                                                SortDirection::Ascending => "↑",
-                                                                SortDirection::Descending => "↓",
-                                                            },
-                                                            priority + 1
-                                                        ),
-                                                    )
-                                                })
-                                            },
-                                        ))
-                                        .child(
-                                            div()
-                                                .debug_selector(move || {
-                                                    format!("filter-result-column-{display_column}")
-                                                })
-                                                .child(
-                                                    IconButton::new(
-                                                        ("filter-result-column", display_column),
-                                                        IconName::Search,
-                                                        format!("Filter {}", column.name),
-                                                    )
-                                                    .square(px(20.))
-                                                    .icon_size(11.)
-                                                    .toggle_state(
-                                                        self.filter_is_active(source_column),
-                                                    )
-                                                    .tooltip(format!("Filter {}", column.name))
-                                                    .on_click(cx.listener(
-                                                        move |view, _, window, cx| {
-                                                            cx.stop_propagation();
-                                                            view.open_grid_transform(
-                                                                source_column,
-                                                                GridTransformTab::Filter,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .debug_selector(move || {
-                                                    format!("sort-result-column-{display_column}")
-                                                })
-                                                .child(
-                                                    IconButton::new(
-                                                        ("sort-result-column", display_column),
-                                                        IconName::ChevronDown,
-                                                        format!("Sort {}", column.name),
-                                                    )
-                                                    .square(px(20.))
-                                                    .icon_size(11.)
-                                                    .toggle_state(self.sorts.iter().any(
-                                                        |(column, _)| *column == source_column,
-                                                    ))
-                                                    .tooltip(format!("Sort {}", column.name))
-                                                    .on_click(cx.listener(
-                                                        move |view, _, window, cx| {
-                                                            cx.stop_propagation();
-                                                            view.open_grid_transform(
-                                                                source_column,
-                                                                GridTransformTab::Sort,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .truncate()
-                                        .child(format!(
-                                            "{}{}",
-                                            column.type_label,
-                                            if column.nullable { "?" } else { "" }
-                                        )),
-                                ),
-                        )
-                    }),
+            .size_full()
+            .overflow_hidden()
+            .child(
+                div()
+                    .id("result-header-scroll-state")
+                    .absolute()
+                    .size_full()
+                    .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
+                    .track_scroll(&self.grid_scroll_handle)
+                    .child(div().w(scrollable_min_width).h(px(1.))),
             )
-            .children((trail_width > 0.0).then(|| div().flex_none().w(px(trail_width))))
+            .child(ResultHeaderElement {
+                view: cx.entity(),
+                columns: visible_columns.clone(),
+                widths: visible_widths.clone(),
+            })
+            .children(column_hit_targets)
             .children(resize_handles);
         let header = div()
+            .debug_selector(|| "result-header".into())
             .flex()
             .h(px(HEADER_HEIGHT))
             .flex_none()
@@ -5427,9 +5408,6 @@ impl ResultsView {
                     .id("result-header-scrollable")
                     .flex_1()
                     .min_w_0()
-                    .overflow_x_scroll()
-                    .restrict_scroll_to_axis()
-                    .track_scroll(&self.grid_scroll_handle)
                     .child(scrollable_header),
             );
 
@@ -6872,6 +6850,217 @@ impl ResultsView {
 impl Focusable for ResultsView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+struct ResultHeaderElement {
+    view: Entity<ResultsView>,
+    columns: Vec<usize>,
+    widths: Vec<f32>,
+}
+
+struct ResultHeaderPrepaint {
+    quads: Vec<PaintQuad>,
+    borders: Vec<(Pixels, Pixels, Pixels)>,
+    lines: Vec<(ShapedLine, Point<Pixels>, Pixels)>,
+}
+
+impl IntoElement for ResultHeaderElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ResultHeaderElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ResultHeaderPrepaint;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = gpui::relative(1.).into();
+        style.size.height = gpui::relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let colors = cx.theme().colors;
+        self.view.update(cx, |view, _| {
+            let mut quads = Vec::new();
+            let mut borders = Vec::new();
+            let mut lines = Vec::new();
+            let mut text_style = window.text_style();
+            text_style.font_size = rems(0.75).into();
+            let font_size = text_style.font_size.to_pixels(window.rem_size());
+            let mut name_style = text_style.clone();
+            name_style.font_weight = gpui::FontWeight::SEMIBOLD;
+            name_style.color = colors.text;
+            let mut left = bounds.left() + view.grid_scroll_handle.offset().x;
+            for (&source_column, &width) in self.columns.iter().zip(&self.widths) {
+                let right = left + px(width);
+                if right >= bounds.left() && left <= bounds.right() {
+                    let column_bounds = gpui::Bounds::new(
+                        gpui::point(left, bounds.top()),
+                        gpui::size(px(width), bounds.size.height),
+                    );
+                    if view
+                        .selected
+                        .is_some_and(|selection| selection.highlights_column(source_column))
+                    {
+                        quads.push(gpui::fill(column_bounds, colors.selected_surface));
+                    }
+                    borders.push((right - px(0.5), bounds.top(), bounds.bottom()));
+                    if let Some(column) = view.rendered_columns.get(source_column) {
+                        let column = column.clone();
+                        let max_name_chars = ((width - 58.).max(14.) / 7.).floor() as usize;
+                        let filter_active = view.filter_is_active(source_column);
+                        let sort_priority = view
+                            .sorts
+                            .iter()
+                            .position(|(column, _)| *column == source_column);
+                        let shaped = view
+                            .header_shape_cache
+                            .get(&source_column)
+                            .filter(|cached| {
+                                cached.max_name_chars == max_name_chars
+                                    && cached.font_size == font_size
+                                    && cached.text_color == colors.text
+                            })
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                let label: SharedString = format!(
+                                    "{}  {}{}",
+                                    column.name,
+                                    column.type_label,
+                                    if column.nullable { "?" } else { "" }
+                                )
+                                .chars()
+                                .take(max_name_chars)
+                                .collect::<String>()
+                                .into();
+                                let texts = [label];
+                                let runs = [name_style.to_run(texts[0].len())];
+                                let lines = std::array::from_fn(|index| {
+                                    window.text_system().shape_line(
+                                        texts[index].clone(),
+                                        font_size,
+                                        std::slice::from_ref(&runs[index]),
+                                        None,
+                                    )
+                                });
+                                let shaped = CachedShapedHeaderColumn {
+                                    max_name_chars,
+                                    font_size,
+                                    text_color: colors.text,
+                                    lines,
+                                };
+                                if view.header_shape_cache.len() >= 256 {
+                                    view.header_shape_cache.clear();
+                                }
+                                view.header_shape_cache
+                                    .insert(source_column, shaped.clone());
+                                shaped
+                            });
+                        lines.push((
+                            shaped.lines[0].clone(),
+                            gpui::point(left + px(8.), bounds.top() + px(11.)),
+                            px(18.),
+                        ));
+                        let filter_color = if filter_active {
+                            colors.accent
+                        } else {
+                            colors.muted_text
+                        };
+                        let sort_color = if sort_priority.is_some() {
+                            colors.accent
+                        } else {
+                            colors.muted_text
+                        };
+                        for (inset, width) in [(0., 8.), (2., 4.), (3., 2.)] {
+                            quads.push(gpui::fill(
+                                gpui::Bounds::new(
+                                    gpui::point(
+                                        right - px(40. - inset),
+                                        bounds.top() + px(15. + inset),
+                                    ),
+                                    gpui::size(px(width), px(1.)),
+                                ),
+                                filter_color,
+                            ));
+                        }
+                        quads.push(gpui::fill(
+                            gpui::Bounds::new(
+                                gpui::point(right - px(18.), bounds.top() + px(14.)),
+                                gpui::size(px(1.), px(9.)),
+                            ),
+                            sort_color,
+                        ));
+                        quads.push(gpui::fill(
+                            gpui::Bounds::new(
+                                gpui::point(right - px(21.), bounds.top() + px(20.)),
+                                gpui::size(px(7.), px(1.)),
+                            ),
+                            sort_color,
+                        ));
+                    }
+                }
+                left = right;
+            }
+            ResultHeaderPrepaint {
+                quads,
+                borders,
+                lines,
+            }
+        })
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _bounds: gpui::Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        for quad in prepaint.quads.drain(..) {
+            window.paint_quad(quad);
+        }
+        let mut borders = gpui::PathBuilder::stroke(px(1.));
+        for (x, top, bottom) in prepaint.borders.drain(..) {
+            borders.move_to(gpui::point(x, top));
+            borders.line_to(gpui::point(x, bottom));
+        }
+        if let Ok(path) = borders.build() {
+            window.paint_path(path, cx.theme().colors.subtle_border);
+        }
+        for (line, origin, line_height) in prepaint.lines.drain(..) {
+            let _ = line.paint(origin, line_height, TextAlign::Left, None, window, cx);
+        }
     }
 }
 
@@ -9338,10 +9527,11 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let filter = cx
-            .debug_bounds("filter-result-column-0")
-            .expect("header filter control");
-        cx.simulate_click(filter.center(), Modifiers::default());
+        let header = cx
+            .debug_bounds("result-column-0")
+            .expect("first result column");
+        let filter = gpui::point(header.right() - px(34.), header.top() + px(10.));
+        cx.simulate_click(filter, Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("result-grid-transform-editor").is_some());
         assert!(view.read_with(&cx, |view, _| {
