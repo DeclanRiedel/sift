@@ -79,7 +79,6 @@ const COLUMN_RESIZE_HANDLE_WIDTH: f32 = 7.0;
 pub(crate) const ROW_NUMBER_WIDTH: f32 = 46.0;
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
 const HEADER_HEIGHT: f32 = 40.0;
-const COLD_ROW_SHAPE_BUDGET: usize = 12;
 const INITIAL_GRID_VIEWPORT_WIDTH: f32 = 1_024.0;
 /// Hard UI retention bound. WebSocket ACK backpressure limits pages in flight;
 /// this separately prevents an arbitrarily large completed query from growing
@@ -212,7 +211,7 @@ struct CachedShapedHeaderColumn {
     max_name_chars: usize,
     font_size: Pixels,
     text_color: gpui::Hsla,
-    lines: [ShapedLine; 1],
+    lines: [ShapedLine; 2],
 }
 
 #[derive(Debug, Clone)]
@@ -6909,7 +6908,8 @@ struct ResultHeaderElement {
 struct ResultHeaderPrepaint {
     quads: Vec<PaintQuad>,
     borders: Vec<(Pixels, Pixels, Pixels)>,
-    lines: Vec<(ShapedLine, Point<Pixels>, Pixels)>,
+    lines: Vec<(ShapedLine, Point<Pixels>, Pixels, Pixels)>,
+    icons: Vec<(Point<Pixels>, gpui::Hsla, bool, bool)>,
 }
 
 impl IntoElement for ResultHeaderElement {
@@ -6959,6 +6959,7 @@ impl Element for ResultHeaderElement {
             let mut quads = Vec::new();
             let mut borders = Vec::new();
             let mut lines = Vec::new();
+            let mut icons = Vec::new();
             let mut text_style = window.text_style();
             text_style.font_size = rems(0.75).into();
             let font_size = text_style.font_size.to_pixels(window.rem_size());
@@ -6998,26 +6999,30 @@ impl Element for ResultHeaderElement {
                             })
                             .cloned()
                             .unwrap_or_else(|| {
-                                let label: SharedString = format!(
-                                    "{}  {}{}",
-                                    column.name,
-                                    column.type_label,
-                                    if column.nullable { "?" } else { "" }
-                                )
-                                .chars()
-                                .take(max_name_chars)
-                                .collect::<String>()
-                                .into();
-                                let texts = [label];
-                                let runs = [name_style.to_run(texts[0].len())];
-                                let lines = std::array::from_fn(|index| {
-                                    window.text_system().shape_line(
-                                        texts[index].clone(),
-                                        font_size,
-                                        std::slice::from_ref(&runs[index]),
-                                        None,
+                                let texts: [SharedString; 2] = [
+                                    column.name.clone(),
+                                    format!(
+                                        "{}{}",
+                                        column.type_label,
+                                        if column.nullable { "?" } else { "" }
                                     )
-                                });
+                                    .into(),
+                                ];
+                                let mut type_style = text_style.clone();
+                                type_style.color = colors.muted_text;
+                                let runs = [
+                                    name_style.to_run(texts[0].len() + 1),
+                                    type_style.to_run(texts[1].len()),
+                                ];
+                                let combined = window.text_system().shape_line(
+                                    format!("{} {}", texts[0], texts[1]).into(),
+                                    font_size,
+                                    &runs,
+                                    None,
+                                );
+                                let (name, rest) = combined.split_at(texts[0].len());
+                                let (_, type_label) = rest.split_at(1);
+                                let lines = [name, type_label];
                                 let shaped = CachedShapedHeaderColumn {
                                     max_name_chars,
                                     font_size,
@@ -7033,8 +7038,15 @@ impl Element for ResultHeaderElement {
                             });
                         lines.push((
                             shaped.lines[0].clone(),
-                            gpui::point(left + px(8.), bounds.top() + px(11.)),
+                            gpui::point(left + px(8.), bounds.top() + px(2.)),
                             px(18.),
+                            px((width - 56.).max(0.)),
+                        ));
+                        lines.push((
+                            shaped.lines[1].clone(),
+                            gpui::point(left + px(8.), bounds.top() + px(20.)),
+                            px(16.),
+                            px((width - 56.).max(0.)),
                         ));
                         let filter_color = if filter_active {
                             colors.accent
@@ -7046,31 +7058,20 @@ impl Element for ResultHeaderElement {
                         } else {
                             colors.muted_text
                         };
-                        for (inset, width) in [(0., 8.), (2., 4.), (3., 2.)] {
-                            quads.push(gpui::fill(
-                                gpui::Bounds::new(
-                                    gpui::point(
-                                        right - px(40. - inset),
-                                        bounds.top() + px(15. + inset),
-                                    ),
-                                    gpui::size(px(width), px(1.)),
-                                ),
-                                filter_color,
-                            ));
-                        }
-                        quads.push(gpui::fill(
-                            gpui::Bounds::new(
-                                gpui::point(right - px(18.), bounds.top() + px(14.)),
-                                gpui::size(px(1.), px(9.)),
-                            ),
-                            sort_color,
+                        icons.push((
+                            gpui::point(right - px(42.), bounds.top() + px(14.)),
+                            filter_color,
+                            true,
+                            false,
                         ));
-                        quads.push(gpui::fill(
-                            gpui::Bounds::new(
-                                gpui::point(right - px(21.), bounds.top() + px(20.)),
-                                gpui::size(px(7.), px(1.)),
-                            ),
+                        let descending = sort_priority.is_some_and(|index| {
+                            matches!(view.sorts[index].1, SortDirection::Descending)
+                        });
+                        icons.push((
+                            gpui::point(right - px(22.), bounds.top() + px(14.)),
                             sort_color,
+                            false,
+                            descending,
                         ));
                     }
                 }
@@ -7080,6 +7081,7 @@ impl Element for ResultHeaderElement {
                 quads,
                 borders,
                 lines,
+                icons,
             }
         })
     }
@@ -7105,8 +7107,41 @@ impl Element for ResultHeaderElement {
         if let Ok(path) = borders.build() {
             window.paint_path(path, cx.theme().colors.subtle_border);
         }
-        for (line, origin, line_height) in prepaint.lines.drain(..) {
-            let _ = line.paint(origin, line_height, TextAlign::Left, None, window, cx);
+        for (line, origin, line_height, width) in prepaint.lines.drain(..) {
+            let clip = gpui::Bounds::new(origin, gpui::size(width, line_height));
+            window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                let _ = line.paint(
+                    origin,
+                    line_height,
+                    TextAlign::Left,
+                    Some(width),
+                    window,
+                    cx,
+                );
+            });
+        }
+        for (origin, color, filter, descending) in prepaint.icons.drain(..) {
+            let mut path = gpui::PathBuilder::stroke(px(1.));
+            let point = |x, y| origin + gpui::point(px(x), px(y));
+            if filter {
+                path.move_to(point(0., 0.));
+                path.line_to(point(12., 0.));
+                path.line_to(point(7., 5.));
+                path.line_to(point(7., 10.));
+                path.line_to(point(5., 12.));
+                path.line_to(point(5., 5.));
+                path.line_to(point(0., 0.));
+            } else {
+                let (tip, tail) = if descending { (11., 1.) } else { (1., 11.) };
+                path.move_to(point(6., tail));
+                path.line_to(point(6., tip));
+                path.move_to(point(2., if descending { 7. } else { 5. }));
+                path.line_to(point(6., tip));
+                path.line_to(point(10., if descending { 7. } else { 5. }));
+            }
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
         }
     }
 }
@@ -7129,6 +7164,7 @@ struct ResultPaintLine {
     width: Pixels,
     alignment: TextAlign,
     colors: Vec<(usize, gpui::Hsla)>,
+    fields: Vec<(std::ops::Range<usize>, Pixels, Pixels, bool)>,
 }
 
 impl IntoElement for ResultRowsElement {
@@ -7175,7 +7211,7 @@ impl Element for ResultRowsElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let colors = cx.theme().colors;
-        let result = self.view.update(cx, |view, cx| {
+        let result = self.view.update(cx, |view, _cx| {
             let viewport = view.row_scroll_handle.0.borrow().base_handle.bounds();
             let scroll_top = -view.row_scroll_handle.0.borrow().base_handle.offset().y;
             let first = (f32::from(scroll_top) / ROW_HEIGHT).floor().max(0.) as usize;
@@ -7185,9 +7221,8 @@ impl Element for ResultRowsElement {
             let mut quads = Vec::new();
             let mut borders = Vec::new();
             let mut lines = Vec::new();
-            let mut new_shapes = 0usize;
-            let mut deferred_shapes = false;
-            let cold_rows = view.row_shape_cache.len() < last.saturating_sub(first);
+            let mut pending = Vec::new();
+            let mut batch_text = String::new();
             let selected = view.selected;
             let mut text_style = window.text_style();
             text_style.color = colors.disabled_text;
@@ -7195,17 +7230,6 @@ impl Element for ResultRowsElement {
             let font_size = text_style.font_size.to_pixels(window.rem_size());
             let mut grid_text_style = text_style.clone();
             grid_text_style.font_family = "monospace".into();
-            let width_run = grid_text_style.to_run(1);
-            let character_width = window
-                .text_system()
-                .shape_line(
-                    "0".into(),
-                    font_size,
-                    std::slice::from_ref(&width_run),
-                    None,
-                )
-                .width();
-            let character_width = f32::from(character_width).max(1.);
             let selected_range = match selected {
                 Some(GridSelection::Range {
                     anchor_row,
@@ -7257,24 +7281,6 @@ impl Element for ResultRowsElement {
                         colors.selected_surface,
                     ));
                 }
-                if !cold_rows {
-                    let number: SharedString =
-                        (view.window_start + row_index + 1).to_string().into();
-                    let run = text_style.to_run(number.len());
-                    let number = window.text_system().shape_line(
-                        number,
-                        font_size,
-                        std::slice::from_ref(&run),
-                        None,
-                    );
-                    lines.push(ResultPaintLine {
-                        colors: vec![(number.len(), colors.disabled_text)],
-                        line: number,
-                        origin: gpui::point(row_bounds.left() + px(4.), top),
-                        width: px(ROW_NUMBER_WIDTH - 12.),
-                        alignment: TextAlign::Right,
-                    });
-                }
                 borders.push((
                     row_bounds.left() + px(ROW_NUMBER_WIDTH - 0.5),
                     top,
@@ -7282,10 +7288,17 @@ impl Element for ResultRowsElement {
                     false,
                 ));
                 let mut left = f32::from(bounds.left()) + ROW_NUMBER_WIDTH + f32::from(horizontal);
-                let mut row_text = String::new();
-                let mut row_runs = Vec::new();
-                let mut row_text_left = None;
-                let mut row_text_width = 0.;
+                let mut row_text = (view.window_start + row_index + 1).to_string();
+                let mut row_runs = vec![grid_text_style.to_run(row_text.len() + 1)];
+                let mut row_text_left = Some(bounds.left());
+                let mut row_text_width = ROW_NUMBER_WIDTH;
+                let mut fields = vec![(
+                    0..row_text.len(),
+                    bounds.left() + px(4.),
+                    px(ROW_NUMBER_WIDTH - 12.),
+                    true,
+                )];
+                row_text.push(' ');
                 for (display_column, (&source_column, &width)) in
                     self.columns.iter().zip(&self.widths).enumerate()
                 {
@@ -7312,9 +7325,13 @@ impl Element for ResultRowsElement {
                         None => false,
                     };
                     let staged = view.staged_cells.contains_key(&(row_index, source_column));
+                    let visible_left = cell_left.max(bounds.left() + px(ROW_NUMBER_WIDTH));
                     let cell_bounds = gpui::Bounds::new(
-                        gpui::point(cell_left, top),
-                        gpui::size(px(width), px(ROW_HEIGHT)),
+                        gpui::point(visible_left, top),
+                        gpui::size(
+                            (cell_left + px(width) - visible_left).max(px(0.)),
+                            px(ROW_HEIGHT),
+                        ),
                     );
                     if staged || is_selected {
                         quads.push(gpui::fill(
@@ -7338,26 +7355,21 @@ impl Element for ResultRowsElement {
                         .and_then(|row| row.get(source_column))
                     {
                         row_text_left.get_or_insert(cell_left);
-                        let slot = (width / character_width).round().max(1.) as usize;
-                        let inner = slot.saturating_sub(2);
-                        let mut value = cell.paint_text.chars().take(inner).collect::<String>();
-                        let value_len = value.chars().count();
-                        let remaining = inner.saturating_sub(value_len);
-                        let mut field = String::with_capacity(slot);
-                        field.push(' ');
-                        if matches!(cell.class, CellClass::Number) {
-                            field.extend(std::iter::repeat_n(' ', remaining));
-                            field.push_str(&value);
-                        } else {
-                            field.push_str(&value);
-                            field.extend(std::iter::repeat_n(' ', remaining));
-                        }
-                        field.push(' ');
-                        value.clear();
-                        let mut run = grid_text_style.to_run(field.len());
+                        // Keep exact pixel slots; padding spaces do not match font metrics.
+                        let start = row_text.len();
+                        let field = cell.paint_text.chars().take(512).collect::<String>();
+                        let mut run = grid_text_style.to_run(field.len() + 1);
                         run.color = ResultsView::cell_color(colors, cell.class);
                         row_runs.push(run);
                         row_text.push_str(&field);
+                        fields.push((
+                            start..row_text.len(),
+                            cell_left + px(8.),
+                            px((width - 16.).max(0.)),
+                            matches!(cell.class, CellClass::Number),
+                        ));
+                        // Separate neighboring cells and rows for shaping ligatures and bidi text.
+                        row_text.push(' ');
                         row_text_width += width;
                     }
                 }
@@ -7379,30 +7391,20 @@ impl Element for ResultRowsElement {
                                 && cached.runs == row_runs
                                 && cached.font_size == font_size
                         })
-                        .map(|cached| cached.line.clone())
-                        .or_else(|| {
-                            if new_shapes >= COLD_ROW_SHAPE_BUDGET {
-                                deferred_shapes = true;
-                                return None;
-                            }
-                            let line = window.text_system().shape_line(
-                                text.clone(),
-                                font_size,
-                                &row_runs,
-                                None,
-                            );
-                            view.row_shape_cache.insert(
-                                row_index,
-                                CachedShapedResultRow {
-                                    text,
-                                    runs: row_runs,
-                                    font_size,
-                                    line: line.clone(),
-                                },
-                            );
-                            new_shapes += 1;
-                            Some(line)
-                        });
+                        .map(|cached| cached.line.clone());
+                    if line.is_none() {
+                        batch_text.push_str(&text);
+                        pending.push((
+                            row_index,
+                            text,
+                            row_runs,
+                            gpui::point(row_text_left, top),
+                            px(row_text_width),
+                            line_colors,
+                            fields,
+                        ));
+                        continue;
+                    }
                     if let Some(line) = line {
                         lines.push(ResultPaintLine {
                             line,
@@ -7410,12 +7412,42 @@ impl Element for ResultRowsElement {
                             width: px(row_text_width),
                             alignment: TextAlign::Left,
                             colors: line_colors,
+                            fields,
                         });
                     }
                 }
             }
-            if deferred_shapes {
-                cx.notify();
+            if !pending.is_empty() {
+                // All cells use the same font. Colors are applied while painting;
+                // do not split font shaping into a separate run for every cell.
+                let batch_runs = [grid_text_style.to_run(batch_text.len())];
+                let mut batch = window.text_system().shape_line(
+                    batch_text.into(),
+                    font_size,
+                    &batch_runs,
+                    None,
+                );
+                for (row_index, text, runs, origin, width, colors, fields) in pending {
+                    let (line, rest) = batch.split_at(text.len());
+                    batch = rest;
+                    view.row_shape_cache.insert(
+                        row_index,
+                        CachedShapedResultRow {
+                            text,
+                            runs,
+                            font_size,
+                            line: line.clone(),
+                        },
+                    );
+                    lines.push(ResultPaintLine {
+                        line,
+                        origin,
+                        width,
+                        alignment: TextAlign::Left,
+                        colors,
+                        fields,
+                    });
+                }
             }
             ResultRowsPrepaint {
                 quads,
@@ -7460,46 +7492,73 @@ impl Element for ResultRowsElement {
         window.paint_layer(bounds, |window| {
             for painted in prepaint.lines.drain(..) {
                 let line = painted.line;
-                let x = match painted.alignment {
-                    TextAlign::Right => painted.origin.x + painted.width - line.width(),
-                    TextAlign::Center => painted.origin.x + (painted.width - line.width()) / 2.,
-                    TextAlign::Left => painted.origin.x,
-                };
                 let baseline = painted.origin.y
                     + (px(ROW_HEIGHT) - line.ascent - line.descent) / 2.
                     + line.ascent;
-                let mut line_colors = painted.colors.into_iter();
-                let mut color_end = 0;
-                let mut color = line_colors
-                    .next()
-                    .map(|(end, color)| {
-                        color_end = end;
-                        color
-                    })
-                    .unwrap_or(colors.text);
-                for run in &line.runs {
-                    for glyph in &run.glyphs {
-                        while glyph.index >= color_end {
-                            let Some((end, next)) = line_colors.next() else {
-                                break;
-                            };
-                            color_end = end;
-                            color = next;
-                        }
-                        let origin = gpui::point(x, baseline) + glyph.position;
-                        if glyph.is_emoji {
-                            let _ =
-                                window.paint_emoji(origin, run.font_id, glyph.id, line.font_size);
-                        } else {
-                            let _ = window.paint_glyph(
-                                origin,
-                                run.font_id,
-                                glyph.id,
-                                line.font_size,
-                                color,
-                            );
-                        }
+                let fields = if painted.fields.is_empty() {
+                    vec![(
+                        0..line.len(),
+                        painted.origin.x,
+                        painted.width,
+                        painted.alignment == TextAlign::Right,
+                    )]
+                } else {
+                    painted.fields
+                };
+                for (field_index, (range, left, width, right_aligned)) in
+                    fields.into_iter().enumerate()
+                {
+                    if range.is_empty() || width <= px(0.) {
+                        continue;
                     }
+                    let start_x = line.x_for_index(range.start);
+                    let text_width = line.x_for_index(range.end) - start_x;
+                    let x = left - start_x
+                        + if right_aligned {
+                            (width - text_width).max(px(0.))
+                        } else {
+                            px(0.)
+                        };
+                    let clip_left = if field_index == 0 {
+                        left
+                    } else {
+                        left.max(bounds.left() + px(ROW_NUMBER_WIDTH))
+                    };
+                    let clip = gpui::Bounds::new(
+                        gpui::point(clip_left, painted.origin.y),
+                        gpui::size((left + width - clip_left).max(px(0.)), px(ROW_HEIGHT)),
+                    );
+                    window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                        for run in &line.runs {
+                            for glyph in &run.glyphs {
+                                if !range.contains(&glyph.index) {
+                                    continue;
+                                }
+                                let color = painted
+                                    .colors
+                                    .iter()
+                                    .find(|(end, _)| glyph.index < *end)
+                                    .map_or(colors.text, |(_, color)| *color);
+                                let origin = gpui::point(x, baseline) + glyph.position;
+                                if glyph.is_emoji {
+                                    let _ = window.paint_emoji(
+                                        origin,
+                                        run.font_id,
+                                        glyph.id,
+                                        line.font_size,
+                                    );
+                                } else {
+                                    let _ = window.paint_glyph(
+                                        origin,
+                                        run.font_id,
+                                        glyph.id,
+                                        line.font_size,
+                                        color,
+                                    );
+                                }
+                            }
+                        }
+                    });
                 }
             }
         });
@@ -9824,6 +9883,13 @@ mod tests {
         let shaped_count = |view: &ResultsView| view.row_shape_cache.len();
         let initially_shaped = view.read_with(&cx, |view, _| shaped_count(view));
         assert!(initially_shaped > 0);
+        let visible_rows = (f32::from(cx.debug_bounds("result-row-viewport").unwrap().size.height)
+            / ROW_HEIGHT)
+            .ceil() as usize;
+        assert!(
+            initially_shaped >= visible_rows.min(100),
+            "the first paint must not leave visible rows blank"
+        );
         assert!(
             initially_shaped < 100,
             "offscreen rows must remain unshaped"
