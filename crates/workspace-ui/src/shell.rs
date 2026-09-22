@@ -1650,6 +1650,7 @@ struct ObjectBrowserActionButtonView {
 
 struct ObjectBrowserRowsPrepaint {
     quads: Vec<gpui::PaintQuad>,
+    icons: Vec<(Bounds<Pixels>, IconName, Hsla)>,
     lines: Vec<(CachedPanelLine, gpui::Point<Pixels>, Pixels, TextAlign)>,
 }
 
@@ -1708,6 +1709,7 @@ impl Element for ObjectBrowserRowsElement {
             let Some(browser) = pane.object_browsers.get(&self.item_id) else {
                 return ObjectBrowserRowsPrepaint {
                     quads: Vec::new(),
+                    icons: Vec::new(),
                     lines: Vec::new(),
                 };
             };
@@ -1719,6 +1721,7 @@ impl Element for ObjectBrowserRowsElement {
             let visible = (f32::from(viewport.size.height) / 34.).ceil() as usize + 2;
             let last = (first + visible).min(browser.visible_row_count());
             let mut quads = Vec::with_capacity(visible * 3);
+            let mut icons = Vec::with_capacity(visible);
             let mut lines = Vec::with_capacity(visible * 5);
             for index in first..last {
                 let Some(&row_index) = browser.visible_indices.get(index) else {
@@ -1739,11 +1742,12 @@ impl Element for ObjectBrowserRowsElement {
                     ),
                     colors.subtle_border,
                 ));
-                quads.push(gpui::fill(
+                icons.push((
                     Bounds::new(
-                        gpui::point(row_bounds.left() + px(10.), row_bounds.top() + px(9.)),
-                        gpui::size(px(2.), px(16.)),
+                        gpui::point(row_bounds.left() + px(10.), row_bounds.top() + px(10.)),
+                        gpui::size(px(14.), px(14.)),
                     ),
+                    schema_object_kind_icon(row.source.object_kind),
                     ObjectGroupKind::from_object_kind(row.source.object_kind).color(colors),
                 ));
                 let cached = browser.row_line_cache.borrow().get(&row_index).cloned();
@@ -1797,13 +1801,12 @@ impl Element for ObjectBrowserRowsElement {
                     }
                     cache.insert(row_index, shaped.clone());
                 }
-                let left = bounds.left() + px(20.);
-                let right = bounds.right() - px(12.);
+                let left = bounds.left() + px(32.);
                 let gap = px(16.);
-                let comment_left = right - px(220.);
-                let modified_left = comment_left - gap - px(155.);
-                let rows_left = modified_left - gap - px(80.);
-                let type_left = rows_left - gap - px(110.);
+                let type_left = bounds.left() + px(328.);
+                let rows_left = type_left + px(110.) + gap;
+                let modified_left = rows_left + px(80.) + gap;
+                let comment_left = modified_left + px(155.) + gap;
                 lines.push((
                     shaped.name,
                     gpui::point(left, top),
@@ -1836,7 +1839,11 @@ impl Element for ObjectBrowserRowsElement {
                     ));
                 }
             }
-            ObjectBrowserRowsPrepaint { quads, lines }
+            ObjectBrowserRowsPrepaint {
+                quads,
+                icons,
+                lines,
+            }
         }
     }
 
@@ -1848,14 +1855,31 @@ impl Element for ObjectBrowserRowsElement {
         _: &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) {
         for quad in prepaint.quads.drain(..) {
             window.paint_quad(quad);
         }
+        for (bounds, icon, color) in prepaint.icons.drain(..) {
+            let _ = window.paint_svg(
+                bounds,
+                icon.path().into(),
+                None,
+                Default::default(),
+                color,
+                cx,
+            );
+        }
         window.paint_layer(bounds, |window| {
             for (line, origin, width, alignment) in prepaint.lines.drain(..) {
-                paint_cached_panel_line(&line, origin, px(34.), alignment, width, window);
+                window.with_content_mask(
+                    Some(gpui::ContentMask {
+                        bounds: Bounds::new(origin, gpui::size(width, px(34.))),
+                    }),
+                    |window| {
+                        paint_cached_panel_line(&line, origin, px(34.), alignment, width, window);
+                    },
+                );
             }
         });
     }
@@ -6775,6 +6799,7 @@ impl Pane {
                         cx.notify();
                     }))
                     .child(format!("{} {}", index + 1, group.label()))
+                    .child(icon(group.icon(), group.color(colors), 12.))
             })
             .collect::<Vec<_>>();
         div()
@@ -7077,7 +7102,8 @@ impl Pane {
                         div()
                             .debug_selector(|| "object-browser-header-name".into())
                             .min_w_0()
-                            .flex_1()
+                            .w(px(300.))
+                            .flex_none()
                             .child("NAME"),
                     )
                     .child(
