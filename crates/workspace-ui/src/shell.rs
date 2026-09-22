@@ -8310,7 +8310,7 @@ impl gpui::Render for Pane {
             .as_ref()
             .is_some_and(|item| self.pending_close_item == Some(item.id))
         {
-            colors.warning_muted
+            colors.surface.blend(colors.warning_muted)
         } else if active.as_ref().is_some_and(|item| {
             self.database_ddl_texts.contains_key(&item.id)
                 || self.database_json_texts.contains_key(&item.id)
@@ -8323,6 +8323,11 @@ impl gpui::Render for Pane {
             colors.toolbar
         } else {
             colors.background
+        };
+        let tab_bar_background = if self.pending_close_item.is_some() {
+            colors.background
+        } else {
+            active_tab_background
         };
 
         let has_tab_drag_preview =
@@ -8387,7 +8392,7 @@ impl gpui::Render for Pane {
                     .flex()
                     .items_stretch()
                     .relative()
-                    .bg(active_tab_background)
+                    .bg(tab_bar_background)
                     .child(
                         div()
                             .debug_selector(|| "pane-history-actions".into())
@@ -8797,7 +8802,7 @@ impl gpui::Render for Pane {
                             // The pane splitter owns the outer edge so two
                             // side-by-side panes share one divider line.
                             .border_color(colors.subtle_border)
-                            .bg(active_tab_background)
+                            .bg(tab_bar_background)
                             .children(active.as_ref().and_then(|item| self.results.get(&item.id)).filter(|result| result.read(cx).collapsed).map(|result| {
                                 let result = result.clone();
                                 IconButton::new(("restore-results", pane_id as usize), IconName::Table, "Show results")
@@ -8961,7 +8966,7 @@ impl gpui::Render for Pane {
                     .px_3()
                     .border_b_1()
                     .border_color(colors.warning)
-                    .bg(gpui::Hsla { a: 1., ..colors.elevated_surface })
+                    .bg(colors.surface.blend(colors.warning_muted))
                     .text_sm()
                     .child(icon(IconName::Warning, colors.warning, 14.))
                     .child(
@@ -8971,7 +8976,7 @@ impl gpui::Render for Pane {
                             .truncate()
                             .child(format!("Discard changes to {}?", item.title)),
                     )
-                    .child(KeyBinding::new("Esc / k"))
+                    .child(KeyBinding::new("k"))
                     .child(
                         Button::new(("keep-editing", item_id as usize), "Keep editing")
                             .tone(ButtonTone::Ghost)
