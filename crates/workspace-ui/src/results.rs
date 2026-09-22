@@ -3290,20 +3290,20 @@ impl ResultsView {
     }
 
     fn toggle_column_sort(&mut self, column: usize, cx: &mut Context<Self>) {
-        if self.sorts.contains(&(column, SortDirection::Descending)) {
-            self.set_sort(column, None, cx);
-            return;
-        }
         if let Some((_, direction)) = self.sorts.iter_mut().find(|(index, _)| *index == column) {
             *direction = match direction {
                 SortDirection::Ascending => SortDirection::Descending,
-                SortDirection::Descending => unreachable!("descending sort was cleared above"),
+                SortDirection::Descending => SortDirection::Ascending,
             };
             // Toggling direction must preserve multi-column sort priority.
             self.rebuild_display_rows(cx);
         } else {
-            self.set_sort(column, Some(SortDirection::Ascending), cx);
+            self.set_sort(column, Some(SortDirection::Descending), cx);
         }
+    }
+
+    fn sort_is_altered(&self, column: usize) -> bool {
+        self.sorts.contains(&(column, SortDirection::Descending))
     }
 
     fn cycle_active_filter_operator(&mut self, cx: &mut Context<Self>) {
@@ -4753,21 +4753,6 @@ impl ResultsView {
                                             })),
                                     )
                             }))
-                            .child(
-                                IconButton::new(
-                                    "copy-result-cell",
-                                    IconName::Copy,
-                                    "Copy highlighted fields",
-                                )
-                                .square(px(24.))
-                                .icon_size(13.)
-                                .tooltip("Copy highlighted fields")
-                                .on_click(cx.listener(
-                                    |view, _, window, cx| {
-                                        view.copy_selected_cell(&CopySelectedCell, window, cx)
-                                    },
-                                )),
-                            )
                     })),
             )
     }
@@ -7112,7 +7097,7 @@ impl Element for ResultHeaderElement {
                         } else {
                             colors.muted_text
                         };
-                        let sort_color = if sort_priority.is_some() {
+                        let sort_color = if view.sort_is_altered(source_column) {
                             colors.accent
                         } else {
                             colors.muted_text
@@ -9726,14 +9711,15 @@ mod tests {
             .debug_bounds("sort-result-column-0")
             .expect("header sort button");
         let selected_before = view.read_with(&cx, |view, _| view.selected);
+        assert!(!view.read_with(&cx, |view, _| view.sort_is_altered(0)));
         // Exercise the bottom of the painted arrow, outside the old hit target.
         for (direction, position) in [
             (
-                Some(SortDirection::Ascending),
+                Some(SortDirection::Descending),
                 gpui::point(sort.center().x, header.top() + px(25.)),
             ),
+            (Some(SortDirection::Ascending), sort.center()),
             (Some(SortDirection::Descending), sort.center()),
-            (None, sort.center()),
         ] {
             cx.simulate_click(position, Modifiers::default());
             cx.run_until_parked();
@@ -9742,6 +9728,10 @@ mod tests {
                 selected_before
             );
             assert!(cx.debug_bounds("result-grid-transform-editor").is_none());
+            assert_eq!(
+                view.read_with(&cx, |view, _| view.sort_is_altered(0)),
+                direction == Some(SortDirection::Descending)
+            );
             assert_eq!(
                 view.read_with(&cx, |view, _| view.sorts.clone()),
                 direction

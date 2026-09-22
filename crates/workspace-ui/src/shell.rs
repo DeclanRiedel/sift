@@ -8306,11 +8306,15 @@ impl gpui::Render for Pane {
         // Join the selected tab and actions to the first surface below them.
         // Objects and run configurations have their own toolbar, like DDL/JSON
         // and the instance configuration editor; plain SQL starts at the editor.
+        let close_surface = colors.toolbar.blend(gpui::Hsla {
+            a: 0.06,
+            ..colors.warning
+        });
         let active_tab_background = if active
             .as_ref()
             .is_some_and(|item| self.pending_close_item == Some(item.id))
         {
-            colors.surface.blend(colors.warning_muted)
+            close_surface
         } else if active.as_ref().is_some_and(|item| {
             self.database_ddl_texts.contains_key(&item.id)
                 || self.database_json_texts.contains_key(&item.id)
@@ -8965,8 +8969,8 @@ impl gpui::Render for Pane {
                     .gap_2()
                     .px_3()
                     .border_b_1()
-                    .border_color(colors.warning)
-                    .bg(colors.surface.blend(colors.warning_muted))
+                    .border_color(colors.subtle_border)
+                    .bg(close_surface)
                     .text_sm()
                     .child(icon(IconName::Warning, colors.warning, 14.))
                     .child(
@@ -8976,9 +8980,8 @@ impl gpui::Render for Pane {
                             .truncate()
                             .child(format!("Discard changes to {}?", item.title)),
                     )
-                    .child(KeyBinding::new("k"))
                     .child(
-                        Button::new(("keep-editing", item_id as usize), "Keep editing")
+                        Button::new(("keep-editing", item_id as usize), "Keep editing · k")
                             .tone(ButtonTone::Ghost)
                             .on_click(cx.listener(move |pane, _, window, cx| {
                                 pane.pending_close_item = None;
@@ -8991,18 +8994,16 @@ impl gpui::Render for Pane {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(KeyBinding::new("s"))
                             .child(
-                                Button::new(("save-dirty-item", item_id as usize), "Save")
+                                Button::new(("save-dirty-item", item_id as usize), "Save · s")
                                     .tone(ButtonTone::Accent)
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.emit(PaneEvent::SaveItemRequested { item_id });
                                     })),
                             )
                     }))
-                    .child(KeyBinding::new("d"))
                     .child(
-                        Button::new(("discard-dirty-item", item_id as usize), "Discard")
+                        Button::new(("discard-dirty-item", item_id as usize), "Discard · d")
                             .tone(ButtonTone::DangerGhost)
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(PaneEvent::DiscardItemRequested { item_id });

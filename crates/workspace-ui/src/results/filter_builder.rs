@@ -109,7 +109,22 @@ mod tests {
         view.update_in(&mut cx, |view, window, cx| {
             view.open_filter_builder(0, window, cx)
         });
+        let before = cx
+            .debug_bounds("result-grid-transform-editor")
+            .expect("filter builder");
         cx.simulate_keystrokes("c");
+        assert_eq!(
+            cx.debug_bounds("result-grid-transform-editor"),
+            Some(before),
+            "opening a choice must not resize the builder"
+        );
+        let field = cx.debug_bounds("filter-column-0").expect("column selector");
+        let menu = cx
+            .debug_bounds("filter-choice-menu")
+            .expect("anchored choices");
+        assert_eq!(menu.left(), field.left());
+        assert!(menu.top() >= field.bottom());
+        assert!(menu.size.width < before.size.width);
         assert!(view.read_with(&cx, |view, _| view
             .filter_draft
             .as_ref()
@@ -254,6 +269,159 @@ impl FilterDraft {
 }
 
 impl ResultsView {
+    fn render_filter_choice_field(
+        &self,
+        group: usize,
+        row: usize,
+        column: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let draft = self.filter_draft.as_ref().unwrap();
+        let condition = &draft.groups[group].conditions[row].condition;
+        let colors = cx.theme().colors;
+        let label = if column {
+            self.rendered_columns[condition.column].name.clone()
+        } else {
+            filter_operator_label(condition.operator).into()
+        };
+        let active = draft.picker == Some((group, row, column));
+        let id = group * 64 + row;
+        let choices = if active {
+            self.filter_choices(cx)
+        } else {
+            Vec::new()
+        };
+        div()
+            .relative()
+            .w(px(if column { 190. } else { 150. }))
+            .flex_none()
+            .child(
+                div()
+                    .id((
+                        if column {
+                            "filter-column"
+                        } else {
+                            "filter-operator"
+                        },
+                        id,
+                    ))
+                    .debug_selector(move || {
+                        format!("filter-{}-{id}", if column { "column" } else { "operator" })
+                    })
+                    .role(gpui::Role::Button)
+                    .aria_label(if column {
+                        "Choose column"
+                    } else {
+                        "Choose operator"
+                    })
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(if active {
+                        colors.accent
+                    } else {
+                        colors.subtle_border
+                    })
+                    .bg(colors.surface)
+                    .hover(|field| field.bg(colors.hovered_surface))
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        cx.stop_propagation();
+                        view.filter_picker(group, row, column, window, cx);
+                    }))
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(label))
+                    .child(icon(IconName::ChevronDown, colors.muted_text, 12.)),
+            )
+            .children(active.then(|| {
+                div().absolute().top_full().left_0().child(
+                    deferred(
+                        anchored().anchor(gpui::Anchor::TopLeft).child(
+                            div()
+                                .id("filter-choice-menu")
+                                .debug_selector(|| "filter-choice-menu".into())
+                                .w(px(264.))
+                                .p_1()
+                                .mt_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.strong_border)
+                                .bg(gpui::Hsla {
+                                    a: 1.,
+                                    ..colors.elevated_surface
+                                })
+                                .shadow_sm()
+                                .occlude()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_mouse_down_out(cx.listener(|view, _, window, cx| {
+                                    if let Some(draft) = &mut view.filter_draft {
+                                        draft.picker = None;
+                                        draft.focus.focus(window, cx);
+                                        cx.notify();
+                                    }
+                                }))
+                                .child(
+                                    div()
+                                        .px_1()
+                                        .pb_1()
+                                        .border_b_1()
+                                        .border_color(colors.subtle_border)
+                                        .child(draft.search.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id("filter-picker-options")
+                                        .max_h(px(196.))
+                                        .overflow_y_scroll()
+                                        .when(choices.is_empty(), |list| {
+                                            list.child(
+                                                div()
+                                                    .p_2()
+                                                    .text_sm()
+                                                    .text_color(colors.muted_text)
+                                                    .child("No matching choices"),
+                                            )
+                                        })
+                                        .children(choices.into_iter().enumerate().map(
+                                            |(position, (index, label))| {
+                                                div()
+                                                    .id(("filter-choice", index))
+                                                    .h(px(28.))
+                                                    .px_2()
+                                                    .flex()
+                                                    .items_center()
+                                                    .rounded_sm()
+                                                    .text_sm()
+                                                    .when(
+                                                        position == draft.picker_selected,
+                                                        |item| item.bg(colors.active_surface),
+                                                    )
+                                                    .hover(|item| item.bg(colors.hovered_surface))
+                                                    .on_click(cx.listener(
+                                                        move |view, _, window, cx| {
+                                                            cx.stop_propagation();
+                                                            view.choose_filter_option(index, cx);
+                                                            view.filter_draft
+                                                                .as_ref()
+                                                                .unwrap()
+                                                                .focus
+                                                                .focus(window, cx);
+                                                        },
+                                                    ))
+                                                    .child(div().min_w_0().truncate().child(label))
+                                            },
+                                        )),
+                                ),
+                        ),
+                    )
+                    .with_priority(3),
+                )
+            }))
+            .into_any_element()
+    }
+
     fn filter_choices(&self, cx: &App) -> Vec<(usize, String)> {
         let Some(draft) = &self.filter_draft else {
             return Vec::new();
@@ -391,9 +559,7 @@ impl ResultsView {
                 value: String::new(),
                 enabled: true,
             },
-            input: cx.new(|cx| {
-                TextInput::new("", "Value (empty string allowed)", cx).aria_label("Filter value")
-            }),
+            input: cx.new(|cx| TextInput::new("", "Value", cx).aria_label("Filter value")),
         }
     }
 
@@ -471,12 +637,8 @@ impl ResultsView {
                             .into_iter()
                             .map(|condition| {
                                 let input = cx.new(|cx| {
-                                    TextInput::new(
-                                        condition.value.clone(),
-                                        "Value (empty string allowed)",
-                                        cx,
-                                    )
-                                    .aria_label("Filter value")
+                                    TextInput::new(condition.value.clone(), "Value", cx)
+                                        .aria_label("Filter value")
                                 });
                                 DraftCondition { condition, input }
                             })
@@ -671,7 +833,7 @@ impl ResultsView {
                                         cx.notify();
                                     })),
                             )
-                            .child(
+                            .children((draft.groups.len() > 1).then(|| {
                                 Button::new(("filter-remove-group", group_index), "Remove group")
                                     .tone(ButtonTone::Ghost)
                                     .on_click(cx.listener(move |view, _, _, cx| {
@@ -679,8 +841,8 @@ impl ResultsView {
                                         draft.picker = None;
                                         draft.groups.remove(group_index);
                                         cx.notify();
-                                    })),
-                            ),
+                                    }))
+                            })),
                     )
                     .children(group.conditions.iter().enumerate().map(|(row_index, row)| {
                         let id = group_index * 64 + row_index;
@@ -694,7 +856,13 @@ impl ResultsView {
                                 + row_index;
                         let condition = &row.condition;
                         div()
-                            .when(selected, |row| row.bg(colors.active_surface))
+                            .border_l_2()
+                            .border_color(if selected {
+                                colors.accent
+                            } else {
+                                colors.subtle_border
+                            })
+                            .pl_2()
                             .flex()
                             .flex_wrap()
                             .items_center()
@@ -715,45 +883,30 @@ impl ResultsView {
                                     },
                                 )),
                             )
-                            .child(
-                                div().w(px(160.)).overflow_hidden().child(
-                                    Button::new(
-                                        ("filter-column", id),
-                                        self.rendered_columns[condition.column].name.clone(),
-                                    )
-                                    .on_click(cx.listener(
-                                        move |view, _, window, cx| {
-                                            view.filter_picker(
-                                                group_index,
-                                                row_index,
-                                                true,
-                                                window,
-                                                cx,
-                                            )
-                                        },
-                                    )),
-                                ),
-                            )
-                            .child(
-                                Button::new(
-                                    ("filter-operator", id),
-                                    filter_operator_label(condition.operator),
-                                )
-                                .on_click(cx.listener(
-                                    move |view, _, window, cx| {
-                                        view.filter_picker(
-                                            group_index,
-                                            row_index,
-                                            false,
-                                            window,
-                                            cx,
-                                        )
-                                    },
-                                )),
-                            )
+                            .child(self.render_filter_choice_field(
+                                group_index,
+                                row_index,
+                                true,
+                                cx,
+                            ))
+                            .child(self.render_filter_choice_field(
+                                group_index,
+                                row_index,
+                                false,
+                                cx,
+                            ))
                             .when(condition.operator.requires_value(), |row_element| {
-                                row_element
-                                    .child(div().w(px(200.)).h(px(28.)).child(row.input.clone()))
+                                row_element.child(
+                                    div()
+                                        .w(px(220.))
+                                        .h(px(28.))
+                                        .px_2()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(colors.subtle_border)
+                                        .bg(colors.surface)
+                                        .child(row.input.clone()),
+                                )
                             })
                             .child(
                                 Button::new(("filter-remove-condition", id), "×")
@@ -768,44 +921,6 @@ impl ResultsView {
                     }))
             })
             .collect::<Vec<_>>();
-        let picker = draft.picker.map(|_| {
-            let choices = self.filter_choices(cx);
-            div()
-                .p_2()
-                .border_1()
-                .border_color(colors.accent)
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(draft.search.clone())
-                .child(
-                    div()
-                        .id("filter-picker-options")
-                        .max_h(px(120.))
-                        .overflow_y_scroll()
-                        .children(choices.into_iter().enumerate().map(
-                            |(position, (index, label))| {
-                                div()
-                                    .when(position == draft.picker_selected, |row| {
-                                        row.bg(colors.active_surface)
-                                    })
-                                    .child(
-                                        Button::new(("filter-choice", index), label)
-                                            .tone(ButtonTone::Ghost)
-                                            .on_click(cx.listener(move |view, _, window, cx| {
-                                                view.choose_filter_option(index, cx);
-                                                view.filter_draft
-                                                    .as_ref()
-                                                    .unwrap()
-                                                    .focus
-                                                    .focus(window, cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                            },
-                        )),
-                )
-        });
         div()
             .id("result-grid-transform-editor")
             .track_focus(&draft.focus)
@@ -893,18 +1008,12 @@ impl ResultsView {
                     .py_1()
                     .child("Filter")
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted_text)
-                            .child("j/k row · c column · o operator · Enter value"),
-                    )
-                    .child(
                         Button::new(
                             "filter-scope",
                             if draft.database {
-                                "Scope: Database query"
+                                "Database query"
                             } else {
-                                "Scope: Loaded rows"
+                                "Loaded rows"
                             },
                         )
                         .tone(ButtonTone::Ghost)
@@ -914,7 +1023,7 @@ impl ResultsView {
                             cx.notify();
                         })),
                     )
-                    .child(
+                    .children((draft.groups.len() > 1).then(|| {
                         Button::new(
                             "filter-root-logic",
                             format!("Match {} groups", logic_label(draft.logic)),
@@ -923,8 +1032,8 @@ impl ResultsView {
                         .on_click(cx.listener(|view, _, _, cx| {
                             toggle(&mut view.filter_draft.as_mut().unwrap().logic);
                             cx.notify();
-                        })),
-                    )
+                        }))
+                    }))
                     .child(div().text_xs().text_color(colors.muted_text).child(format!(
                         "{} / {} loaded rows{}",
                         self.display_rows.len(),
@@ -941,8 +1050,7 @@ impl ResultsView {
                     .id("filter-condition-scroll")
                     .max_h(px(180.))
                     .overflow_y_scroll()
-                    .children(groups)
-                    .children(picker),
+                    .children(groups),
             )
             .children(draft.find_open.then(|| {
                 div()
