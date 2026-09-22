@@ -5368,8 +5368,12 @@ impl ResultsView {
                                 })
                                 .absolute()
                                 .right(px(24.))
-                                .top(px(2.))
-                                .size(px(20.))
+                                .top_0()
+                                .w(px(20.))
+                                .h_full()
+                                .role(gpui::Role::Button)
+                                .aria_label("Filter column")
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     cx.stop_propagation();
                                     view.open_grid_transform(
@@ -5388,8 +5392,12 @@ impl ResultsView {
                                 })
                                 .absolute()
                                 .right(px(4.))
-                                .top(px(2.))
-                                .size(px(20.))
+                                .top_0()
+                                .w(px(20.))
+                                .h_full()
+                                .role(gpui::Role::Button)
+                                .aria_label("Toggle column sort direction")
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     cx.stop_propagation();
                                     view.focus_handle.focus(window, cx);
@@ -9714,9 +9722,21 @@ mod tests {
         let sort = cx
             .debug_bounds("sort-result-column-0")
             .expect("header sort button");
-        for direction in [SortDirection::Ascending, SortDirection::Descending] {
-            cx.simulate_click(sort.center(), Modifiers::default());
+        let selected_before = view.read_with(&cx, |view, _| view.selected);
+        // Exercise the bottom of the painted arrow, outside the old hit target.
+        for (direction, position) in [
+            (
+                SortDirection::Ascending,
+                gpui::point(sort.center().x, header.top() + px(25.)),
+            ),
+            (SortDirection::Descending, sort.center()),
+        ] {
+            cx.simulate_click(position, Modifiers::default());
             cx.run_until_parked();
+            assert_eq!(
+                view.read_with(&cx, |view, _| view.selected),
+                selected_before
+            );
             assert!(cx.debug_bounds("result-grid-transform-editor").is_none());
             assert_eq!(
                 view.read_with(&cx, |view, _| view.sorts.clone()),

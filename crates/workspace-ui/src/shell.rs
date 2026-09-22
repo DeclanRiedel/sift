@@ -8947,6 +8947,7 @@ impl gpui::Render for Pane {
                 );
                 deferred(div()
                     .id(("dirty-close-strip", item_id as usize))
+                    .debug_selector(|| "dirty-close-strip".into())
                     .absolute()
                     .top(theme.metrics.tab_height)
                     .left_0()
@@ -8960,7 +8961,7 @@ impl gpui::Render for Pane {
                     .px_3()
                     .border_b_1()
                     .border_color(colors.warning)
-                    .bg(colors.warning_muted)
+                    .bg(gpui::Hsla { a: 1., ..colors.elevated_surface })
                     .text_sm()
                     .child(icon(IconName::Warning, colors.warning, 14.))
                     .child(
@@ -11007,8 +11008,7 @@ impl WorkspaceShell {
             })
             .collect();
         let query_input = cx.new(|cx| {
-            TextInput::new("", "Search commands or choose a prefix below", cx)
-                .aria_label("Command palette")
+            TextInput::new("", "Search · > / @ $ ^ # ? & !", cx).aria_label("Command palette")
         });
         let query_history_input = cx.new(|cx| {
             TextInput::new("", "Search query history…", cx).aria_label("Search query history")
@@ -46757,9 +46757,14 @@ mod tests {
         workspace.update_in(&mut cx, |shell, window, cx| shell.focus_results(window, cx));
 
         for shortcut in ["ctrl-k t c", "ctrl-k w c"] {
-            let body_before = cx.debug_bounds("pane-body-1");
+            let body_before = cx.debug_bounds("pane-body-1").expect("pane body");
             cx.simulate_keystrokes(shortcut);
-            assert_eq!(cx.debug_bounds("pane-body-1"), body_before);
+            assert_eq!(cx.debug_bounds("pane-body-1"), Some(body_before));
+            let strip = cx
+                .debug_bounds("dirty-close-strip")
+                .expect("discard prompt");
+            assert_eq!(strip.top(), body_before.top());
+            assert_eq!(strip.size.width, body_before.size.width);
             workspace.read_with(&cx, |shell, cx| {
                 let pane = shell.panes[0].read(cx);
                 assert_eq!(pane.items.len(), 1);

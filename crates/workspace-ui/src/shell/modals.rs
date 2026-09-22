@@ -83,19 +83,6 @@ impl WorkspaceShell {
                         .w_full()
                         .flex()
                         .flex_col()
-                        .child(
-                            div().flex().flex_wrap().gap_2().px_2().py_1()
-                                .border_b_1().border_color(colors.subtle_border)
-                                .children([
-                                    (">", "Commands"), ("/", "Files"), ("@", "Objects"),
-                                    ("$", "Data"), ("^", "Checkpoints"), ("#", "Tabs"),
-                                    ("?", "Saved queries"), ("&", "Shared queries"), ("!", "History"),
-                                ].into_iter().map(|(prefix, label)| {
-                                    div().flex().items_center().gap_1().text_xs()
-                                        .text_color(colors.muted_text)
-                                        .child(KeyBinding::new(prefix)).child(label)
-                                })),
-                        )
                         .when(items.is_empty(), |palette| {
                             palette.child(
                                 div()
