@@ -3257,6 +3257,19 @@ impl ResultsView {
         self.rebuild_display_rows(cx);
     }
 
+    fn toggle_column_sort(&mut self, column: usize, cx: &mut Context<Self>) {
+        if let Some((_, direction)) = self.sorts.iter_mut().find(|(index, _)| *index == column) {
+            *direction = match direction {
+                SortDirection::Ascending => SortDirection::Descending,
+                SortDirection::Descending => SortDirection::Ascending,
+            };
+            // Toggling direction must preserve multi-column sort priority.
+            self.rebuild_display_rows(cx);
+        } else {
+            self.set_sort(column, Some(SortDirection::Ascending), cx);
+        }
+    }
+
     fn cycle_active_filter_operator(&mut self, cx: &mut Context<Self>) {
         const OPERATORS: [ResultFilterOperator; 12] = [
             ResultFilterOperator::Contains,
@@ -5379,12 +5392,8 @@ impl ResultsView {
                                 .size(px(20.))
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     cx.stop_propagation();
-                                    view.open_grid_transform(
-                                        source_column,
-                                        GridTransformTab::Sort,
-                                        window,
-                                        cx,
-                                    );
+                                    view.focus_handle.focus(window, cx);
+                                    view.toggle_column_sort(source_column, cx);
                                 })),
                         ),
                 )
@@ -9702,6 +9711,26 @@ mod tests {
         cx.simulate_click(close.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("result-grid-transform-editor").is_none());
+        let sort = cx
+            .debug_bounds("sort-result-column-0")
+            .expect("header sort button");
+        for direction in [SortDirection::Ascending, SortDirection::Descending] {
+            cx.simulate_click(sort.center(), Modifiers::default());
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("result-grid-transform-editor").is_none());
+            assert_eq!(
+                view.read_with(&cx, |view, _| view.sorts.clone()),
+                [(0, direction)]
+            );
+        }
+        view.update(&mut cx, |view, cx| {
+            view.set_sort(1, Some(SortDirection::Ascending), cx);
+            view.toggle_column_sort(0, cx);
+            assert_eq!(
+                view.sorts,
+                [(0, SortDirection::Ascending), (1, SortDirection::Ascending)]
+            );
+        });
     }
 
     #[gpui::test]

@@ -6314,7 +6314,7 @@ impl Pane {
             let retained_item_id = self.items[index].id;
             self.object_browsers.insert(retained_item_id, state);
             self.ensure_object_browser_rows(retained_item_id, cx);
-            self.items[index].title = "objs".into();
+            self.items[index].title = "objects".into();
             if index != 0 {
                 let item = self.items.remove(index);
                 self.items.insert(0, item);
@@ -6802,8 +6802,8 @@ impl Pane {
                         pane.refresh_object_browser_rows(item_id, cx);
                         cx.notify();
                     }))
-                    .child(format!("{} {}", index + 1, group.label()))
                     .child(icon(group.icon(), group.color(colors), 12.))
+                    .child(div().ml_1().child(group.label()))
             })
             .collect::<Vec<_>>();
         div()
@@ -6867,7 +6867,8 @@ impl Pane {
                                                 cx.notify();
                                             },
                                         ))
-                                        .child(connection_name),
+                                        .child(icon(IconName::Server, colors.muted_text, 12.))
+                                        .child(div().ml_1().truncate().child(connection_name)),
                                     )
                                     .when(connection_picker_open, |trigger| {
                                         trigger.child(
@@ -6947,7 +6948,8 @@ impl Pane {
                                             }
                                             cx.notify();
                                         }))
-                                        .child(catalog_name),
+                                        .child(icon(IconName::Database, colors.muted_text, 12.))
+                                        .child(div().ml_1().truncate().child(catalog_name)),
                                     )
                                     .when(catalog_picker_open, |trigger| {
                                         trigger.child(
@@ -7026,7 +7028,8 @@ impl Pane {
                                             }
                                             cx.notify();
                                         }))
-                                        .child(schema_name),
+                                        .child(icon(IconName::Folder, colors.muted_text, 12.))
+                                        .child(div().ml_1().truncate().child(schema_name)),
                                     )
                                     .when(schema_picker_open, |trigger| {
                                         trigger.child(
@@ -11004,7 +11007,7 @@ impl WorkspaceShell {
             })
             .collect();
         let query_input = cx.new(|cx| {
-            TextInput::new("", "Search commands · @ objects · / files", cx)
+            TextInput::new("", "Search commands or choose a prefix below", cx)
                 .aria_label("Command palette")
         });
         let query_history_input = cx.new(|cx| {
@@ -20560,7 +20563,7 @@ impl WorkspaceShell {
                     ItemPresentation {
                         id: item_id,
                         kind: ItemKind::Schema,
-                        title: "objs".into(),
+                        title: "objects".into(),
                         dirty: false,
                         source: None,
                         last_result: None,
@@ -20795,7 +20798,7 @@ impl WorkspaceShell {
             }
             pane.refresh_object_browser_rows(item_id, cx);
             if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
-                item.title = "objs".into();
+                item.title = "objects".into();
             }
             cx.notify();
         });
@@ -51782,7 +51785,7 @@ mod tests {
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().unwrap();
             assert_eq!(item.kind, ItemKind::Schema);
-            assert_eq!(item.title, "objs");
+            assert_eq!(item.title, "objects");
             assert_eq!(pane.items.first().map(|item| item.id), Some(item.id));
             let browser = pane.object_browsers.get(&item.id).unwrap();
             assert_eq!(browser.rows.len(), 4);
@@ -51917,7 +51920,7 @@ mod tests {
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().unwrap();
-            assert_eq!(item.title, "objs");
+            assert_eq!(item.title, "objects");
             let browser = &pane.object_browsers[&item.id];
             assert_eq!(browser.profile_id, 3);
             assert!(browser.rows.is_empty());
@@ -51959,7 +51962,7 @@ mod tests {
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             assert_eq!(pane.active_item().unwrap().title, "public.events");
-            assert_eq!(pane.items.first().unwrap().title, "objs");
+            assert_eq!(pane.items.first().unwrap().title, "objects");
         });
     }
 
@@ -52004,7 +52007,7 @@ mod tests {
         workspace.read_with(&cx, |shell, cx| {
             let pane = shell.panes[shell.active_pane].read(cx);
             let item = pane.active_item().expect("Objects tab");
-            assert_eq!(item.title, "objs");
+            assert_eq!(item.title, "objects");
             assert_eq!(
                 pane.items.first().map(|candidate| candidate.id),
                 Some(item.id)
