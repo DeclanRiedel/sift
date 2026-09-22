@@ -5741,6 +5741,10 @@ impl Pane {
     }
 
     fn forget_item(&mut self, item_id: u64) {
+        self.editors.remove(&item_id);
+        self.results.remove(&item_id);
+        self.result_subscriptions.remove(&item_id);
+        self.database_item_states.remove(&item_id);
         self.backward_items.retain(|id| *id != item_id);
         self.forward_items.retain(|id| *id != item_id);
         self.clean_documents.remove(&item_id);
@@ -8938,8 +8942,13 @@ impl gpui::Render for Pane {
                     item.kind,
                     ItemKind::Configuration | ItemKind::RunConfiguration
                 );
-                div()
+                deferred(div()
                     .id(("dirty-close-strip", item_id as usize))
+                    .absolute()
+                    .top(theme.metrics.tab_height)
+                    .left_0()
+                    .right_0()
+                    .occlude()
                     .h(theme.metrics.toolbar_height)
                     .flex_none()
                     .flex()
@@ -8989,7 +8998,7 @@ impl gpui::Render for Pane {
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(PaneEvent::DiscardItemRequested { item_id });
                             })),
-                    )
+                    )).with_priority(2)
             }))
             .child({
                 let body = div()
@@ -29421,8 +29430,9 @@ impl WorkspaceShell {
         if let Some(item) = pane.read(cx).active_item() {
             if self.item_needs_close_confirmation(pane, item.id, cx) {
                 let item_id = item.id;
-                pane.update(cx, |pane, _| {
+                pane.update(cx, |pane, cx| {
                     pane.pending_close_item = Some(item_id);
+                    cx.notify();
                 });
                 let focus = pane.read(cx).focus_handle.clone();
                 focus.focus(window, cx);
@@ -29448,11 +29458,12 @@ impl WorkspaceShell {
                 .map(|source| source.document_id)
         });
         let removed_item_id = self.panes.get(self.active_pane).and_then(|pane| {
-            pane.update(cx, |pane, _| {
+            pane.update(cx, |pane, cx| {
                 if !pane.items.is_empty() {
                     let removed = pane.items.remove(pane.active_item);
                     pane.forget_item(removed.id);
                     pane.active_item = pane.active_item.min(pane.items.len().saturating_sub(1));
+                    cx.notify();
                     Some(removed.id)
                 } else {
                     None
@@ -46743,7 +46754,9 @@ mod tests {
         workspace.update_in(&mut cx, |shell, window, cx| shell.focus_results(window, cx));
 
         for shortcut in ["ctrl-k t c", "ctrl-k w c"] {
+            let body_before = cx.debug_bounds("pane-body-1");
             cx.simulate_keystrokes(shortcut);
+            assert_eq!(cx.debug_bounds("pane-body-1"), body_before);
             workspace.read_with(&cx, |shell, cx| {
                 let pane = shell.panes[0].read(cx);
                 assert_eq!(pane.items.len(), 1);
@@ -46758,7 +46771,14 @@ mod tests {
             });
         }
         cx.simulate_keystrokes("ctrl-k t c d");
-        workspace.read_with(&cx, |shell, cx| assert_eq!(shell.active_item_count(cx), 0));
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.active_item_count(cx), 0);
+            let pane = shell.panes[0].read(cx);
+            assert!(!pane.editors.contains_key(&1));
+            assert!(!pane.results.contains_key(&1));
+            assert!(!pane.result_subscriptions.contains_key(&1));
+            assert!(!pane.database_item_states.contains_key(&1));
+        });
     }
 
     #[gpui::test]
