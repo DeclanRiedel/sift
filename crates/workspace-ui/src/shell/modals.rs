@@ -80,6 +80,7 @@ impl WorkspaceShell {
                             .into(),
                     };
                     div()
+                        .w_full()
                         .flex()
                         .flex_col()
                         .when(items.is_empty(), |palette| {
@@ -106,7 +107,7 @@ impl WorkspaceShell {
                                 })
                                 .map(|(idx, matched)| {
                                     let ranges = matched.ranges;
-                                    let (label, right, enabled, _key_binding) = match matched.item {
+                                    let (label, right, enabled, key_binding) = match matched.item {
                                         CommandPaletteItem::Command(command) => {
                                             let right = command.disabled_reason.clone().unwrap_or_else(|| {
                                                 if command.language.is_empty() {
@@ -232,7 +233,6 @@ impl WorkspaceShell {
                                         .justify_between()
                                         .gap_2()
                                         .h(px(PALETTE_ROW_HEIGHT))
-                                        .px_2()
                                         .rounded_sm()
                                         .when(!enabled, |row| {
                                             row.text_color(colors.muted_text)
@@ -247,25 +247,48 @@ impl WorkspaceShell {
                                                             colors.active_surface,
                                                         ));
                                                     }
-                                                    let label_width =
-                                                        (bounds.size.width - px(224.)).max(px(0.));
+                                                    let content = gpui::Bounds::new(
+                                                        bounds.origin + gpui::point(px(8.), px(0.)),
+                                                        gpui::size((bounds.size.width - px(16.)).max(px(0.)), bounds.size.height),
+                                                    );
+                                                    let right_width = (right_line.width() + px(12.)).min(content.size.width / 2.);
+                                                    let label_width = (content.size.width - right_width - px(16.)).max(px(0.));
+                                                    window.with_content_mask(Some(gpui::ContentMask {
+                                                        bounds: gpui::Bounds::new(content.origin, gpui::size(label_width, content.size.height)),
+                                                    }), |window| {
                                                     let _ = label_line.paint(
-                                                        bounds.origin,
+                                                        content.origin,
                                                         bounds.size.height,
                                                         TextAlign::Left,
                                                         Some(label_width),
                                                         window,
                                                         cx,
                                                     );
+                                                    });
                                                     if !right.is_empty() {
+                                                        if key_binding && enabled {
+                                                            let badge = gpui::Bounds::new(
+                                                                gpui::point(content.right() - right_width, bounds.top() + px(5.)),
+                                                                gpui::size(right_width, bounds.size.height - px(10.)),
+                                                            );
+                                                            window.paint_quad(gpui::quad(badge, px(3.), colors.surface,
+                                                                px(1.), colors.subtle_border, gpui::BorderStyle::Solid));
+                                                        }
+                                                        window.with_content_mask(Some(gpui::ContentMask {
+                                                            bounds: gpui::Bounds::new(
+                                                                gpui::point(content.right() - right_width + px(6.), content.top()),
+                                                                gpui::size((right_width - px(12.)).max(px(0.)), content.size.height),
+                                                            ),
+                                                        }), |window| {
                                                         let _ = right_line.paint(
-                                                            bounds.origin,
+                                                            content.origin,
                                                             bounds.size.height,
                                                             TextAlign::Right,
-                                                            Some(bounds.size.width),
+                                                            Some((content.size.width - px(6.)).max(px(0.))),
                                                             window,
                                                             cx,
                                                         );
+                                                        });
                                                     }
                                                 },
                                             )

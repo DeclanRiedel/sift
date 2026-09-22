@@ -1986,9 +1986,9 @@ impl Render for ObjectBrowserSelectionView {
             .absolute()
             .left_0()
             .top(px(selected as f32 * 34.))
-            .w(px(3.))
+            .right_0()
             .h(px(34.))
-            .bg(cx.theme().colors.accent)
+            .bg(cx.theme().colors.active_surface)
     }
 }
 
@@ -10994,7 +10994,10 @@ impl WorkspaceShell {
                 (definition.id, input)
             })
             .collect();
-        let query_input = cx.new(|cx| TextInput::new("", "", cx).aria_label("Command palette"));
+        let query_input = cx.new(|cx| {
+            TextInput::new("", "Search commands · @ objects · / files", cx)
+                .aria_label("Command palette")
+        });
         let query_history_input = cx.new(|cx| {
             TextInput::new("", "Search query history…", cx).aria_label("Search query history")
         });
