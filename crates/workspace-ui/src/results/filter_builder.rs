@@ -1,0 +1,1047 @@
+//! Draft-based inline filters. Inputs own their text; typing never scans the grid.
+use super::*;
+
+const OPERATORS: [ResultFilterOperator; 12] = [
+    ResultFilterOperator::Equals,
+    ResultFilterOperator::NotEquals,
+    ResultFilterOperator::Contains,
+    ResultFilterOperator::NotContains,
+    ResultFilterOperator::StartsWith,
+    ResultFilterOperator::EndsWith,
+    ResultFilterOperator::GreaterThan,
+    ResultFilterOperator::GreaterThanOrEqual,
+    ResultFilterOperator::LessThan,
+    ResultFilterOperator::LessThanOrEqual,
+    ResultFilterOperator::IsNull,
+    ResultFilterOperator::IsNotNull,
+];
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct FilterSpec {
+    pub logic: ResultFilterLogic,
+    pub groups: Vec<FilterGroup>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    #[gpui::test]
+    fn drafts_apply_multiple_conditions_cancel_and_guard_staged_edits(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| cx.open_window(Default::default(), |_, cx| cx.new(ResultsView::new)))
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let view = window.root(&mut cx).unwrap();
+        view.update(&mut cx, |view, cx| {
+            view.set_state(
+                ResultState::Ready(ResultData {
+                    columns: vec![ResultColumn {
+                        name: "amount".into(),
+                        type_label: "int64".into(),
+                        nullable: false,
+                    }],
+                    rows: (1..=5)
+                        .map(|value| Row::new(vec![Value::Int64(value)]))
+                        .collect(),
+                    ..ResultData::default()
+                }),
+                cx,
+            )
+        });
+        view.update_in(&mut cx, |view, window, cx| {
+            view.open_filter_builder(0, window, cx);
+            let original_projection = view.display_rows.clone();
+            let second = ResultsView::new_filter_condition(0, cx);
+            let draft = view.filter_draft.as_mut().unwrap();
+            let first = &mut draft.groups[0].conditions[0];
+            first.condition.operator = ResultFilterOperator::GreaterThan;
+            first.input.update(cx, |input, cx| input.set_text("1", cx));
+            draft.groups[0].conditions.push(second);
+            let second = &mut draft.groups[0].conditions[1];
+            second.condition.operator = ResultFilterOperator::LessThan;
+            second.input.update(cx, |input, cx| input.set_text("4", cx));
+            assert_eq!(
+                *view.display_rows,
+                [0, 1, 2, 3, 4],
+                "typing only changes the draft"
+            );
+            assert!(Arc::ptr_eq(&original_projection, &view.display_rows));
+            view.apply_filter_builder(window, cx);
+            assert_eq!(*view.display_rows, [1, 2]);
+            assert!(view.filter_draft.is_none());
+            view.open_filter_builder(0, window, cx);
+            view.filter_draft.as_mut().unwrap().groups[0].conditions[0]
+                .input
+                .update(cx, |input, cx| input.set_text("bad number", cx));
+            view.apply_filter_builder(window, cx);
+            assert!(view.filter_draft.as_ref().unwrap().error.is_some());
+            assert_eq!(*view.display_rows, [1, 2]);
+            view.close_grid_transform(window, cx);
+            view.open_filter_builder(0, window, cx);
+            assert_eq!(
+                view.filter_draft.as_ref().unwrap().groups[0].conditions[0]
+                    .input
+                    .read(cx)
+                    .text(),
+                "1"
+            );
+            view.filter_draft.as_mut().unwrap().groups[0].conditions[1]
+                .condition
+                .enabled = false;
+            view.set_staged_row_deletions(1, cx);
+            view.apply_filter_builder(window, cx);
+            assert_eq!(*view.display_rows, [1, 2]);
+            view.set_staged_row_deletions(0, cx);
+            view.apply_filter_builder(window, cx);
+            assert_eq!(*view.display_rows, [1, 2, 3, 4]);
+            let stored = view.take_active_result_set().unwrap();
+            view.restore_result_set(stored);
+            assert!(view.filter_draft.is_none());
+            assert_eq!(
+                view.applied_filter.as_ref().unwrap().groups[0]
+                    .conditions
+                    .len(),
+                2
+            );
+        });
+        view.update_in(&mut cx, |view, window, cx| {
+            view.open_filter_builder(0, window, cx)
+        });
+        cx.simulate_keystrokes("c");
+        assert!(view.read_with(&cx, |view, _| view
+            .filter_draft
+            .as_ref()
+            .unwrap()
+            .picker
+            .is_some()));
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |view, _| view
+            .filter_draft
+            .as_ref()
+            .unwrap()
+            .picker
+            .is_none()));
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |view, _| view.filter_draft.is_none()));
+    }
+
+    #[gpui::test]
+    fn builder_preserves_empty_strings_and_nulls_and_combines_groups(cx: &mut TestAppContext) {
+        let view = cx.new(ResultsView::new);
+        view.update(cx, |view, cx| {
+            view.set_state(
+                ResultState::Ready(ResultData {
+                    columns: vec![ResultColumn {
+                        name: "name".into(),
+                        type_label: "text".into(),
+                        nullable: true,
+                    }],
+                    rows: vec![
+                        Row::new(vec![Value::Text("".into())]),
+                        Row::new(vec![Value::Null]),
+                        Row::new(vec![Value::Text("other".into())]),
+                    ],
+                    ..ResultData::default()
+                }),
+                cx,
+            );
+            let condition = FilterCondition {
+                column: 0,
+                operator: ResultFilterOperator::Equals,
+                value: "".into(),
+                enabled: true,
+            };
+            view.applied_filter = Some(FilterSpec {
+                logic: ResultFilterLogic::Any,
+                groups: vec![
+                    FilterGroup {
+                        logic: ResultFilterLogic::All,
+                        conditions: vec![condition.clone()],
+                    },
+                    FilterGroup {
+                        logic: ResultFilterLogic::All,
+                        conditions: vec![FilterCondition {
+                            operator: ResultFilterOperator::IsNull,
+                            ..condition
+                        }],
+                    },
+                ],
+            });
+            view.rebuild_display_rows(cx);
+            assert_eq!(*view.display_rows, [0, 1]);
+            view.applied_filter.as_mut().unwrap().logic = ResultFilterLogic::All;
+            view.rebuild_display_rows(cx);
+            assert!(view.display_rows.is_empty());
+        });
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct FilterGroup {
+    pub logic: ResultFilterLogic,
+    pub conditions: Vec<FilterCondition>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct FilterCondition {
+    pub column: usize,
+    pub operator: ResultFilterOperator,
+    pub value: String,
+    pub enabled: bool,
+}
+
+struct DraftCondition {
+    condition: FilterCondition,
+    input: Entity<TextInput>,
+}
+
+struct DraftGroup {
+    logic: ResultFilterLogic,
+    conditions: Vec<DraftCondition>,
+}
+
+pub(super) struct FilterDraft {
+    focus: FocusHandle,
+    selected: usize,
+    picker_selected: usize,
+    logic: ResultFilterLogic,
+    groups: Vec<DraftGroup>,
+    database: bool,
+    find_open: bool,
+    error: Option<String>,
+    picker: Option<(usize, usize, bool)>, // group, condition, column (otherwise operator)
+    search: Entity<TextInput>,
+    _search_subscription: Subscription,
+}
+
+fn logic_label(logic: ResultFilterLogic) -> &'static str {
+    match logic {
+        ResultFilterLogic::All => "All",
+        ResultFilterLogic::Any => "Any",
+    }
+}
+
+fn toggle(logic: &mut ResultFilterLogic) {
+    *logic = match logic {
+        ResultFilterLogic::All => ResultFilterLogic::Any,
+        ResultFilterLogic::Any => ResultFilterLogic::All,
+    };
+}
+
+impl FilterDraft {
+    fn spec(&self, cx: &App) -> FilterSpec {
+        FilterSpec {
+            logic: self.logic,
+            groups: self
+                .groups
+                .iter()
+                .map(|group| FilterGroup {
+                    logic: group.logic,
+                    conditions: group
+                        .conditions
+                        .iter()
+                        .map(|row| FilterCondition {
+                            value: row.input.read(cx).text().to_owned(),
+                            ..row.condition.clone()
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl ResultsView {
+    fn filter_choices(&self, cx: &App) -> Vec<(usize, String)> {
+        let Some(draft) = &self.filter_draft else {
+            return Vec::new();
+        };
+        let Some((_, _, column)) = draft.picker else {
+            return Vec::new();
+        };
+        let query = draft.search.read(cx).text().to_lowercase();
+        let choices = if column {
+            self.rendered_columns
+                .iter()
+                .enumerate()
+                .map(|(index, col)| (index, col.name.to_string()))
+                .collect::<Vec<_>>()
+        } else {
+            OPERATORS
+                .iter()
+                .enumerate()
+                .map(|(index, operator)| (index, filter_operator_label(*operator).to_owned()))
+                .collect()
+        };
+        choices
+            .into_iter()
+            .filter(|(_, label)| label.to_lowercase().contains(&query))
+            .take(100)
+            .collect()
+    }
+
+    fn choose_filter_option(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(draft) = &mut self.filter_draft else {
+            return;
+        };
+        let Some((group, row, column)) = draft.picker.take() else {
+            return;
+        };
+        let condition = &mut draft.groups[group].conditions[row].condition;
+        if column {
+            condition.column = index;
+        } else {
+            condition.operator = OPERATORS[index];
+        }
+        cx.notify();
+    }
+
+    pub(super) fn render_filter_summary(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let spec = self.applied_filter.as_ref()?;
+        let count = spec
+            .groups
+            .iter()
+            .flat_map(|group| &group.conditions)
+            .filter(|condition| condition.enabled)
+            .count();
+        if count == 0 {
+            return None;
+        }
+        let column = spec
+            .groups
+            .iter()
+            .flat_map(|group| &group.conditions)
+            .next()?
+            .column;
+        let join = |logic| match logic {
+            ResultFilterLogic::All => " AND ",
+            ResultFilterLogic::Any => " OR ",
+        };
+        let summary = spec
+            .groups
+            .iter()
+            .filter_map(|group| {
+                let conditions = group
+                    .conditions
+                    .iter()
+                    .filter(|condition| condition.enabled)
+                    .map(|condition| {
+                        let value = if condition.operator.requires_value() {
+                            format!(
+                                " {:?}",
+                                condition.value.chars().take(80).collect::<String>()
+                            )
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "{} {}{value}",
+                            self.rendered_columns[condition.column].name,
+                            filter_operator_label(condition.operator)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (!conditions.is_empty())
+                    .then(|| format!("({})", conditions.join(join(group.logic))))
+            })
+            .collect::<Vec<_>>()
+            .join(join(spec.logic));
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .bg(cx.theme().colors.toolbar)
+                .child(div().flex_1().min_w_0().truncate().text_xs().child(summary))
+                .child(div().text_xs().child(format!(
+                    "Loaded rows · {count} conditions · {} / {} matched",
+                    self.display_rows.len(),
+                    self.rendered_rows.len()
+                )))
+                .child(
+                    Button::new("edit-result-filter", "Edit")
+                        .tone(ButtonTone::Ghost)
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.open_filter_builder(column, window, cx)
+                        })),
+                )
+                .child(
+                    Button::new("clear-result-filter", "Clear")
+                        .tone(ButtonTone::Ghost)
+                        .disabled(self.has_staged_changes())
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.applied_filter = Some(FilterSpec::default());
+                            view.rebuild_display_rows(cx);
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn new_filter_condition(column: usize, cx: &mut Context<Self>) -> DraftCondition {
+        DraftCondition {
+            condition: FilterCondition {
+                column,
+                operator: ResultFilterOperator::Equals,
+                value: String::new(),
+                enabled: true,
+            },
+            input: cx.new(|cx| {
+                TextInput::new("", "Value (empty string allowed)", cx).aria_label("Filter value")
+            }),
+        }
+    }
+
+    pub(super) fn open_filter_builder(
+        &mut self,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.filter_draft.is_none() {
+            let spec = self.applied_filter.clone().unwrap_or_else(|| FilterSpec {
+                logic: self.filter_logic,
+                groups: self
+                    .filter_group_logics
+                    .iter()
+                    .enumerate()
+                    .map(|(group, logic)| FilterGroup {
+                        logic: *logic,
+                        conditions: self
+                            .column_filters
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| {
+                                self.filter_is_active(*index)
+                                    && self.column_filter_groups[*index] == group
+                            })
+                            .map(|(index, value)| FilterCondition {
+                                column: index,
+                                operator: self.column_filter_operators[index],
+                                value: value.clone(),
+                                enabled: true,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            });
+            let search = cx.new(|cx| {
+                TextInput::new("", "Search choices…", cx).aria_label("Search filter choices")
+            });
+            let subscription = cx.subscribe_in(&search, window, |view, _, event, window, cx| {
+                if *event == TextInputEvent::Submitted {
+                    let selected = view
+                        .filter_draft
+                        .as_ref()
+                        .map_or(0, |draft| draft.picker_selected);
+                    if let Some((index, _)) = view.filter_choices(cx).get(selected).cloned() {
+                        view.choose_filter_option(index, cx);
+                        if let Some(draft) = &view.filter_draft {
+                            draft.focus.focus(window, cx);
+                        }
+                    }
+                } else if let Some(draft) = &mut view.filter_draft {
+                    draft.picker_selected = 0;
+                }
+                cx.notify();
+            });
+            self.filter_draft = Some(FilterDraft {
+                focus: cx.focus_handle(),
+                selected: 0,
+                picker_selected: 0,
+                logic: spec.logic,
+                database: false,
+                find_open: false,
+                error: None,
+                picker: None,
+                search,
+                _search_subscription: subscription,
+                groups: spec
+                    .groups
+                    .into_iter()
+                    .map(|group| DraftGroup {
+                        logic: group.logic,
+                        conditions: group
+                            .conditions
+                            .into_iter()
+                            .map(|condition| {
+                                let input = cx.new(|cx| {
+                                    TextInput::new(
+                                        condition.value.clone(),
+                                        "Value (empty string allowed)",
+                                        cx,
+                                    )
+                                    .aria_label("Filter value")
+                                });
+                                DraftCondition { condition, input }
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            });
+        }
+        let draft = self.filter_draft.as_mut().unwrap();
+        if draft.groups.is_empty() {
+            draft.groups.push(DraftGroup {
+                logic: ResultFilterLogic::All,
+                conditions: Vec::new(),
+            });
+        }
+        if !draft
+            .groups
+            .iter()
+            .flat_map(|group| &group.conditions)
+            .any(|row| row.condition.column == column)
+        {
+            draft.groups[0]
+                .conditions
+                .push(Self::new_filter_condition(column, cx));
+        }
+        self.grid_transform_column = Some(column);
+        self.grid_transform_tab = GridTransformTab::Filter;
+        draft.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn filter_picker(
+        &mut self,
+        group: usize,
+        row: usize,
+        column: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(draft) = &mut self.filter_draft {
+            draft.picker = Some((group, row, column));
+            draft.picker_selected = 0;
+            draft.search.update(cx, |input, cx| input.set_text("", cx));
+            draft.search.focus_handle(cx).focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn apply_filter_builder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft) = &self.filter_draft else {
+            return;
+        };
+        let spec = draft.spec(cx);
+        // Validate comparisons using observed scalar kinds, never display labels.
+        // Null-only/empty columns remain unknown and are validated by the server.
+        for condition in spec
+            .groups
+            .iter()
+            .flat_map(|group| &group.conditions)
+            .filter(|row| row.enabled)
+        {
+            let scalar_comparison = matches!(
+                condition.operator,
+                ResultFilterOperator::Equals
+                    | ResultFilterOperator::NotEquals
+                    | ResultFilterOperator::GreaterThan
+                    | ResultFilterOperator::GreaterThanOrEqual
+                    | ResultFilterOperator::LessThan
+                    | ResultFilterOperator::LessThanOrEqual
+            );
+            let numeric = self
+                .rendered_rows
+                .iter()
+                .filter_map(|row| row.get(condition.column))
+                .find(|cell| cell.class != CellClass::Null)
+                .is_some_and(|cell| cell.class == CellClass::Number);
+            if scalar_comparison
+                && numeric
+                && !condition.value.parse::<f64>().is_ok_and(f64::is_finite)
+            {
+                self.filter_draft.as_mut().unwrap().error = Some(format!(
+                    "{} requires a numeric value.",
+                    self.rendered_columns[condition.column].name
+                ));
+                cx.notify();
+                return;
+            }
+        }
+        if self.has_staged_changes() {
+            self.filter_draft.as_mut().unwrap().error =
+                Some("Apply or discard staged data edits before filtering.".into());
+            cx.notify();
+            return;
+        }
+        if draft.database {
+            let transform = sift_protocol::ResultTransform {
+                logic: spec.logic,
+                groups: spec
+                    .groups
+                    .iter()
+                    .map(|group| sift_protocol::ResultFilterGroup {
+                        logic: group.logic,
+                        filters: group
+                            .conditions
+                            .iter()
+                            .filter(|row| row.enabled)
+                            .map(|row| sift_protocol::ResultFilter {
+                                column: self.rendered_columns[row.column].name.to_string(),
+                                operator: row.operator,
+                                value: row.operator.requires_value().then(|| row.value.clone()),
+                            })
+                            .collect(),
+                    })
+                    .filter(|group| !group.filters.is_empty())
+                    .collect(),
+                sorts: self
+                    .sorts
+                    .iter()
+                    .map(|(column, direction)| sift_protocol::ResultSort {
+                        column: self.rendered_columns[*column].name.to_string(),
+                        direction: match direction {
+                            SortDirection::Ascending => {
+                                sift_protocol::ResultSortDirection::Ascending
+                            }
+                            SortDirection::Descending => {
+                                sift_protocol::ResultSortDirection::Descending
+                            }
+                        },
+                    })
+                    .collect(),
+            };
+            // The owning pane supplies query/connection context and audits execution.
+            // Keep the draft available if execution fails; no optimistic local filtering.
+            cx.emit(ResultsEvent::ApplyTransformRequested { transform });
+            return;
+        }
+        self.applied_filter = Some(spec);
+        self.rebuild_display_rows(cx);
+        self.close_grid_transform(window, cx);
+    }
+
+    pub(super) fn render_filter_builder(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let draft = self.filter_draft.as_ref().unwrap();
+        let colors = cx.theme().colors;
+        let groups = draft
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(group_index, group)| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_2()
+                    .border_l_2()
+                    .border_color(colors.subtle_border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new(
+                                    ("filter-group-logic", group_index),
+                                    format!("Match {} conditions", logic_label(group.logic)),
+                                )
+                                .tone(ButtonTone::Ghost)
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| {
+                                        toggle(
+                                            &mut view.filter_draft.as_mut().unwrap().groups
+                                                [group_index]
+                                                .logic,
+                                        );
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                Button::new(("filter-add-condition", group_index), "+ Condition")
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(group.conditions.len() >= 64)
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        let row = Self::new_filter_condition(
+                                            view.grid_transform_column.unwrap_or(0),
+                                            cx,
+                                        );
+                                        row.input.focus_handle(cx).focus(window, cx);
+                                        let draft = view.filter_draft.as_mut().unwrap();
+                                        draft.picker = None;
+                                        draft.groups[group_index].conditions.push(row);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(("filter-remove-group", group_index), "Remove group")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        let draft = view.filter_draft.as_mut().unwrap();
+                                        draft.picker = None;
+                                        draft.groups.remove(group_index);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .children(group.conditions.iter().enumerate().map(|(row_index, row)| {
+                        let id = group_index * 64 + row_index;
+                        let selected = draft.selected
+                            == draft
+                                .groups
+                                .iter()
+                                .take(group_index)
+                                .map(|group| group.conditions.len())
+                                .sum::<usize>()
+                                + row_index;
+                        let condition = &row.condition;
+                        div()
+                            .when(selected, |row| row.bg(colors.active_surface))
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                Button::new(
+                                    ("filter-enabled", id),
+                                    if condition.enabled { "✓" } else { "—" },
+                                )
+                                .tone(ButtonTone::Ghost)
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| {
+                                        let row = &mut view.filter_draft.as_mut().unwrap().groups
+                                            [group_index]
+                                            .conditions[row_index];
+                                        row.condition.enabled = !row.condition.enabled;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                div().w(px(160.)).overflow_hidden().child(
+                                    Button::new(
+                                        ("filter-column", id),
+                                        self.rendered_columns[condition.column].name.clone(),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |view, _, window, cx| {
+                                            view.filter_picker(
+                                                group_index,
+                                                row_index,
+                                                true,
+                                                window,
+                                                cx,
+                                            )
+                                        },
+                                    )),
+                                ),
+                            )
+                            .child(
+                                Button::new(
+                                    ("filter-operator", id),
+                                    filter_operator_label(condition.operator),
+                                )
+                                .on_click(cx.listener(
+                                    move |view, _, window, cx| {
+                                        view.filter_picker(
+                                            group_index,
+                                            row_index,
+                                            false,
+                                            window,
+                                            cx,
+                                        )
+                                    },
+                                )),
+                            )
+                            .when(condition.operator.requires_value(), |row_element| {
+                                row_element
+                                    .child(div().w(px(200.)).h(px(28.)).child(row.input.clone()))
+                            })
+                            .child(
+                                Button::new(("filter-remove-condition", id), "×")
+                                    .tone(ButtonTone::Ghost)
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        let draft = view.filter_draft.as_mut().unwrap();
+                                        draft.picker = None;
+                                        draft.groups[group_index].conditions.remove(row_index);
+                                        cx.notify();
+                                    })),
+                            )
+                    }))
+            })
+            .collect::<Vec<_>>();
+        let picker = draft.picker.map(|_| {
+            let choices = self.filter_choices(cx);
+            div()
+                .p_2()
+                .border_1()
+                .border_color(colors.accent)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(draft.search.clone())
+                .child(
+                    div()
+                        .id("filter-picker-options")
+                        .max_h(px(120.))
+                        .overflow_y_scroll()
+                        .children(choices.into_iter().enumerate().map(
+                            |(position, (index, label))| {
+                                div()
+                                    .when(position == draft.picker_selected, |row| {
+                                        row.bg(colors.active_surface)
+                                    })
+                                    .child(
+                                        Button::new(("filter-choice", index), label)
+                                            .tone(ButtonTone::Ghost)
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                view.choose_filter_option(index, cx);
+                                                view.filter_draft
+                                                    .as_ref()
+                                                    .unwrap()
+                                                    .focus
+                                                    .focus(window, cx);
+                                                cx.notify();
+                                            })),
+                                    )
+                            },
+                        )),
+                )
+        });
+        div()
+            .id("result-grid-transform-editor")
+            .track_focus(&draft.focus)
+            .debug_selector(|| "result-grid-transform-editor".into())
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_b_1()
+            .border_color(colors.subtle_border)
+            .bg(colors.elevated_surface)
+            .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                if view
+                    .filter_draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.picker.is_some())
+                    && matches!(key, "up" | "down")
+                {
+                    let count = view.filter_choices(cx).len();
+                    let draft = view.filter_draft.as_mut().unwrap();
+                    draft.picker_selected = draft
+                        .picker_selected
+                        .saturating_add_signed(if key == "up" { -1 } else { 1 })
+                        .min(count.saturating_sub(1));
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if view
+                    .filter_draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.focus.is_focused(window))
+                {
+                    let draft = view.filter_draft.as_mut().unwrap();
+                    let rows = draft
+                        .groups
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(g, group)| (0..group.conditions.len()).map(move |r| (g, r)))
+                        .collect::<Vec<_>>();
+                    if matches!(key, "j" | "k" | "down" | "up") {
+                        draft.selected = draft
+                            .selected
+                            .saturating_add_signed(if matches!(key, "k" | "up") { -1 } else { 1 })
+                            .min(rows.len().saturating_sub(1));
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if let Some(&(group, row)) = rows.get(draft.selected) {
+                        if key == "enter" {
+                            draft.groups[group].conditions[row]
+                                .input
+                                .focus_handle(cx)
+                                .focus(window, cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        if matches!(key, "c" | "o") {
+                            view.filter_picker(group, row, key == "c", window, cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                    }
+                }
+                if event.keystroke.key == "escape" {
+                    if let Some(draft) = &mut view.filter_draft {
+                        if draft.picker.take().is_some() || !draft.focus.is_focused(window) {
+                            draft.focus.focus(window, cx);
+                            cx.notify();
+                        } else {
+                            view.close_grid_transform(window, cx);
+                        }
+                    }
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .child("Filter")
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted_text)
+                            .child("j/k row · c column · o operator · Enter value"),
+                    )
+                    .child(
+                        Button::new(
+                            "filter-scope",
+                            if draft.database {
+                                "Scope: Database query"
+                            } else {
+                                "Scope: Loaded rows"
+                            },
+                        )
+                        .tone(ButtonTone::Ghost)
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            let draft = view.filter_draft.as_mut().unwrap();
+                            draft.database = !draft.database;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        Button::new(
+                            "filter-root-logic",
+                            format!("Match {} groups", logic_label(draft.logic)),
+                        )
+                        .tone(ButtonTone::Ghost)
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            toggle(&mut view.filter_draft.as_mut().unwrap().logic);
+                            cx.notify();
+                        })),
+                    )
+                    .child(div().text_xs().text_color(colors.muted_text).child(format!(
+                        "{} / {} loaded rows{}",
+                        self.display_rows.len(),
+                        self.rendered_rows.len(),
+                        if self.state.ready().is_some_and(|data| data.has_more) {
+                            " · partial result"
+                        } else {
+                            ""
+                        }
+                    ))),
+            )
+            .child(
+                div()
+                    .id("filter-condition-scroll")
+                    .max_h(px(180.))
+                    .overflow_y_scroll()
+                    .children(groups)
+                    .children(picker),
+            )
+            .children(draft.find_open.then(|| {
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .child(div().w(px(220.)).child(self.grid_search_input.clone()))
+                    .child(
+                        Button::new("filter-find-next", "Next match")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.select_next_search_match(cx);
+                            })),
+                    )
+            }))
+            .children(
+                draft
+                    .error
+                    .as_ref()
+                    .map(|error| div().px_2().text_color(colors.danger).child(error.clone())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .child(
+                        Button::new("filter-add-group", "+ Group")
+                            .tone(ButtonTone::Ghost)
+                            .disabled(draft.groups.len() >= 16)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                let row = Self::new_filter_condition(
+                                    view.grid_transform_column.unwrap_or(0),
+                                    cx,
+                                );
+                                view.filter_draft.as_mut().unwrap().groups.push(DraftGroup {
+                                    logic: ResultFilterLogic::All,
+                                    conditions: vec![row],
+                                });
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("filter-clear", "Clear")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                let draft = view.filter_draft.as_mut().unwrap();
+                                draft.groups.clear();
+                                draft.picker = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("filter-find", "Find")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                let draft = view.filter_draft.as_mut().unwrap();
+                                draft.find_open = !draft.find_open;
+                                if draft.find_open {
+                                    view.grid_search_input.focus_handle(cx).focus(window, cx);
+                                } else {
+                                    draft.focus.focus(window, cx);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("close-result-grid-transform-editor", "Cancel")
+                            .debug_selector("close-result-grid-transform-editor")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.close_grid_transform(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(
+                            "filter-apply",
+                            if draft.database {
+                                "Run filtered query"
+                            } else {
+                                "Apply"
+                            },
+                        )
+                        .debug_selector("filter-apply")
+                        .tone(ButtonTone::Accent)
+                        .on_click(
+                            cx.listener(|view, _, window, cx| {
+                                view.apply_filter_builder(window, cx)
+                            }),
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+}

@@ -63,6 +63,32 @@ pub(super) struct PreparedFilters {
 
 impl PreparedFilters {
     pub(super) fn new(view: &ResultsView) -> Self {
+        if let Some(spec) = &view.applied_filter {
+            return Self {
+                logic: spec.logic,
+                groups: spec
+                    .groups
+                    .iter()
+                    .filter_map(|group| {
+                        let filters = group
+                            .conditions
+                            .iter()
+                            .filter(|condition| condition.enabled)
+                            .map(|condition| {
+                                let value = condition.value.to_lowercase();
+                                ColumnFilter {
+                                    column: condition.column,
+                                    operator: condition.operator,
+                                    number: value.parse().ok(),
+                                    value,
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        (!filters.is_empty()).then_some((group.logic, filters))
+                    })
+                    .collect(),
+            };
+        }
         let mut groups = view
             .filter_group_logics
             .iter()

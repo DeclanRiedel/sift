@@ -1,7 +1,19 @@
 # Result filter builder redesign
 
-Status: design proposal; not implemented. Scope: result-grid filtering, not the
+Status: first inline UI implemented. Scope: result-grid filtering, not the
 Objects type toggles or global search. Preserve the retained grid renderer.
+
+Implemented: independent drafts; multiple conditions per column; enabled rules;
+two-level All/Any groups; searchable column/operator choices; explicit local or
+database Apply; Cancel; compact applied summary; result-set retention; numeric
+comparison validation using observed scalar values; staged-edit guards; and Vim
+row/picker navigation. Existing audited server transform execution is reused.
+
+Remaining design work: authoritative type metadata and type-specific controls,
+database context/SQL preview inside the panel, asynchronous large-result Apply,
+and expanded keyboard navigation through every control. Loaded-row Apply still
+runs the existing prepared predicate scan once, not on every keystroke. Local
+text/collation and numeric semantics retain their existing limitations.
 
 ## Direction
 
@@ -64,9 +76,9 @@ header clicks toggle direction, advanced sorting controls order and clearing.
 
 ## Repository constraints and implementation sequence
 
-Current `ResultsView` stores one value/operator/group per column, rebuilds the
+The previous `ResultsView` stored one value/operator/group per column, rebuilt the
 loaded-row projection on input changes, and exposes a per-column transform
-editor. This cannot express two conditions for the same column. The existing
+editor. That could not express two conditions for the same column. The existing
 `ResultTransform` protocol already accepts multiple filters per group and
 All/Any at two levels; use that structure without a protocol change. Arbitrary
 recursive groups are explicitly out of scope for the first version.

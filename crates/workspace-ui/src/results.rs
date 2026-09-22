@@ -31,6 +31,8 @@ use crate::presentation::ResultReference;
 
 mod filter;
 use filter::PreparedFilters;
+mod filter_builder;
+use filter_builder::{FilterDraft, FilterSpec};
 
 const MIN_COLUMN_WIDTH: f32 = 144.0;
 fn parse_benchmark_limits(values: [&str; 5]) -> Result<sift_protocol::BenchmarkLimits, String> {
@@ -606,6 +608,7 @@ pub struct ResultData {
 
 #[derive(Debug, Clone)]
 struct StoredResultSet {
+    applied_filter: Option<FilterSpec>,
     data: ResultData,
     rendered_columns: Vec<CachedColumnRender>,
     rendered_rows: Vec<Vec<CachedCellRender>>,
@@ -1218,6 +1221,8 @@ fn flatten_plan(root: &PlanNode) -> Vec<RenderedPlanNode> {
 
 /// The query-owned results surface.
 pub struct ResultsView {
+    applied_filter: Option<FilterSpec>,
+    filter_draft: Option<FilterDraft>,
     focus_handle: FocusHandle,
     state: ResultState,
     /// Display-ready values are built once per result update, not repeatedly
@@ -1352,6 +1357,8 @@ impl ResultsView {
             });
         Self {
             focus_handle,
+            applied_filter: None,
+            filter_draft: None,
             state: ResultState::Idle,
             rendered_columns: Vec::new(),
             rendered_rows: Vec::new(),
@@ -2299,6 +2306,8 @@ impl ResultsView {
             _ => Vec::new(),
         };
         self.display_rows = Arc::new((0..self.rendered_rows.len()).collect());
+        self.applied_filter = None;
+        self.filter_draft = None;
         self.sorts.clear();
         self.column_filters = vec![String::new(); self.rendered_columns.len()];
         self.column_filter_operators =
@@ -2495,6 +2504,7 @@ impl ResultsView {
             }
         };
         Some(StoredResultSet {
+            applied_filter: self.applied_filter.take(),
             data,
             rendered_columns: std::mem::take(&mut self.rendered_columns),
             rendered_rows: std::mem::take(&mut self.rendered_rows),
@@ -2526,6 +2536,9 @@ impl ResultsView {
     }
 
     fn restore_result_set(&mut self, stored: StoredResultSet) {
+        self.applied_filter = stored.applied_filter;
+        self.filter_draft = None;
+        self.grid_transform_column = None;
         self.state = ResultState::Ready(stored.data);
         self.rendered_columns = stored.rendered_columns;
         self.header_shape_cache.clear();
@@ -2688,11 +2701,18 @@ impl ResultsView {
                 self.filter_group_logics = vec![ResultFilterLogic::All];
                 self.filter_logic = ResultFilterLogic::All;
                 self.grid_transform_column = None;
+                self.applied_filter = None;
+                self.filter_draft = None;
                 self.schedule_stream_refresh(cx);
                 StreamProgress::Consumed
             }
             Page::Rows { rows } => {
-                let transforms_active = !self.sorts.is_empty()
+                let transforms_active = self.applied_filter.as_ref().is_some_and(|spec| {
+                    spec.groups
+                        .iter()
+                        .flat_map(|group| &group.conditions)
+                        .any(|condition| condition.enabled)
+                }) || !self.sorts.is_empty()
                     || !self.grid_filter_input.read(cx).text().trim().is_empty()
                     || self
                         .column_filters
@@ -3119,6 +3139,13 @@ impl ResultsView {
     }
 
     fn filter_is_active(&self, column: usize) -> bool {
+        if let Some(spec) = &self.applied_filter {
+            return spec
+                .groups
+                .iter()
+                .flat_map(|group| &group.conditions)
+                .any(|condition| condition.enabled && condition.column == column);
+        }
         let operator = self
             .column_filter_operators
             .get(column)
@@ -3190,6 +3217,10 @@ impl ResultsView {
         if column >= self.rendered_columns.len() {
             return;
         }
+        if tab == GridTransformTab::Filter {
+            self.open_filter_builder(column, window, cx);
+            return;
+        }
         self.grid_transform_column = None;
         self.grid_transform_tab = tab;
         let filter = self.column_filters.get(column).cloned().unwrap_or_default();
@@ -3205,6 +3236,7 @@ impl ResultsView {
     }
 
     fn close_grid_transform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_draft = None;
         self.grid_transform_column = None;
         self.focus_handle.focus(window, cx);
         cx.notify();
@@ -3258,10 +3290,14 @@ impl ResultsView {
     }
 
     fn toggle_column_sort(&mut self, column: usize, cx: &mut Context<Self>) {
+        if self.sorts.contains(&(column, SortDirection::Descending)) {
+            self.set_sort(column, None, cx);
+            return;
+        }
         if let Some((_, direction)) = self.sorts.iter_mut().find(|(index, _)| *index == column) {
             *direction = match direction {
                 SortDirection::Ascending => SortDirection::Descending,
-                SortDirection::Descending => SortDirection::Ascending,
+                SortDirection::Descending => unreachable!("descending sort was cleared above"),
             };
             // Toggling direction must preserve multi-column sort priority.
             self.rebuild_display_rows(cx);
@@ -4737,6 +4773,12 @@ impl ResultsView {
     }
 
     fn render_grid_transform_editor(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.filter_draft.is_some() {
+            return Some(self.render_filter_builder(cx));
+        }
+        if self.grid_transform_column.is_none() && self.applied_filter.is_some() {
+            return self.render_filter_summary(cx);
+        }
         let column_index = self.grid_transform_column?;
         let column = self.rendered_columns.get(column_index)?;
         let colors = cx.theme().colors;
@@ -9674,45 +9716,6 @@ mod tests {
             view.grid_transform_column == Some(0)
                 && view.grid_transform_tab == GridTransformTab::Filter
         }));
-        assert!(cx
-            .debug_bounds("result-filter-builder-row-filter")
-            .is_some());
-        assert!(cx.debug_bounds("result-filter-builder-find").is_some());
-
-        let next_column = cx
-            .debug_bounds("next-result-transform-column")
-            .expect("next column navigator");
-        cx.simulate_click(next_column.center(), Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            view.read_with(&cx, |view, _| view.grid_transform_column),
-            Some(1)
-        );
-        let previous_column = cx
-            .debug_bounds("previous-result-transform-column")
-            .expect("previous column navigator");
-        cx.simulate_click(previous_column.center(), Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            view.read_with(&cx, |view, _| view.grid_transform_column),
-            Some(0)
-        );
-
-        let sort_tab = cx
-            .debug_bounds("grid-transform-tab-sort")
-            .expect("sort editor tab");
-        cx.simulate_click(sort_tab.center(), Modifiers::default());
-        cx.run_until_parked();
-        let descending = cx
-            .debug_bounds("sort-active-column-descending")
-            .expect("descending sort action");
-        cx.simulate_click(descending.center(), Modifiers::default());
-        cx.run_until_parked();
-        assert!(view.read_with(&cx, |view, _| {
-            view.sorts == [(0, SortDirection::Descending)] && *view.display_rows == [1, 0]
-        }));
-        assert!(cx.debug_bounds("apply-full-result-transform").is_some());
-
         let close = cx
             .debug_bounds("close-result-grid-transform-editor")
             .expect("close editor action");
@@ -9726,10 +9729,11 @@ mod tests {
         // Exercise the bottom of the painted arrow, outside the old hit target.
         for (direction, position) in [
             (
-                SortDirection::Ascending,
+                Some(SortDirection::Ascending),
                 gpui::point(sort.center().x, header.top() + px(25.)),
             ),
-            (SortDirection::Descending, sort.center()),
+            (Some(SortDirection::Descending), sort.center()),
+            (None, sort.center()),
         ] {
             cx.simulate_click(position, Modifiers::default());
             cx.run_until_parked();
@@ -9740,15 +9744,22 @@ mod tests {
             assert!(cx.debug_bounds("result-grid-transform-editor").is_none());
             assert_eq!(
                 view.read_with(&cx, |view, _| view.sorts.clone()),
-                [(0, direction)]
+                direction
+                    .map(|direction| (0, direction))
+                    .into_iter()
+                    .collect::<Vec<_>>()
             );
         }
         view.update(&mut cx, |view, cx| {
+            view.set_sort(0, Some(SortDirection::Ascending), cx);
             view.set_sort(1, Some(SortDirection::Ascending), cx);
             view.toggle_column_sort(0, cx);
             assert_eq!(
                 view.sorts,
-                [(0, SortDirection::Ascending), (1, SortDirection::Ascending)]
+                [
+                    (0, SortDirection::Descending),
+                    (1, SortDirection::Ascending)
+                ]
             );
         });
     }
