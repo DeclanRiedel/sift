@@ -223,7 +223,9 @@ and forwarded health/readiness probes.
 
 ### Notifications
 
-- [ ] `listen_notifications` — toast/inbox for server-pushed notifications (M4/M5)
+- [x] `subscribe_notifications` — dedicated PostgreSQL channel listener view
+      with bounded history and explicit stop/restart. The finite
+      `listen_notifications` SDK helper remains headless.
 
 ---
 

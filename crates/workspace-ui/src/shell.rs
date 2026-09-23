@@ -2233,6 +2233,7 @@ pub enum Modal {
     CatalogSnapshots,
     CsvImport,
     TransferRecipes,
+    PgNotifications,
     TransferQuarantineHistory,
     TransferQuarantineReport,
     RepositoryCommit,
@@ -4132,6 +4133,13 @@ pub enum ExecutorCommand {
         workspace_id: sift_protocol::WorkspaceId,
         generation: u64,
     },
+    StartPgListener {
+        instance_id: Option<String>,
+        profile_id: i64,
+        channel: String,
+        generation: u64,
+    },
+    StopPgListener,
     CancelTransferRecipe {
         generation: u64,
     },
@@ -4720,6 +4728,33 @@ pub enum ExecutorEvent {
         workspace_id: sift_protocol::WorkspaceId,
         generation: u64,
         result: Result<Vec<sift_protocol::WorkspaceArtifact>, String>,
+    },
+    PgListenerStarted {
+        instance_id: Option<String>,
+        profile_id: i64,
+        session: sift_protocol::SessionId,
+        connection: sift_protocol::ConnectionId,
+        generation: u64,
+        result: Result<(), String>,
+    },
+    PgListenerMessage {
+        instance_id: Option<String>,
+        profile_id: i64,
+        session: sift_protocol::SessionId,
+        connection: sift_protocol::ConnectionId,
+        generation: u64,
+        channel: String,
+        payload: String,
+        received_at_ms: u64,
+        queued_counter: Arc<std::sync::atomic::AtomicUsize>,
+    },
+    PgListenerFailed {
+        instance_id: Option<String>,
+        profile_id: i64,
+        session: sift_protocol::SessionId,
+        connection: sift_protocol::ConnectionId,
+        generation: u64,
+        message: String,
     },
     CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
     DatabaseProcessTerminated {
@@ -10309,6 +10344,7 @@ struct ActiveQuerySnapshot {
 }
 
 mod explorer_filter;
+mod pg_notifications;
 mod query_history;
 mod transfer_input;
 mod transfers;
@@ -10557,6 +10593,7 @@ pub struct WorkspaceShell {
     automations_loading: bool,
     automations_error: Option<String>,
     transfer: transfers::TransferState,
+    pg_notifications: pg_notifications::PgNotificationState,
     _lifecycle_task: Option<Task<()>>,
     _presence_task: Option<Task<()>>,
     _room_document_task: Option<Task<()>>,
@@ -11161,6 +11198,20 @@ impl WorkspaceShell {
         });
         let transfer_recipe_name_input =
             cx.new(|cx| TextInput::new("", "Recipe name", cx).aria_label("Transfer recipe name"));
+        let pg_notification_channel_input =
+            cx.new(|cx| TextInput::new("", "PostgreSQL channel", cx).aria_label("Listen channel"));
+        cx.subscribe_in(
+            &pg_notification_channel_input,
+            window,
+            |shell, _, event: &TextInputEvent, window, cx| {
+                if *event == TextInputEvent::Submitted
+                    && shell.modal == Some(Modal::PgNotifications)
+                {
+                    shell.start_pg_notifications(window, cx);
+                }
+            },
+        )
+        .detach();
         let transfer_recipe_format_input = cx
             .new(|cx| TextInput::new("csv", "Format identifier", cx).aria_label("Transfer format"));
         let transfer_recipe_version_input = cx.new(|cx| {
@@ -11866,6 +11917,23 @@ impl WorkspaceShell {
                 quarantine_history_error: None,
                 quarantine_return_to_history: false,
             },
+            pg_notifications: pg_notifications::PgNotificationState {
+                channel_input: pg_notification_channel_input,
+                channel: String::new(),
+                instance_id: None,
+                profile_id: None,
+                session: None,
+                connection: None,
+                generation: 0,
+                pending: false,
+                listening: false,
+                error: None,
+                rows: Vec::new(),
+                bytes: 0,
+                dropped: 0,
+                selected: 0,
+                scroll: UniformListScrollHandle::new(),
+            },
             _lifecycle_task: None,
             _presence_task: None,
             _room_document_task: None,
@@ -12117,6 +12185,7 @@ impl WorkspaceShell {
             CommandId::SearchSchema => sift_protocol::OperationKind::SearchSchema,
             CommandId::SearchData => sift_protocol::OperationKind::SearchData,
             CommandId::ImportCsv => sift_protocol::OperationKind::ImportCsv,
+            CommandId::ListenPostgres => sift_protocol::OperationKind::Listen,
             CommandId::OpenCatalogDiagram => sift_protocol::OperationKind::ProjectCatalogDiagram,
             CommandId::CaptureCatalogSnapshot => {
                 sift_protocol::OperationKind::CreateCatalogSnapshot
@@ -13211,6 +13280,9 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::Connection(status) => {
+                if self.pg_notifications.profile_id.is_some() {
+                    self.pg_listener_target_changed(cx);
+                }
                 let previous_profile = match self.connection_status {
                     ConnectionStatus::Connected { profile_id, .. }
                     | ConnectionStatus::Connecting { profile_id }
@@ -15766,6 +15838,9 @@ impl WorkspaceShell {
             | ExecutorEvent::TransferQuarantineHistoryLoaded { .. }) => {
                 self.on_transfer_event(event, cx);
             }
+            event @ (ExecutorEvent::PgListenerStarted { .. }
+            | ExecutorEvent::PgListenerMessage { .. }
+            | ExecutorEvent::PgListenerFailed { .. }) => self.on_pg_listener_event(event, cx),
             ExecutorEvent::SqlSnippetsLoaded(result) => {
                 self.snippet_pending = false;
                 match result {
@@ -34785,6 +34860,9 @@ impl WorkspaceShell {
         if self.modal == Some(Modal::CsvImport) {
             self.csv_import_preview = None;
         }
+        if self.modal == Some(Modal::PgNotifications) {
+            self.stop_pg_notifications(cx);
+        }
         self.modal = None;
         // Return focus to the surface the user chose before opening temporary UI.
         self.restore_active_surface(window, cx);
@@ -34856,6 +34934,7 @@ impl WorkspaceShell {
             CommandId::SearchSchema => self.open_schema_search(window, cx),
             CommandId::SearchData => self.open_data_search(window, cx),
             CommandId::OpenObjects => self.open_active_connection_objects(window, cx),
+            CommandId::ListenPostgres => self.open_pg_notifications(window, cx),
             CommandId::ImportCsv => {
                 self.csv_import_target = None;
                 self.prompt_csv_import(cx)
@@ -41711,6 +41790,16 @@ impl gpui::Render for PaneLayoutView {
 
 impl gpui::Render for WorkspaceShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pg_notifications.profile_id.is_some()
+            && self.pg_notifications.instance_id != self.selected_instance_id
+        {
+            self.pg_listener_target_changed(cx);
+        }
+        if self.modal != Some(Modal::PgNotifications)
+            && (self.pg_notifications.pending || self.pg_notifications.listening)
+        {
+            self.stop_pg_notifications(cx);
+        }
         // A scrim must own focus unless one of its controls already does.
         // Otherwise editor caret and key handling remain active behind dialog.
         if self.modal.is_some() && self.active_editor_focused(window, cx) {
@@ -52711,6 +52800,220 @@ mod tests {
             assert_eq!(shell.modal, Some(Modal::TransferQuarantineReport));
             assert!(shell.transfer.quarantine_return_to_history);
         });
+    }
+
+    #[gpui::test]
+    fn pg_listener_validates_channel_bounds_history_and_rejects_stale_events(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("server-a".into());
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "reporting".into(),
+            };
+            shell.open_pg_notifications(window, cx);
+            shell
+                .pg_notifications
+                .channel_input
+                .update(cx, |input, cx| {
+                    input.set_text("bad-channel", cx);
+                });
+            shell.start_pg_notifications(window, cx);
+            assert!(shell.pg_notifications.error.is_some());
+            shell
+                .pg_notifications
+                .channel_input
+                .update(cx, |input, cx| {
+                    input.set_text("job_events", cx);
+                });
+            shell.start_pg_notifications(window, cx);
+        });
+        assert!(
+            matches!(commands.try_recv(), Ok(ExecutorCommand::StartPgListener {
+            profile_id: 7, channel, generation: 1, ..
+        }) if channel == "job_events")
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::PgListenerStarted {
+                    instance_id: Some("server-b".into()),
+                    profile_id: 7,
+                    session: sift_protocol::SessionId(1),
+                    connection: sift_protocol::ConnectionId(2),
+                    generation: 1,
+                    result: Ok(()),
+                },
+                cx,
+            );
+            assert!(shell.pg_notifications.pending);
+            shell.on_executor_event(
+                ExecutorEvent::PgListenerStarted {
+                    instance_id: Some("server-a".into()),
+                    profile_id: 7,
+                    session: sift_protocol::SessionId(1),
+                    connection: sift_protocol::ConnectionId(2),
+                    generation: 1,
+                    result: Ok(()),
+                },
+                cx,
+            );
+            assert!(shell.pg_notifications.listening);
+            for index in 0..201 {
+                shell.on_executor_event(
+                    ExecutorEvent::PgListenerMessage {
+                        instance_id: Some("server-a".into()),
+                        profile_id: 7,
+                        session: sift_protocol::SessionId(1),
+                        connection: sift_protocol::ConnectionId(2),
+                        generation: 1,
+                        channel: "job_events".into(),
+                        payload: format!("message {index}"),
+                        received_at_ms: 1_000,
+                        queued_counter: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+                    },
+                    cx,
+                );
+            }
+            assert_eq!(shell.pg_notifications.rows.len(), 200);
+            assert_eq!(shell.pg_notifications.dropped, 1);
+            assert_eq!(shell.pg_notifications.rows[0].payload, "message 1");
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("k y");
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("message 199".into())
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .pg_notifications
+                .push("job_events".into(), "newest".into(), 1_500);
+            assert_eq!(
+                shell.pg_notifications.rows[shell.pg_notifications.selected].payload,
+                "message 199"
+            );
+            shell.stop_pg_notifications(cx);
+            shell.on_executor_event(
+                ExecutorEvent::PgListenerMessage {
+                    instance_id: Some("server-a".into()),
+                    profile_id: 7,
+                    session: sift_protocol::SessionId(1),
+                    connection: sift_protocol::ConnectionId(2),
+                    generation: 1,
+                    channel: "job_events".into(),
+                    payload: "late".into(),
+                    received_at_ms: 2_000,
+                    queued_counter: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+                },
+                cx,
+            );
+            assert_eq!(shell.pg_notifications.rows.len(), 200);
+            assert!(!shell.pg_notifications.listening);
+            shell
+                .pg_notifications
+                .push("job_events".into(), "x".repeat(20_000), 3_000);
+            assert!(shell
+                .pg_notifications
+                .rows
+                .last()
+                .unwrap()
+                .payload
+                .contains("truncated"));
+            assert!(shell.pg_notifications.bytes <= 1024 * 1024);
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Disconnected),
+                cx,
+            );
+            assert!(shell.pg_notifications.rows.is_empty());
+            assert!(shell.pg_notifications.profile_id.is_none());
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::StopPgListener)
+        ));
+    }
+
+    #[gpui::test]
+    fn pg_listener_reports_failure_restarts_and_stops_when_view_closes(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("server-a".into());
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "reporting".into(),
+            };
+            shell.open_pg_notifications(window, cx);
+            shell
+                .pg_notifications
+                .channel_input
+                .update(cx, |input, cx| {
+                    input.set_text("job_events", cx);
+                });
+            shell.start_pg_notifications(window, cx);
+            shell.on_executor_event(
+                ExecutorEvent::PgListenerStarted {
+                    instance_id: Some("server-a".into()),
+                    profile_id: 7,
+                    session: sift_protocol::SessionId(1),
+                    connection: sift_protocol::ConnectionId(2),
+                    generation: 1,
+                    result: Err("permission denied".into()),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell.pg_notifications.error.as_deref(),
+                Some("permission denied")
+            );
+            shell.start_pg_notifications(window, cx);
+            shell.on_executor_event(
+                ExecutorEvent::PgListenerStarted {
+                    instance_id: Some("server-a".into()),
+                    profile_id: 7,
+                    session: sift_protocol::SessionId(3),
+                    connection: sift_protocol::ConnectionId(4),
+                    generation: 2,
+                    result: Ok(()),
+                },
+                cx,
+            );
+            shell.on_executor_event(
+                ExecutorEvent::PgListenerFailed {
+                    instance_id: Some("server-a".into()),
+                    profile_id: 7,
+                    session: sift_protocol::SessionId(1),
+                    connection: sift_protocol::ConnectionId(2),
+                    generation: 1,
+                    message: "old stream".into(),
+                },
+                cx,
+            );
+            assert!(shell.pg_notifications.listening);
+            shell.dismiss_modal(&DismissModal, window, cx);
+            assert!(!shell.pg_notifications.listening);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::StartPgListener { generation: 1, .. })
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::StartPgListener { generation: 2, .. })
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::StopPgListener)
+        ));
     }
 
     #[gpui::test]

@@ -790,6 +790,7 @@ async fn run_query_executor(
     let mut active_exports: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
     let mut active_transfers: HashMap<u64, tokio::sync::oneshot::Sender<()>> = HashMap::new();
     let mut notification_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut pg_listener_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut repository_history_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut repository_diff_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
@@ -813,6 +814,9 @@ async fn run_query_executor(
                 if let Some(task) = notification_task.take() {
                     task.abort();
                 }
+                if let Some(task) = pg_listener_task.take() {
+                    task.abort();
+                }
                 if let Some(task) = repository_history_task.take() {
                     task.abort();
                 }
@@ -832,6 +836,9 @@ async fn run_query_executor(
             }
         };
         let Some(command) = command else {
+            if let Some(task) = pg_listener_task.take() {
+                task.abort();
+            }
             return;
         };
         match command {
@@ -917,6 +924,9 @@ async fn run_query_executor(
                 if let Some(task) = notification_task.take() {
                     task.abort();
                 }
+                if let Some(task) = pg_listener_task.take() {
+                    task.abort();
+                }
                 if let Some(previous) = context.take() {
                     parked_contexts.insert(previous.profile_id, previous);
                 }
@@ -968,6 +978,9 @@ async fn run_query_executor(
                 credentials,
             } => {
                 if let Some(task) = notification_task.take() {
+                    task.abort();
+                }
+                if let Some(task) = pg_listener_task.take() {
                     task.abort();
                 }
                 if let Some(previous) = context.take() {
@@ -1027,6 +1040,9 @@ async fn run_query_executor(
                 active_exports.clear();
                 active_transfers.clear();
                 if let Some(task) = notification_task.take() {
+                    task.abort();
+                }
+                if let Some(task) = pg_listener_task.take() {
                     task.abort();
                 }
                 if let Some(opened) = context.take() {
@@ -1612,6 +1628,9 @@ async fn run_query_executor(
                     if let Some(task) = notification_task.take() {
                         task.abort();
                     }
+                    if let Some(task) = pg_listener_task.take() {
+                        task.abort();
+                    }
                     if let Some(mut opened) = context.take() {
                         opened.disarm_session_cleanup();
                     }
@@ -1673,6 +1692,9 @@ async fn run_query_executor(
                         if let Some(task) = notification_task.take() {
                             task.abort();
                         }
+                        if let Some(task) = pg_listener_task.take() {
+                            task.abort();
+                        }
                         if let Some(mut opened) = context.take() {
                             opened.disarm_session_cleanup();
                         }
@@ -1720,6 +1742,9 @@ async fn run_query_executor(
                     active_exports.clear();
                     active_transfers.clear();
                     if let Some(task) = notification_task.take() {
+                        task.abort();
+                    }
+                    if let Some(task) = pg_listener_task.take() {
                         task.abort();
                     }
                     context = None;
@@ -2174,6 +2199,9 @@ async fn run_query_executor(
                             if let Some(task) = notification_task.take() {
                                 task.abort();
                             }
+                            if let Some(task) = pg_listener_task.take() {
+                                task.abort();
+                            }
                             parked_contexts.insert(previous.profile_id, previous);
                         }
                         let _ =
@@ -2320,6 +2348,9 @@ async fn run_query_executor(
                 {
                     if let Some(opened) = context.take() {
                         if let Some(task) = notification_task.take() {
+                            task.abort();
+                        }
+                        if let Some(task) = pg_listener_task.take() {
                             task.abort();
                         }
                         opened.close().await;
@@ -5110,6 +5141,132 @@ async fn run_query_executor(
             }
             ExecutorCommand::CancelTransferRecipe { generation } => {
                 active_transfers.remove(&generation);
+            }
+            ExecutorCommand::StartPgListener {
+                instance_id,
+                profile_id,
+                channel,
+                generation,
+            } => {
+                if let Some(task) = pg_listener_task.take() {
+                    task.abort();
+                }
+                let Some(opened) = context.as_ref().filter(|opened| {
+                    opened.profile_id == profile_id
+                        && instance_id.as_deref().unwrap_or("local") == opened.instance_id
+                }) else {
+                    let _ = events.send(ExecutorEvent::PgListenerStarted {
+                        instance_id,
+                        profile_id,
+                        session: sift_protocol::SessionId(0),
+                        connection: sift_protocol::ConnectionId(0),
+                        generation,
+                        result: Err("Database target changed; reopen the listener".into()),
+                    });
+                    continue;
+                };
+                let client = opened.client.clone();
+                let session = opened.session;
+                let connection = opened.connection;
+                let events = events.clone();
+                pg_listener_task = Some(tokio::spawn(async move {
+                    let queued_counter =
+                        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let mut stream = match client
+                        .subscribe_notifications(session, connection, vec![channel])
+                        .await
+                    {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            let _ = events.send(ExecutorEvent::PgListenerStarted {
+                                instance_id,
+                                profile_id,
+                                session,
+                                connection,
+                                generation,
+                                result: Err(error.to_string()),
+                            });
+                            return;
+                        }
+                    };
+                    if events
+                        .send(ExecutorEvent::PgListenerStarted {
+                            instance_id: instance_id.clone(),
+                            profile_id,
+                            session,
+                            connection,
+                            generation,
+                            result: Ok(()),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let mut pace = tokio::time::interval(std::time::Duration::from_millis(20));
+                    pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        let result = stream.next().await;
+                        match result {
+                            Ok((channel, payload)) => {
+                                pace.tick().await;
+                                if queued_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                    >= 512
+                                {
+                                    queued_counter
+                                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                                    let _ = events.send(ExecutorEvent::PgListenerFailed {
+                                        instance_id,
+                                        profile_id,
+                                        session,
+                                        connection,
+                                        generation,
+                                        message:
+                                            "Notification view fell behind; restart the listener"
+                                                .into(),
+                                    });
+                                    return;
+                                }
+                                let received_at_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis()
+                                    as u64;
+                                if events
+                                    .send(ExecutorEvent::PgListenerMessage {
+                                        instance_id: instance_id.clone(),
+                                        profile_id,
+                                        session,
+                                        connection,
+                                        generation,
+                                        channel,
+                                        payload,
+                                        received_at_ms,
+                                        queued_counter: std::sync::Arc::clone(&queued_counter),
+                                    })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            Err(error) => {
+                                let _ = events.send(ExecutorEvent::PgListenerFailed {
+                                    instance_id,
+                                    profile_id,
+                                    session,
+                                    connection,
+                                    generation,
+                                    message: error.to_string(),
+                                });
+                                return;
+                            }
+                        }
+                    }
+                }));
+            }
+            ExecutorCommand::StopPgListener => {
+                if let Some(task) = pg_listener_task.take() {
+                    task.abort();
+                }
             }
             ExecutorCommand::LoadTransferQuarantineReport {
                 instance_id,

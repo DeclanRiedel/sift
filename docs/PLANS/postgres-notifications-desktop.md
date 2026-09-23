@@ -1,6 +1,6 @@
 # PostgreSQL notification listener in the desktop
 
-Status: design for the next Linux desktop slice. The existing `Listen`
+Status: implemented for Linux desktop. The existing `Listen`
 operation, PostgreSQL driver stream, session WebSocket, and SDK subscription are
 the transport. No `Driver` trait or protocol change is needed.
 

@@ -7893,6 +7893,86 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::PgNotifications => {
+                    let rows = self.pg_notifications.rows.clone();
+                    let count = rows.len();
+                    let selected = self.pg_notifications.selected;
+                    let detail = rows.get(selected).map(|row| row.payload.clone());
+                    let target = match &self.connection_status {
+                        ConnectionStatus::Connected { name, .. } => name.clone(),
+                        _ => "Disconnected".into(),
+                    };
+                    let source = match (self.pg_notifications.session, self.pg_notifications.connection) {
+                        (Some(session), Some(connection)) => format!(" · session {} / connection {}", session.0, connection.0),
+                        _ => String::new(),
+                    };
+                    div()
+                        .debug_selector(|| "pg-notifications".into())
+                        .track_focus(&self.focus_handle)
+                        .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, window, cx| {
+                            shell.handle_pg_notification_key(event, window, cx)
+                        }))
+                        .w(px(760.)).h(px(580.)).flex().flex_col().gap_2()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("PostgreSQL notifications"))
+                        .child(div().text_xs().text_color(colors.muted_text).child(format!(
+                            "{target}{source} · {} · {} · {} received · {} dropped/truncated",
+                            if self.pg_notifications.channel.is_empty() { "No channel" } else { &self.pg_notifications.channel },
+                            if self.pg_notifications.listening { "Listening" }
+                            else if self.pg_notifications.pending { "Connecting…" }
+                            else { "Stopped" },
+                            count, self.pg_notifications.dropped,
+                        )))
+                        .child(div().text_xs().text_color(colors.muted_text).child("j/k select · g/G first/last · y copies selected payload. Closing stops the listener."))
+                        .child(div().flex().items_center().gap_2()
+                            .child(self.pg_notifications.channel_input.clone())
+                            .child(Button::new("start-pg-listener", if self.pg_notifications.listening { "Restart" } else { "Start" })
+                                .tone(ButtonTone::Accent)
+                                .disabled(self.pg_notifications.pending)
+                                .on_click(cx.listener(|shell, _, window, cx| shell.start_pg_notifications(window, cx))))
+                            .child(Button::new("stop-pg-listener", "Stop")
+                                .tone(ButtonTone::Neutral)
+                                .disabled(!self.pg_notifications.listening && !self.pg_notifications.pending)
+                                .on_click(cx.listener(|shell, _, _, cx| shell.stop_pg_notifications(cx)))))
+                        .children(self.pg_notifications.error.clone().map(ErrorBanner::new))
+                        .children((!self.pg_notifications.pending && rows.is_empty()).then(||
+                            div().text_color(colors.muted_text).child("No notifications received.")))
+                        .child(uniform_list("pg-notification-rows", count, cx.processor(move |shell, range: Range<usize>, _, cx| {
+                            range.filter_map(|index| rows.get(index).map(|row| (index, row))).map(|(index, row)| {
+                                let seconds = (row.received_at_ms / 1000) % 86_400;
+                                let time = format!("{:02}:{:02}:{:02}Z", seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+                                let preview = row.payload.chars().take(100).collect::<String>();
+                                div().id(("pg-notification-row", index)).role(Role::ListItem)
+                                    .h(px(38.)).px_2().flex().items_center().gap_2()
+                                    .when(index == shell.pg_notifications.selected, |row| row.bg(cx.theme().colors.active_surface))
+                                    .border_b_1().border_color(cx.theme().colors.subtle_border)
+                                    .child(div().w(px(92.)).child(time))
+                                    .child(div().w(px(130.)).truncate().child(row.channel.clone()))
+                                    .child(div().flex_1().min_w_0().truncate().child(preview))
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.pg_notifications.selected = index;
+                                        cx.notify();
+                                    }))
+                            }).collect::<Vec<_>>()
+                        })).flex_1().min_h_0().border_1().border_color(colors.subtle_border)
+                            .track_scroll(&self.pg_notifications.scroll))
+                        .children(detail.map(|payload| div().id("pg-notification-detail")
+                            .max_h(px(150.)).overflow_y_scroll().p_2().border_1()
+                            .border_color(colors.subtle_border).font_family("monospace")
+                            .text_xs().whitespace_normal().child(payload)))
+                        .child(div().flex().justify_end().gap_2()
+                            .child(Button::new("clear-pg-notifications", "Clear")
+                                .tone(ButtonTone::Ghost)
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.pg_notifications.rows.clear();
+                                    shell.pg_notifications.bytes = 0;
+                                    shell.pg_notifications.selected = 0;
+                                    cx.notify();
+                                })))
+                            .child(Button::new("close-pg-notifications", "Close")
+                                .tone(ButtonTone::Neutral)
+                                .on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx)))))
+                        .into_any_element()
+                }
                 Modal::TransferQuarantineHistory => {
                     let artifacts = self.transfer.quarantine_artifacts.clone();
                     let count = artifacts.len();

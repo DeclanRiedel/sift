@@ -324,7 +324,8 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [~] PostgreSQL plans
 - [~] PostgreSQL process control
 - [~] PostgreSQL bulk import
-- [~] PostgreSQL notifications
+- [x] PostgreSQL notifications (single-channel desktop listener with bounded
+      history, explicit stop/restart, and Vim navigation)
 - [x] SQL Server scoped shallow/deep/graph introspection and native object DDL
 - [~] SQL Server plans
 - [~] SQL Server process control
