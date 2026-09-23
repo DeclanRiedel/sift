@@ -11163,6 +11163,12 @@ impl WorkspaceShell {
         });
         let transfer_recipe_sheet_input =
             cx.new(|cx| TextInput::new("Sheet1", "XLSX sheet", cx).aria_label("Import XLSX sheet"));
+        let transfer_resume_checkpoint_input = cx.new(|cx| {
+            TextInput::new("sift_csv_checkpoints", "schema.checkpoint_table", cx)
+                .aria_label("CSV resume checkpoint table")
+        });
+        let transfer_resume_run_id_input =
+            cx.new(|cx| TextInput::new("", "Run UUID", cx).aria_label("CSV resume run UUID"));
         let server_name_input = cx.new(|cx| TextInput::new("", "Display name", cx));
         let server_url_input = cx.new(|cx| TextInput::new("", "http://192.168.1.20:7474", cx));
         let server_token_input =
@@ -11822,6 +11828,9 @@ impl WorkspaceShell {
                 recipe_options_input: transfer_recipe_options_input,
                 recipe_table_input: transfer_recipe_table_input,
                 recipe_sheet_input: transfer_recipe_sheet_input,
+                resume_checkpoint_input: transfer_resume_checkpoint_input,
+                resume_run_id_input: transfer_resume_run_id_input,
+                resume_enabled: false,
                 advanced_open: false,
                 recipe_direction: sift_protocol::TransferDirection::Export,
                 import_create_table: false,
@@ -52398,6 +52407,53 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[gpui::test]
+    fn csv_resume_controls_persist_identity_and_reject_incompatible_import_options(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_workspace_id = Some(42);
+            shell.clear_transfer_recipe_editor(cx);
+            shell.toggle_transfer_recipe_direction(cx);
+            shell
+                .transfer
+                .recipe_name_input
+                .update(cx, |input, cx| input.set_text("Resumable import", cx));
+            shell.toggle_transfer_durable_resume(cx);
+            shell.save_transfer_recipe(cx);
+        });
+        let options = match commands.try_recv().unwrap() {
+            ExecutorCommand::SaveTransferRecipe { request, .. } => request.options,
+            _ => panic!("expected recipe save"),
+        };
+        let resume = &options["durable_resume"];
+        assert_eq!(resume["checkpoint_table"], "sift_csv_checkpoints");
+        assert!(uuid::Uuid::parse_str(resume["run_id"].as_str().unwrap()).is_ok());
+        let run_id = resume["run_id"].as_str().unwrap().to_owned();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.transfer.recipes_loading = false;
+            let mut recipe = transfer_recipe(7, sift_protocol::TransferDirection::Import);
+            recipe.options = options;
+            shell.transfer.recipes = vec![recipe];
+            shell.edit_transfer_recipe(0, cx);
+            assert!(shell.transfer.resume_enabled);
+            assert_eq!(shell.transfer.resume_run_id_input.read(cx).text(), run_id);
+            shell.transfer.import_create_table = true;
+            shell.execute_selected_transfer_recipe(false, cx);
+            assert!(shell
+                .transfer
+                .recipes_error
+                .as_deref()
+                .is_some_and(|error| error.contains("existing target")));
+        });
+        assert!(commands.try_recv().is_err());
     }
 
     #[gpui::test]

@@ -26,6 +26,8 @@ sources for current support claims.
 
 - [x] Open CSV quarantine reports from the current import result, with
       authorized retrieval and rejected source-row details.
+- [x] Configure and retry durable CSV import from the desktop using a target
+      checkpoint table and stable run UUID.
 - [ ] Reopen retained transfer artifacts through a durable history view.
 - [ ] Finish the PostgreSQL plans, process-control, bulk-import, and notification
       desktop workflows currently marked partial in the product inventory.

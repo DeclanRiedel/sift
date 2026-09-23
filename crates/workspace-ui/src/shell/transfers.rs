@@ -14,6 +14,9 @@ pub(super) struct TransferState {
     pub(super) recipe_options_input: Entity<TextInput>,
     pub(super) recipe_table_input: Entity<TextInput>,
     pub(super) recipe_sheet_input: Entity<TextInput>,
+    pub(super) resume_checkpoint_input: Entity<TextInput>,
+    pub(super) resume_run_id_input: Entity<TextInput>,
+    pub(super) resume_enabled: bool,
     pub(super) advanced_open: bool,
     pub(super) recipe_direction: sift_protocol::TransferDirection,
     pub(super) import_create_table: bool,
@@ -63,6 +66,8 @@ impl WorkspaceShell {
                 &self.transfer.recipe_options_input,
                 &self.transfer.recipe_table_input,
                 &self.transfer.recipe_sheet_input,
+                &self.transfer.resume_checkpoint_input,
+                &self.transfer.resume_run_id_input,
             ]
             .iter()
             .any(|input| input.focus_handle(cx).is_focused(window))
@@ -135,6 +140,13 @@ impl WorkspaceShell {
         self.transfer
             .recipe_sheet_input
             .update(cx, |input, cx| input.set_text("Sheet1", cx));
+        self.transfer.resume_enabled = false;
+        self.transfer
+            .resume_checkpoint_input
+            .update(cx, |input, cx| input.set_text("sift_csv_checkpoints", cx));
+        self.transfer
+            .resume_run_id_input
+            .update(cx, |input, cx| input.set_text("", cx));
         self.transfer.import_create_table = false;
         self.transfer.import_conflict_policy = sift_protocol::CsvConflictPolicy::Abort;
         self.transfer.execution_result = None;
@@ -166,6 +178,28 @@ impl WorkspaceShell {
         self.transfer.recipe_options_input.update(cx, |input, cx| {
             input.set_text(recipe.options.to_string(), cx)
         });
+        let resume = recipe.options.get("durable_resume");
+        self.transfer.resume_enabled = resume.is_some();
+        self.transfer
+            .resume_checkpoint_input
+            .update(cx, |input, cx| {
+                input.set_text(
+                    resume
+                        .and_then(|resume| resume.get("checkpoint_table"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("sift_csv_checkpoints"),
+                    cx,
+                )
+            });
+        self.transfer.resume_run_id_input.update(cx, |input, cx| {
+            input.set_text(
+                resume
+                    .and_then(|resume| resume.get("run_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                cx,
+            )
+        });
         self.transfer.execution_result = None;
         self.transfer.quarantine_artifact_id = None;
         self.transfer.quarantine_report = None;
@@ -188,6 +222,18 @@ impl WorkspaceShell {
         self.transfer
             .recipe_format_input
             .update(cx, |input, cx| input.set_text(format, cx));
+        cx.notify();
+    }
+
+    pub(super) fn toggle_transfer_durable_resume(&mut self, cx: &mut Context<Self>) {
+        self.transfer.resume_enabled = !self.transfer.resume_enabled;
+        if self.transfer.resume_enabled
+            && self.transfer.resume_run_id_input.read(cx).text().is_empty()
+        {
+            self.transfer.resume_run_id_input.update(cx, |input, cx| {
+                input.set_text(uuid::Uuid::new_v4().to_string(), cx)
+            });
+        }
         cx.notify();
     }
 
@@ -232,9 +278,9 @@ impl WorkspaceShell {
             cx.notify();
             return;
         }
-        let options =
+        let mut options =
             match serde_json::from_str(self.transfer.recipe_options_input.read(cx).text().trim()) {
-                Ok(serde_json::Value::Object(options)) => serde_json::Value::Object(options),
+                Ok(serde_json::Value::Object(options)) => options,
                 Ok(_) => {
                     self.transfer.recipes_error =
                         Some("Recipe options must be a JSON object".into());
@@ -248,6 +294,45 @@ impl WorkspaceShell {
                     return;
                 }
             };
+        if self.transfer.resume_enabled {
+            if self.transfer.recipe_direction != sift_protocol::TransferDirection::Import
+                || format_id != "csv"
+            {
+                self.transfer.recipes_error =
+                    Some("Durable resume is available only for CSV imports".into());
+                cx.notify();
+                return;
+            }
+            let checkpoint_table = self.transfer.resume_checkpoint_input.read(cx).text().trim();
+            let run_id = self.transfer.resume_run_id_input.read(cx).text().trim();
+            if checkpoint_table.is_empty() || uuid::Uuid::parse_str(run_id).is_err() {
+                self.transfer.recipes_error =
+                    Some("Durable resume requires a checkpoint table and a valid run UUID".into());
+                cx.notify();
+                return;
+            }
+            if options
+                .get("resume_from_row")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                != 0
+                || options
+                    .get("type_mappings")
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|mappings| !mappings.is_empty())
+            {
+                self.transfer.recipes_error =
+                    Some("Durable resume cannot use a manual row offset or type mappings".into());
+                cx.notify();
+                return;
+            }
+            options.insert(
+                "durable_resume".into(),
+                serde_json::json!({"checkpoint_table": checkpoint_table, "run_id": run_id}),
+            );
+        } else {
+            options.remove("durable_resume");
+        }
         let (source, sink) = match self.transfer.recipe_direction {
             sift_protocol::TransferDirection::Export => (
                 sift_protocol::TransferEndpoint::Query,
@@ -280,7 +365,7 @@ impl WorkspaceShell {
                     sink,
                     format_id,
                     format_version,
-                    options,
+                    options: serde_json::Value::Object(options),
                 },
             })
             .is_ok();
@@ -404,6 +489,16 @@ impl WorkspaceShell {
         else {
             return;
         };
+        if recipe.options.get("durable_resume").is_some()
+            && (self.transfer.import_create_table
+                || self.transfer.import_conflict_policy != sift_protocol::CsvConflictPolicy::Abort)
+        {
+            self.transfer.recipes_error = Some(
+                "Durable resume requires an existing target table and Abort conflict policy".into(),
+            );
+            cx.notify();
+            return;
+        }
         match recipe.direction {
             sift_protocol::TransferDirection::Export => {
                 let Some(query) = self.active_query_snapshot(cx) else {

@@ -273,14 +273,15 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Error quarantine (CSV API reports, authorized artifact downloads, and
       desktop inspection from the current import result)
 - [x] Durable CSV resume API (target-side atomic checkpoints and source validation)
-- [ ] Resumable transfer UI
+- [x] Resumable CSV import UI (target-side checkpoint table and stable run UUID)
 - [ ] Cross-engine type-mapping editor
 - [x] Parquet support
 
 Transfer preview, CSV quarantine reports with current-result desktop inspection,
-and durable CSV resume are implemented. A desktop resume workflow, retained
-artifact history, and dedicated type-mapping editor remain open; existing
-preview and result plumbing do not complete those workflows.
+and durable CSV resume are implemented. The desktop saves the checkpoint table
+and run UUID in the CSV recipe; retrying with that recipe and the same source file
+resumes from the target-side checkpoint. Retained artifact history and a
+dedicated type-mapping editor remain open.
 Quarantine report fields and provider limits are documented in backend operations.
 
 Parquet has bounded typed API export and transactional flat-type import; see

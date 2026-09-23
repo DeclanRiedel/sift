@@ -28,6 +28,8 @@ claims.
       server roots, with preview, backup expectations, and audit.
 - [x] Open the authorized CSV quarantine artifact from an import result in the
       desktop, with rejected-row navigation and source-value details.
+- [x] Configure and retry durable CSV import from the desktop using a target
+      checkpoint table and stable run UUID.
 - [ ] Add a durable transfer-artifact history so quarantine reports can be
       reopened after the current import result is dismissed (within retention).
 - [ ] Decide whether ATTACH, extensions, custom functions/collations, or

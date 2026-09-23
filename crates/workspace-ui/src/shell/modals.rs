@@ -7737,6 +7737,42 @@ impl WorkspaceShell {
                                                     )
                                             },
                                         )
+                                        .when(
+                                            self.transfer.recipe_direction
+                                                == sift_protocol::TransferDirection::Import
+                                                && self.transfer.recipe_format_input.read(cx).text().trim() == "csv",
+                                            |editor| {
+                                                editor.child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_2()
+                                                        .child(
+                                                            Button::new(
+                                                                "transfer-durable-resume",
+                                                                if self.transfer.resume_enabled {
+                                                                    "Durable resume: on"
+                                                                } else {
+                                                                    "Durable resume: off"
+                                                                },
+                                                            )
+                                                            .tone(ButtonTone::Neutral)
+                                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                                shell.toggle_transfer_durable_resume(cx)
+                                                            })),
+                                                        )
+                                                        .child(div().text_xs().text_color(colors.muted_text).whitespace_normal()
+                                                            .child("These controls set the durable_resume JSON option when you save the recipe."))
+                                                        .when(self.transfer.resume_enabled, |fields| {
+                                                            fields
+                                                                .child(div().text_xs().text_color(colors.muted_text).whitespace_normal()
+                                                                    .child("Use an existing target. On retry choose the same recipe and CSV file; Sift resumes from the target-side checkpoint. Keep Abort conflict policy and leave Create table off."))
+                                                                .child(field("Checkpoint table", self.transfer.resume_checkpoint_input.clone()))
+                                                                .child(field("Run UUID", self.transfer.resume_run_id_input.clone()))
+                                                        }),
+                                                )
+                                            },
+                                        )
                                         .children(result.map(|message| {
                                             div()
                                                 .p_2()
