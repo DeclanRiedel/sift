@@ -23,13 +23,30 @@ pub(super) fn matches_object(
         {
             return true;
         }
-        buffer.clear();
-        write!(buffer, "{kind:?}").expect("writing to a String");
+        return kind_name(kind).contains(query);
     } else {
         buffer.clear();
         write!(buffer, "{catalog}.{schema}.{object} {kind:?}").expect("writing to a String");
     }
     contains_folded(buffer, query)
+}
+
+const fn kind_name(kind: ObjectKind) -> &'static str {
+    match kind {
+        ObjectKind::Table => "table",
+        ObjectKind::View => "view",
+        ObjectKind::MaterializedView => "materializedview",
+        ObjectKind::ForeignTable => "foreigntable",
+        ObjectKind::PartitionedTable => "partitionedtable",
+        ObjectKind::TableValuedFunction => "tablevaluedfunction",
+        ObjectKind::ScalarFunction => "scalarfunction",
+        ObjectKind::Procedure => "procedure",
+        ObjectKind::Synonym => "synonym",
+        ObjectKind::Sequence => "sequence",
+        ObjectKind::Trigger => "trigger",
+        ObjectKind::Type => "type",
+        ObjectKind::Extension => "extension",
+    }
 }
 
 fn contains_folded(value: &str, query: &str) -> bool {
@@ -78,6 +95,14 @@ mod tests {
             "Événements",
             ObjectKind::Table,
             "événements",
+            &mut buffer
+        ));
+        assert!(matches_object(
+            "Warehouse",
+            "Public",
+            "Orders",
+            ObjectKind::MaterializedView,
+            "materializedview",
             &mut buffer
         ));
     }

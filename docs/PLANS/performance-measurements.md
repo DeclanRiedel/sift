@@ -64,6 +64,18 @@ This machine needed an existing temporary `libxkbcommon-x11.so` linker alias in
 measured separately by running the generated benchmark executable under
 `/usr/bin/time -v`, without Cargo compilation.
 
+## Schema filter kind lookup (2026-09-23)
+
+Simple schema searches now check static object-kind names after identifier
+misses, avoiding per-object formatting. The existing 100,000-object
+`schema_tree_filter` fixture measured 6.640 ms dirty-to-draw p95 over 37
+observed frames, with no 8.33 ms frame overruns. Criterion's ten samples
+reported a 6.276 ms mean iteration and approximately 20% improvement against
+its saved local baseline. The run used the same Linux host and fixture but a
+later build; these are local CPU-renderer measurements, not physical-display
+latency or a cross-platform guarantee. The native xkbcommon library was
+provided through `LIBRARY_PATH` for benchmark linking.
+
 The direct executable run completed all 13 fixtures in 59.76 seconds with maximum
 resident set size 1,023,768 KiB (about 999.8 MiB), no swaps, and exit status 0.
 This is the peak of the complete benchmark process, including fixture data,
