@@ -73,8 +73,10 @@ WAL and shared-memory sidecars. Sift preserves their journal and sync settings.
   views, virtual tables and writes to generated columns are rejected.
 - Estimated `EXPLAIN QUERY PLAN` trees with native detail text and no invented
   costs or actual timings. ANALYZE/actual plan capture is unsupported.
-- Atomic CSV imports, including table creation, with abort or skip-conflict
-  behavior. Bounded batches roll back together on failure; quarantine is unsupported.
+- Atomic CSV imports, including table creation, with abort, skip-conflict, or
+  quarantine behavior. Quarantine uses per-row savepoints and returns rejected
+  source rows with bounded reasons; the desktop report workflow remains open.
+  Bounded batches roll back together on fatal failure.
 
 The IDE navigation catalog is explicitly partial. Full dependency graphs,
 schema comparison/migration, database designer mutations, process controls,

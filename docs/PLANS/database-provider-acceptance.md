@@ -145,7 +145,11 @@ tests. The two server stream measurements remained 32.1 ms/103.6 ms respectively
 Explicit exclusions: Windows file authority (fails closed), untested macOS
 deployment, network/hostile-local filesystems, full dependency/migration graphs,
 virtual-table mutation, extension loading/ATTACH, actual plans, native bulk or
-transfer targets, quarantine import, creation/maintenance UI and full SQLite
+transfer targets, creation/maintenance UI and full SQLite
 DDL parser coverage. CHECK metadata is best-effort; native definitions remain
 authoritative. Exhaustive filesystem fault injection and enterprise-scale
 catalog stress are not claimed by this graduation scope.
+
+Follow-on SQLite CSV quarantine is implemented with per-row savepoints and a
+real-file server regression. The desktop quarantine report workflow remains
+separate work; the original 2026-09-07 graduation did not include quarantine.

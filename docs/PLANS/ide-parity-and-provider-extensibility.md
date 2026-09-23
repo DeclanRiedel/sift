@@ -314,6 +314,8 @@ The backend daily-driver scope below passed ADR-055 acceptance. Partial markers
 retain broader UI/administration depth; they no longer imply missing native
 provider implementations. The evidence matrix names tested versions and explicit
 exclusions. Broader engine administration remains separate work.
+Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
+[SQL Server](sqlserver-provider-gaps.md), and [SQLite](sqlite-provider-gaps.md).
 
 - [x] PostgreSQL scoped shallow/deep/graph introspection and native object DDL
 - [~] PostgreSQL plans
