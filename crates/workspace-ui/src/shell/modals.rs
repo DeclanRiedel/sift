@@ -7786,9 +7786,14 @@ impl WorkspaceShell {
                                             Button::new("open-transfer-quarantine-report", "View rejected rows")
                                                 .tone(ButtonTone::Neutral)
                                                 .on_click(cx.listener(move |shell, _, window, cx| {
-                                                    shell.open_transfer_quarantine_report(artifact_id, window, cx)
+                                                    shell.open_transfer_quarantine_report(artifact_id, false, window, cx)
                                                 }))
                                         }))
+                                        .child(Button::new("open-transfer-quarantine-history", "Recent rejected rows")
+                                            .tone(ButtonTone::Ghost)
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.open_transfer_quarantine_history(window, cx)
+                                            })))
                                         .child(div().flex_1())
                                         .child(
                                             div()
@@ -7888,6 +7893,52 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::TransferQuarantineHistory => {
+                    let artifacts = self.transfer.quarantine_artifacts.clone();
+                    let count = artifacts.len();
+                    div()
+                        .debug_selector(|| "transfer-quarantine-history".into())
+                        .track_focus(&self.focus_handle)
+                        .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, window, cx| {
+                            shell.handle_transfer_quarantine_history_key(event, window, cx)
+                        }))
+                        .w(px(760.))
+                        .h(px(500.))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Recent rejected-row reports"))
+                        .child(div().text_xs().text_color(colors.muted_text).child("Newest 100 unexpired reports in this workspace; reports expire seven days after import."))
+                        .child(div().text_xs().text_color(colors.muted_text).child("j/k select · g/G first/last · Enter opens selected report."))
+                        .children(self.transfer.quarantine_history_loading.then(|| div().child("Loading reports…")))
+                        .children(self.transfer.quarantine_history_error.clone().map(ErrorBanner::new))
+                        .children((!self.transfer.quarantine_history_loading && artifacts.is_empty() && self.transfer.quarantine_history_error.is_none())
+                            .then(|| div().text_color(colors.muted_text).child("No retained reports found.")))
+                        .child(uniform_list("transfer-quarantine-history-list", count, cx.processor(move |shell, range: Range<usize>, _, cx| {
+                            range.filter_map(|index| artifacts.get(index).map(|artifact| (index, artifact))).map(|(index, artifact)| {
+                                let artifact_id = artifact.id;
+                                Button::new(("quarantine-history-artifact", index),
+                                    format!("Report {} · {} · {} bytes", artifact_id.0, artifact.created_at.format("%Y-%m-%d %H:%M UTC"), artifact.byte_len))
+                                    .debug_selector(format!("quarantine-history-artifact-{index}"))
+                                    .tone(if index == shell.transfer.quarantine_history_selected {
+                                        ButtonTone::Accent
+                                    } else {
+                                        ButtonTone::Ghost
+                                    })
+                                    .on_click(cx.listener(move |shell, _, window, cx| {
+                                        shell.open_transfer_quarantine_report(artifact_id, true, window, cx)
+                                    }))
+                            }).collect::<Vec<_>>()
+                        })).flex_1().min_h_0().track_scroll(&self.transfer.quarantine_history_scroll))
+                        .child(div().flex().justify_end().child(Button::new("back-to-transfer-recipes-from-history", "Back to recipes")
+                            .tone(ButtonTone::Neutral)
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.modal = Some(Modal::TransferRecipes);
+                                shell.transfer.recipe_focus_handle.focus(window, cx);
+                                cx.notify();
+                            }))))
+                        .into_any_element()
+                }
                 Modal::TransferQuarantineReport => {
                     let report = self.transfer.quarantine_report.clone();
                     let count = report.as_ref().map_or(0, |report| report.rows.len());
@@ -7931,8 +7982,14 @@ impl WorkspaceShell {
                         .child(div().flex().justify_end().child(Button::new("back-to-transfer-recipes", "Back to recipes")
                             .tone(ButtonTone::Neutral)
                             .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.modal = Some(Modal::TransferRecipes);
-                                shell.transfer.recipe_focus_handle.focus(window, cx);
+                                shell.modal = Some(if shell.transfer.quarantine_return_to_history {
+                                    Modal::TransferQuarantineHistory
+                                } else {
+                                    Modal::TransferRecipes
+                                });
+                                if !shell.transfer.quarantine_return_to_history {
+                                    shell.transfer.recipe_focus_handle.focus(window, cx);
+                                }
                                 cx.notify();
                             }))))
                         .into_any_element()

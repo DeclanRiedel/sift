@@ -30,7 +30,7 @@ claims.
       desktop, with rejected-row navigation and source-value details.
 - [x] Configure and retry durable CSV import from the desktop using a target
       checkpoint table and stable run UUID.
-- [ ] Add a durable transfer-artifact history so quarantine reports can be
+- [x] Add a durable transfer-artifact history so quarantine reports can be
       reopened after the current import result is dismissed (within retention).
 - [ ] Decide whether ATTACH, extensions, custom functions/collations, or
       virtual-table writes can meet Sift's file and authorization boundaries;

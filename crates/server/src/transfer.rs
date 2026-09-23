@@ -146,7 +146,7 @@ pub async fn execute_recipe(
             Some(metadata.create_workspace_artifact(
                 recipe.workspace_id,
                 actor,
-                "application/json",
+                sift_protocol::CSV_QUARANTINE_CONTENT_TYPE,
                 report,
                 Some(chrono::Utc::now() + chrono::Duration::days(7)),
             )?)

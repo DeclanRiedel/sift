@@ -1,6 +1,6 @@
 # Retained CSV quarantine reports
 
-Status: design for the next Linux transfer slice. This applies to PostgreSQL,
+Status: implemented. This applies to PostgreSQL,
 SQL Server, and SQLite imports through the shared transfer API.
 
 - Store new CSV quarantine artifacts with a dedicated content type so a history

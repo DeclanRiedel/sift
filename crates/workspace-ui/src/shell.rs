@@ -2233,6 +2233,7 @@ pub enum Modal {
     CatalogSnapshots,
     CsvImport,
     TransferRecipes,
+    TransferQuarantineHistory,
     TransferQuarantineReport,
     RepositoryCommit,
     ConfirmRepositoryUncommit,
@@ -4126,6 +4127,11 @@ pub enum ExecutorCommand {
         artifact_id: sift_protocol::WorkspaceArtifactId,
         generation: u64,
     },
+    LoadTransferQuarantineHistory {
+        instance_id: Option<String>,
+        workspace_id: sift_protocol::WorkspaceId,
+        generation: u64,
+    },
     CancelTransferRecipe {
         generation: u64,
     },
@@ -4708,6 +4714,12 @@ pub enum ExecutorEvent {
         artifact_id: sift_protocol::WorkspaceArtifactId,
         generation: u64,
         result: Result<sift_protocol::CsvQuarantineReport, String>,
+    },
+    TransferQuarantineHistoryLoaded {
+        instance_id: Option<String>,
+        workspace_id: sift_protocol::WorkspaceId,
+        generation: u64,
+        result: Result<Vec<sift_protocol::WorkspaceArtifact>, String>,
     },
     CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
     DatabaseProcessTerminated {
@@ -11846,6 +11858,13 @@ impl WorkspaceShell {
                 quarantine_scroll: UniformListScrollHandle::new(),
                 quarantine_loading: false,
                 quarantine_error: None,
+                quarantine_artifacts: Vec::new(),
+                quarantine_history_selected: 0,
+                quarantine_history_scroll: UniformListScrollHandle::new(),
+                quarantine_history_loading: false,
+                quarantine_history_generation: 0,
+                quarantine_history_error: None,
+                quarantine_return_to_history: false,
             },
             _lifecycle_task: None,
             _presence_task: None,
@@ -15743,7 +15762,8 @@ impl WorkspaceShell {
             event @ (ExecutorEvent::TransferRecipesLoaded { .. }
             | ExecutorEvent::TransferRecipeMutationFinished { .. }
             | ExecutorEvent::TransferRecipeExecutionFinished { .. }
-            | ExecutorEvent::TransferQuarantineReportLoaded { .. }) => {
+            | ExecutorEvent::TransferQuarantineReportLoaded { .. }
+            | ExecutorEvent::TransferQuarantineHistoryLoaded { .. }) => {
                 self.on_transfer_event(event, cx);
             }
             ExecutorEvent::SqlSnippetsLoaded(result) => {
@@ -52528,6 +52548,7 @@ mod tests {
             shell.transfer.execution_generation = 7;
             shell.open_transfer_quarantine_report(
                 sift_protocol::WorkspaceArtifactId(5),
+                false,
                 window,
                 cx,
             );
@@ -52612,6 +52633,83 @@ mod tests {
                 .read_from_clipboard()
                 .and_then(|item| item.text())
                 .is_some_and(|text| text.contains("\"bad\"")));
+        });
+    }
+
+    #[gpui::test]
+    fn quarantine_history_ignores_stale_responses_and_opens_retained_report(
+        cx: &mut TestAppContext,
+    ) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("server-a".into());
+            shell.selected_workspace_id = Some(42);
+            shell.transfer.execution_generation = 7;
+            shell.open_transfer_quarantine_history(window, cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadTransferQuarantineHistory {
+                workspace_id: sift_protocol::WorkspaceId(42),
+                generation: 1,
+                ..
+            })
+        ));
+        let artifact: sift_protocol::WorkspaceArtifact =
+            serde_json::from_value(serde_json::json!({
+                "id": 5,
+                "workspace_id": 42,
+                "content_type": sift_protocol::CSV_QUARANTINE_CONTENT_TYPE,
+                "digest": "abc",
+                "byte_len": 32,
+                "expires_at": null,
+                "pinned": false,
+                "created_at": "2026-09-23T00:00:00Z"
+            }))
+            .unwrap();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::TransferQuarantineHistoryLoaded {
+                    instance_id: Some("server-b".into()),
+                    workspace_id: sift_protocol::WorkspaceId(42),
+                    generation: 1,
+                    result: Ok(vec![artifact.clone()]),
+                },
+                cx,
+            );
+            assert!(shell.transfer.quarantine_artifacts.is_empty());
+            shell.on_executor_event(
+                ExecutorEvent::TransferQuarantineHistoryLoaded {
+                    instance_id: Some("server-a".into()),
+                    workspace_id: sift_protocol::WorkspaceId(42),
+                    generation: 1,
+                    result: Ok(vec![artifact]),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.transfer.quarantine_artifacts.len(), 1);
+            assert_eq!(shell.modal, Some(Modal::TransferQuarantineHistory));
+        });
+        assert!(cx.debug_bounds("transfer-quarantine-history").is_some());
+        let row = cx.debug_bounds("quarantine-history-artifact-0").unwrap();
+        cx.simulate_click(row.center(), Modifiers::default());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadTransferQuarantineReport {
+                artifact_id: sift_protocol::WorkspaceArtifactId(5),
+                ..
+            })
+        ));
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.modal, Some(Modal::TransferQuarantineReport));
+            assert!(shell.transfer.quarantine_return_to_history);
         });
     }
 

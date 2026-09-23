@@ -5143,6 +5143,36 @@ async fn run_query_executor(
                     });
                 }));
             }
+            ExecutorCommand::LoadTransferQuarantineHistory {
+                instance_id,
+                workspace_id,
+                generation,
+            } => {
+                let server = targets.borrow().clone();
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let result =
+                        if instance_id.as_deref().unwrap_or("local") != server.instance().id {
+                            Err("Server changed; reopen quarantine history".into())
+                        } else {
+                            match server.client().await {
+                                Ok(client) => client
+                                    .quarantine_artifacts(workspace_id)
+                                    .await
+                                    .map_err(|error| {
+                                        format!("loading quarantine history failed: {error}")
+                                    }),
+                                Err(error) => Err(error),
+                            }
+                        };
+                    let _ = events.send(ExecutorEvent::TransferQuarantineHistoryLoaded {
+                        instance_id,
+                        workspace_id,
+                        generation,
+                        result,
+                    });
+                }));
+            }
             ExecutorCommand::LoadCatalogDiagram => {
                 let result = match context.as_ref() {
                     Some(opened) => match opened

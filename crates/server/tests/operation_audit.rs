@@ -8,7 +8,9 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::mock::MockDriver;
-use sift_metadata::{MemorySecretStore, MetadataStore, OperationAudit};
+use sift_metadata::{
+    MemorySecretStore, MetadataStore, NewRoom, OperationAudit, PrincipalId, RoomKind, TenantId,
+};
 use sift_protocol::{
     Code, ColumnMetadata, DriverError, Engine, Nullability, Page, PrimitiveType, Row, SchemaScope,
     SchemaSnapshot, SessionInfo, TypeRef, Value,
@@ -38,6 +40,59 @@ async fn every_http_action_has_an_operation_envelope() {
             status_code: 200,
         } if method == "GET" && path == "/v1/health"
     )));
+}
+
+#[tokio::test]
+async fn quarantine_history_is_authorized_and_audited() {
+    let state = audited_state(MockDriver::builder().engine(Engine::Postgres).build());
+    let metadata = state.metadata.as_ref().unwrap().clone();
+    let actor = PrincipalId(1);
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            actor,
+            NewRoom {
+                name: "reports".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let workspace = metadata
+        .create_workspace(room.id, actor, "reports")
+        .unwrap();
+    let artifact = metadata
+        .create_workspace_artifact(
+            workspace.id,
+            actor,
+            sift_protocol::CSV_QUARANTINE_CONTENT_TYPE,
+            b"{}".to_vec(),
+            None,
+        )
+        .unwrap();
+    let app = app(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/v1/metadata/workspaces/{}/quarantine-artifacts",
+                workspace.id.0
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed: Vec<sift_protocol::WorkspaceArtifact> = body_json(response.into_body()).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, artifact.id);
+    let rows = audit_rows_where(&app, |row| {
+        row.action == "read"
+            && row.target == "transfer_recipe"
+            && row.target_id == Some(workspace.id.0)
+    })
+    .await;
+    assert!(rows.iter().any(|row| row.status == "succeeded"));
 }
 
 fn success_pages() -> Vec<Page> {

@@ -28,7 +28,7 @@ current public support boundary.
       authorized retrieval and rejected source-row details.
 - [x] Configure and retry durable CSV import from the desktop using a target
       checkpoint table and stable run UUID.
-- [ ] Reopen retained transfer artifacts through a durable history view.
+- [x] Reopen retained CSV quarantine reports through a workspace history view.
 - [ ] Finish plan, process-control, and bulk-import desktop workflows currently
       marked partial in the product inventory; retain SQL Server's documented
       abort-and-discard cancellation and savepoint limits.

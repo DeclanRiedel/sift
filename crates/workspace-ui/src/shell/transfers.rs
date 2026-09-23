@@ -32,6 +32,13 @@ pub(super) struct TransferState {
     pub(super) quarantine_scroll: UniformListScrollHandle,
     pub(super) quarantine_loading: bool,
     pub(super) quarantine_error: Option<String>,
+    pub(super) quarantine_artifacts: Vec<sift_protocol::WorkspaceArtifact>,
+    pub(super) quarantine_history_selected: usize,
+    pub(super) quarantine_history_scroll: UniformListScrollHandle,
+    pub(super) quarantine_history_loading: bool,
+    pub(super) quarantine_history_generation: u64,
+    pub(super) quarantine_history_error: Option<String>,
+    pub(super) quarantine_return_to_history: bool,
 }
 
 impl WorkspaceShell {
@@ -773,6 +780,29 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            ExecutorEvent::TransferQuarantineHistoryLoaded {
+                instance_id,
+                workspace_id,
+                generation,
+                result,
+            } => {
+                if self.selected_instance_id != instance_id
+                    || self.selected_workspace_id != Some(workspace_id.0)
+                    || generation != self.transfer.quarantine_history_generation
+                {
+                    return;
+                }
+                self.transfer.quarantine_history_loading = false;
+                match result {
+                    Ok(artifacts) => {
+                        self.transfer.quarantine_artifacts = artifacts;
+                        self.transfer.quarantine_history_selected = 0;
+                        self.transfer.quarantine_history_error = None;
+                    }
+                    Err(message) => self.transfer.quarantine_history_error = Some(message),
+                }
+                cx.notify();
+            }
             _ => unreachable!("only transfer events are routed here"),
         }
     }
@@ -780,6 +810,7 @@ impl WorkspaceShell {
     pub(super) fn open_transfer_quarantine_report(
         &mut self,
         artifact_id: sift_protocol::WorkspaceArtifactId,
+        from_history: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -798,6 +829,7 @@ impl WorkspaceShell {
             return;
         };
         self.transfer.quarantine_artifact_id = Some(artifact_id);
+        self.transfer.quarantine_return_to_history = from_history;
         self.transfer.quarantine_report = None;
         self.transfer.quarantine_selected = 0;
         self.transfer.quarantine_error = None;
@@ -815,6 +847,48 @@ impl WorkspaceShell {
         } else {
             self.transfer.quarantine_error =
                 Some("Quarantine report request was not queued".into());
+        }
+        cx.notify();
+    }
+
+    pub(super) fn open_transfer_quarantine_history(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::ReadTransferRecipe,
+            "Browse quarantine reports",
+            cx,
+        ) {
+            return;
+        }
+        let Some(workspace_id) = self.selected_workspace_id.map(sift_protocol::WorkspaceId) else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.transfer.recipes_error = Some("Transfer manager is unavailable".into());
+            cx.notify();
+            return;
+        };
+        self.transfer.quarantine_history_error = None;
+        self.transfer.quarantine_artifacts.clear();
+        self.transfer.quarantine_history_selected = 0;
+        self.transfer.quarantine_history_generation =
+            self.transfer.quarantine_history_generation.wrapping_add(1);
+        self.transfer.quarantine_history_loading = sender
+            .send(ExecutorCommand::LoadTransferQuarantineHistory {
+                instance_id: self.selected_instance_id.clone(),
+                workspace_id,
+                generation: self.transfer.quarantine_history_generation,
+            })
+            .is_ok();
+        if self.transfer.quarantine_history_loading {
+            self.modal = Some(Modal::TransferQuarantineHistory);
+            self.focus_handle.focus(window, cx);
+        } else {
+            self.transfer.recipes_error =
+                Some("Quarantine report history request was not queued".into());
         }
         cx.notify();
     }
@@ -851,6 +925,43 @@ impl WorkspaceShell {
         self.transfer
             .quarantine_scroll
             .scroll_to_item(self.transfer.quarantine_selected, ScrollStrategy::Nearest);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_transfer_quarantine_history_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        let count = self.transfer.quarantine_artifacts.len();
+        let next = match event.keystroke.key.as_str() {
+            "j" | "down" => self.transfer.quarantine_history_selected.saturating_add(1),
+            "k" | "up" => self.transfer.quarantine_history_selected.saturating_sub(1),
+            "g" => 0,
+            "G" => count.saturating_sub(1),
+            "enter" => {
+                if let Some(artifact) = self
+                    .transfer
+                    .quarantine_artifacts
+                    .get(self.transfer.quarantine_history_selected)
+                {
+                    self.open_transfer_quarantine_report(artifact.id, true, window, cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
+            _ => return,
+        };
+        self.transfer.quarantine_history_selected = next.min(count.saturating_sub(1));
+        self.transfer.quarantine_history_scroll.scroll_to_item(
+            self.transfer.quarantine_history_selected,
+            ScrollStrategy::Nearest,
+        );
         cx.stop_propagation();
         cx.notify();
     }

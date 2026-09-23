@@ -991,6 +991,38 @@ pub(super) async fn list_transfer_recipes(
     Ok(Json(recipes))
 }
 
+pub(super) async fn list_quarantine_artifacts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Vec<sift_protocol::WorkspaceArtifact>>> {
+    let metadata = metadata_store_cloned(&state)?;
+    let auth = resolve_auth_context_blocking(state.clone(), headers).await?;
+    let workspace_id = workspace_id(id)?;
+    authorize_transfer_operation(
+        &state,
+        &auth,
+        workspace_id,
+        None,
+        TransferRecipeAction::Read,
+    )?;
+    let actor = auth.principal_id;
+    let artifacts = metadata_blocking(move || {
+        metadata
+            .list_quarantine_artifacts_for_principal(workspace_id, actor)
+            .map_err(Into::into)
+    })
+    .await?;
+    push_transfer_operation(
+        &state,
+        actor,
+        workspace_id,
+        None,
+        TransferRecipeAction::Read,
+    );
+    Ok(Json(artifacts))
+}
+
 pub(super) async fn create_transfer_recipe(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1267,6 +1299,7 @@ pub(super) async fn get_workspace_artifact(
         None,
         TransferRecipeAction::Read,
     )?;
+    let workspace_id = record.artifact.workspace_id;
     let mut response = Body::from(record.content).into_response();
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
@@ -1283,6 +1316,13 @@ pub(super) async fn get_workspace_artifact(
             .digest
             .parse()
             .map_err(|_| ApiError::Internal("invalid artifact digest".into()))?,
+    );
+    push_transfer_operation(
+        &state,
+        actor,
+        workspace_id,
+        None,
+        TransferRecipeAction::Read,
     );
     Ok(response)
 }

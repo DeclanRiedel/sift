@@ -271,17 +271,17 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Import schema and type inference UI
 - [x] Dry-run transfer UI
 - [x] Error quarantine (CSV API reports, authorized artifact downloads, and
-      desktop inspection from the current import result)
+      desktop inspection from the current result or retained workspace history)
 - [x] Durable CSV resume API (target-side atomic checkpoints and source validation)
 - [x] Resumable CSV import UI (target-side checkpoint table and stable run UUID)
 - [ ] Cross-engine type-mapping editor
 - [x] Parquet support
 
-Transfer preview, CSV quarantine reports with current-result desktop inspection,
+Transfer preview, CSV quarantine reports with retained desktop history,
 and durable CSV resume are implemented. The desktop saves the checkpoint table
 and run UUID in the CSV recipe; retrying with that recipe and the same source file
-resumes from the target-side checkpoint. Retained artifact history and a
-dedicated type-mapping editor remain open.
+resumes from the target-side checkpoint. A dedicated type-mapping editor remains
+open.
 Quarantine report fields and provider limits are documented in backend operations.
 
 Parquet has bounded typed API export and transactional flat-type import; see

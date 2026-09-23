@@ -3,6 +3,17 @@
 use super::*;
 
 impl Client {
+    pub async fn quarantine_artifacts(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<Vec<sift_protocol::WorkspaceArtifact>> {
+        self.get(&format!(
+            "/v1/metadata/workspaces/{}/quarantine-artifacts",
+            workspace.0
+        ))
+        .await
+    }
+
     /// Download an expiring quarantine report using normal workspace authorization.
     pub async fn transfer_quarantine_report(
         &self,

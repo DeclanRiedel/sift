@@ -822,6 +822,10 @@ pub fn app(state: AppState) -> Router {
             get_with(list_transfer_recipes, doc("listTransferRecipes", "List workspace transfer recipes")).post_with(create_transfer_recipe, doc("createTransferRecipe", "Create a revisioned transfer recipe")),
         )
         .api_route(
+            "/v1/metadata/workspaces/:id/quarantine-artifacts",
+            get_with(list_quarantine_artifacts, doc("listQuarantineArtifacts", "List retained CSV quarantine reports")),
+        )
+        .api_route(
             "/v1/metadata/transfer-recipes/:id",
             get_with(get_transfer_recipe, doc("getTransferRecipe", "Get a transfer recipe")).put_with(update_transfer_recipe, doc("updateTransferRecipe", "Update a transfer recipe by revision")).delete_with(delete_transfer_recipe, doc("deleteTransferRecipe", "Delete a transfer recipe by revision")),
         )

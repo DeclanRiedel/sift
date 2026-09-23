@@ -203,6 +203,50 @@ impl MetadataStore {
         }
         Ok(record)
     }
+
+    pub fn list_quarantine_artifacts_for_principal(
+        &self,
+        workspace_id: WorkspaceId,
+        actor: PrincipalId,
+    ) -> Result<Vec<WorkspaceArtifact>> {
+        let conn = self.conn()?;
+        let workspace = workspace_by_id_locked(&conn, workspace_id)?;
+        ensure_room_access(&conn, workspace.room_id, actor, false)?;
+        let mut statement = conn.prepare(
+            "SELECT id, workspace_id, content_type, digest, byte_len, expires_at, pinned, created_at
+             FROM workspace_artifact
+             WHERE workspace_id = ?1 AND content_type = ?2
+               AND (expires_at IS NULL OR julianday(expires_at) > julianday(?3))
+             ORDER BY id DESC LIMIT 100",
+        )?;
+        let artifacts = statement
+            .query_map(
+                params![
+                    workspace_id.0,
+                    sift_protocol::CSV_QUARANTINE_CONTENT_TYPE,
+                    now_text()
+                ],
+                |row| {
+                    let byte_len = row.get::<_, i64>(4)?;
+                    Ok(WorkspaceArtifact {
+                        id: WorkspaceArtifactId(row.get(0)?),
+                        workspace_id: WorkspaceId(row.get(1)?),
+                        content_type: row.get(2)?,
+                        digest: row.get(3)?,
+                        byte_len: u64::try_from(byte_len)
+                            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, byte_len))?,
+                        expires_at: row
+                            .get::<_, Option<String>>(5)?
+                            .map(parse_time_sql)
+                            .transpose()?,
+                        pinned: row.get(6)?,
+                        created_at: parse_time_sql(row.get(7)?)?,
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(artifacts)
+    }
 }
 
 fn validate_recipe(input: &NewTransferRecipe) -> Result<()> {
@@ -399,5 +443,55 @@ mod tests {
             store.workspace_artifact_for_principal(WorkspaceArtifactId(999), actor),
             Err(MetadataError::WorkspaceArtifactNotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn quarantine_history_is_scoped_bounded_and_excludes_expired_artifacts() {
+        let store = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+        store.bootstrap_local("quarantine-history").unwrap();
+        let actor = PrincipalId(1);
+        let room = store
+            .create_room(
+                TenantId(1),
+                actor,
+                NewRoom {
+                    name: "quarantine-room".into(),
+                    kind: RoomKind::Shared,
+                },
+            )
+            .unwrap();
+        let workspace = store.create_workspace(room.id, actor, "first").unwrap();
+        let other = store.create_workspace(room.id, actor, "second").unwrap();
+        let create = |workspace_id, content_type, expires_at| {
+            store
+                .create_workspace_artifact(workspace_id, actor, content_type, vec![1], expires_at)
+                .unwrap()
+        };
+        create(other.id, sift_protocol::CSV_QUARANTINE_CONTENT_TYPE, None);
+        create(workspace.id, "application/json", None);
+        create(
+            workspace.id,
+            sift_protocol::CSV_QUARANTINE_CONTENT_TYPE,
+            Some(Utc::now() - chrono::Duration::seconds(1)),
+        );
+        let expected = (0..101)
+            .map(|_| {
+                create(
+                    workspace.id,
+                    sift_protocol::CSV_QUARANTINE_CONTENT_TYPE,
+                    None,
+                )
+                .id
+            })
+            .collect::<Vec<_>>();
+        let history = store
+            .list_quarantine_artifacts_for_principal(workspace.id, actor)
+            .unwrap();
+        assert_eq!(history.len(), 100);
+        assert_eq!(history.first().unwrap().id, *expected.last().unwrap());
+        assert_eq!(history.last().unwrap().id, expected[1]);
+        assert!(store
+            .list_quarantine_artifacts_for_principal(workspace.id, PrincipalId(2))
+            .is_err());
     }
 }

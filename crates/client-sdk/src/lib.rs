@@ -310,6 +310,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listChangeLedger",
     "listRunSchedules",
     "listScheduleOccurrences",
+    "listQuarantineArtifacts",
     "listTransferRecipes",
     "rerun",
     "resumeScheduleOccurrence",

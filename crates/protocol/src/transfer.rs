@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{WorkspaceArtifactId, WorkspaceId, WorkspaceNodeId};
 
+pub const CSV_QUARANTINE_CONTENT_TYPE: &str = "application/vnd.sift.csv-quarantine+json";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct TransferRecipeId(pub i64);
 
