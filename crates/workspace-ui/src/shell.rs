@@ -16907,6 +16907,17 @@ impl WorkspaceShell {
     }
 
     fn confirm_outcome_unknown_rerun(&mut self, cx: &mut Context<Self>) {
+        if self
+            .executor_sender
+            .as_ref()
+            .is_none_or(ExecutorSender::is_closed)
+        {
+            self.show_toast(
+                "Reconnect before retrying; the previous query outcome is still unknown".into(),
+                cx,
+            );
+            return;
+        }
         let Some(Modal::ConfirmOutcomeUnknownRerun(item_id, sql)) = self.modal.take() else {
             return;
         };
@@ -46250,6 +46261,26 @@ mod tests {
             Ok(ExecutorCommand::Execute { item_id: 9, sql, .. })
                 if sql == "update invoices set reviewed = true"
         ));
+    }
+
+    #[gpui::test]
+    fn disconnected_outcome_unknown_keeps_retry_warning(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let workspace = window.root(cx).unwrap();
+        let (sender, receiver) = ExecutorSender::channel(1);
+        drop(receiver);
+        workspace.update(cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.modal = Some(Modal::ConfirmOutcomeUnknownRerun(
+                9,
+                "update invoices set reviewed = true".into(),
+            ));
+            shell.confirm_outcome_unknown_rerun(cx);
+            assert!(matches!(
+                shell.modal,
+                Some(Modal::ConfirmOutcomeUnknownRerun(9, _))
+            ));
+        });
     }
 
     #[test]

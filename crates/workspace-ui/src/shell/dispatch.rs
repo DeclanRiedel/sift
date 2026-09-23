@@ -41,6 +41,10 @@ impl ExecutorSender {
         })
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+
     pub(super) fn failures(&self) -> watch::Receiver<Option<&'static str>> {
         self.failures.subscribe()
     }
