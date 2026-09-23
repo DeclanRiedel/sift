@@ -295,7 +295,7 @@ impl PgExt for PgDriver {
             .entry(c.id())
             .or_default()
             .push(conn::ListenEntry {
-                client,
+                client: Arc::downgrade(&client),
                 channels: channels_set,
             });
         Ok(NotificationStream { notifications: rx })
@@ -318,18 +318,21 @@ impl PgExt for PgDriver {
             };
             let mut out = Vec::new();
             for listen in entry.value_mut().iter_mut() {
+                let Some(client) = listen.client.upgrade() else {
+                    continue;
+                };
                 let hits: Vec<String> = channels
                     .iter()
                     .filter(|ch| listen.channels.remove(*ch))
                     .cloned()
                     .collect();
                 if !hits.is_empty() {
-                    out.push((Arc::clone(&listen.client), hits));
+                    out.push((client, hits));
                 }
             }
             entry
                 .value_mut()
-                .retain(|listen| !listen.channels.is_empty());
+                .retain(|listen| !listen.channels.is_empty() && listen.client.strong_count() > 0);
             let empty = entry.value().is_empty();
             (out, empty)
         };

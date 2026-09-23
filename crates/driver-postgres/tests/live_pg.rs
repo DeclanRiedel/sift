@@ -869,6 +869,94 @@ async fn listen_notify_receives_payload() {
 }
 
 #[tokio::test]
+async fn dropped_listener_releases_its_connection_without_stopping_another() {
+    let driver = PgDriver::new();
+    let conn = driver.open(&spec()).await.unwrap();
+    let first_channel = unique_schema();
+    let second_channel = unique_schema();
+    let first = driver
+        .listen(conn.clone(), vec![first_channel.clone()])
+        .await
+        .unwrap();
+    let mut second = driver
+        .listen(conn.clone(), vec![second_channel.clone()])
+        .await
+        .unwrap();
+    assert_eq!(active_listener_count(&driver, &conn).await, 2);
+
+    drop(first);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while active_listener_count(&driver, &conn).await != 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("closed listener releases its dedicated connection");
+    driver
+        .unlisten(conn.clone(), vec![first_channel])
+        .await
+        .expect("dead listener entry can be pruned");
+
+    drain(
+        driver
+            .execute(
+                conn.clone(),
+                sift_protocol::ExecuteRequest::new(format!(
+                    "NOTIFY \"{second_channel}\", 'still listening'"
+                )),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let notification = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        second.notifications.recv(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(notification.payload, "still listening");
+
+    drop(second);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while active_listener_count(&driver, &conn).await != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("last listener releases its dedicated connection");
+    driver.close(conn).await.unwrap();
+}
+
+async fn active_listener_count(driver: &PgDriver, conn: &ConnHandle) -> i64 {
+    let pages = drain(
+        driver
+            .execute(
+                conn.clone(),
+                sift_protocol::ExecuteRequest::new(
+                    "SELECT count(*)::bigint FROM pg_stat_activity WHERE application_name = 'sift-listen'",
+                ),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    pages
+        .iter()
+        .find_map(|page| match page {
+            Page::Rows { rows } => rows.first(),
+            _ => None,
+        })
+        .and_then(|row| row.values.first())
+        .and_then(|value| match value {
+            Value::Int64(count) => Some(*count),
+            _ => None,
+        })
+        .expect("PostgreSQL listener count")
+}
+
+#[tokio::test]
 async fn cancel_aborts_long_query() {
     let driver = PgDriver::new();
     let conn = driver.open(&spec()).await.unwrap();

@@ -36,8 +36,8 @@ pub(crate) struct PgDriverInner {
     pub(crate) cursors: DashMap<u64, CursorEntry>,
     /// conn_id → dedicated LISTEN clients + the channels each subscribed
     /// to. Each `listen` call spawns its own connection and appends an
-    /// entry here so `unlisten` can issue UNLISTEN against only the
-    /// clients that actually subscribed to the named channels.
+    /// weak entry here so `unlisten` can reach active subscribers without
+    /// keeping a listener connection alive after its receiver closes.
     pub(crate) listens: DashMap<u64, Vec<ListenEntry>>,
     /// Cached pools by canonical connection-spec key. `open()` of an
     /// already-seen spec reuses the pool; identical connections share warm
@@ -55,7 +55,7 @@ pub(crate) struct PgDriverInner {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ListenEntry {
-    pub(crate) client: Arc<tokio_postgres::Client>,
+    pub(crate) client: std::sync::Weak<tokio_postgres::Client>,
     pub(crate) channels: std::collections::HashSet<String>,
 }
 
@@ -295,8 +295,8 @@ impl PgDriverInner {
                 }
             }
         }
-        // Drop any LISTEN clients tied to this conn. Dropping the Arc
-        // ends their notification pumps at the next `poll_message`.
+        // Forget listener handles tied to this connection. The stream receiver
+        // owns each pump's lifetime; closing it releases the dedicated client.
         self.listens.remove(&c.id());
     }
 }
