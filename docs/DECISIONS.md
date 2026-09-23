@@ -2413,3 +2413,22 @@ separate operations, so a later database outage can leave a validated saved
 profile. This is safer than deleting a possibly concurrently updated profile.
 
 See [Tailnet setup and recovery](TAILNET.md).
+
+## ADR-062 — CSV type choices remain server validated
+
+Status: accepted. Date: 2026-09-23.
+
+The desktop CSV preview offers per-column SQL types for new tables. Blank input
+uses the inferred type for the selected engine. The desktop validates each
+explicit value as one bounded SQL data type before generating reviewable DDL or
+preparing a transfer recipe. The CSV API repeats that validation at execution;
+recipe options and desktop validation never become an authorization boundary.
+
+Transfer recipes persist type mappings and desktop execution choices in their
+options. Reopening a recipe restores those choices before sending a normal
+audited execution request. Existing target tables use their actual column
+types. For a new table, skip and quarantine ingestion casts against the same
+explicit types used in CREATE TABLE. Durable resume remains incompatible with
+explicit type mappings and table creation.
+
+See [CSV type mapping design](PLANS/csv-type-mapping-editor.md).

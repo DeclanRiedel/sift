@@ -274,14 +274,14 @@ and open the live collaborative document, reusing existing tabs.
       desktop inspection from the current result or retained workspace history)
 - [x] Durable CSV resume API (target-side atomic checkpoints and source validation)
 - [x] Resumable CSV import UI (target-side checkpoint table and stable run UUID)
-- [ ] Cross-engine type-mapping editor
+- [x] Cross-engine CSV type-mapping editor (Postgres, SQL Server, SQLite)
 - [x] Parquet support
 
 Transfer preview, CSV quarantine reports with retained desktop history,
 and durable CSV resume are implemented. The desktop saves the checkpoint table
 and run UUID in the CSV recipe; retrying with that recipe and the same source file
-resumes from the target-side checkpoint. A dedicated type-mapping editor remains
-open.
+resumes from the target-side checkpoint. CSV preview accepts per-column SQL
+types for the selected engine and can carry them into a transfer recipe.
 Quarantine report fields and provider limits are documented in backend operations.
 
 Parquet has bounded typed API export and transactional flat-type import; see

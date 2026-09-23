@@ -185,6 +185,30 @@ impl WorkspaceShell {
         self.transfer.recipe_options_input.update(cx, |input, cx| {
             input.set_text(recipe.options.to_string(), cx)
         });
+        self.transfer.import_create_table = recipe
+            .options
+            .get("create_table")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        self.transfer.import_conflict_policy = match recipe
+            .options
+            .get("conflict_policy")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("skip") => sift_protocol::CsvConflictPolicy::Skip,
+            Some("quarantine") => sift_protocol::CsvConflictPolicy::Quarantine,
+            _ => sift_protocol::CsvConflictPolicy::Abort,
+        };
+        self.transfer.recipe_table_input.update(cx, |input, cx| {
+            input.set_text(
+                recipe
+                    .options
+                    .get("destination_table")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                cx,
+            )
+        });
         let resume = recipe.options.get("durable_resume");
         self.transfer.resume_enabled = resume.is_some();
         self.transfer
@@ -310,6 +334,16 @@ impl WorkspaceShell {
                 cx.notify();
                 return;
             }
+            if self.transfer.import_create_table
+                || self.transfer.import_conflict_policy != sift_protocol::CsvConflictPolicy::Abort
+            {
+                self.transfer.recipes_error = Some(
+                    "Durable resume requires an existing target table and Abort conflict policy"
+                        .into(),
+                );
+                cx.notify();
+                return;
+            }
             let checkpoint_table = self.transfer.resume_checkpoint_input.read(cx).text().trim();
             let run_id = self.transfer.resume_run_id_input.read(cx).text().trim();
             if checkpoint_table.is_empty() || uuid::Uuid::parse_str(run_id).is_err() {
@@ -339,6 +373,38 @@ impl WorkspaceShell {
             );
         } else {
             options.remove("durable_resume");
+        }
+        if self.transfer.recipe_direction == sift_protocol::TransferDirection::Import {
+            options.insert(
+                "create_table".into(),
+                self.transfer.import_create_table.into(),
+            );
+            options.insert(
+                "conflict_policy".into(),
+                serde_json::Value::String(
+                    match self.transfer.import_conflict_policy {
+                        sift_protocol::CsvConflictPolicy::Abort => "abort",
+                        sift_protocol::CsvConflictPolicy::Skip => "skip",
+                        sift_protocol::CsvConflictPolicy::Quarantine => "quarantine",
+                    }
+                    .into(),
+                ),
+            );
+            options.insert(
+                "destination_table".into(),
+                serde_json::Value::String(
+                    self.transfer
+                        .recipe_table_input
+                        .read(cx)
+                        .text()
+                        .trim()
+                        .to_owned(),
+                ),
+            );
+        } else {
+            options.remove("create_table");
+            options.remove("conflict_policy");
+            options.remove("destination_table");
         }
         let (source, sink) = match self.transfer.recipe_direction {
             sift_protocol::TransferDirection::Export => (

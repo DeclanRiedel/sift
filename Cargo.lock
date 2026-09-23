@@ -8172,6 +8172,7 @@ dependencies = [
  "sift-snippets",
  "sift-sql-variables",
  "sift-ui",
+ "sqlparser",
  "tempfile",
  "tokio",
  "toml 0.8.23",

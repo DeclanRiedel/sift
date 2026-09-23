@@ -89,11 +89,7 @@ pub async fn import(
         }
         CsvConflictPolicy::Skip | CsvConflictPolicy::Quarantine => {
             let target_types = if request.create_table {
-                prepared
-                    .columns
-                    .iter()
-                    .map(|column| inferred_sql(column.inferred_type, engine).to_string())
-                    .collect()
+                created_column_types(&prepared.columns, engine, &request.type_mappings)
             } else {
                 target_column_types(store, session, connection, &request.table, &prepared).await?
             };
@@ -327,6 +323,22 @@ fn create_table_sql(
         })
         .collect::<Vec<_>>();
     format!("CREATE TABLE {table} ({})", definitions.join(", "))
+}
+
+fn created_column_types(
+    columns: &[InferredCsvColumn],
+    engine: Engine,
+    mappings: &std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
+    columns
+        .iter()
+        .map(|column| {
+            mappings
+                .get(&column.name)
+                .cloned()
+                .unwrap_or_else(|| inferred_sql(column.inferred_type, engine).to_string())
+        })
+        .collect()
 }
 
 fn inferred_sql(inferred: InferredCsvType, engine: Engine) -> &'static str {
@@ -981,6 +993,10 @@ mod tests {
             &request.type_mappings,
         );
         assert!(ddl.contains("\"id\" numeric(20,0)"));
+        assert_eq!(
+            created_column_types(&prepared.columns, Engine::Postgres, &request.type_mappings),
+            ["numeric(20,0)", "text"]
+        );
 
         for (engine, sql_type) in [
             (Engine::Postgres, "double precision"),

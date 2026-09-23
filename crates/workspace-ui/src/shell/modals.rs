@@ -7292,7 +7292,7 @@ impl WorkspaceShell {
                 }
                 Modal::CsvImport => {
                     let preview = self.csv_import_preview.as_ref();
-                    let (table, row_count, conflict_policy, create_table, target, columns, rows) = preview.map_or_else(
+                    let (table, row_count, conflict_policy, create_table, target, columns, rows, type_inputs) = preview.map_or_else(
                         || {
                             (
                                 "CSV import".to_owned(),
@@ -7300,6 +7300,7 @@ impl WorkspaceShell {
                                 sift_protocol::CsvConflictPolicy::Abort,
                                 true,
                                 "No connection selected".to_owned(),
+                                Vec::new(),
                                 Vec::new(),
                                 Vec::new(),
                             )
@@ -7316,6 +7317,7 @@ impl WorkspaceShell {
                                 ),
                                 preview.columns.clone(),
                                 preview.rows.clone(),
+                                preview.type_inputs.clone(),
                             )
                         },
                     );
@@ -7343,6 +7345,9 @@ impl WorkspaceShell {
                                         if column.nullable { "nullable" } else { "required" }
                                     )),
                             )
+                            .children(create_table.then(|| type_inputs.get(index).cloned()).flatten().map(|input| {
+                                div().min_w_0().child(input)
+                            }))
                     });
                     let data_header = columns.iter().map(|column| {
                         div()
@@ -7389,7 +7394,7 @@ impl WorkspaceShell {
                         .gap_2()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(if create_table { format!("Prepare {table}") } else { format!("Import into {table}") }))
                         .child(div().text_sm().text_color(colors.muted_text).child(format!("{target} · {row_count} rows · 200 sampled · 20 previewed")))
-                        .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("INFERRED COLUMNS"))
+                        .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child(if create_table { "COLUMN TYPES · blank uses inferred type" } else { "COLUMN TYPES · existing table types apply" }))
                         .child(div().id("csv-import-mappings").overflow_x_scroll().border_1().border_color(colors.subtle_border).child(div().w(grid_width).flex().text_xs().children(mapping_cells)))
                         .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("DATA PREVIEW"))
                         .child(div().id("csv-import-preview-rows").flex_1().min_h(px(120.)).overflow_scroll().border_1().border_color(colors.subtle_border).text_xs().child(div().w(grid_width).child(div().w(grid_width).flex().bg(colors.toolbar).children(data_header)).children(data_rows)))
@@ -7429,6 +7434,14 @@ impl WorkspaceShell {
                                                         )
                                                     },
                                                 )),
+                                        )
+                                        .child(
+                                            Button::new("csv-import-save-recipe", "Use in recipe")
+                                                .tone(ButtonTone::Neutral)
+                                                .disabled(preview.is_none())
+                                                .on_click(cx.listener(|shell, _, window, cx| {
+                                                    shell.csv_preview_to_transfer_recipe(window, cx)
+                                                })),
                                         )
                                         .child(
                                             Button::new(

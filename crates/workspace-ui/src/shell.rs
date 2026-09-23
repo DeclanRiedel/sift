@@ -3264,6 +3264,7 @@ struct CsvImportPreviewState {
     rows: Vec<Vec<String>>,
     row_count: usize,
     conflict_policy: sift_protocol::CsvConflictPolicy,
+    type_inputs: Vec<Entity<TextInput>>,
 }
 
 #[derive(Debug, Clone)]
@@ -9986,10 +9987,60 @@ fn preview_csv(
         rows,
         row_count,
         conflict_policy: sift_protocol::CsvConflictPolicy::Abort,
+        type_inputs: Vec::new(),
     })
 }
 
-fn csv_create_table_sql(preview: &CsvImportPreviewState) -> Result<String, String> {
+fn csv_inferred_sql(inferred: sift_protocol::InferredCsvType, provider: &str) -> &'static str {
+    match (inferred, provider) {
+        (sift_protocol::InferredCsvType::Boolean, "sift/sqlite") => "INTEGER",
+        (
+            sift_protocol::InferredCsvType::Decimal
+            | sift_protocol::InferredCsvType::Date
+            | sift_protocol::InferredCsvType::TimestampTz
+            | sift_protocol::InferredCsvType::Text,
+            "sift/sqlite",
+        ) => "TEXT",
+        (sift_protocol::InferredCsvType::Boolean, "sift/postgres") => "boolean",
+        (sift_protocol::InferredCsvType::Boolean, "sift/sql-server") => "bit",
+        (sift_protocol::InferredCsvType::Int64, _) => "bigint",
+        (sift_protocol::InferredCsvType::Decimal, "sift/postgres") => "numeric",
+        (sift_protocol::InferredCsvType::Decimal, "sift/sql-server") => "decimal(38,10)",
+        (sift_protocol::InferredCsvType::Date, _) => "date",
+        (sift_protocol::InferredCsvType::TimestampTz, "sift/postgres") => "timestamptz",
+        (sift_protocol::InferredCsvType::TimestampTz, "sift/sql-server") => "datetimeoffset",
+        (sift_protocol::InferredCsvType::Text, "sift/postgres") => "text",
+        (sift_protocol::InferredCsvType::Text, "sift/sql-server") => "nvarchar(max)",
+        _ => "text",
+    }
+}
+
+fn validate_csv_sql_type(sql_type: &str, provider: &str) -> bool {
+    use sqlparser::dialect::{Dialect, MsSqlDialect, PostgreSqlDialect, SQLiteDialect};
+    use sqlparser::parser::Parser;
+    use sqlparser::tokenizer::Token;
+    let dialect: &dyn Dialect = match provider {
+        "sift/postgres" => &PostgreSqlDialect {},
+        "sift/sql-server" => &MsSqlDialect {},
+        "sift/sqlite" => &SQLiteDialect {},
+        _ => return false,
+    };
+    !sql_type.is_empty()
+        && sql_type.len() <= 128
+        && !sql_type.contains(';')
+        && !sql_type.contains("--")
+        && !sql_type.contains("/*")
+        && Parser::new(dialect)
+            .try_with_sql(sql_type)
+            .is_ok_and(|mut parser| {
+                parser.parse_data_type().is_ok() && parser.peek_token().token == Token::EOF
+            })
+}
+
+fn csv_create_table_sql(
+    preview: &CsvImportPreviewState,
+    mappings: &std::collections::BTreeMap<String, String>,
+) -> Result<String, String> {
     let provider = preview.target.provider_id.as_str();
     if !matches!(
         provider,
@@ -10010,29 +10061,10 @@ fn csv_create_table_sql(preview: &CsvImportPreviewState) -> Result<String, Strin
         .columns
         .iter()
         .map(|column| {
-            let data_type = match (column.inferred_type, provider) {
-                (sift_protocol::InferredCsvType::Boolean, "sift/sqlite") => "INTEGER",
-                (
-                    sift_protocol::InferredCsvType::Decimal
-                    | sift_protocol::InferredCsvType::Date
-                    | sift_protocol::InferredCsvType::TimestampTz
-                    | sift_protocol::InferredCsvType::Text,
-                    "sift/sqlite",
-                ) => "TEXT",
-                (sift_protocol::InferredCsvType::Boolean, "sift/postgres") => "boolean",
-                (sift_protocol::InferredCsvType::Boolean, "sift/sql-server") => "bit",
-                (sift_protocol::InferredCsvType::Int64, _) => "bigint",
-                (sift_protocol::InferredCsvType::Decimal, "sift/postgres") => "numeric",
-                (sift_protocol::InferredCsvType::Decimal, "sift/sql-server") => "decimal(38,10)",
-                (sift_protocol::InferredCsvType::Date, _) => "date",
-                (sift_protocol::InferredCsvType::TimestampTz, "sift/postgres") => "timestamptz",
-                (sift_protocol::InferredCsvType::TimestampTz, "sift/sql-server") => {
-                    "datetimeoffset"
-                }
-                (sift_protocol::InferredCsvType::Text, "sift/postgres") => "text",
-                (sift_protocol::InferredCsvType::Text, "sift/sql-server") => "nvarchar(max)",
-                _ => unreachable!("provider checked above"),
-            };
+            let data_type = mappings.get(&column.source).map_or_else(
+                || csv_inferred_sql(column.inferred_type, provider),
+                String::as_str,
+            );
             format!(
                 "    {} {data_type} {}",
                 quote(&column.target),
@@ -31438,6 +31470,21 @@ impl WorkspaceShell {
                 .await;
             let _ = shell.update(cx, |shell, cx| match preview {
                 Ok(preview) => {
+                    let mut preview = preview;
+                    preview.type_inputs = preview
+                        .columns
+                        .iter()
+                        .map(|column| {
+                            let inferred = csv_inferred_sql(
+                                column.inferred_type,
+                                preview.target.provider_id.as_str(),
+                            );
+                            cx.new(|cx| {
+                                TextInput::new("", inferred, cx)
+                                    .aria_label(format!("SQL type for {}", column.source))
+                            })
+                        })
+                        .collect();
                     shell.csv_import_preview = Some(preview);
                     shell.modal = Some(Modal::CsvImport);
                     cx.notify();
@@ -31460,12 +31507,86 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn confirm_csv_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(preview) = self.csv_import_preview.take() else {
+    fn csv_type_mappings(
+        &self,
+        preview: &CsvImportPreviewState,
+        cx: &Context<Self>,
+    ) -> Result<std::collections::BTreeMap<String, String>, String> {
+        let mut mappings = std::collections::BTreeMap::new();
+        if !preview.create_table {
+            return Ok(mappings);
+        }
+        for (column, input) in preview.columns.iter().zip(&preview.type_inputs) {
+            let sql_type = input.read(cx).text().trim();
+            if sql_type.is_empty() {
+                continue;
+            }
+            if !validate_csv_sql_type(sql_type, preview.target.provider_id.as_str()) {
+                return Err(format!(
+                    "SQL type for `{}` is invalid for this provider",
+                    column.source
+                ));
+            }
+            mappings.insert(column.source.clone(), sql_type.to_owned());
+        }
+        Ok(mappings)
+    }
+
+    fn csv_preview_to_transfer_recipe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(preview) = self.csv_import_preview.as_ref() else {
             return;
         };
+        let mappings = match self.csv_type_mappings(preview, cx) {
+            Ok(mappings) => mappings,
+            Err(message) => {
+                self.show_error_toast(message, cx);
+                return;
+            }
+        };
+        let table = preview.table.clone();
+        let create_table = preview.create_table;
+        let conflict_policy = preview.conflict_policy;
+        if self.selected_workspace_id.is_none() {
+            self.show_error_toast(
+                "Select a workspace before saving a transfer recipe".into(),
+                cx,
+            );
+            return;
+        }
+        self.clear_transfer_recipe_editor(cx);
+        self.transfer.recipe_direction = sift_protocol::TransferDirection::Import;
+        self.transfer.advanced_open = true;
+        self.transfer.import_create_table = create_table;
+        self.transfer.import_conflict_policy = conflict_policy;
+        self.transfer.recipe_name_input.update(cx, |input, cx| {
+            input.set_text(format!("Import {table}"), cx)
+        });
+        self.transfer
+            .recipe_table_input
+            .update(cx, |input, cx| input.set_text(table, cx));
+        self.transfer.recipe_options_input.update(cx, |input, cx| {
+            input.set_text(
+                serde_json::json!({"header": true, "type_mappings": mappings}).to_string(),
+                cx,
+            )
+        });
+        self.open_transfer_recipes(window, cx);
+    }
+
+    fn confirm_csv_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(preview) = self.csv_import_preview.as_ref() else {
+            return;
+        };
+        let type_mappings = match self.csv_type_mappings(preview, cx) {
+            Ok(mappings) => mappings,
+            Err(message) => {
+                self.show_error_toast(message, cx);
+                return;
+            }
+        };
+        let preview = self.csv_import_preview.take().unwrap();
         if preview.create_table {
-            let sql = match csv_create_table_sql(&preview) {
+            let sql = match csv_create_table_sql(&preview, &type_mappings) {
                 Ok(sql) => sql,
                 Err(message) => {
                     self.csv_import_preview = Some(preview);
@@ -31502,7 +31623,7 @@ impl WorkspaceShell {
             conflict_policy: preview.conflict_policy,
             dry_run: false,
             resume_from_row: 0,
-            type_mappings: Default::default(),
+            type_mappings,
         };
         if sender
             .send(ExecutorCommand::ImportCsv {
@@ -46252,6 +46373,18 @@ mod tests {
         assert!(preview.columns[4].nullable);
     }
 
+    #[test]
+    fn csv_type_editor_accepts_one_engine_type_and_rejects_sql_fragments() {
+        assert!(validate_csv_sql_type("numeric(20,0)", "sift/postgres"));
+        assert!(validate_csv_sql_type("nvarchar(max)", "sift/sql-server"));
+        assert!(validate_csv_sql_type("TEXT", "sift/sqlite"));
+        assert!(!validate_csv_sql_type("int DEFAULT 1", "sift/postgres"));
+        assert!(!validate_csv_sql_type(
+            "text; DROP TABLE t",
+            "sift/postgres"
+        ));
+    }
+
     fn csv_test_target() -> SemanticConnectionTarget {
         SemanticConnectionTarget {
             instance_id: "local".into(),
@@ -46271,14 +46404,24 @@ mod tests {
         let (sender, mut receiver) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
-            shell.csv_import_preview = Some(
-                preview_csv(
-                    "events".into(),
-                    b"id,name\n1,Alice\n".to_vec(),
-                    csv_test_target(),
-                )
-                .unwrap(),
-            );
+            let mut preview = preview_csv(
+                "events".into(),
+                b"id,name\n1,Alice\n".to_vec(),
+                csv_test_target(),
+            )
+            .unwrap();
+            preview.type_inputs = preview
+                .columns
+                .iter()
+                .map(|column| {
+                    cx.new(|cx| {
+                        TextInput::new("", "SQL type", cx)
+                            .aria_label(format!("SQL type for {}", column.source))
+                    })
+                })
+                .collect();
+            preview.type_inputs[0].update(cx, |input, cx| input.set_text("numeric(20,0)", cx));
+            shell.csv_import_preview = Some(preview);
             shell.modal = Some(Modal::CsvImport);
             cx.notify();
         });
@@ -46293,7 +46436,7 @@ mod tests {
             assert!(item.title.starts_with("create-events"));
             let sql = pane.editors[&item.id].read(cx).document().text().to_owned();
             assert!(sql.contains("CREATE TABLE \"events\""));
-            assert!(sql.contains("\"id\" bigint NOT NULL"));
+            assert!(sql.contains("\"id\" numeric(20,0) NOT NULL"));
             assert_eq!(shell.query_semantic_targets[&item.id], csv_test_target());
         });
 
@@ -46320,6 +46463,56 @@ mod tests {
                 if request.table == "public.events"
                     && request.conflict_policy == sift_protocol::CsvConflictPolicy::Skip
         ));
+    }
+
+    #[gpui::test]
+    fn csv_type_choices_populate_transfer_recipe(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_workspace_id = Some(42);
+            let mut preview = preview_csv(
+                "events".into(),
+                b"id,name\n1,Alice\n".to_vec(),
+                csv_test_target(),
+            )
+            .unwrap();
+            preview.type_inputs = preview
+                .columns
+                .iter()
+                .map(|column| {
+                    cx.new(|cx| {
+                        TextInput::new("", "SQL type", cx)
+                            .aria_label(format!("SQL type for {}", column.source))
+                    })
+                })
+                .collect();
+            preview.type_inputs[0].update(cx, |input, cx| input.set_text("numeric(20,0)", cx));
+            shell.csv_import_preview = Some(preview);
+            shell.csv_preview_to_transfer_recipe(window, cx);
+            assert_eq!(shell.modal, Some(Modal::TransferRecipes));
+            assert_eq!(
+                shell.transfer.recipe_direction,
+                sift_protocol::TransferDirection::Import
+            );
+            assert!(shell.transfer.import_create_table);
+            assert_eq!(shell.transfer.recipe_table_input.read(cx).text(), "events");
+            shell.transfer.recipes_loading = false;
+            shell.save_transfer_recipe(cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadTransferRecipes { .. })
+        ));
+        assert!(
+            matches!(commands.try_recv(), Ok(ExecutorCommand::SaveTransferRecipe { request, .. })
+            if request.options["type_mappings"]["id"] == "numeric(20,0)"
+                && request.options["create_table"] == true
+                && request.options["destination_table"] == "events")
+        );
     }
 
     #[test]
