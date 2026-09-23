@@ -75,6 +75,49 @@ fn benchmark_ms(ns: Option<f64>) -> String {
         |v| format!("{:.3} ms", v / 1_000_000.0),
     )
 }
+
+fn benchmark_comparison(
+    base: &sift_protocol::BenchmarkReport,
+    current: &sift_protocol::BenchmarkReport,
+) -> String {
+    if base.engine != current.engine {
+        return "Baseline uses a different engine; timing comparison unavailable".into();
+    }
+    if !base.completed || !current.completed {
+        return "Comparison is inconclusive: at least one run is incomplete".into();
+    }
+    if base.query_timeout_ms != current.query_timeout_ms
+        || base.total_budget_ms != current.total_budget_ms
+        || base.requested_iterations != current.requested_iterations
+        || base.delay_ms != current.delay_ms
+        || base.warmups != current.warmups
+        || base.parameter_count != current.parameter_count
+    {
+        return "Benchmark configurations differ; rerun with matching settings before comparing"
+            .into();
+    }
+    let Some((baseline, observed)) = base
+        .median_ns
+        .zip(current.median_ns)
+        .filter(|(baseline, observed)| *baseline > 0.0 && observed.is_finite())
+    else {
+        return "Baseline comparison needs successful timed samples and a non-zero baseline".into();
+    };
+    let mut comparison = format!(
+        "Baseline median {} → {} ({:+.1}%).",
+        benchmark_ms(Some(baseline)),
+        benchmark_ms(Some(observed)),
+        (observed / baseline - 1.0) * 100.0
+    );
+    if base.sql != current.sql {
+        comparison.push_str(" SQL differs between runs.");
+    }
+    if base.parameter_count > 0 {
+        comparison.push_str(" Parameter values are absent from reports and cannot be checked.");
+    }
+    comparison.push_str(" Observed difference only: data, cache and load may differ.");
+    comparison
+}
 const DEFAULT_COLUMN_WIDTH: f32 = 184.0;
 const MAX_COLUMN_WIDTH: f32 = 960.0;
 const COLUMN_RESIZE_HANDLE_WIDTH: f32 = 7.0;
@@ -6430,18 +6473,11 @@ impl ResultsView {
                 benchmark_ms(report.p99_ns.map(|v| v as f64))
             )
         });
-        let comparison = self.benchmark_baseline.as_ref().zip(self.benchmark_report.as_ref()).map(|(base, current)| {
-            if base.engine != current.engine { return "Baseline uses a different engine; timing comparison unavailable".to_string(); }
-            if !base.completed || !current.completed { return "Comparison is inconclusive: at least one run is incomplete".into(); }
-            if base.query_timeout_ms != current.query_timeout_ms || base.total_budget_ms != current.total_budget_ms || base.requested_iterations != current.requested_iterations || base.delay_ms != current.delay_ms || base.warmups != current.warmups || base.parameter_count != current.parameter_count {
-                return "Benchmark configurations differ; rerun with matching settings before comparing".into();
-            }
-            match base.median_ns.zip(current.median_ns) {
-                Some((a, b)) if a > 0.0 => format!("Baseline median {} → {} ({:+.1}%). Observed difference only: data, parameters, cache and load may differ.",
-                    benchmark_ms(Some(a)), benchmark_ms(Some(b)), (b / a - 1.0) * 100.0),
-                _ => "Baseline comparison needs successful timed samples and a non-zero baseline".into(),
-            }
-        });
+        let comparison = self
+            .benchmark_baseline
+            .as_ref()
+            .zip(self.benchmark_report.as_ref())
+            .map(|(base, current)| benchmark_comparison(base, current));
         let count = self
             .benchmark_report
             .as_ref()
@@ -7778,6 +7814,43 @@ mod tests {
     use super::*;
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
     use sift_protocol::{Code, DriverError, PrimitiveType};
+
+    #[test]
+    fn benchmark_comparison_discloses_query_and_parameter_limits() {
+        let report = |sql: &str, median_ns: f64| sift_protocol::BenchmarkReport {
+            version: 1,
+            run_id: uuid::Uuid::new_v4(),
+            engine: sift_protocol::Engine::Postgres,
+            sql: sql.into(),
+            captured_at: chrono::Utc::now(),
+            warmups: 2,
+            requested_iterations: 10,
+            query_timeout_ms: 1_000,
+            total_budget_ms: 20_000,
+            delay_ms: 0,
+            parameter_count: 1,
+            samples: Vec::new(),
+            completed: true,
+            warnings: Vec::new(),
+            median_ns: Some(median_ns),
+            mean_ns: Some(median_ns),
+            min_ns: None,
+            max_ns: None,
+            standard_deviation_ns: None,
+            p95_ns: None,
+            p99_ns: None,
+        };
+        let base = report("select $1", 1_000_000.0);
+        let current = report("select $1 + 1", 2_000_000.0);
+        let comparison = benchmark_comparison(&base, &current);
+        assert!(comparison.contains("+100.0%"));
+        assert!(comparison.contains("SQL differs"));
+        assert!(comparison.contains("Parameter values are absent"));
+
+        let mut incompatible = current;
+        incompatible.engine = sift_protocol::Engine::SqlServer;
+        assert!(benchmark_comparison(&base, &incompatible).contains("different engine"));
+    }
 
     struct ResultsHost(Entity<ResultsView>);
 
