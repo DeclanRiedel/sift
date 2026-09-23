@@ -26,8 +26,10 @@ claims.
       SQLite evidence; estimated `EXPLAIN QUERY PLAN` must not invent costs.
 - [ ] Add scoped maintenance and database creation workflows for configured
       server roots, with preview, backup expectations, and audit.
-- [ ] Add desktop controls for the already implemented CSV quarantine import
-      behavior, including authorized report retrieval and source-row details.
+- [x] Open the authorized CSV quarantine artifact from an import result in the
+      desktop, with rejected-row navigation and source-value details.
+- [ ] Add a durable transfer-artifact history so quarantine reports can be
+      reopened after the current import result is dismissed (within retention).
 - [ ] Decide whether ATTACH, extensions, custom functions/collations, or
       virtual-table writes can meet Sift's file and authorization boundaries;
       keep them disabled until an accepted design exists.

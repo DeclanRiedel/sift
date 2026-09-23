@@ -2233,6 +2233,7 @@ pub enum Modal {
     CatalogSnapshots,
     CsvImport,
     TransferRecipes,
+    TransferQuarantineReport,
     RepositoryCommit,
     ConfirmRepositoryUncommit,
     ConfirmRepositoryDiscard(sift_protocol::WorkspacePath),
@@ -4119,6 +4120,12 @@ pub enum ExecutorCommand {
         resume_from_row: u64,
         type_mappings: std::collections::BTreeMap<String, String>,
     },
+    LoadTransferQuarantineReport {
+        instance_id: Option<String>,
+        workspace_id: sift_protocol::WorkspaceId,
+        artifact_id: sift_protocol::WorkspaceArtifactId,
+        generation: u64,
+    },
     CancelTransferRecipe {
         generation: u64,
     },
@@ -4694,6 +4701,13 @@ pub enum ExecutorEvent {
     TransferRecipeExecutionFinished {
         generation: u64,
         result: Result<sift_protocol::TransferExecutionResult, String>,
+    },
+    TransferQuarantineReportLoaded {
+        instance_id: Option<String>,
+        workspace_id: sift_protocol::WorkspaceId,
+        artifact_id: sift_protocol::WorkspaceArtifactId,
+        generation: u64,
+        result: Result<sift_protocol::CsvQuarantineReport, String>,
     },
     CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
     DatabaseProcessTerminated {
@@ -11817,6 +11831,12 @@ impl WorkspaceShell {
                 execution_generation: 0,
                 execution_pending: false,
                 execution_result: None,
+                quarantine_artifact_id: None,
+                quarantine_report: None,
+                quarantine_selected: 0,
+                quarantine_scroll: UniformListScrollHandle::new(),
+                quarantine_loading: false,
+                quarantine_error: None,
             },
             _lifecycle_task: None,
             _presence_task: None,
@@ -15713,7 +15733,8 @@ impl WorkspaceShell {
             }
             event @ (ExecutorEvent::TransferRecipesLoaded { .. }
             | ExecutorEvent::TransferRecipeMutationFinished { .. }
-            | ExecutorEvent::TransferRecipeExecutionFinished { .. }) => {
+            | ExecutorEvent::TransferRecipeExecutionFinished { .. }
+            | ExecutorEvent::TransferQuarantineReportLoaded { .. }) => {
                 self.on_transfer_event(event, cx);
             }
             ExecutorEvent::SqlSnippetsLoaded(result) => {
@@ -52435,6 +52456,106 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("cancelled locally"));
+        });
+    }
+
+    #[gpui::test]
+    fn quarantine_report_load_is_scoped_and_shows_source_rows(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("server-a".into());
+            shell.selected_workspace_id = Some(42);
+            shell.transfer.execution_generation = 7;
+            shell.open_transfer_quarantine_report(
+                sift_protocol::WorkspaceArtifactId(5),
+                window,
+                cx,
+            );
+            assert_eq!(shell.modal, Some(Modal::TransferQuarantineReport));
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadTransferQuarantineReport {
+                workspace_id: sift_protocol::WorkspaceId(42),
+                artifact_id: sift_protocol::WorkspaceArtifactId(5),
+                generation: 7,
+                ..
+            })
+        ));
+        let report = || sift_protocol::CsvQuarantineReport {
+            version: 1,
+            columns: vec!["id".into(), "name".into()],
+            rows: vec![
+                sift_protocol::CsvQuarantinedRow {
+                    row_number: 3,
+                    reason: "constraint conflict".into(),
+                    values: vec![Some("4".into()), None],
+                },
+                sift_protocol::CsvQuarantinedRow {
+                    row_number: 8,
+                    reason: "invalid value".into(),
+                    values: vec![Some("9".into()), Some("bad".into())],
+                },
+            ],
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::TransferQuarantineReportLoaded {
+                    instance_id: Some("server-a".into()),
+                    workspace_id: sift_protocol::WorkspaceId(99),
+                    artifact_id: sift_protocol::WorkspaceArtifactId(5),
+                    generation: 7,
+                    result: Ok(report()),
+                },
+                cx,
+            );
+            assert!(shell.transfer.quarantine_report.is_none());
+            shell.on_executor_event(
+                ExecutorEvent::TransferQuarantineReportLoaded {
+                    instance_id: Some("server-b".into()),
+                    workspace_id: sift_protocol::WorkspaceId(42),
+                    artifact_id: sift_protocol::WorkspaceArtifactId(5),
+                    generation: 7,
+                    result: Ok(report()),
+                },
+                cx,
+            );
+            assert!(shell.transfer.quarantine_report.is_none());
+            shell.on_executor_event(
+                ExecutorEvent::TransferQuarantineReportLoaded {
+                    instance_id: Some("server-a".into()),
+                    workspace_id: sift_protocol::WorkspaceId(42),
+                    artifact_id: sift_protocol::WorkspaceArtifactId(5),
+                    generation: 7,
+                    result: Ok(report()),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell
+                    .transfer
+                    .quarantine_report
+                    .as_ref()
+                    .unwrap()
+                    .rows
+                    .len(),
+                2
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("transfer-quarantine-report").is_some());
+        assert!(cx.debug_bounds("transfer-quarantine-detail").is_some());
+        cx.simulate_keystrokes("j y");
+        workspace.read_with(&cx, |shell, cx| {
+            assert_eq!(shell.transfer.quarantine_selected, 1);
+            assert!(cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some_and(|text| text.contains("\"bad\"")));
         });
     }
 

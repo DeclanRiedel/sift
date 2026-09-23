@@ -7528,6 +7528,13 @@ impl WorkspaceShell {
                             "Validated {direction:?} · {format_id} · resume row {resume_from_row}"
                         ),
                     });
+                    let quarantine_artifact = self.transfer.execution_result.as_ref().and_then(|result| {
+                        match result {
+                            sift_protocol::TransferExecutionResult::Import { quarantine_artifact, .. } =>
+                                quarantine_artifact.as_ref().map(|artifact| artifact.id),
+                            _ => None,
+                        }
+                    });
                     let field = |label: &'static str, input: Entity<TextInput>| {
                         div()
                             .flex()
@@ -7739,6 +7746,13 @@ impl WorkspaceShell {
                                                 .whitespace_normal()
                                                 .child(message)
                                         }))
+                                        .children(quarantine_artifact.map(|artifact_id| {
+                                            Button::new("open-transfer-quarantine-report", "View rejected rows")
+                                                .tone(ButtonTone::Neutral)
+                                                .on_click(cx.listener(move |shell, _, window, cx| {
+                                                    shell.open_transfer_quarantine_report(artifact_id, window, cx)
+                                                }))
+                                        }))
                                         .child(div().flex_1())
                                         .child(
                                             div()
@@ -7836,6 +7850,55 @@ impl WorkspaceShell {
                                         ),
                                 ),
                         )
+                        .into_any_element()
+                }
+                Modal::TransferQuarantineReport => {
+                    let report = self.transfer.quarantine_report.clone();
+                    let count = report.as_ref().map_or(0, |report| report.rows.len());
+                    let selected = self.transfer.quarantine_selected;
+                    let detail = report.as_ref().and_then(|report| report.rows.get(selected).map(|row| {
+                        report.columns.iter().zip(&row.values).map(|(column, value)| {
+                            format!("{column}: {}", value.as_deref().unwrap_or("NULL"))
+                        }).collect::<Vec<_>>().join("\n")
+                    }));
+                    div()
+                        .debug_selector(|| "transfer-quarantine-report".into())
+                        .track_focus(&self.focus_handle)
+                        .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, _, cx| {
+                            shell.handle_transfer_quarantine_key(event, cx)
+                        }))
+                        .w(px(760.))
+                        .h(px(580.))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Rejected CSV rows · {count}")))
+                        .child(div().text_xs().text_color(colors.muted_text).child("j/k select · g/G first/last · y copies selected row as JSON. Row numbers exclude the CSV header."))
+                        .children(self.transfer.quarantine_loading.then(|| div().child("Loading report…")))
+                        .children(self.transfer.quarantine_error.clone().map(ErrorBanner::new))
+                        .child(uniform_list("transfer-quarantine-rows", count, cx.processor(move |shell, range: Range<usize>, _, cx| {
+                            let Some(report) = &report else { return Vec::new(); };
+                            range.filter_map(|index| report.rows.get(index).map(|row| (index, row))).map(|(index, row)| {
+                                div().id(("transfer-quarantine-row", index)).role(Role::ListItem)
+                                    .h(px(38.)).px_2().flex().items_center().gap_2()
+                                    .when(index == shell.transfer.quarantine_selected, |row| row.bg(cx.theme().colors.active_surface))
+                                    .border_b_1().border_color(cx.theme().colors.subtle_border)
+                                    .child(div().w(px(92.)).child(format!("Data row {}", row.row_number + 1)))
+                                    .child(div().flex_1().min_w_0().truncate().child(row.reason.clone()))
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.transfer.quarantine_selected = index;
+                                        cx.notify();
+                                    }))
+                            }).collect::<Vec<_>>()
+                        })).flex_1().min_h_0().border_1().border_color(colors.subtle_border).track_scroll(&self.transfer.quarantine_scroll))
+                        .children(detail.map(|detail| div().id("transfer-quarantine-detail").debug_selector(|| "transfer-quarantine-detail".into()).max_h(px(160.)).overflow_y_scroll().p_2().border_1().border_color(colors.subtle_border).font_family("monospace").text_xs().whitespace_normal().child(detail)))
+                        .child(div().flex().justify_end().child(Button::new("back-to-transfer-recipes", "Back to recipes")
+                            .tone(ButtonTone::Neutral)
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.modal = Some(Modal::TransferRecipes);
+                                shell.transfer.recipe_focus_handle.focus(window, cx);
+                                cx.notify();
+                            }))))
                         .into_any_element()
                 }
                 Modal::ConfirmDeleteDatabaseObject => {

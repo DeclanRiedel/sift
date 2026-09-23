@@ -91,6 +91,7 @@ pub(super) fn content_width(modal: &Modal, wizard: DatabaseWizardStep) -> f32 {
         Modal::Snippets => 820.0,
         Modal::RepositoryHistory => 780.0,
         Modal::RoomAdministration
+        | Modal::TransferQuarantineReport
         | Modal::RepositoryCommitDetail
         | Modal::RepositoryHistoricalFile => 760.0,
         Modal::CommandPalette

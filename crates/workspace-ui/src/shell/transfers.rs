@@ -23,6 +23,12 @@ pub(super) struct TransferState {
     pub(super) execution_generation: u64,
     pub(super) execution_pending: bool,
     pub(super) execution_result: Option<sift_protocol::TransferExecutionResult>,
+    pub(super) quarantine_artifact_id: Option<sift_protocol::WorkspaceArtifactId>,
+    pub(super) quarantine_report: Option<Arc<sift_protocol::CsvQuarantineReport>>,
+    pub(super) quarantine_selected: usize,
+    pub(super) quarantine_scroll: UniformListScrollHandle,
+    pub(super) quarantine_loading: bool,
+    pub(super) quarantine_error: Option<String>,
 }
 
 impl WorkspaceShell {
@@ -132,6 +138,11 @@ impl WorkspaceShell {
         self.transfer.import_create_table = false;
         self.transfer.import_conflict_policy = sift_protocol::CsvConflictPolicy::Abort;
         self.transfer.execution_result = None;
+        self.transfer.quarantine_artifact_id = None;
+        self.transfer.quarantine_report = None;
+        self.transfer.quarantine_selected = 0;
+        self.transfer.quarantine_loading = false;
+        self.transfer.quarantine_error = None;
         self.transfer.recipes_error = None;
     }
 
@@ -156,6 +167,11 @@ impl WorkspaceShell {
             input.set_text(recipe.options.to_string(), cx)
         });
         self.transfer.execution_result = None;
+        self.transfer.quarantine_artifact_id = None;
+        self.transfer.quarantine_report = None;
+        self.transfer.quarantine_selected = 0;
+        self.transfer.quarantine_loading = false;
+        self.transfer.quarantine_error = None;
         self.transfer.recipes_error = None;
         cx.notify();
     }
@@ -522,6 +538,11 @@ impl WorkspaceShell {
             })
             .is_ok();
         self.transfer.execution_result = None;
+        self.transfer.quarantine_artifact_id = None;
+        self.transfer.quarantine_report = None;
+        self.transfer.quarantine_selected = 0;
+        self.transfer.quarantine_loading = false;
+        self.transfer.quarantine_error = None;
         self.transfer.recipes_error = None;
         cx.notify();
     }
@@ -629,7 +650,113 @@ impl WorkspaceShell {
                 }
                 cx.notify();
             }
+            ExecutorEvent::TransferQuarantineReportLoaded {
+                instance_id,
+                workspace_id,
+                artifact_id,
+                generation,
+                result,
+            } => {
+                if self.selected_instance_id != instance_id
+                    || self.selected_workspace_id != Some(workspace_id.0)
+                    || generation != self.transfer.execution_generation
+                    || self.transfer.quarantine_artifact_id != Some(artifact_id)
+                {
+                    return;
+                }
+                self.transfer.quarantine_loading = false;
+                match result {
+                    Ok(report) => {
+                        self.transfer.quarantine_report = Some(Arc::new(report));
+                        self.transfer.quarantine_selected = 0;
+                        self.transfer
+                            .quarantine_scroll
+                            .scroll_to_item(0, ScrollStrategy::Top);
+                        self.transfer.quarantine_error = None;
+                    }
+                    Err(message) => self.transfer.quarantine_error = Some(message),
+                }
+                cx.notify();
+            }
             _ => unreachable!("only transfer events are routed here"),
         }
+    }
+
+    pub(super) fn open_transfer_quarantine_report(
+        &mut self,
+        artifact_id: sift_protocol::WorkspaceArtifactId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.require_operation(
+            sift_protocol::OperationKind::ReadTransferRecipe,
+            "View quarantine report",
+            cx,
+        ) {
+            return;
+        }
+        let Some(workspace_id) = self.selected_workspace_id.map(sift_protocol::WorkspaceId) else {
+            return;
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.transfer.quarantine_error = Some("Transfer manager is unavailable".into());
+            return;
+        };
+        self.transfer.quarantine_artifact_id = Some(artifact_id);
+        self.transfer.quarantine_report = None;
+        self.transfer.quarantine_selected = 0;
+        self.transfer.quarantine_error = None;
+        self.transfer.quarantine_loading = sender
+            .send(ExecutorCommand::LoadTransferQuarantineReport {
+                instance_id: self.selected_instance_id.clone(),
+                workspace_id,
+                artifact_id,
+                generation: self.transfer.execution_generation,
+            })
+            .is_ok();
+        if self.transfer.quarantine_loading {
+            self.modal = Some(Modal::TransferQuarantineReport);
+            self.focus_handle.focus(window, cx);
+        } else {
+            self.transfer.quarantine_error =
+                Some("Quarantine report request was not queued".into());
+        }
+        cx.notify();
+    }
+
+    pub(super) fn handle_transfer_quarantine_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        let Some(report) = &self.transfer.quarantine_report else {
+            return;
+        };
+        let count = report.rows.len();
+        let next = match event.keystroke.key.as_str() {
+            "j" | "down" => self.transfer.quarantine_selected.saturating_add(1),
+            "k" | "up" => self.transfer.quarantine_selected.saturating_sub(1),
+            "g" => 0,
+            "G" => count.saturating_sub(1),
+            "y" => {
+                if let Some(row) = report.rows.get(self.transfer.quarantine_selected) {
+                    if let Ok(json) = serde_json::to_string_pretty(row) {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(json));
+                    }
+                }
+                cx.stop_propagation();
+                return;
+            }
+            _ => return,
+        };
+        self.transfer.quarantine_selected = next.min(count.saturating_sub(1));
+        self.transfer
+            .quarantine_scroll
+            .scroll_to_item(self.transfer.quarantine_selected, ScrollStrategy::Nearest);
+        cx.stop_propagation();
+        cx.notify();
     }
 }

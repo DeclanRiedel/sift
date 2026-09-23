@@ -270,15 +270,17 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Transfer scheduling
 - [x] Import schema and type inference UI
 - [x] Dry-run transfer UI
-- [x] Error quarantine (CSV API reports and authorized artifact downloads)
+- [x] Error quarantine (CSV API reports, authorized artifact downloads, and
+      desktop inspection from the current import result)
 - [x] Durable CSV resume API (target-side atomic checkpoints and source validation)
 - [ ] Resumable transfer UI
 - [ ] Cross-engine type-mapping editor
 - [x] Parquet support
 
-Transfer preview, backend CSV quarantine reports and durable CSV resume are
-implemented. A desktop resume workflow and dedicated type-mapping editor remain
-open; existing preview and result plumbing do not complete those workflows.
+Transfer preview, CSV quarantine reports with current-result desktop inspection,
+and durable CSV resume are implemented. A desktop resume workflow, retained
+artifact history, and dedicated type-mapping editor remain open; existing
+preview and result plumbing do not complete those workflows.
 Quarantine report fields and provider limits are documented in backend operations.
 
 Parquet has bounded typed API export and transactional flat-type import; see

@@ -24,6 +24,9 @@ current public support boundary.
 
 ## Workbench and administration
 
+- [x] Open CSV quarantine reports from the current import result, with
+      authorized retrieval and rejected source-row details.
+- [ ] Reopen retained transfer artifacts through a durable history view.
 - [ ] Finish plan, process-control, and bulk-import desktop workflows currently
       marked partial in the product inventory; retain SQL Server's documented
       abort-and-discard cancellation and savepoint limits.

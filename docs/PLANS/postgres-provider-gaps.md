@@ -24,6 +24,9 @@ sources for current support claims.
 
 ## Workbench and administration
 
+- [x] Open CSV quarantine reports from the current import result, with
+      authorized retrieval and rejected source-row details.
+- [ ] Reopen retained transfer artifacts through a durable history view.
 - [ ] Finish the PostgreSQL plans, process-control, bulk-import, and notification
       desktop workflows currently marked partial in the product inventory.
 - [ ] Add extension and partition inspection/management UI through audited,
