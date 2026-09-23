@@ -9,6 +9,15 @@ struct ColumnFilter {
     operator: ResultFilterOperator,
     value: String,
     number: Option<f64>,
+    integer: Option<i128>,
+}
+
+fn exact_integer(value: &str) -> Option<i128> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if fraction.bytes().any(|digit| digit != b'0') {
+        return None;
+    }
+    whole.parse().ok()
 }
 
 impl ColumnFilter {
@@ -37,9 +46,12 @@ impl ColumnFilter {
             _ => {}
         }
         let ordering = if cell.class == CellClass::Number {
-            match (cell.text.parse::<f64>(), self.number) {
-                (Ok(left), Some(right)) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
-                _ => filter_text.cmp(value),
+            match (exact_integer(&cell.text), self.integer) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                _ => match (cell.text.parse::<f64>(), self.number) {
+                    (Ok(left), Some(right)) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
+                    _ => filter_text.cmp(value),
+                },
             }
         } else {
             filter_text.cmp(value)
@@ -80,6 +92,7 @@ impl PreparedFilters {
                                     column: condition.column,
                                     operator: condition.operator,
                                     number: value.parse().ok(),
+                                    integer: exact_integer(&value),
                                     value,
                                 }
                             })
@@ -111,6 +124,7 @@ impl PreparedFilters {
                     .copied()
                     .unwrap_or_default(),
                 number: value.parse().ok(),
+                integer: exact_integer(&value),
                 value,
             });
         }
@@ -177,6 +191,7 @@ mod tests {
                 operator,
                 value: value.into(),
                 number: value.parse().ok(),
+                integer: exact_integer(value),
             };
             assert_eq!(filter.matches(Some(candidate)), expected, "{operator:?}");
             assert_eq!(
@@ -184,5 +199,25 @@ mod tests {
                 operator == ResultFilterOperator::IsNull
             );
         }
+    }
+
+    #[test]
+    fn integer_predicates_keep_precision_beyond_f64() {
+        let cell: CachedCellRender = PreparedCellRender {
+            text: "9007199254740993".into(),
+            paint_text: "9007199254740993".into(),
+            lowercase_text: None,
+            class: CellClass::Number,
+        }
+        .into();
+        let filter = ColumnFilter {
+            column: 0,
+            operator: ResultFilterOperator::GreaterThan,
+            value: "9007199254740992".into(),
+            number: Some(9_007_199_254_740_992.0),
+            integer: exact_integer("9007199254740992.0"),
+        };
+        assert!(filter.matches(Some(&cell)));
+        assert_eq!(exact_integer("1.5"), None);
     }
 }
