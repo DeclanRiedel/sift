@@ -1770,6 +1770,11 @@ the configured projection and atomically refreshes repository identity and Git
 adapter metadata under the existing binding id and revision. If an operator
 moves a configured projection, they update the root mapping first and then run
 repair; changing the logical root handle remains the explicit rebind workflow.
+If a bound projection has lost its Git metadata, an explicit desktop action
+initializes Git at the same configured root and repairs the existing binding
+under its revision guard. Ordinary status reads never initialize a repository.
+This creates fresh history; operators restore `.git` from backup when the old
+history matters.
 
 **Consequences.** Conflict UI does not confuse user SQL with Git structure,
 stale clients cannot resolve a newer conflict, and repository operations remain

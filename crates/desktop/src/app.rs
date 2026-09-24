@@ -1247,6 +1247,89 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadGithubAllowlist => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .github_allowlist()
+                        .await
+                        .map_err(|error| format!("loading GitHub users failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::GithubAllowlistLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateGithubAllowlist {
+                login,
+                target_principal_id,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .create_github_allowlist_entry(
+                            sift_protocol::CreateGithubAllowlistRequest {
+                                login,
+                                target_principal_id,
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("adding GitHub user failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::GithubAllowlistChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::RevokeGithubAllowlist { id } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .revoke_github_allowlist_entry(id)
+                        .await
+                        .map_err(|error| format!("revoking GitHub admission failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::GithubAllowlistChanged(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreatePasswordUser {
+                username,
+                display_name,
+                email,
+                password,
+            } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .admin_create_principal(
+                            sift_protocol::AdminCreatePasswordPrincipalRequest {
+                                username,
+                                display_name,
+                                email,
+                                password,
+                                is_instance_admin: false,
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("creating user failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events.send(ExecutorEvent::UserCreated(result)).is_err() {
+                    return;
+                }
+            }
             ExecutorCommand::RegisterPrincipalKey { public_key, label } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
@@ -3969,23 +4052,40 @@ async fn run_query_executor(
                 workspace_id,
                 binding_id,
                 expected_revision,
+                initialize,
             } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
-                    Ok(client) => client
-                        .repair_repository_binding(
-                            sift_protocol::RepositoryBindingId(binding_id),
-                            sift_api_types::ExpectedRepositoryRevisionRequest { expected_revision },
-                        )
-                        .await
-                        .map(|_| ())
-                        .map_err(|error| format!("repairing repository binding failed: {error}")),
+                    Ok(client) => {
+                        let binding = sift_protocol::RepositoryBindingId(binding_id);
+                        let result = if initialize {
+                            client
+                                .initialize_repository_binding(binding, expected_revision)
+                                .await
+                        } else {
+                            client
+                                .repair_repository_binding(
+                                    binding,
+                                    sift_api_types::ExpectedRepositoryRevisionRequest {
+                                        expected_revision,
+                                    },
+                                )
+                                .await
+                        };
+                        result.map(|_| ()).map_err(|error| {
+                            format!("repairing repository binding failed: {error}")
+                        })
+                    }
                     Err(error) => Err(error),
                 };
                 if events
                     .send(ExecutorEvent::RepositoryConflictMutationFinished {
                         workspace_id,
-                        action: "Repository binding repaired",
+                        action: if initialize {
+                            "Repository initialized"
+                        } else {
+                            "Repository binding repaired"
+                        },
                         manual_path: None,
                         result,
                     })

@@ -626,3 +626,126 @@ async fn git_commit_is_tied_to_a_checkpoint_and_later_virtual_edits_stay_uncommi
         "select 1;\n"
     );
 }
+
+#[tokio::test]
+async fn missing_git_metadata_requires_explicit_initialize_to_repair_binding() {
+    let metadata = MetadataStore::open_in_memory(Arc::new(MemorySecretStore::new())).unwrap();
+    metadata.bootstrap_local("local user").unwrap();
+    let room = metadata
+        .create_room(
+            TenantId(1),
+            PrincipalId(1),
+            NewRoom {
+                name: "Recovery room".into(),
+                kind: RoomKind::Shared,
+            },
+        )
+        .unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(checkout.path().join("query.sql"), "select 1;\n").unwrap();
+    let rooms = RoomRuntime::with_integrations(
+        &WorkspaceProjectionConfig {
+            enabled: true,
+            roots: vec![WorkspaceRootConfig {
+                handle: "checkout".into(),
+                path: checkout.path().display().to_string(),
+                read_only: false,
+            }],
+        },
+        &VcsConfig {
+            enabled: true,
+            network_enabled: false,
+            ..VcsConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let router = app(AppState {
+        sessions: SessionStore::new(DriverRegistry::builder().build()),
+        rooms,
+        auth: AuthState::default(),
+        metadata: Some(metadata),
+        shutdown: Shutdown::default(),
+    });
+
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/rooms/{}/workspaces", room.id.0),
+            serde_json::json!({"name": "recovery"}),
+        ))
+        .await
+        .unwrap();
+    let workspace: Workspace = json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/workspaces/{}/projection", workspace.id.0),
+            serde_json::json!({"root_handle": "checkout", "mode": "read_write"}),
+        ))
+        .await
+        .unwrap();
+    let projection: ProjectionBinding = json(response.into_body()).await;
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &format!("/v1/metadata/workspaces/{}/repository", workspace.id.0),
+            serde_json::json!({"projection_id": projection.id, "initialize": true}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let binding: sift_protocol::RepositoryBinding = json(response.into_body()).await;
+
+    std::fs::remove_dir_all(checkout.path().join(".git")).unwrap();
+    let status_uri = format!("/v1/metadata/repositories/{}/status", binding.id.0);
+    let repair_uri = format!("/v1/metadata/repositories/{}/repair", binding.id.0);
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::GET,
+            &status_uri,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &repair_uri,
+            serde_json::json!({"expected_revision": binding.revision}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            &repair_uri,
+            serde_json::json!({"expected_revision": binding.revision, "initialize": true}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let repaired: sift_protocol::RepositoryBinding = json(response.into_body()).await;
+    assert!(repaired.revision > binding.revision);
+    let response = router
+        .oneshot(json_request(
+            Method::GET,
+            &status_uri,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(checkout.path().join("query.sql")).unwrap(),
+        "select 1;\n"
+    );
+}

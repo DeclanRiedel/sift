@@ -3281,6 +3281,21 @@ impl Client {
         .await
     }
 
+    pub async fn initialize_repository_binding(
+        &self,
+        binding: RepositoryBindingId,
+        expected_revision: u64,
+    ) -> Result<RepositoryBinding> {
+        self.post(
+            &format!("/v1/metadata/repositories/{}/repair", binding.0),
+            &sift_api_types::RepairRepositoryBindingRequest {
+                expected_revision,
+                initialize: true,
+            },
+        )
+        .await
+    }
+
     pub async fn stage_repository_paths(
         &self,
         binding: RepositoryBindingId,

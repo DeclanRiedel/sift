@@ -2662,20 +2662,43 @@ impl WorkspaceShell {
                 }
                 Modal::Administration => {
                     let keys = self.principal_keys.clone();
+                    let github_entries = self.github_allowlist.clone();
                     let approvals = self.operation_approvals.clone();
                     let audit_rows = self.operation_audit_rows.clone();
                     div().h(px(650.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between()
                             .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Runtime administration"))
-                            .child(Button::new("refresh-administration", "Refresh").tone(ButtonTone::Ghost).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| match shell.administration_section {
-                                AdministrationSection::Keys => shell.load_principal_keys(cx),
-                                AdministrationSection::Approvals => shell.load_operation_approvals(cx),
-                                AdministrationSection::Audit => shell.load_operation_audit(false, cx),
-                            }))))
+                            .when(self.administration_section == AdministrationSection::Audit, |header| header.child(
+                                Button::new("refresh-administration-audit", "Refresh").tone(ButtonTone::Ghost)
+                                    .disabled(self.principal_admin_pending)
+                                    .on_click(cx.listener(|shell, _, _, cx| shell.load_operation_audit(false, cx)))))
+                            .when(self.administration_section != AdministrationSection::Audit, |header| header.child(
+                                div().text_xs().text_color(colors.muted_text).child(
+                                    if self.principal_admin_pending { "Updating…" } else { "Updates automatically" },
+                                ))))
                         .child(div().flex().gap_1()
+                            .child(Button::new("admin-users-tab", "Users").tone(if self.administration_section == AdministrationSection::Users { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Users, cx))))
                             .child(Button::new("admin-keys-tab", "Signing keys").tone(if self.administration_section == AdministrationSection::Keys { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Keys, cx))))
                             .child(Button::new("admin-approvals-tab", "Approvals").tone(if self.administration_section == AdministrationSection::Approvals { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Approvals, cx))))
                             .child(Button::new("admin-audit-tab", "Audit").tone(if self.administration_section == AdministrationSection::Audit { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Audit, cx)))))
+                        .when(self.administration_section == AdministrationSection::Users, |view| view
+                            .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child("Add a password user"))
+                            .child(div().flex().flex_col().gap_2().children(self.new_user_inputs.iter().cloned()))
+                            .child(Button::new("create-password-user", "Create user").tone(ButtonTone::Accent).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.create_password_user(cx))))
+                            .child(div().pt_3().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child("Admit a GitHub user"))
+                            .child(div().text_xs().text_color(colors.muted_text).child("Enter their GitHub login. Leave principal ID empty to create a new Sift principal, or enter an existing ID to link GitHub to that principal. The server operator must configure a GitHub OAuth App first."))
+                            .child(div().flex().gap_2().child(self.github_login_input.clone()).child(self.github_target_principal_input.clone()).child(Button::new("allow-github-user", "Allow login").tone(ButtonTone::Accent).disabled(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.allow_github_user(cx))))
+                            .child(div().text_xs().text_color(colors.muted_text).child("GitHub logins"))
+                            .child(div().id("github-allowlist").flex_1().min_h_0().overflow_y_scroll().children(github_entries.into_iter().filter(|entry| entry.revoked_at.is_none()).map(|entry| {
+                                let state = if entry.consumed_at.is_some() { "Signed in" } else { "Waiting for first sign in" };
+                                let id = entry.id.0;
+                                let target = entry.target_principal_id.map(|principal| format!(" · principal #{}", principal.0)).unwrap_or_default();
+                                div().px_2().py_1().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border)
+                                    .child(div().flex_1().child(format!("@{} · {}{}", entry.normalized_login, state, target)))
+                                    .when(entry.consumed_at.is_none(), |row| row.child(Button::new(("revoke-github-admission", id as usize), "Revoke")
+                                        .tone(ButtonTone::DangerGhost).disabled(self.principal_admin_pending)
+                                        .on_click(cx.listener(move |shell, _, _, cx| shell.revoke_github_user(id, cx)))))
+                            })))))
                         .when(self.administration_section == AdministrationSection::Keys, |view| view
                             .child(div().flex().gap_2().children(self.principal_key_inputs.iter().cloned()).child(Button::new("register-principal-key", "Register key").tone(ButtonTone::Accent).loading(self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.register_principal_key(cx)))))
                             .child(div().id("principal-key-list").flex_1().min_h_0().overflow_y_scroll().children(keys.into_iter().enumerate().map(|(index, key)| { let key_id = key.id.0; div().id(("principal-key", index)).min_h(px(48.)).px_2().flex().items_center().gap_2().border_b_1().border_color(colors.subtle_border).child(div().min_w_0().flex_1().flex().flex_col().child(key.label).child(div().text_xs().font_family("monospace").text_color(colors.muted_text).child(key.fingerprint))).child(Button::new(("revoke-principal-key", index), "Revoke").tone(ButtonTone::DangerGhost).disabled(key.revoked_at.is_some() || self.principal_admin_pending).on_click(cx.listener(move |shell, _, _, cx| shell.revoke_principal_key(key_id, cx)))) }))))
@@ -3497,6 +3520,8 @@ impl WorkspaceShell {
                                     .children(github_link),
                             )
                         })
+                        .children(identity.map(|identity| div().px_3().pb_2().text_xs()
+                            .text_color(colors.muted_text).child(format!("Sift principal #{}", identity.principal.id))))
                         .when(identity.is_none(), |account| {
                             account.child(
                                 div()
@@ -3532,6 +3557,10 @@ impl WorkspaceShell {
                                     .child("This local instance manages its built-in identity."),
                             )
                         })
+                        .when(identity.is_some_and(|identity| identity.principal.is_instance_admin) && !is_local, |account| {
+                            account.child(div().px_3().py_2().child(Button::new("account-manage-users", "Manage users…")
+                                .tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_administration(cx)))))
+                        })
                         .when(identity.is_some(), |account| {
                             account.child(
                                 div()
@@ -3549,14 +3578,9 @@ impl WorkspaceShell {
                                             .items_center()
                                             .justify_between()
                                             .child(SectionLabel::new("SERVER SESSIONS"))
-                                            .child(
-                                                Button::new("refresh-server-sessions", "Refresh")
-                                                    .tone(ButtonTone::Ghost)
-                                                    .loading(self.server_sessions_loading)
-                                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                                        shell.load_server_sessions(cx)
-                                                    })),
-                                            ),
+                                            .child(div().text_xs().text_color(colors.muted_text).child(
+                                                if self.server_sessions_loading { "Updating…" } else { "Updates automatically" },
+                                            )),
                                     )
                                     .child(
                                         div()
@@ -3615,6 +3639,7 @@ impl WorkspaceShell {
                                             shell.sign_in_with_github(cx)
                                         })),
                                     )
+                                    .child(div().text_xs().text_color(colors.muted_text).child("Your server admin must allow your GitHub login and configure GitHub OAuth before first sign in."))
                                     .child(
                                         div()
                                             .flex()
@@ -5163,24 +5188,31 @@ impl WorkspaceShell {
                         .into_any_element()
                 }
                 Modal::RepositorySetup => {
+                    let has_projection = self.workspace_files.snapshot()
+                        .is_some_and(|snapshot| snapshot.projection.is_some());
                     div()
                         .debug_selector(|| "repository-setup".into())
                         .flex()
                         .flex_col()
                         .gap_3()
                         .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Set up Git repository"))
-                        .child(div().text_sm().text_color(colors.muted_text).child("The root handle must be configured by the server operator. Sift never accepts an arbitrary filesystem path."))
-                        .child(div().flex().flex_col().gap_1().child(SectionLabel::new("CONFIGURED ROOT HANDLE")).child(self.repository_root_input.clone()))
-                        .child(div().flex().flex_col().gap_1().child(SectionLabel::new("HTTPS CLONE URL")).child(self.repository_remote_url_input.clone()))
-                        .child(div().flex().gap_2()
+                        .child(div().text_sm().text_color(colors.muted_text).child(if has_projection {
+                            "This workspace already has a filesystem projection. Bind existing or Initialize will use that projection."
+                        } else {
+                            "Enter a root handle configured by the server operator. Sift never accepts an arbitrary filesystem path."
+                        }))
+                        .when(!has_projection, |view| view.child(div().flex().flex_col().gap_1().child(SectionLabel::new("CONFIGURED ROOT HANDLE")).child(self.repository_root_input.clone())))
+                        .when(!has_projection, |view| view.child(div().flex().flex_col().gap_1().child(SectionLabel::new("HTTPS CLONE URL")).child(self.repository_remote_url_input.clone())))
+                        .when(!has_projection, |view| view.child(div().flex().gap_2()
                             .child(div().flex_1().flex().flex_col().gap_1().child(SectionLabel::new("USERNAME")).child(self.repository_username_input.clone()))
-                            .child(div().flex_1().flex().flex_col().gap_1().child(SectionLabel::new("PAT / PASSWORD")).child(self.repository_password_input.clone())))
-                        .child(div().text_xs().text_color(colors.muted_text).child("Credentials are sent once and stored behind SecretStore. Clone currently supports HTTPS; managed SSH keys are deliberately unavailable until they can run without ambient agents."))
+                            .child(div().flex_1().flex().flex_col().gap_1().child(SectionLabel::new("PAT / PASSWORD")).child(self.repository_password_input.clone()))))
+                        .when(!has_projection, |view| view.child(div().text_xs().text_color(colors.muted_text).child("Clone credentials are stored behind SecretStore. HTTPS is supported.")))
+                        .children(self.repository.error().map(|failure| ErrorBanner::new(failure.message.clone())))
                         .child(div().flex().justify_end().gap_2()
                             .child(Button::new("cancel-repository-setup", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
                             .child(Button::new("bind-existing-repository", "Bind existing").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(RepositorySetupMode::BindExisting, cx))))
                             .child(Button::new("initialize-repository", "Initialize").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(RepositorySetupMode::Initialize, cx))))
-                            .child(Button::new("clone-repository", "Clone HTTPS").tone(ButtonTone::Accent).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(RepositorySetupMode::Clone, cx)))))
+                            .child(Button::new("clone-repository", "Clone HTTPS").tone(ButtonTone::Accent).disabled(has_projection).on_click(cx.listener(|shell, _, _, cx| shell.submit_repository_setup(RepositorySetupMode::Clone, cx)))))
                         .into_any_element()
                 }
                 Modal::RepositoryRemotes => {

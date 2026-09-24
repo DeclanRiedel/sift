@@ -25,6 +25,8 @@
 - Local desktop and self-hosted team workflows
 - Versioned API 
 
+See [team sign in and Source Control](docs/TEAM-SETUP.md) for first-time setup.
+
 Development performance measurement and profiling are documented in
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 

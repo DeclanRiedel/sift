@@ -1684,7 +1684,7 @@ pub(super) async fn repair_repository_binding(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(req): Json<ExpectedRepositoryRevisionRequest>,
+    Json(req): Json<sift_api_types::RepairRepositoryBindingRequest>,
 ) -> ApiResult<Json<RepositoryBinding>> {
     use crate::git_adapter::VcsRepository as _;
     let metadata = metadata_store_cloned(&state)?;
@@ -1715,11 +1715,17 @@ pub(super) async fn repair_repository_binding(
             "repository binding changed; refresh and retry".into(),
         ));
     }
-    let observation = context
-        .adapter
-        .discover(&context.worktree)
-        .await
-        .map_err(git_adapter_error)?;
+    let observation = if req.initialize {
+        match context.adapter.discover(&context.worktree).await {
+            Err(crate::git_adapter::GitAdapterError::NotRepository) => {
+                context.adapter.initialize(&context.worktree).await
+            }
+            other => other,
+        }
+    } else {
+        context.adapter.discover(&context.worktree).await
+    }
+    .map_err(git_adapter_error)?;
     let adapter = context.adapter.clone();
     let projection_id = context.record.binding.projection_id;
     let updated = metadata_blocking(move || {
