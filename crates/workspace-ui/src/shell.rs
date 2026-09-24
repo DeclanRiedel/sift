@@ -29101,7 +29101,13 @@ impl WorkspaceShell {
                     .and_then(|pane| pane.read(cx).results.get(item_id))
                     .cloned()
                 {
-                    view.update(cx, |view, cx| view.set_filter_sql_preview(preview, cx));
+                    let focus = view.update(cx, |view, cx| {
+                        view.set_filter_sql_preview(preview, cx);
+                        view.filter_sql_editor_focus(cx)
+                    });
+                    if let Some(focus) = focus {
+                        focus.focus(window, cx);
+                    }
                 }
             }
             PaneEvent::OpenResultSqlTextRequested { sql } => {
