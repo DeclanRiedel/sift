@@ -14,6 +14,8 @@ For the bounded PostgreSQL/SQL Server support milestone and next-provider
 sequence, use the [driver graduation checklist](postgres-sqlserver-graduation.md).
 Core Driver contract remains locked; scoped PostgreSQL/SQL Server graduation
 is recorded in ADR-055 and the linked acceptance evidence.
+The [PostgreSQL feature map](postgres-feature-map.md) traces current PostgreSQL
+paths from driver to API, SDK and desktop, including backend-only boundaries.
 
 ## SQL IDE
 
