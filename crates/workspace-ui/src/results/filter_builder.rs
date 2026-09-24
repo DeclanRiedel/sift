@@ -1244,35 +1244,74 @@ impl ResultsView {
                     )
                     .child(div().flex_1())
                     .child(
-                        Button::new("filter-view-builder", "Builder")
-                            .debug_selector("filter-view-builder")
-                            .tone(if draft.text_view {
-                                ButtonTone::Ghost
-                            } else {
-                                ButtonTone::Accent
-                            })
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                let draft = view.filter_draft.as_mut().unwrap();
-                                draft.text_view = false;
-                                draft.focus.focus(window, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("filter-view-text", "Text")
-                            .debug_selector("filter-view-text")
-                            .tone(if draft.text_view {
-                                ButtonTone::Accent
-                            } else {
-                                ButtonTone::Ghost
-                            })
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                let draft = view.filter_draft.as_mut().unwrap();
-                                draft.text_view = true;
-                                draft.picker = None;
-                                draft.focus.focus(window, cx);
-                                cx.notify();
-                            })),
+                        div()
+                            .id("filter-view-toggle")
+                            .role(gpui::Role::TabList)
+                            .flex()
+                            .items_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.subtle_border)
+                            .bg(colors.toolbar)
+                            .child(
+                                div()
+                                    .id("filter-view-builder")
+                                    .debug_selector(|| "filter-view-builder".into())
+                                    .role(gpui::Role::Tab)
+                                    .aria_label("Builder")
+                                    .h(px(25.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_sm()
+                                    .bg(if draft.text_view {
+                                        colors.toolbar
+                                    } else {
+                                        colors.active_surface
+                                    })
+                                    .text_color(if draft.text_view {
+                                        colors.muted_text
+                                    } else {
+                                        colors.accent
+                                    })
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        let draft = view.filter_draft.as_mut().unwrap();
+                                        draft.text_view = false;
+                                        draft.focus.focus(window, cx);
+                                        cx.notify();
+                                    }))
+                                    .child("Builder"),
+                            )
+                            .child(
+                                div()
+                                    .id("filter-view-text")
+                                    .debug_selector(|| "filter-view-text".into())
+                                    .role(gpui::Role::Tab)
+                                    .aria_label("Text")
+                                    .h(px(25.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_sm()
+                                    .bg(if draft.text_view {
+                                        colors.active_surface
+                                    } else {
+                                        colors.toolbar
+                                    })
+                                    .text_color(if draft.text_view {
+                                        colors.accent
+                                    } else {
+                                        colors.muted_text
+                                    })
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        let draft = view.filter_draft.as_mut().unwrap();
+                                        draft.text_view = true;
+                                        draft.picker = None;
+                                        draft.focus.focus(window, cx);
+                                        cx.notify();
+                                    }))
+                                    .child("Text"),
+                            ),
                     ),
             )
             .children((!draft.text_view).then(|| {
