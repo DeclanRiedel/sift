@@ -1218,6 +1218,16 @@ impl ResultsView {
                         })),
                     )
                     .child(div().flex_1())
+                    .children((!draft.text_view).then(|| {
+                        Button::new("filter-see-full-sql", "See full SQL")
+                            .debug_selector("filter-see-full-sql")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                cx.emit(ResultsEvent::OpenTransformSqlRequested {
+                                    transform: view.draft_result_transform(cx),
+                                });
+                            }))
+                    }))
                     .child(
                         div()
                             .id("filter-view-toggle")
