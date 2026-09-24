@@ -1070,6 +1070,9 @@ pub enum ResultsEvent {
     ApplyTransformRequested {
         transform: sift_protocol::ResultTransform,
     },
+    OpenTransformSqlRequested {
+        transform: sift_protocol::ResultTransform,
+    },
     EditSelectedCellRequested,
     PasteSelectedCellRequested {
         text: String,
@@ -3350,6 +3353,23 @@ impl ResultsView {
         self.sorts.iter().any(|(index, _)| *index == column)
     }
 
+    fn cycle_sort(&mut self, column: usize, cx: &mut Context<Self>) {
+        match self.sorts.iter().position(|(sorted, _)| *sorted == column) {
+            None => {
+                self.set_sort(column, Some(SortDirection::Ascending), cx);
+                return;
+            }
+            Some(position) if self.sorts[position].1 == SortDirection::Ascending => {
+                self.sorts[position].1 = SortDirection::Descending;
+            }
+            Some(_) => {
+                self.set_sort(column, None, cx);
+                return;
+            }
+        }
+        self.rebuild_display_rows(cx);
+    }
+
     fn cycle_active_filter_operator(&mut self, cx: &mut Context<Self>) {
         const OPERATORS: [ResultFilterOperator; 12] = [
             ResultFilterOperator::Contains,
@@ -4952,7 +4972,7 @@ impl ResultsView {
                 )
                 .child(
                     div()
-                        .w(px(280.))
+                        .w(px(200.))
                         .h(px(26.))
                         .child(self.column_filter_input.clone()),
                 )
@@ -4985,44 +5005,24 @@ impl ResultsView {
                     .items_center()
                     .gap_1()
                     .child(
-                        Button::new("sort-active-column-ascending", "Ascending")
-                            .debug_selector("sort-active-column-ascending")
-                            .tone(
-                                if current == Some((column_index, SortDirection::Ascending)) {
-                                    ButtonTone::Accent
-                                } else {
-                                    ButtonTone::Neutral
-                                },
-                            )
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                cx.stop_propagation();
-                                view.set_sort(column_index, Some(SortDirection::Ascending), cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("sort-active-column-descending", "Descending")
-                            .debug_selector("sort-active-column-descending")
-                            .tone(
-                                if current == Some((column_index, SortDirection::Descending)) {
-                                    ButtonTone::Accent
-                                } else {
-                                    ButtonTone::Neutral
-                                },
-                            )
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                cx.stop_propagation();
-                                view.set_sort(column_index, Some(SortDirection::Descending), cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("clear-active-column-sort", "Clear")
-                            .debug_selector("clear-active-column-sort")
-                            .tone(ButtonTone::Ghost)
-                            .disabled(current.is_none())
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                cx.stop_propagation();
-                                view.set_sort(column_index, None, cx);
-                            })),
+                        Button::new(
+                            "cycle-active-column-sort",
+                            match current {
+                                None => "Sort: Off",
+                                Some((_, SortDirection::Ascending)) => "Sort: ↑ Asc",
+                                Some((_, SortDirection::Descending)) => "Sort: ↓ Desc",
+                            },
+                        )
+                        .debug_selector("cycle-active-column-sort")
+                        .tone(if current.is_some() {
+                            ButtonTone::Accent
+                        } else {
+                            ButtonTone::Neutral
+                        })
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            cx.stop_propagation();
+                            view.cycle_sort(column_index, cx);
+                        })),
                     )
                     .into_any_element()
             }
@@ -5031,7 +5031,7 @@ impl ResultsView {
             div()
                 .id("result-grid-transform-editor")
                 .debug_selector(|| "result-grid-transform-editor".into())
-                .h(px(70.))
+                .h(px(62.))
                 .flex_none()
                 .flex()
                 .flex_col()
@@ -5040,7 +5040,7 @@ impl ResultsView {
                 .bg(colors.elevated_surface)
                 .child(
                     div()
-                        .h(px(32.))
+                        .h(px(29.))
                         .flex_none()
                         .flex()
                         .items_center()
@@ -5053,14 +5053,14 @@ impl ResultsView {
                                 .text_xs()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(colors.muted_text)
-                                .child("FILTER BUILDER"),
+                                .child("Filter · Sort"),
                         )
                         .child(
                             Button::new(
                                 "toggle-result-filter-logic",
                                 match self.filter_logic {
-                                    ResultFilterLogic::All => "Match ALL",
-                                    ResultFilterLogic::Any => "Match ANY",
+                                    ResultFilterLogic::All => "Groups AND",
+                                    ResultFilterLogic::Any => "Groups OR",
                                 },
                             )
                             .debug_selector("toggle-result-filter-logic")
@@ -5073,11 +5073,7 @@ impl ResultsView {
                         .child(
                             Button::new(
                                 "cycle-active-result-filter-group",
-                                format!(
-                                    "Group {}/{}",
-                                    active_group + 1,
-                                    self.filter_group_logics.len()
-                                ),
+                                format!("{}/{}", active_group + 1, self.filter_group_logics.len()),
                             )
                             .debug_selector("cycle-active-result-filter-group")
                             .tone(ButtonTone::Ghost)
@@ -5090,8 +5086,8 @@ impl ResultsView {
                             Button::new(
                                 "toggle-active-result-filter-group-logic",
                                 match active_group_logic {
-                                    ResultFilterLogic::All => "Group ALL",
-                                    ResultFilterLogic::Any => "Group ANY",
+                                    ResultFilterLogic::All => "Rows AND",
+                                    ResultFilterLogic::Any => "Rows OR",
                                 },
                             )
                             .debug_selector("toggle-active-result-filter-group-logic")
@@ -5102,7 +5098,7 @@ impl ResultsView {
                             })),
                         )
                         .child(
-                            Button::new("add-result-filter-group", "+ Group")
+                            Button::new("add-result-filter-group", "+ group")
                                 .debug_selector("add-result-filter-group")
                                 .tone(ButtonTone::Ghost)
                                 .disabled(self.filter_group_logics.len() >= 16)
@@ -5114,14 +5110,14 @@ impl ResultsView {
                         .child(
                             div()
                                 .debug_selector(|| "result-filter-builder-row-filter".into())
-                                .w(px(240.))
+                                .w(px(160.))
                                 .h(px(24.))
                                 .child(self.grid_filter_input.clone()),
                         )
                         .child(
                             div()
                                 .debug_selector(|| "result-filter-builder-find".into())
-                                .w(px(200.))
+                                .w(px(140.))
                                 .h(px(24.))
                                 .child(self.grid_search_input.clone()),
                         )
@@ -5135,15 +5131,16 @@ impl ResultsView {
                                 })),
                         )
                         .child(div().flex_1())
-                        .child(div().text_xs().text_color(colors.muted_text).child(format!(
-                            "{active_filter_count} column filter(s) · {} of {} rows",
-                            self.display_rows.len(),
-                            self.rendered_rows.len()
-                        ))),
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child(format!("{active_filter_count} filters")),
+                        ),
                 )
                 .child(
                     div()
-                        .h(px(37.))
+                        .h(px(33.))
                         .flex_none()
                         .flex()
                         .items_center()
@@ -5170,7 +5167,7 @@ impl ResultsView {
                         )
                         .child(
                             div()
-                                .w(px(150.))
+                                .w(px(120.))
                                 .min_w_0()
                                 .truncate()
                                 .text_sm()
@@ -5210,6 +5207,20 @@ impl ResultsView {
                                 .child(tab("Sort", GridTransformTab::Sort)),
                         )
                         .child(editor)
+                        .child(
+                            Button::new("open-result-transform-sql", "SQL → Editor")
+                                .debug_selector("open-result-transform-sql")
+                                .tone(ButtonTone::Ghost)
+                                .on_click(cx.listener({
+                                    let transform = server_transform.clone();
+                                    move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(ResultsEvent::OpenTransformSqlRequested {
+                                            transform: transform.clone(),
+                                        });
+                                    }
+                                })),
+                        )
                         .child(
                             Button::new("apply-full-result-transform", "Apply to all rows")
                                 .debug_selector("apply-full-result-transform")
@@ -8619,6 +8630,24 @@ mod tests {
             assert!(view.display_rows.is_empty());
             view.set_column_filter(1, "", cx);
             assert_eq!(&*view.display_rows, &[0, 2, 1]);
+            view.cycle_sort(2, cx);
+            assert_eq!(
+                view.sorts,
+                [
+                    (2, SortDirection::Descending),
+                    (1, SortDirection::Descending)
+                ]
+            );
+            view.cycle_sort(2, cx);
+            assert_eq!(view.sorts, [(1, SortDirection::Descending)]);
+            view.cycle_sort(2, cx);
+            assert_eq!(
+                view.sorts,
+                [
+                    (1, SortDirection::Descending),
+                    (2, SortDirection::Ascending)
+                ]
+            );
         });
     }
 
@@ -9775,6 +9804,60 @@ mod tests {
             view.grid_transform_column == Some(0)
                 && view.grid_transform_tab == GridTransformTab::Filter
         }));
+        assert!(cx
+            .debug_bounds("result-filter-builder-row-filter")
+            .is_some());
+        assert!(cx.debug_bounds("result-filter-builder-find").is_some());
+        let logic = cx
+            .debug_bounds("toggle-active-result-filter-group-logic")
+            .expect("AND or OR control");
+        cx.simulate_click(logic.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.filter_group_logics[0]),
+            ResultFilterLogic::Any
+        );
+
+        let next_column = cx
+            .debug_bounds("next-result-transform-column")
+            .expect("next column navigator");
+        cx.simulate_click(next_column.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.grid_transform_column),
+            Some(1)
+        );
+        let previous_column = cx
+            .debug_bounds("previous-result-transform-column")
+            .expect("previous column navigator");
+        cx.simulate_click(previous_column.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.grid_transform_column),
+            Some(0)
+        );
+
+        let sort_tab = cx
+            .debug_bounds("grid-transform-tab-sort")
+            .expect("sort editor tab");
+        cx.simulate_click(sort_tab.center(), Modifiers::default());
+        cx.run_until_parked();
+        let sort = cx
+            .debug_bounds("cycle-active-column-sort")
+            .expect("sort direction control");
+        cx.simulate_click(sort.center(), Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_click(sort.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(view.read_with(&cx, |view, _| {
+            view.sorts == [(0, SortDirection::Descending)] && *view.display_rows == [1, 0]
+        }));
+        assert!(cx.debug_bounds("apply-full-result-transform").is_some());
+        assert!(cx.debug_bounds("open-result-transform-sql").is_some());
+        cx.simulate_click(sort.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(view.read_with(&cx, |view, _| view.sorts.is_empty()));
+
         let close = cx
             .debug_bounds("close-result-grid-transform-editor")
             .expect("close editor action");
