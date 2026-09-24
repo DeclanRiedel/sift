@@ -1542,7 +1542,7 @@ impl ResultsView {
                         Button::new(
                             "filter-apply",
                             if draft.text_view {
-                                "Open SQL in editor"
+                                "Run SQL"
                             } else if draft.database {
                                 "Run query"
                             } else {
@@ -1560,7 +1560,7 @@ impl ResultsView {
                                 if let Some(editor) =
                                     &view.filter_draft.as_ref().unwrap().sql_editor
                                 {
-                                    cx.emit(ResultsEvent::OpenSqlTextRequested {
+                                    cx.emit(ResultsEvent::ExecuteSqlTextRequested {
                                         sql: editor.read(cx).document().text().to_owned(),
                                     });
                                 }
@@ -1569,6 +1569,19 @@ impl ResultsView {
                             }
                         })),
                     )
+                    .children(draft.text_view.then(|| {
+                        Button::new("filter-open-sql-text", "Open in editor")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                if let Some(editor) =
+                                    &view.filter_draft.as_ref().unwrap().sql_editor
+                                {
+                                    cx.emit(ResultsEvent::OpenSqlTextRequested {
+                                        sql: editor.read(cx).document().text().to_owned(),
+                                    });
+                                }
+                            }))
+                    }))
                     .children((!draft.text_view).then(|| {
                         Button::new("filter-clear", "Clear")
                             .tone(ButtonTone::Ghost)

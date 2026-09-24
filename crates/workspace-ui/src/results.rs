@@ -1080,6 +1080,9 @@ pub enum ResultsEvent {
     OpenSqlTextRequested {
         sql: String,
     },
+    ExecuteSqlTextRequested {
+        sql: String,
+    },
     EditSelectedCellRequested,
     PasteSelectedCellRequested {
         text: String,

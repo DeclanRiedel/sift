@@ -2864,6 +2864,10 @@ pub enum PaneEvent {
     OpenResultSqlTextRequested {
         sql: String,
     },
+    ExecuteResultSqlTextRequested {
+        item_id: u64,
+        sql: String,
+    },
     EditResultCellRequested {
         item_id: u64,
     },
@@ -5274,6 +5278,12 @@ impl Pane {
             }
             ResultsEvent::OpenSqlTextRequested { sql } => {
                 cx.emit(PaneEvent::OpenResultSqlTextRequested { sql: sql.clone() })
+            }
+            ResultsEvent::ExecuteSqlTextRequested { sql } => {
+                cx.emit(PaneEvent::ExecuteResultSqlTextRequested {
+                    item_id,
+                    sql: sql.clone(),
+                })
             }
             ResultsEvent::EditSelectedCellRequested => {
                 cx.emit(PaneEvent::EditResultCellRequested { item_id })
@@ -17371,6 +17381,48 @@ impl WorkspaceShell {
         }
     }
 
+    fn run_result_sql_text(
+        &mut self,
+        pane_index: usize,
+        source_item_id: u64,
+        sql: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sql = sql.trim();
+        if sql.is_empty() {
+            self.show_error_toast("Write SQL before running it".into(), cx);
+            return;
+        }
+        let params = match self.remembered_query_params(sql) {
+            Ok(params) => params,
+            Err(error) => {
+                self.show_error_toast(error, cx);
+                return;
+            }
+        };
+        let target = self
+            .query_semantic_targets
+            .get(&source_item_id)
+            .cloned()
+            .or_else(|| self.sourced_semantic_target(source_item_id, cx))
+            .or_else(|| self.active_semantic_target());
+        self.active_pane = pane_index;
+        let new_item_id = self.open_sql_scratch(
+            "filter-sort.sql".into(),
+            format!("{}\n", sql.trim_end()),
+            window,
+            cx,
+        );
+        if let Some(target) = target {
+            self.query_semantic_targets.insert(new_item_id, target);
+            if let Some(editor) = self.editor_for_item(new_item_id, cx) {
+                editor.update(cx, |editor, cx| editor.invalidate_semantic_context(cx));
+            }
+        }
+        self.send_execution_with_context(new_item_id, sql.to_owned(), params, None, cx);
+    }
+
     fn explain_database_item(
         &mut self,
         item_id: u64,
@@ -29113,6 +29165,9 @@ impl WorkspaceShell {
             PaneEvent::OpenResultSqlTextRequested { sql } => {
                 self.active_pane = index;
                 self.open_sql_scratch("filter-sort.sql".into(), sql.clone(), window, cx);
+            }
+            PaneEvent::ExecuteResultSqlTextRequested { item_id, sql } => {
+                self.run_result_sql_text(index, *item_id, sql, window, cx);
             }
             PaneEvent::EditResultCellRequested { item_id } => {
                 self.active_pane = index;
@@ -43789,6 +43844,61 @@ mod tests {
             assert_eq!(
                 pane.editor(opened.id).unwrap().read(cx).document().text(),
                 "SELECT * FROM (SELECT * FROM \"main\".\"order_items\" LIMIT 100) AS sift_result WHERE (\"status\" = 'open');\n"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn edited_filter_sql_runs_in_a_new_tab_with_the_source_connection(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "SQLite".into(),
+            };
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "SQLite".into(),
+                        provider_id: sift_protocol::Engine::Sqlite.provider_id(),
+                        tags: Vec::new(),
+                    },
+                    catalog: "main".into(),
+                    schema: "main".into(),
+                    object: "order_items".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                window,
+                cx,
+            );
+            while receiver.try_recv().is_ok() {}
+            let source_item = shell.panes[0].read(cx).active_item().unwrap().id;
+            shell.run_result_sql_text(0, source_item, "SELECT 42", window, cx);
+            let new_item = shell.panes[0].read(cx).active_item().unwrap().id;
+            assert_ne!(new_item, source_item);
+            assert_eq!(shell.query_semantic_targets[&new_item].profile_id, 2);
+            assert_eq!(
+                shell.panes[0]
+                    .read(cx)
+                    .editor(new_item)
+                    .unwrap()
+                    .read(cx)
+                    .document()
+                    .text(),
+                "SELECT 42\n"
+            );
+            assert!(
+                std::iter::from_fn(|| receiver.try_recv().ok()).any(|command| matches!(
+                    command,
+                    ExecutorCommand::Execute { item_id, profile_id: Some(2), sql, .. }
+                        if item_id == new_item && sql == "SELECT 42"
+                ))
             );
         });
     }
