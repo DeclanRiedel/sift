@@ -235,6 +235,13 @@ pub struct ExpectedRepositoryRevisionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RepairRepositoryBindingRequest {
+    pub expected_revision: u64,
+    #[serde(default)]
+    pub initialize: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VcsDiffQuery {
     #[serde(default = "default_vcs_diff_side")]
     pub side: VcsDiffSide,

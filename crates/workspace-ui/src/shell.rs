@@ -2251,6 +2251,7 @@ pub enum Modal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdministrationSection {
+    Users,
     Keys,
     Approvals,
     Audit,
@@ -3466,6 +3467,20 @@ pub enum ExecutorCommand {
     },
     LoadVcsDiagnostics,
     LoadPrincipalKeys,
+    LoadGithubAllowlist,
+    CreateGithubAllowlist {
+        login: String,
+        target_principal_id: Option<i64>,
+    },
+    RevokeGithubAllowlist {
+        id: i64,
+    },
+    CreatePasswordUser {
+        username: String,
+        display_name: String,
+        email: Option<String>,
+        password: String,
+    },
     RegisterPrincipalKey {
         public_key: String,
         label: String,
@@ -3917,6 +3932,7 @@ pub enum ExecutorCommand {
         workspace_id: i64,
         binding_id: i64,
         expected_revision: u64,
+        initialize: bool,
     },
     LoadWorkspaceFiles {
         workspace_id: i64,
@@ -4298,6 +4314,9 @@ pub enum ExecutorEvent {
     TenantLimitsSaved(Result<sift_protocol::TenantUsageSnapshot, String>),
     VcsDiagnosticsLoaded(Result<sift_protocol::VcsAdapterDiagnostics, String>),
     PrincipalKeysLoaded(Result<Vec<sift_api_types::PrincipalKey>, String>),
+    GithubAllowlistLoaded(Result<Vec<sift_api_types::GithubAllowlistEntry>, String>),
+    UserCreated(Result<sift_protocol::AuthPrincipal, String>),
+    GithubAllowlistChanged(Result<(), String>),
     PrincipalKeyChanged(Result<(), String>),
     OperationApprovalsLoaded(Result<Vec<sift_protocol::OperationApproval>, String>),
     OperationApprovalChanged(Result<(), String>),
@@ -10300,6 +10319,9 @@ pub struct WorkspaceShell {
     server_token_input: Entity<TextInput>,
     account_username_input: Entity<TextInput>,
     account_password_input: Entity<TextInput>,
+    new_user_inputs: Vec<Entity<TextInput>>,
+    github_login_input: Entity<TextInput>,
+    github_target_principal_input: Entity<TextInput>,
     api_token_name_input: Entity<TextInput>,
     administration_section: AdministrationSection,
     principal_key_inputs: Vec<Entity<TextInput>>,
@@ -10619,6 +10641,7 @@ pub struct WorkspaceShell {
     principal_admin_pending: bool,
     principal_admin_error: Option<String>,
     principal_keys: Vec<sift_api_types::PrincipalKey>,
+    github_allowlist: Vec<sift_api_types::GithubAllowlistEntry>,
     operation_approvals: Vec<sift_protocol::OperationApproval>,
     operation_audit_rows: Vec<sift_api_types::OperationAudit>,
     operation_audit_cursor: Option<String>,
@@ -10647,6 +10670,8 @@ pub struct WorkspaceShell {
     server_sessions: Vec<sift_protocol::SessionInfo>,
     server_sessions_loading: bool,
     server_sessions_error: Option<String>,
+    account_ticker_generation: u64,
+    administration_ticker_generation: u64,
     connection_status: ConnectionStatus,
     /// Profiles with live executor sessions. `connection_status` remains the
     /// profile currently selected for global schema/transaction controls.
@@ -11113,6 +11138,15 @@ impl WorkspaceShell {
                 .aria_label("Account password")
                 .masked()
         });
+        let new_user_inputs = vec![
+            cx.new(|cx| TextInput::new("", "Username", cx)),
+            cx.new(|cx| TextInput::new("", "Display name", cx)),
+            cx.new(|cx| TextInput::new("", "Email (optional)", cx)),
+            cx.new(|cx| TextInput::new("", "Password", cx).masked()),
+        ];
+        let github_login_input = cx.new(|cx| TextInput::new("", "GitHub login", cx));
+        let github_target_principal_input =
+            cx.new(|cx| TextInput::new("", "Existing principal ID (optional)", cx));
         let api_token_name_input =
             cx.new(|cx| TextInput::new("", "Token name", cx).aria_label("API token name"));
         let principal_key_inputs = vec![
@@ -11567,8 +11601,11 @@ impl WorkspaceShell {
             server_token_input,
             account_username_input,
             account_password_input,
+            new_user_inputs,
+            github_login_input,
+            github_target_principal_input,
             api_token_name_input,
-            administration_section: AdministrationSection::Keys,
+            administration_section: AdministrationSection::Users,
             principal_key_inputs,
             ddl_source_inputs,
             room_admin_inputs,
@@ -11891,6 +11928,7 @@ impl WorkspaceShell {
             principal_admin_pending: false,
             principal_admin_error: None,
             principal_keys: Vec::new(),
+            github_allowlist: Vec::new(),
             operation_approvals: Vec::new(),
             operation_audit_rows: Vec::new(),
             operation_audit_cursor: None,
@@ -11919,6 +11957,8 @@ impl WorkspaceShell {
             server_sessions: Vec::new(),
             server_sessions_loading: false,
             server_sessions_error: None,
+            account_ticker_generation: 0,
+            administration_ticker_generation: 0,
             connection_status: ConnectionStatus::Disconnected,
             connected_profiles: HashSet::new(),
             connection_health: None,
@@ -13344,6 +13384,50 @@ impl WorkspaceShell {
                     Ok(keys) => {
                         self.principal_keys = keys;
                         self.principal_admin_error = None;
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::GithubAllowlistLoaded(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(entries) => {
+                        self.github_allowlist = entries;
+                        self.principal_admin_error = None;
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::UserCreated(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(principal) => {
+                        for input in &self.new_user_inputs {
+                            input.update(cx, |input, cx| input.set_text("", cx));
+                        }
+                        self.show_success_toast(
+                            format!(
+                                "{} created · principal #{}",
+                                principal.display_name, principal.id
+                            ),
+                            cx,
+                        );
+                    }
+                    Err(error) => self.principal_admin_error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::GithubAllowlistChanged(result) => {
+                self.principal_admin_pending = false;
+                match result {
+                    Ok(()) => {
+                        self.github_login_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                        self.github_target_principal_input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                        self.load_github_allowlist(cx);
                     }
                     Err(error) => self.principal_admin_error = Some(error),
                 }
@@ -22863,6 +22947,7 @@ impl WorkspaceShell {
     }
 
     fn open_repository_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_workspace_files(cx);
         self.repository_root_input
             .update(cx, |input, cx| input.set_text("", cx));
         self.repository_remote_url_input
@@ -22872,10 +22957,16 @@ impl WorkspaceShell {
         self.repository_password_input
             .update(cx, |input, cx| input.set_text("", cx));
         self.modal = Some(Modal::RepositorySetup);
-        self.repository_root_input
-            .read(cx)
-            .focus_handle(cx)
-            .focus(window, cx);
+        let has_projection = self
+            .workspace_files
+            .snapshot()
+            .is_some_and(|snapshot| snapshot.projection.is_some());
+        if !has_projection {
+            self.repository_root_input
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx);
+        }
         cx.notify();
     }
 
@@ -22883,10 +22974,21 @@ impl WorkspaceShell {
         let Some(workspace_id) = self.selected_workspace_id else {
             return;
         };
+        let has_projection = self
+            .workspace_files
+            .snapshot()
+            .is_some_and(|snapshot| snapshot.projection.is_some());
         let root_handle = self.repository_root_input.read(cx).text().trim().to_owned();
-        if root_handle.is_empty() {
+        if root_handle.is_empty() && !has_projection {
             self.repository
                 .set_error("A configured root handle is required");
+            cx.notify();
+            return;
+        }
+        if mode == RepositorySetupMode::Clone && has_projection {
+            self.repository
+                .set_error("Clone requires a workspace without an existing filesystem projection");
+            cx.notify();
             return;
         }
         let Some(sender) = &self.executor_sender else {
@@ -23325,6 +23427,7 @@ impl WorkspaceShell {
             workspace_id,
             binding_id,
             expected_revision,
+            initialize: false,
         });
         cx.notify();
     }
@@ -32648,10 +32751,41 @@ impl WorkspaceShell {
     }
 
     fn open_administration(&mut self, cx: &mut Context<Self>) {
+        self.account_password_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.new_user_inputs[3].update(cx, |input, cx| input.set_text("", cx));
         self.modal = Some(Modal::Administration);
-        self.administration_section = AdministrationSection::Keys;
+        self.administration_section = AdministrationSection::Users;
         self.principal_admin_error = None;
-        self.load_principal_keys(cx);
+        self.load_github_allowlist(cx);
+        self.administration_ticker_generation += 1;
+        let generation = self.administration_ticker_generation;
+        cx.spawn(async move |shell, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(15))
+                .await;
+            let open = shell
+                .update(cx, |shell, cx| {
+                    if shell.modal == Some(Modal::Administration)
+                        && shell.administration_ticker_generation == generation
+                        && !shell.principal_admin_pending
+                    {
+                        match shell.administration_section {
+                            AdministrationSection::Users => shell.load_github_allowlist(cx),
+                            AdministrationSection::Keys => shell.load_principal_keys(cx),
+                            AdministrationSection::Approvals => shell.load_operation_approvals(cx),
+                            AdministrationSection::Audit => {}
+                        }
+                    }
+                    shell.modal == Some(Modal::Administration)
+                        && shell.administration_ticker_generation == generation
+                })
+                .unwrap_or(false);
+            if !open {
+                break;
+            }
+        })
+        .detach();
         cx.notify();
     }
 
@@ -32676,6 +32810,7 @@ impl WorkspaceShell {
     ) {
         self.administration_section = section;
         match section {
+            AdministrationSection::Users => self.load_github_allowlist(cx),
             AdministrationSection::Keys => self.load_principal_keys(cx),
             AdministrationSection::Approvals => self.load_operation_approvals(cx),
             AdministrationSection::Audit => self.load_operation_audit(false, cx),
@@ -32684,6 +32819,78 @@ impl WorkspaceShell {
 
     fn load_principal_keys(&mut self, cx: &mut Context<Self>) {
         self.send_principal_command(ExecutorCommand::LoadPrincipalKeys, cx);
+    }
+
+    fn load_github_allowlist(&mut self, cx: &mut Context<Self>) {
+        self.send_principal_command(ExecutorCommand::LoadGithubAllowlist, cx);
+    }
+
+    fn create_password_user(&mut self, cx: &mut Context<Self>) {
+        let values: Vec<String> = self
+            .new_user_inputs
+            .iter()
+            .map(|input| input.read(cx).text().trim().to_owned())
+            .collect();
+        if values[0].is_empty() || values[1].is_empty() || values[3].is_empty() {
+            self.principal_admin_error =
+                Some("Username, display name, and password are required".into());
+            cx.notify();
+            return;
+        }
+        self.send_principal_command(
+            ExecutorCommand::CreatePasswordUser {
+                username: values[0].clone(),
+                display_name: values[1].clone(),
+                email: (!values[2].is_empty()).then(|| values[2].clone()),
+                password: values[3].clone(),
+            },
+            cx,
+        );
+    }
+
+    fn allow_github_user(&mut self, cx: &mut Context<Self>) {
+        let login = self
+            .github_login_input
+            .read(cx)
+            .text()
+            .trim()
+            .trim_start_matches('@')
+            .to_owned();
+        if login.is_empty() {
+            self.principal_admin_error = Some("Enter a GitHub login".into());
+            cx.notify();
+            return;
+        }
+        let target = self
+            .github_target_principal_input
+            .read(cx)
+            .text()
+            .trim()
+            .to_owned();
+        let target_principal_id = if target.is_empty() {
+            None
+        } else {
+            match target.parse::<i64>() {
+                Ok(id) if id > 0 => Some(id),
+                _ => {
+                    self.principal_admin_error =
+                        Some("Existing principal ID must be a positive number".into());
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        self.send_principal_command(
+            ExecutorCommand::CreateGithubAllowlist {
+                login,
+                target_principal_id,
+            },
+            cx,
+        );
+    }
+
+    fn revoke_github_user(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.send_principal_command(ExecutorCommand::RevokeGithubAllowlist { id }, cx);
     }
 
     fn register_principal_key(&mut self, cx: &mut Context<Self>) {
@@ -34602,6 +34809,9 @@ impl WorkspaceShell {
             self.database_password_input
                 .update(cx, |input, cx| input.set_text("", cx));
         }
+        if self.modal == Some(Modal::Administration) {
+            self.new_user_inputs[3].update(cx, |input, cx| input.set_text("", cx));
+        }
         if self.modal == Some(Modal::ConnectionUrl) {
             self.connection_url_input
                 .update(cx, |input, cx| input.set_text("", cx));
@@ -35317,6 +35527,30 @@ impl WorkspaceShell {
         self.modal = Some(modal);
         if self.modal == Some(Modal::Account) {
             self.load_server_sessions(cx);
+            self.account_ticker_generation += 1;
+            let generation = self.account_ticker_generation;
+            cx.spawn(async move |shell, cx| loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(10))
+                    .await;
+                let open = shell
+                    .update(cx, |shell, cx| {
+                        if shell.modal == Some(Modal::Account)
+                            && shell.account_ticker_generation == generation
+                            && shell.lifecycle.identity.is_some()
+                            && !shell.server_sessions_loading
+                        {
+                            shell.load_server_sessions(cx);
+                        }
+                        shell.modal == Some(Modal::Account)
+                            && shell.account_ticker_generation == generation
+                    })
+                    .unwrap_or(false);
+                if !open {
+                    break;
+                }
+            })
+            .detach();
         }
         cx.notify();
     }
@@ -39401,6 +39635,7 @@ impl WorkspaceShell {
                         }))
                         .children(self.repository.error().map(|failure| {
                             let repair = self.repository.repair_target();
+                            let initialize = self.repository.initialize_target();
                             div()
                                 .mx_2()
                                 .mb_2()
@@ -39422,8 +39657,26 @@ impl WorkspaceShell {
                                                 workspace_id,
                                                 binding_id,
                                                 expected_revision,
+                                                initialize: false,
                                             });
                                         }))
+                                }))
+                                .children(initialize.map(|(binding_id, expected_revision)| {
+                                    div().flex().flex_col().gap_1()
+                                        .child(div().text_xs().text_color(colors.muted_text).child("Git metadata is missing from this workspace root. A workspace owner can initialize Git here. Existing workspace files are kept; old commit history is not restored."))
+                                        .child(Button::new("initialize-bound-repository", "Initialize Git here")
+                                            .tone(ButtonTone::Accent)
+                                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                                let Some(workspace_id) = shell.selected_workspace_id else { return };
+                                                let Some(sender) = &shell.executor_sender else { return };
+                                                let _ = sender.send(ExecutorCommand::RepairRepositoryBinding {
+                                                    workspace_id,
+                                                    binding_id,
+                                                    expected_revision,
+                                                    initialize: true,
+                                                });
+                                                cx.notify();
+                                            })))
                                 }))
                         }))
                         .children(self.repository.operation().map(|operation| {

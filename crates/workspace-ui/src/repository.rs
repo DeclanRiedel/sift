@@ -772,6 +772,20 @@ impl RepositoryProjection {
             })
     }
 
+    pub(crate) fn initialize_target(&self) -> Option<(i64, u64)> {
+        if self.error.as_ref()?.kind != RepositoryFailureKind::NotRepository {
+            return None;
+        }
+        self.observed_binding
+            .as_ref()
+            .map(|binding| (binding.id.0, binding.revision))
+            .or_else(|| {
+                self.status
+                    .as_ref()
+                    .map(|status| (status.binding_id.0, status.binding_revision))
+            })
+    }
+
     pub(crate) fn rows(&self) -> Arc<[RepositoryRow]> {
         self.visible_rows.clone()
     }
@@ -1506,6 +1520,7 @@ mod tests {
             RepositoryFailureKind::NotRepository
         );
         assert_eq!(projection.repair_target(), None);
+        assert_eq!(projection.initialize_target(), Some((9, 4)));
 
         projection.set_error("the Git repository metadata is invalid or corrupt");
         assert_eq!(
@@ -1513,5 +1528,6 @@ mod tests {
             RepositoryFailureKind::CorruptRepository
         );
         assert_eq!(projection.repair_target(), None);
+        assert_eq!(projection.initialize_target(), None);
     }
 }

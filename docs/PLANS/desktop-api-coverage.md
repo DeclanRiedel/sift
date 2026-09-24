@@ -51,7 +51,7 @@ and forwarded health/readiness probes.
 - [x] `open_session_for_tenant` — every profile and ad-hoc query context opens
   a tenant-scoped session (M2)
 - [x] `list_sessions` — Account lists live sessions and their physical
-  connections, with refresh and close controls (M4)
+  connections, with automatic updates and close controls (M4)
 - [x] `open_connection` (explicit spec) — connection-URL dialog offers
   **Connect once** without creating a durable profile (M4)
 - [x] `ping_connection` — periodic connection health chip with latency, failure
@@ -243,11 +243,11 @@ and forwarded health/readiness probes.
 
 ### Admin & tenant management — admin console
 
-- [ ] `admin_create_principal`, `admin_set_principal_disabled`, `admin_principal_identities`, `admin_link_password_identity`, `admin_unlink_identity` — principal admin (M5/M6)
+- [~] `admin_create_principal`, `admin_set_principal_disabled`, `admin_principal_identities`, `admin_link_password_identity`, `admin_unlink_identity` — password user creation is available; other principal controls remain (M5/M6)
 - [ ] `admin_auth_sessions`, `admin_revoke_auth_session`, `admin_issue_password_reset` — session admin (M6)
 - [ ] `create_tenant_invitation`, `tenant_invitations`, `revoke_tenant_invitation`, `accept_tenant_invitation` — tenant invites (M5)
 - [ ] `tenant_usage`, `set_tenant_limits`, `clear_tenant_limits` — usage/limits panel (M5)
-- [ ] `github_allowlist`, `create_github_allowlist_entry`, `revoke_github_allowlist_entry` — GitHub allowlist (M5)
+- [x] `github_allowlist`, `create_github_allowlist_entry`, `revoke_github_allowlist_entry` — GitHub admission, pending-entry revocation, and automatic list updates (M5)
 
 ### Keys, tokens, account — account settings
 
