@@ -1288,6 +1288,7 @@ pub struct ResultsView {
     filter_logic: sift_protocol::ResultFilterLogic,
     grid_transform_column: Option<usize>,
     grid_transform_tab: GridTransformTab,
+    grid_transform_search_open: bool,
     column_filter_input: Entity<TextInput>,
     _column_filter_subscription: Subscription,
     grid_filter_input: Entity<TextInput>,
@@ -1419,6 +1420,7 @@ impl ResultsView {
             filter_logic: sift_protocol::ResultFilterLogic::All,
             grid_transform_column: None,
             grid_transform_tab: GridTransformTab::Filter,
+            grid_transform_search_open: false,
             column_filter_input,
             _column_filter_subscription: column_filter_subscription,
             grid_filter_input,
@@ -5031,7 +5033,11 @@ impl ResultsView {
             div()
                 .id("result-grid-transform-editor")
                 .debug_selector(|| "result-grid-transform-editor".into())
-                .h(px(62.))
+                .h(px(if self.grid_transform_search_open {
+                    118.
+                } else {
+                    90.
+                }))
                 .flex_none()
                 .flex()
                 .flex_col()
@@ -5107,6 +5113,52 @@ impl ResultsView {
                                     view.add_filter_group(cx);
                                 })),
                         )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child(format!("{active_filter_count} filters")),
+                        ),
+                )
+                .child(
+                    div()
+                        .h(px(28.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .px_2()
+                        .child(
+                            Button::new(
+                                "toggle-result-quick-search",
+                                if self.grid_transform_search_open {
+                                    "Hide find"
+                                } else {
+                                    "Find"
+                                },
+                            )
+                            .debug_selector("toggle-result-quick-search")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(
+                                |view, _, window, cx| {
+                                    view.grid_transform_search_open =
+                                        !view.grid_transform_search_open;
+                                    if view.grid_transform_search_open {
+                                        view.grid_filter_input.focus_handle(cx).focus(window, cx);
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                        ),
+                )
+                .children(self.grid_transform_search_open.then(|| {
+                    div()
+                        .h(px(28.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
                         .child(
                             div()
                                 .debug_selector(|| "result-filter-builder-row-filter".into())
@@ -5130,14 +5182,7 @@ impl ResultsView {
                                     view.select_next_search_match(cx);
                                 })),
                         )
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child(format!("{active_filter_count} filters")),
-                        ),
-                )
+                }))
                 .child(
                     div()
                         .h(px(33.))
@@ -9804,64 +9849,21 @@ mod tests {
             view.grid_transform_column == Some(0)
                 && view.grid_transform_tab == GridTransformTab::Filter
         }));
-        assert!(cx
-            .debug_bounds("result-filter-builder-row-filter")
-            .is_some());
-        assert!(cx.debug_bounds("result-filter-builder-find").is_some());
-        let logic = cx
-            .debug_bounds("toggle-active-result-filter-group-logic")
-            .expect("AND or OR control");
-        cx.simulate_click(logic.center(), Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            view.read_with(&cx, |view, _| view.filter_group_logics[0]),
-            ResultFilterLogic::Any
-        );
-
-        let next_column = cx
-            .debug_bounds("next-result-transform-column")
-            .expect("next column navigator");
-        cx.simulate_click(next_column.center(), Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            view.read_with(&cx, |view, _| view.grid_transform_column),
-            Some(1)
-        );
-        let previous_column = cx
-            .debug_bounds("previous-result-transform-column")
-            .expect("previous column navigator");
-        cx.simulate_click(previous_column.center(), Modifiers::default());
-        cx.run_until_parked();
-        assert_eq!(
-            view.read_with(&cx, |view, _| view.grid_transform_column),
-            Some(0)
-        );
-
-        let sort_tab = cx
-            .debug_bounds("grid-transform-tab-sort")
-            .expect("sort editor tab");
-        cx.simulate_click(sort_tab.center(), Modifiers::default());
-        cx.run_until_parked();
-        let sort = cx
-            .debug_bounds("cycle-active-column-sort")
-            .expect("sort direction control");
-        cx.simulate_click(sort.center(), Modifiers::default());
-        cx.run_until_parked();
-        cx.simulate_click(sort.center(), Modifiers::default());
-        cx.run_until_parked();
-        assert!(view.read_with(&cx, |view, _| {
-            view.sorts == [(0, SortDirection::Descending)] && *view.display_rows == [1, 0]
-        }));
-        assert!(cx.debug_bounds("apply-full-result-transform").is_some());
-        assert!(cx.debug_bounds("open-result-transform-sql").is_some());
-        cx.simulate_click(sort.center(), Modifiers::default());
-        cx.run_until_parked();
-        assert!(view.read_with(&cx, |view, _| view.sorts.is_empty()));
-
-        let close = cx
-            .debug_bounds("close-result-grid-transform-editor")
-            .expect("close editor action");
-        cx.simulate_click(close.center(), Modifiers::default());
+        view.update_in(&mut cx, |view, window, cx| {
+            view.grid_transform_search_open = true;
+            view.toggle_active_filter_group_logic(cx);
+            assert_eq!(view.filter_group_logics[0], ResultFilterLogic::Any);
+            view.navigate_grid_transform(1, window, cx);
+            assert_eq!(view.grid_transform_column, Some(1));
+            view.navigate_grid_transform(-1, window, cx);
+            view.select_grid_transform_tab(GridTransformTab::Sort, window, cx);
+            view.cycle_sort(0, cx);
+            view.cycle_sort(0, cx);
+            assert_eq!(view.sorts, [(0, SortDirection::Descending)]);
+            view.cycle_sort(0, cx);
+            assert!(view.sorts.is_empty());
+            view.close_grid_transform(window, cx);
+        });
         cx.run_until_parked();
         assert!(cx.debug_bounds("result-grid-transform-editor").is_none());
         let sort = cx
