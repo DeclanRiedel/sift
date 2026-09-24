@@ -7,6 +7,7 @@ use sift_protocol::{DialectId, SnippetScope, SqlSnippet};
 
 mod object_sql;
 pub use object_sql::{editable_object_ddl, object_designer_sql, table_preview_sql};
+pub mod result_transform;
 
 pub const MAX_SNIPPETS: usize = 2_000;
 pub const MAX_SNIPPET_BODY_BYTES: usize = 64 * 1024;

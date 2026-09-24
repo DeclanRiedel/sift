@@ -2823,6 +2823,11 @@ pub enum PaneEvent {
         sql: String,
         transform: sift_protocol::ResultTransform,
     },
+    OpenResultTransformSqlRequested {
+        item_id: u64,
+        sql: String,
+        transform: sift_protocol::ResultTransform,
+    },
     EditResultCellRequested {
         item_id: u64,
     },
@@ -5135,6 +5140,13 @@ impl Pane {
             }
             ResultsEvent::ApplyTransformRequested { transform } => {
                 cx.emit(PaneEvent::ApplyResultTransformRequested {
+                    item_id,
+                    sql: self.targeted_query_sql(item_id, cx),
+                    transform: transform.clone(),
+                })
+            }
+            ResultsEvent::OpenTransformSqlRequested { transform } => {
+                cx.emit(PaneEvent::OpenResultTransformSqlRequested {
                     item_id,
                     sql: self.targeted_query_sql(item_id, cx),
                     transform: transform.clone(),
@@ -16985,6 +16997,55 @@ impl WorkspaceShell {
         self.send_execution_now(item_id, sql.to_owned(), params, Some(transform), None, cx);
     }
 
+    fn open_result_transform_sql(
+        &mut self,
+        pane_index: usize,
+        item_id: u64,
+        sql: &str,
+        transform: &sift_protocol::ResultTransform,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let provider = self
+            .panes
+            .get(pane_index)
+            .and_then(|pane| {
+                pane.read(cx)
+                    .items
+                    .iter()
+                    .find(|item| item.id == item_id)
+                    .and_then(|item| match item.source.as_ref() {
+                        Some(ItemSource::DatabaseObject(source)) => {
+                            Some(source.provider_id.clone())
+                        }
+                        _ => None,
+                    })
+            })
+            .or_else(|| {
+                self.query_semantic_targets
+                    .get(&item_id)
+                    .map(|target| target.provider_id.clone())
+            })
+            .or_else(|| self.active_connection_provider_id().cloned());
+        let engine = match provider.as_ref().map(|provider| provider.as_str()) {
+            Some("sift/postgres") => sift_protocol::Engine::Postgres,
+            Some("sift/sql-server") => sift_protocol::Engine::SqlServer,
+            Some("sift/sqlite") => sift_protocol::Engine::Sqlite,
+            _ => {
+                self.show_error_toast("Select a supported connection to build SQL".into(), cx);
+                return;
+            }
+        };
+        match sift_snippets::result_transform::apply(engine, sql, transform) {
+            Ok(sql) => {
+                self.active_pane = pane_index;
+                let sql = sql.trim_end().trim_end_matches(';').trim_end();
+                self.open_sql_scratch("filter-sort.sql".into(), format!("{sql};\n"), window, cx);
+            }
+            Err(error) => self.show_error_toast(error, cx),
+        }
+    }
+
     fn explain_database_item(
         &mut self,
         item_id: u64,
@@ -28679,6 +28740,11 @@ impl WorkspaceShell {
                 sql,
                 transform,
             } => self.apply_server_result_transform(*item_id, sql, transform.clone(), cx),
+            PaneEvent::OpenResultTransformSqlRequested {
+                item_id,
+                sql,
+                transform,
+            } => self.open_result_transform_sql(index, *item_id, sql, transform, window, cx),
             PaneEvent::EditResultCellRequested { item_id } => {
                 self.active_pane = index;
                 self.open_result_cell_editor(emitter, *item_id, window, cx);
@@ -43047,6 +43113,60 @@ mod tests {
         assert!(
             matches!(receiver.try_recv().unwrap(), ExecutorCommand::Execute { sql, .. } if sql == "SELECT * FROM \"main\".\"order_items\" LIMIT 100;")
         );
+    }
+
+    #[gpui::test]
+    fn table_filter_sql_opens_a_full_editable_query(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.open_table_preview(
+                DatabaseObjectTarget {
+                    connection: ConnectionNavEntry {
+                        id: 2,
+                        tenant_id: 1,
+                        name: "SQLite".into(),
+                        provider_id: sift_protocol::Engine::Sqlite.provider_id(),
+                        tags: Vec::new(),
+                    },
+                    catalog: "main".into(),
+                    schema: "main".into(),
+                    object: "order_items".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                },
+                window,
+                cx,
+            );
+            let item_id = shell.panes[0].read(cx).active_item().unwrap().id;
+            shell.open_result_transform_sql(
+                0,
+                item_id,
+                "SELECT * FROM \"main\".\"order_items\" LIMIT 100;",
+                &sift_protocol::ResultTransform {
+                    logic: sift_protocol::ResultFilterLogic::All,
+                    groups: vec![sift_protocol::ResultFilterGroup {
+                        logic: sift_protocol::ResultFilterLogic::All,
+                        filters: vec![sift_protocol::ResultFilter {
+                            column: "status".into(),
+                            operator: sift_protocol::ResultFilterOperator::Equals,
+                            value: Some("open".into()),
+                        }],
+                    }],
+                    sorts: vec![],
+                },
+                window,
+                cx,
+            );
+            let pane = shell.panes[0].read(cx);
+            let opened = pane.active_item().unwrap();
+            assert_ne!(opened.id, item_id);
+            assert!(opened.source.is_none());
+            assert_eq!(
+                pane.editor(opened.id).unwrap().read(cx).document().text(),
+                "SELECT * FROM (SELECT * FROM \"main\".\"order_items\" LIMIT 100) AS sift_result WHERE (\"status\" = 'open');\n"
+            );
+        });
     }
 
     #[gpui::test]
