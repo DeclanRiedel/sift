@@ -27,6 +27,7 @@ use sift_ui::{
     IconName, TextInput, TextInputEvent, ThemeColors,
 };
 
+use crate::editor::{QueryDocument, QueryEditor};
 use crate::presentation::ResultReference;
 
 mod filter;
@@ -1072,6 +1073,12 @@ pub enum ResultsEvent {
     },
     OpenTransformSqlRequested {
         transform: sift_protocol::ResultTransform,
+    },
+    PreviewTransformSqlRequested {
+        transform: sift_protocol::ResultTransform,
+    },
+    OpenSqlTextRequested {
+        sql: String,
     },
     EditSelectedCellRequested,
     PasteSelectedCellRequested {

@@ -235,14 +235,23 @@ mod tests {
                 .clone()),
             vec![(0, SortDirection::Ascending)]
         );
-        assert!(view.read_with(&cx, |view, cx| {
-            let draft = view.filter_draft.as_ref().unwrap();
-            filter_text(&draft.spec(cx), &view.rendered_columns, &draft.sorts)
-                .contains("SORT BY score ASC")
-        }));
         let text = cx.debug_bounds("filter-view-text").expect("Text toggle");
         cx.simulate_click(text.center(), gpui::Modifiers::default());
         assert!(view.read_with(&cx, |view, _| view.filter_draft.as_ref().unwrap().text_view));
+        view.update(&mut cx, |view, cx| {
+            view.set_filter_sql_preview(Ok("SELECT * FROM scores ORDER BY score ASC".into()), cx);
+        });
+        assert!(view.read_with(&cx, |view, cx| view
+            .filter_draft
+            .as_ref()
+            .unwrap()
+            .sql_editor
+            .as_ref()
+            .unwrap()
+            .read(cx)
+            .document()
+            .text()
+            .contains("ORDER BY score ASC")));
         let builder = cx
             .debug_bounds("filter-view-builder")
             .expect("Builder toggle");
@@ -295,6 +304,8 @@ pub(super) struct FilterDraft {
     database: bool,
     text_view: bool,
     sorts: Vec<(usize, SortDirection)>,
+    sql_editor: Option<Entity<QueryEditor>>,
+    generated_sql: Option<String>,
     find_open: bool,
     error: Option<String>,
     picker: Option<(usize, usize, bool)>, // group, condition, column (otherwise operator); usize::MAX group = sort
@@ -314,73 +325,6 @@ fn toggle(logic: &mut ResultFilterLogic) {
         ResultFilterLogic::All => ResultFilterLogic::Any,
         ResultFilterLogic::Any => ResultFilterLogic::All,
     };
-}
-
-fn filter_text(
-    spec: &FilterSpec,
-    columns: &[CachedColumnRender],
-    sorts: &[(usize, SortDirection)],
-) -> String {
-    let join = |logic| match logic {
-        ResultFilterLogic::All => " AND ",
-        ResultFilterLogic::Any => " OR ",
-    };
-    let groups = spec
-        .groups
-        .iter()
-        .filter_map(|group| {
-            let criteria = group
-                .conditions
-                .iter()
-                .filter(|row| row.enabled)
-                .map(|row| {
-                    let name = columns
-                        .get(row.column)
-                        .map_or("?", |column| column.name.as_ref());
-                    let operator = filter_operator_label(row.operator);
-                    if row.operator.requires_value() {
-                        format!("{name} {operator} '{}'", row.value.replace('\'', "''"))
-                    } else {
-                        format!("{name} {operator}")
-                    }
-                })
-                .collect::<Vec<_>>();
-            (!criteria.is_empty()).then(|| format!("({})", criteria.join(join(group.logic))))
-        })
-        .collect::<Vec<_>>();
-    let mut lines = vec![format!(
-        "FILTER {}",
-        if groups.is_empty() {
-            "—".to_owned()
-        } else {
-            groups.join(join(spec.logic))
-        }
-    )];
-    let order = sorts
-        .iter()
-        .filter_map(|(column, direction)| {
-            columns.get(*column).map(|column| {
-                format!(
-                    "{} {}",
-                    column.name,
-                    if *direction == SortDirection::Ascending {
-                        "ASC"
-                    } else {
-                        "DESC"
-                    }
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    lines.push(format!(
-        "SORT BY {}",
-        if order.is_empty() {
-            "—".to_owned()
-        } else {
-            order.join(", ")
-        }
-    ));
-    lines.join("\n")
 }
 
 impl FilterDraft {
@@ -798,6 +742,8 @@ impl ResultsView {
                 database: false,
                 text_view: false,
                 sorts: self.sorts.clone(),
+                sql_editor: None,
+                generated_sql: None,
                 find_open: false,
                 error: None,
                 picker: None,
@@ -853,6 +799,69 @@ impl ResultsView {
         }
     }
 
+    fn draft_result_transform(&self, cx: &App) -> sift_protocol::ResultTransform {
+        let draft = self.filter_draft.as_ref().unwrap();
+        let spec = draft.spec(cx);
+        sift_protocol::ResultTransform {
+            logic: spec.logic,
+            groups: spec
+                .groups
+                .iter()
+                .map(|group| sift_protocol::ResultFilterGroup {
+                    logic: group.logic,
+                    filters: group
+                        .conditions
+                        .iter()
+                        .filter(|row| row.enabled)
+                        .map(|row| sift_protocol::ResultFilter {
+                            column: self.rendered_columns[row.column].name.to_string(),
+                            operator: row.operator,
+                            value: row.operator.requires_value().then(|| row.value.clone()),
+                        })
+                        .collect(),
+                })
+                .filter(|group| !group.filters.is_empty())
+                .collect(),
+            sorts: draft
+                .sorts
+                .iter()
+                .map(|(column, direction)| sift_protocol::ResultSort {
+                    column: self.rendered_columns[*column].name.to_string(),
+                    direction: match direction {
+                        SortDirection::Ascending => sift_protocol::ResultSortDirection::Ascending,
+                        SortDirection::Descending => sift_protocol::ResultSortDirection::Descending,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn set_filter_sql_preview(
+        &mut self,
+        preview: Result<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(draft) = self.filter_draft.as_mut() else {
+            return;
+        };
+        match preview {
+            Ok(sql) => {
+                let sql = format!("{};\n", sql.trim_end().trim_end_matches(';').trim_end());
+                if let Some(editor) = &draft.sql_editor {
+                    editor.update(cx, |editor, cx| editor.replace_text_from_owner(&sql, cx));
+                } else {
+                    draft.sql_editor = Some(
+                        cx.new(|cx| QueryEditor::new(QueryDocument::with_random_peer(&sql), cx)),
+                    );
+                }
+                draft.generated_sql = Some(sql);
+                draft.error = None;
+            }
+            Err(error) => draft.error = Some(error),
+        }
+        cx.notify();
+    }
+
     fn apply_filter_builder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(draft) = &self.filter_draft else {
             return;
@@ -901,41 +910,7 @@ impl ResultsView {
             return;
         }
         if draft.database {
-            let transform = sift_protocol::ResultTransform {
-                logic: spec.logic,
-                groups: spec
-                    .groups
-                    .iter()
-                    .map(|group| sift_protocol::ResultFilterGroup {
-                        logic: group.logic,
-                        filters: group
-                            .conditions
-                            .iter()
-                            .filter(|row| row.enabled)
-                            .map(|row| sift_protocol::ResultFilter {
-                                column: self.rendered_columns[row.column].name.to_string(),
-                                operator: row.operator,
-                                value: row.operator.requires_value().then(|| row.value.clone()),
-                            })
-                            .collect(),
-                    })
-                    .filter(|group| !group.filters.is_empty())
-                    .collect(),
-                sorts: sorts
-                    .iter()
-                    .map(|(column, direction)| sift_protocol::ResultSort {
-                        column: self.rendered_columns[*column].name.to_string(),
-                        direction: match direction {
-                            SortDirection::Ascending => {
-                                sift_protocol::ResultSortDirection::Ascending
-                            }
-                            SortDirection::Descending => {
-                                sift_protocol::ResultSortDirection::Descending
-                            }
-                        },
-                    })
-                    .collect(),
-            };
+            let transform = self.draft_result_transform(cx);
             // The owning pane supplies query/connection context and audits execution.
             // Keep the draft available if execution fails; no optimistic local filtering.
             cx.emit(ResultsEvent::ApplyTransformRequested { transform });
@@ -1304,10 +1279,26 @@ impl ResultsView {
                                         colors.muted_text
                                     })
                                     .on_click(cx.listener(|view, _, window, cx| {
+                                        let regenerate =
+                                            view.filter_draft.as_ref().is_some_and(|draft| {
+                                                draft.sql_editor.as_ref().is_none_or(|editor| {
+                                                    draft.generated_sql.as_deref()
+                                                        == Some(editor.read(cx).document().text())
+                                                })
+                                            });
                                         let draft = view.filter_draft.as_mut().unwrap();
                                         draft.text_view = true;
                                         draft.picker = None;
-                                        draft.focus.focus(window, cx);
+                                        if let Some(editor) = &draft.sql_editor {
+                                            editor.focus_handle(cx).focus(window, cx);
+                                        } else {
+                                            draft.focus.focus(window, cx);
+                                        }
+                                        if regenerate {
+                                            cx.emit(ResultsEvent::PreviewTransformSqlRequested {
+                                                transform: view.draft_result_transform(cx),
+                                            });
+                                        }
                                         cx.notify();
                                     }))
                                     .child("Text"),
@@ -1366,19 +1357,16 @@ impl ResultsView {
             }))
             .children(draft.text_view.then(|| {
                 div()
-                    .px_3()
-                    .py_2()
-                    .min_h(px(90.))
-                    .text_sm()
-                    .text_color(colors.text)
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .children(
-                        filter_text(&draft.spec(cx), &self.rendered_columns, &draft.sorts)
-                            .lines()
-                            .map(|line| div().child(line.to_owned())),
-                    )
+                    .h(px(190.))
+                    .w_full()
+                    .children(draft.sql_editor.iter().cloned())
+                    .when(draft.sql_editor.is_none(), |panel| {
+                        panel
+                            .p_2()
+                            .text_sm()
+                            .text_color(colors.muted_text)
+                            .child("Preparing SQL…")
+                    })
             }))
             .children((draft.find_open && !draft.text_view).then(|| {
                 div()
@@ -1475,7 +1463,9 @@ impl ResultsView {
                     .child(
                         Button::new(
                             "filter-apply",
-                            if draft.database {
+                            if draft.text_view {
+                                "Open SQL in editor"
+                            } else if draft.database {
                                 "Run query"
                             } else {
                                 "Apply Filter & Sort"
@@ -1483,11 +1473,23 @@ impl ResultsView {
                         )
                         .debug_selector("filter-apply")
                         .tone(ButtonTone::Accent)
-                        .on_click(
-                            cx.listener(|view, _, window, cx| {
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            if view
+                                .filter_draft
+                                .as_ref()
+                                .is_some_and(|draft| draft.text_view)
+                            {
+                                if let Some(editor) =
+                                    &view.filter_draft.as_ref().unwrap().sql_editor
+                                {
+                                    cx.emit(ResultsEvent::OpenSqlTextRequested {
+                                        sql: editor.read(cx).document().text().to_owned(),
+                                    });
+                                }
+                            } else {
                                 view.apply_filter_builder(window, cx)
-                            }),
-                        ),
+                            }
+                        })),
                     ),
             )
             .into_any_element()

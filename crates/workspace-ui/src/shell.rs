@@ -2856,6 +2856,14 @@ pub enum PaneEvent {
         sql: String,
         transform: sift_protocol::ResultTransform,
     },
+    PreviewResultTransformSqlRequested {
+        item_id: u64,
+        sql: String,
+        transform: sift_protocol::ResultTransform,
+    },
+    OpenResultSqlTextRequested {
+        sql: String,
+    },
     EditResultCellRequested {
         item_id: u64,
     },
@@ -5256,6 +5264,16 @@ impl Pane {
                     sql: self.targeted_query_sql(item_id, cx),
                     transform: transform.clone(),
                 })
+            }
+            ResultsEvent::PreviewTransformSqlRequested { transform } => {
+                cx.emit(PaneEvent::PreviewResultTransformSqlRequested {
+                    item_id,
+                    sql: self.targeted_query_sql(item_id, cx),
+                    transform: transform.clone(),
+                })
+            }
+            ResultsEvent::OpenSqlTextRequested { sql } => {
+                cx.emit(PaneEvent::OpenResultSqlTextRequested { sql: sql.clone() })
             }
             ResultsEvent::EditSelectedCellRequested => {
                 cx.emit(PaneEvent::EditResultCellRequested { item_id })
@@ -17296,15 +17314,14 @@ impl WorkspaceShell {
         self.send_execution_now(item_id, sql.to_owned(), params, Some(transform), None, cx);
     }
 
-    fn open_result_transform_sql(
-        &mut self,
+    fn result_transform_sql(
+        &self,
         pane_index: usize,
         item_id: u64,
         sql: &str,
         transform: &sift_protocol::ResultTransform,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+        cx: &App,
+    ) -> Result<String, String> {
         let provider = self
             .panes
             .get(pane_index)
@@ -17330,12 +17347,21 @@ impl WorkspaceShell {
             Some("sift/postgres") => sift_protocol::Engine::Postgres,
             Some("sift/sql-server") => sift_protocol::Engine::SqlServer,
             Some("sift/sqlite") => sift_protocol::Engine::Sqlite,
-            _ => {
-                self.show_error_toast("Select a supported connection to build SQL".into(), cx);
-                return;
-            }
+            _ => return Err("Select a supported connection to build SQL".into()),
         };
-        match sift_snippets::result_transform::apply(engine, sql, transform) {
+        sift_snippets::result_transform::apply(engine, sql, transform)
+    }
+
+    fn open_result_transform_sql(
+        &mut self,
+        pane_index: usize,
+        item_id: u64,
+        sql: &str,
+        transform: &sift_protocol::ResultTransform,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.result_transform_sql(pane_index, item_id, sql, transform, cx) {
             Ok(sql) => {
                 self.active_pane = pane_index;
                 let sql = sql.trim_end().trim_end_matches(';').trim_end();
@@ -29063,6 +29089,25 @@ impl WorkspaceShell {
                 sql,
                 transform,
             } => self.open_result_transform_sql(index, *item_id, sql, transform, window, cx),
+            PaneEvent::PreviewResultTransformSqlRequested {
+                item_id,
+                sql,
+                transform,
+            } => {
+                let preview = self.result_transform_sql(index, *item_id, sql, transform, cx);
+                if let Some(view) = self
+                    .panes
+                    .get(index)
+                    .and_then(|pane| pane.read(cx).results.get(item_id))
+                    .cloned()
+                {
+                    view.update(cx, |view, cx| view.set_filter_sql_preview(preview, cx));
+                }
+            }
+            PaneEvent::OpenResultSqlTextRequested { sql } => {
+                self.active_pane = index;
+                self.open_sql_scratch("filter-sort.sql".into(), sql.clone(), window, cx);
+            }
             PaneEvent::EditResultCellRequested { item_id } => {
                 self.active_pane = index;
                 self.open_result_cell_editor(emitter, *item_id, window, cx);
