@@ -569,8 +569,8 @@ fn filter_operator_label(operator: ResultFilterOperator) -> &'static str {
     match operator {
         ResultFilterOperator::Contains => "contains",
         ResultFilterOperator::NotContains => "does not contain",
-        ResultFilterOperator::Equals => "equals",
-        ResultFilterOperator::NotEquals => "does not equal",
+        ResultFilterOperator::Equals => "=",
+        ResultFilterOperator::NotEquals => "≠",
         ResultFilterOperator::GreaterThan => ">",
         ResultFilterOperator::GreaterThanOrEqual => ">=",
         ResultFilterOperator::LessThan => "<",

@@ -53,8 +53,10 @@ mod tests {
         view.update_in(&mut cx, |view, window, cx| {
             view.open_filter_builder(0, window, cx);
             let original_projection = view.display_rows.clone();
+            let first = ResultsView::new_filter_condition(0, cx);
             let second = ResultsView::new_filter_condition(0, cx);
             let draft = view.filter_draft.as_mut().unwrap();
+            draft.groups[0].conditions.push(first);
             let first = &mut draft.groups[0].conditions[0];
             first.condition.operator = ResultFilterOperator::GreaterThan;
             first.input.update(cx, |input, cx| input.set_text("1", cx));
@@ -191,6 +193,73 @@ mod tests {
             assert!(view.display_rows.is_empty());
         });
     }
+
+    #[gpui::test]
+    fn builder_sort_and_text_view_keep_changes_draft_until_apply(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| cx.open_window(Default::default(), |_, cx| cx.new(ResultsView::new)))
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let view = window.root(&mut cx).unwrap();
+        view.update(&mut cx, |view, cx| {
+            view.set_state(
+                ResultState::Ready(ResultData {
+                    columns: vec![ResultColumn {
+                        name: "score".into(),
+                        type_label: "int64".into(),
+                        nullable: false,
+                    }],
+                    rows: vec![
+                        Row::new(vec![Value::Int64(2)]),
+                        Row::new(vec![Value::Int64(1)]),
+                    ],
+                    ..ResultData::default()
+                }),
+                cx,
+            );
+        });
+        view.update_in(&mut cx, |view, window, cx| {
+            view.open_filter_builder(0, window, cx);
+            let draft = view.filter_draft.as_mut().unwrap();
+            draft.groups[0].conditions.clear();
+            assert!(view.sorts.is_empty());
+        });
+        let add_sort = cx.debug_bounds("filter-add-sort").expect("add sort");
+        cx.simulate_click(add_sort.center(), gpui::Modifiers::default());
+        assert_eq!(
+            view.read_with(&cx, |view, _| view
+                .filter_draft
+                .as_ref()
+                .unwrap()
+                .sorts
+                .clone()),
+            vec![(0, SortDirection::Ascending)]
+        );
+        assert!(view.read_with(&cx, |view, cx| {
+            let draft = view.filter_draft.as_ref().unwrap();
+            filter_text(&draft.spec(cx), &view.rendered_columns, &draft.sorts)
+                .contains("SORT BY score ASC")
+        }));
+        let text = cx.debug_bounds("filter-view-text").expect("Text toggle");
+        cx.simulate_click(text.center(), gpui::Modifiers::default());
+        assert!(view.read_with(&cx, |view, _| view.filter_draft.as_ref().unwrap().text_view));
+        let builder = cx
+            .debug_bounds("filter-view-builder")
+            .expect("Builder toggle");
+        cx.simulate_click(builder.center(), gpui::Modifiers::default());
+        assert!(!view.read_with(&cx, |view, _| view.filter_draft.as_ref().unwrap().text_view));
+        view.update_in(&mut cx, |view, window, cx| {
+            view.apply_filter_builder(window, cx)
+        });
+        assert_eq!(
+            view.read_with(&cx, |view, _| view.sorts.clone()),
+            vec![(0, SortDirection::Ascending)]
+        );
+        assert_eq!(
+            *view.read_with(&cx, |view, _| view.display_rows.clone()),
+            [1, 0]
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -224,9 +293,11 @@ pub(super) struct FilterDraft {
     logic: ResultFilterLogic,
     groups: Vec<DraftGroup>,
     database: bool,
+    text_view: bool,
+    sorts: Vec<(usize, SortDirection)>,
     find_open: bool,
     error: Option<String>,
-    picker: Option<(usize, usize, bool)>, // group, condition, column (otherwise operator)
+    picker: Option<(usize, usize, bool)>, // group, condition, column (otherwise operator); usize::MAX group = sort
     search: Entity<TextInput>,
     _search_subscription: Subscription,
 }
@@ -243,6 +314,73 @@ fn toggle(logic: &mut ResultFilterLogic) {
         ResultFilterLogic::All => ResultFilterLogic::Any,
         ResultFilterLogic::Any => ResultFilterLogic::All,
     };
+}
+
+fn filter_text(
+    spec: &FilterSpec,
+    columns: &[CachedColumnRender],
+    sorts: &[(usize, SortDirection)],
+) -> String {
+    let join = |logic| match logic {
+        ResultFilterLogic::All => " AND ",
+        ResultFilterLogic::Any => " OR ",
+    };
+    let groups = spec
+        .groups
+        .iter()
+        .filter_map(|group| {
+            let criteria = group
+                .conditions
+                .iter()
+                .filter(|row| row.enabled)
+                .map(|row| {
+                    let name = columns
+                        .get(row.column)
+                        .map_or("?", |column| column.name.as_ref());
+                    let operator = filter_operator_label(row.operator);
+                    if row.operator.requires_value() {
+                        format!("{name} {operator} '{}'", row.value.replace('\'', "''"))
+                    } else {
+                        format!("{name} {operator}")
+                    }
+                })
+                .collect::<Vec<_>>();
+            (!criteria.is_empty()).then(|| format!("({})", criteria.join(join(group.logic))))
+        })
+        .collect::<Vec<_>>();
+    let mut lines = vec![format!(
+        "FILTER {}",
+        if groups.is_empty() {
+            "—".to_owned()
+        } else {
+            groups.join(join(spec.logic))
+        }
+    )];
+    let order = sorts
+        .iter()
+        .filter_map(|(column, direction)| {
+            columns.get(*column).map(|column| {
+                format!(
+                    "{} {}",
+                    column.name,
+                    if *direction == SortDirection::Ascending {
+                        "ASC"
+                    } else {
+                        "DESC"
+                    }
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    lines.push(format!(
+        "SORT BY {}",
+        if order.is_empty() {
+            "—".to_owned()
+        } else {
+            order.join(", ")
+        }
+    ));
+    lines.join("\n")
 }
 
 impl FilterDraft {
@@ -277,15 +415,24 @@ impl ResultsView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let draft = self.filter_draft.as_ref().unwrap();
-        let condition = &draft.groups[group].conditions[row].condition;
+        let sort_field = group == usize::MAX;
         let colors = cx.theme().colors;
-        let label = if column {
-            self.rendered_columns[condition.column].name.clone()
+        let label = if sort_field {
+            self.rendered_columns[draft.sorts[row].0].name.clone()
         } else {
-            filter_operator_label(condition.operator).into()
+            let condition = &draft.groups[group].conditions[row].condition;
+            if column {
+                self.rendered_columns[condition.column].name.clone()
+            } else {
+                filter_operator_label(condition.operator).into()
+            }
         };
         let active = draft.picker == Some((group, row, column));
-        let id = group * 64 + row;
+        let id = if sort_field {
+            4096 + row
+        } else {
+            group * 64 + row
+        };
         let choices = if active {
             self.filter_choices(cx)
         } else {
@@ -293,7 +440,7 @@ impl ResultsView {
         };
         div()
             .relative()
-            .w(px(if column { 190. } else { 150. }))
+            .w(px(if column { 190. } else { 76. }))
             .flex_none()
             .child(
                 div()
@@ -321,18 +468,34 @@ impl ResultsView {
                     .gap_2()
                     .rounded_sm()
                     .border_1()
-                    .border_color(if active {
+                    .border_color(if active || (!column && !sort_field) {
                         colors.accent
                     } else {
                         colors.subtle_border
                     })
-                    .bg(colors.surface)
+                    .bg(if !column && !sort_field {
+                        colors.active_surface
+                    } else {
+                        colors.surface
+                    })
                     .hover(|field| field.bg(colors.hovered_surface))
                     .on_click(cx.listener(move |view, _, window, cx| {
                         cx.stop_propagation();
                         view.filter_picker(group, row, column, window, cx);
                     }))
-                    .child(div().flex_1().min_w_0().truncate().text_sm().child(label))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(if !column && !sort_field {
+                                colors.accent
+                            } else {
+                                colors.text
+                            })
+                            .child(label),
+                    )
                     .child(icon(IconName::ChevronDown, colors.muted_text, 12.)),
             )
             .children(active.then(|| {
@@ -457,11 +620,22 @@ impl ResultsView {
         let Some((group, row, column)) = draft.picker.take() else {
             return;
         };
-        let condition = &mut draft.groups[group].conditions[row].condition;
-        if column {
-            condition.column = index;
+        if group == usize::MAX {
+            if let Some(other) = draft
+                .sorts
+                .iter()
+                .position(|(column, _)| *column == index && *column != draft.sorts[row].0)
+            {
+                draft.sorts[other].0 = draft.sorts[row].0;
+            }
+            draft.sorts[row].0 = index;
         } else {
-            condition.operator = OPERATORS[index];
+            let condition = &mut draft.groups[group].conditions[row].condition;
+            if column {
+                condition.column = index;
+            } else {
+                condition.operator = OPERATORS[index];
+            }
         }
         cx.notify();
     }
@@ -622,6 +796,8 @@ impl ResultsView {
                 picker_selected: 0,
                 logic: spec.logic,
                 database: false,
+                text_view: false,
+                sorts: self.sorts.clone(),
                 find_open: false,
                 error: None,
                 picker: None,
@@ -654,16 +830,6 @@ impl ResultsView {
                 conditions: Vec::new(),
             });
         }
-        if !draft
-            .groups
-            .iter()
-            .flat_map(|group| &group.conditions)
-            .any(|row| row.condition.column == column)
-        {
-            draft.groups[0]
-                .conditions
-                .push(Self::new_filter_condition(column, cx));
-        }
         self.grid_transform_column = Some(column);
         self.grid_transform_tab = GridTransformTab::Filter;
         draft.focus.focus(window, cx);
@@ -692,6 +858,7 @@ impl ResultsView {
             return;
         };
         let spec = draft.spec(cx);
+        let sorts = draft.sorts.clone();
         // Validate comparisons using observed scalar kinds, never display labels.
         // Null-only/empty columns remain unknown and are validated by the server.
         for condition in spec
@@ -754,8 +921,7 @@ impl ResultsView {
                     })
                     .filter(|group| !group.filters.is_empty())
                     .collect(),
-                sorts: self
-                    .sorts
+                sorts: sorts
                     .iter()
                     .map(|(column, direction)| sift_protocol::ResultSort {
                         column: self.rendered_columns[*column].name.to_string(),
@@ -776,6 +942,7 @@ impl ResultsView {
             return;
         }
         self.applied_filter = Some(spec);
+        self.sorts = sorts;
         self.rebuild_display_rows(cx);
         self.close_grid_transform(window, cx);
     }
@@ -792,18 +959,17 @@ impl ResultsView {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .p_2()
-                    .border_l_2()
-                    .border_color(colors.subtle_border)
+                    .px_2()
+                    .py_1()
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(
+                            .children((group.conditions.len() > 1).then(|| {
                                 Button::new(
                                     ("filter-group-logic", group_index),
-                                    format!("Match {} conditions", logic_label(group.logic)),
+                                    format!("Match {}", logic_label(group.logic)),
                                 )
                                 .tone(ButtonTone::Ghost)
                                 .on_click(cx.listener(
@@ -815,10 +981,10 @@ impl ResultsView {
                                         );
                                         cx.notify();
                                     },
-                                )),
-                            )
+                                ))
+                            }))
                             .child(
-                                Button::new(("filter-add-condition", group_index), "+ Condition")
+                                Button::new(("filter-add-condition", group_index), "+")
                                     .tone(ButtonTone::Ghost)
                                     .disabled(group.conditions.len() >= 64)
                                     .on_click(cx.listener(move |view, _, window, cx| {
@@ -844,6 +1010,16 @@ impl ResultsView {
                                     }))
                             })),
                     )
+                    .when(group.conditions.is_empty(), |group| {
+                        group.child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                                .child("Click + to add filter criteria"),
+                        )
+                    })
                     .children(group.conditions.iter().enumerate().map(|(row_index, row)| {
                         let id = group_index * 64 + row_index;
                         let selected = draft.selected
@@ -921,6 +1097,50 @@ impl ResultsView {
                     }))
             })
             .collect::<Vec<_>>();
+        let sort_rows = draft
+            .sorts
+            .iter()
+            .enumerate()
+            .map(|(index, (_, direction))| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .child(self.render_filter_choice_field(usize::MAX, index, true, cx))
+                    .child(
+                        Button::new(
+                            ("filter-sort-direction", index),
+                            if *direction == SortDirection::Ascending {
+                                "↑ ASC"
+                            } else {
+                                "↓ DESC"
+                            },
+                        )
+                        .tone(ButtonTone::Accent)
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            let direction = &mut view.filter_draft.as_mut().unwrap().sorts[index].1;
+                            *direction = if *direction == SortDirection::Ascending {
+                                SortDirection::Descending
+                            } else {
+                                SortDirection::Ascending
+                            };
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        Button::new(("filter-remove-sort", index), "×")
+                            .tone(ButtonTone::Ghost)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                let draft = view.filter_draft.as_mut().unwrap();
+                                draft.picker = None;
+                                draft.sorts.remove(index);
+                                cx.notify();
+                            })),
+                    )
+            })
+            .collect::<Vec<_>>();
         div()
             .id("result-grid-transform-editor")
             .track_focus(&draft.focus)
@@ -952,7 +1172,7 @@ impl ResultsView {
                 if view
                     .filter_draft
                     .as_ref()
-                    .is_some_and(|draft| draft.focus.is_focused(window))
+                    .is_some_and(|draft| !draft.text_view && draft.focus.is_focused(window))
                 {
                     let draft = view.filter_draft.as_mut().unwrap();
                     let rows = draft
@@ -1001,12 +1221,11 @@ impl ResultsView {
             .child(
                 div()
                     .flex()
-                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .px_2()
                     .py_1()
-                    .child("Filter")
+                    .child("Filter & Sort")
                     .child(
                         Button::new(
                             "filter-scope",
@@ -1023,36 +1242,106 @@ impl ResultsView {
                             cx.notify();
                         })),
                     )
-                    .children((draft.groups.len() > 1).then(|| {
-                        Button::new(
-                            "filter-root-logic",
-                            format!("Match {} groups", logic_label(draft.logic)),
-                        )
-                        .tone(ButtonTone::Ghost)
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            toggle(&mut view.filter_draft.as_mut().unwrap().logic);
-                            cx.notify();
-                        }))
-                    }))
-                    .child(div().text_xs().text_color(colors.muted_text).child(format!(
-                        "{} / {} loaded rows{}",
-                        self.display_rows.len(),
-                        self.rendered_rows.len(),
-                        if self.state.ready().is_some_and(|data| data.has_more) {
-                            " · partial result"
-                        } else {
-                            ""
-                        }
-                    ))),
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("filter-view-builder", "Builder")
+                            .debug_selector("filter-view-builder")
+                            .tone(if draft.text_view {
+                                ButtonTone::Ghost
+                            } else {
+                                ButtonTone::Accent
+                            })
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                let draft = view.filter_draft.as_mut().unwrap();
+                                draft.text_view = false;
+                                draft.focus.focus(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("filter-view-text", "Text")
+                            .debug_selector("filter-view-text")
+                            .tone(if draft.text_view {
+                                ButtonTone::Accent
+                            } else {
+                                ButtonTone::Ghost
+                            })
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                let draft = view.filter_draft.as_mut().unwrap();
+                                draft.text_view = true;
+                                draft.picker = None;
+                                draft.focus.focus(window, cx);
+                                cx.notify();
+                            })),
+                    ),
             )
-            .child(
+            .children((!draft.text_view).then(|| {
                 div()
-                    .id("filter-condition-scroll")
-                    .max_h(px(180.))
-                    .overflow_y_scroll()
-                    .children(groups),
-            )
-            .children(draft.find_open.then(|| {
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id("filter-condition-scroll")
+                            .min_h(px(96.))
+                            .max_h(px(180.))
+                            .overflow_y_scroll()
+                            .children(groups),
+                    )
+                    .child(
+                        div()
+                            .border_t_1()
+                            .border_color(colors.subtle_border)
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child("Sort By")
+                            .child(
+                                Button::new("filter-add-sort", "+")
+                                    .debug_selector("filter-add-sort")
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(draft.sorts.len() >= self.rendered_columns.len())
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        let draft = view.filter_draft.as_mut().unwrap();
+                                        let column =
+                                            (0..view.rendered_columns.len()).find(|index| {
+                                                !draft.sorts.iter().any(|(used, _)| used == index)
+                                            });
+                                        if let Some(column) = column {
+                                            draft.sorts.push((column, SortDirection::Ascending));
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                            .when(draft.sorts.is_empty(), |row| {
+                                row.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(colors.muted_text)
+                                        .child("Click + to add sort criteria"),
+                                )
+                            }),
+                    )
+                    .children(sort_rows)
+            }))
+            .children(draft.text_view.then(|| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .min_h(px(90.))
+                    .text_sm()
+                    .text_color(colors.text)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .children(
+                        filter_text(&draft.spec(cx), &self.rendered_columns, &draft.sorts)
+                            .lines()
+                            .map(|line| div().child(line.to_owned())),
+                    )
+            }))
+            .children((draft.find_open && !draft.text_view).then(|| {
                 div()
                     .flex()
                     .flex_wrap()
@@ -1083,7 +1372,18 @@ impl ResultsView {
                     .gap_2()
                     .px_2()
                     .py_1()
-                    .child(
+                    .children((!draft.text_view && draft.groups.len() > 1).then(|| {
+                        Button::new(
+                            "filter-root-logic",
+                            format!("Match {} groups", logic_label(draft.logic)),
+                        )
+                        .tone(ButtonTone::Ghost)
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            toggle(&mut view.filter_draft.as_mut().unwrap().logic);
+                            cx.notify();
+                        }))
+                    }))
+                    .children((!draft.text_view).then(|| {
                         Button::new("filter-add-group", "+ Group")
                             .tone(ButtonTone::Ghost)
                             .disabled(draft.groups.len() >= 16)
@@ -1097,20 +1397,21 @@ impl ResultsView {
                                     conditions: vec![row],
                                 });
                                 cx.notify();
-                            })),
-                    )
-                    .child(
+                            }))
+                    }))
+                    .children((!draft.text_view).then(|| {
                         Button::new("filter-clear", "Clear")
                             .tone(ButtonTone::Ghost)
                             .on_click(cx.listener(|view, _, _, cx| {
                                 let draft = view.filter_draft.as_mut().unwrap();
                                 draft.groups.clear();
+                                draft.sorts.clear();
                                 draft.picker = None;
                                 cx.notify();
-                            })),
-                    )
+                            }))
+                    }))
                     .child(div().flex_1())
-                    .child(
+                    .children((!draft.text_view).then(|| {
                         Button::new("filter-find", "Find")
                             .tone(ButtonTone::Ghost)
                             .on_click(cx.listener(|view, _, window, cx| {
@@ -1122,8 +1423,8 @@ impl ResultsView {
                                     draft.focus.focus(window, cx);
                                 }
                                 cx.notify();
-                            })),
-                    )
+                            }))
+                    }))
                     .child(
                         Button::new("close-result-grid-transform-editor", "Cancel")
                             .debug_selector("close-result-grid-transform-editor")
@@ -1136,9 +1437,9 @@ impl ResultsView {
                         Button::new(
                             "filter-apply",
                             if draft.database {
-                                "Run filtered query"
+                                "Run query"
                             } else {
-                                "Apply"
+                                "Apply Filter & Sort"
                             },
                         )
                         .debug_selector("filter-apply")
