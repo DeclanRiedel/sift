@@ -77,7 +77,7 @@ pub(super) fn actions() -> Div {
 
 pub(super) fn content_width(modal: &Modal, wizard: DatabaseWizardStep) -> f32 {
     match modal {
-        Modal::DataResults(_) => 0.0, // Uses its own viewport-relative layout.
+        Modal::DataResults(_) | Modal::RelationshipViewer(_) => 0.0, // Viewport-relative layout.
         Modal::ServerPicker | Modal::Account => 360.0,
         Modal::DatabaseConnection => match wizard {
             DatabaseWizardStep::Provider => 760.0,

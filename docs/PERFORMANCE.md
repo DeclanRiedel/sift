@@ -41,6 +41,11 @@ renderer submission rather than timing isolated model functions.
 | `query_outline_navigation` | j/k through the same outline | p95 draw ≤ 8.3 ms |
 | `change_ledger_first_frame` | 1,000 ledger entries | p95 draw ≤ 16.7 ms |
 | `result_set_tab_navigation` | switch among eight visible retained result sets | p95 draw ≤ 8.3 ms; inactive cells remain unshaped |
+| `relationship_viewer_horizontal_scroll` | 128 tables × 6 columns, 127 FKs, repeated 56 px horizontal pan | p95 draw ≤ 8.3 ms; off-screen cards and relationship rows remain unpainted |
+| `relationship_viewer_horizontal_scroll_small` | 12 tables with the same interaction | p95 draw ≤ 8.3 ms |
+| `relationship_viewer_horizontal_scroll_no_details` | 128-table graph with details pane hidden | p95 draw ≤ 8.3 ms; graph-first default |
+| `relationship_viewer_horizontal_scroll_empty` | relationship viewer without diagram tables | isolates fixed viewer redraw cost |
+| `workspace_empty_refresh` | redraw the default shell without a relationship viewer | context for the shell's fixed draw cost |
 
 Benchmarks are comparison gates, not portable absolute scores. Record CPU, GPU,
 display server, compositor, build revision, and benchmark output when publishing
@@ -113,6 +118,26 @@ entering GPUI, matching the production executor boundary. Formatting time is
 therefore excluded from the UI-thread measurement. M3 performance is not yet
 graduated: typing meets its draw budget, while grid construction and navigation
 still require a custom paint/layout path or equivalent measured reduction.
+
+### Relationship viewer horizontal-pan comparison
+
+On 2026-09-25, a dirty-worktree `release-dev` run on a 13th Gen Intel Core
+i7-13620H (headless GPUI renderer, display Hz unknown) measured the 128-table
+fixture at 4,333 ms p95 draw before viewport culling and retained scrolling.
+After culling cards and both relationship lists and caching shaped card/detail
+text, it measured 69 ms p95 draw. A separate 12-table fixture measured 68 ms
+p95, while an empty relationship viewer measured 18.3 ms p95 and an empty
+workspace redraw measured 9.8 ms p95. These are local
+comparison figures, not an interactive compositor measurement or a 120 Hz pass:
+both viewer fixtures remain well above the 8.3 ms target.
+
+Second pass paints each card in one canvas and defaults to graph-first view.
+With the details pane open, the 128-table fixture measured 42 ms p95 in one
+run; a repeat measured 60 ms p95 with a 42 ms median due to high outliers.
+With details hidden, the same fixture measured 18.1 ms p95. Default view now
+auto-fits the graph when viewport size is available, and the details pane is
+optional. This remains above the 120 Hz frame budget, but removes the details
+pane as the dominant redraw cost during graph navigation.
 
 ### Git integration G11 baseline
 

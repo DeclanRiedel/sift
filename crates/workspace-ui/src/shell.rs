@@ -2204,6 +2204,7 @@ pub enum Modal {
     CommandPalette,
     DataSearch,
     DataResults(u64),
+    RelationshipViewer(u64),
     QueryParameters,
     EditResultCell,
     PlanCaptures,
@@ -2815,6 +2816,9 @@ pub enum PaneEvent {
         source: DatabaseObjectSource,
     },
     RelationshipViewerRefreshRequested {
+        item_id: u64,
+    },
+    RelationshipViewerExpandRequested {
         item_id: u64,
     },
     ObjectBrowserConnectionRequested {
@@ -5065,6 +5069,7 @@ pub struct Pane {
     database_json_baselines: HashMap<u64, String>,
     object_browsers: HashMap<u64, ObjectBrowserState>,
     relationship_viewers: HashMap<u64, RelationshipViewerState>,
+    expanded_relationship_item: Option<u64>,
     object_browser_rows: HashMap<u64, Entity<ObjectBrowserRowsView>>,
     /// Transient wrapper sizes while dragging. Keeping these on the pane avoids
     /// invalidating and repainting the result grid for every pointer event.
@@ -5219,6 +5224,7 @@ impl Pane {
             database_json_baselines: HashMap::new(),
             object_browsers: HashMap::new(),
             relationship_viewers: HashMap::new(),
+            expanded_relationship_item: None,
             object_browser_rows: HashMap::new(),
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
@@ -5909,6 +5915,9 @@ impl Pane {
         self.database_json_baselines.remove(&item_id);
         self.object_browsers.remove(&item_id);
         self.relationship_viewers.remove(&item_id);
+        if self.expanded_relationship_item == Some(item_id) {
+            self.expanded_relationship_item = None;
+        }
         self.object_browser_rows.remove(&item_id);
         if self.pending_close_item == Some(item_id) {
             self.pending_close_item = None;
@@ -9636,7 +9645,19 @@ impl gpui::Render for Pane {
                     }
                     Some(item) if item.kind == ItemKind::Schema => {
                         if self.relationship_viewers.contains_key(&item.id) {
-                            body.child(self.render_relationship_viewer(item.id, cx))
+                            if self.expanded_relationship_item == Some(item.id) {
+                                body.child(
+                                    div()
+                                        .size_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(colors.muted_text)
+                                        .child("Relationship viewer open in large view"),
+                                )
+                            } else {
+                                body.child(self.render_relationship_viewer(item.id, cx))
+                            }
                         } else {
                             body.child(self.render_object_browser(item.id, cx))
                         }
@@ -14330,6 +14351,24 @@ impl WorkspaceShell {
                     snapshot,
                 };
                 self.invalidate_connection_projection();
+                let live_viewers = self
+                    .panes
+                    .iter()
+                    .flat_map(|pane| {
+                        pane.read(cx)
+                            .relationship_viewers
+                            .iter()
+                            .filter(|(_, viewer)| {
+                                viewer.source.profile_id == profile_id
+                                    && (viewer.diagram.is_some() || !viewer.loading)
+                            })
+                            .map(|(item_id, _)| *item_id)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                for item_id in live_viewers {
+                    self.refresh_relationship_viewer(item_id, cx);
+                }
                 let palette_input = self.query_input.read(cx).text();
                 let (mode, query) = CommandPaletteMode::parse(palette_input);
                 if mode == CommandPaletteMode::Schema && !query.trim().is_empty() {
@@ -29226,6 +29265,9 @@ impl WorkspaceShell {
                 self.active_pane = index;
                 self.refresh_relationship_viewer(*item_id, cx);
             }
+            PaneEvent::RelationshipViewerExpandRequested { item_id } => {
+                self.expand_relationship_viewer(index, *item_id, window, cx);
+            }
             PaneEvent::ObjectBrowserConnectionRequested {
                 item_id,
                 profile_id,
@@ -31441,6 +31483,29 @@ impl WorkspaceShell {
         });
         self.refresh_relationship_viewer(item_id, cx);
         self.persist(cx);
+    }
+
+    fn expand_relationship_viewer(
+        &mut self,
+        pane_index: usize,
+        item_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.panes.get(pane_index) else {
+            return;
+        };
+        if !pane.read(cx).relationship_viewers.contains_key(&item_id) {
+            return;
+        }
+        pane.update(cx, |pane, cx| {
+            pane.expanded_relationship_item = Some(item_id);
+            cx.notify();
+        });
+        self.active_pane = pane_index;
+        self.modal = Some(Modal::RelationshipViewer(item_id));
+        self.focus_handle.focus(window, cx);
+        cx.notify();
     }
 
     fn refresh_relationship_viewer(&mut self, item_id: u64, cx: &mut Context<Self>) {
@@ -35630,6 +35695,14 @@ impl WorkspaceShell {
                 });
             }
         }
+        if matches!(self.modal, Some(Modal::RelationshipViewer(_))) {
+            for pane in &self.panes {
+                pane.update(cx, |pane, cx| {
+                    pane.expanded_relationship_item = None;
+                    cx.notify();
+                });
+            }
+        }
         if self.modal == Some(Modal::DataSearch) {
             self.foreign_key_pick_target = None;
             self.data_search_input
@@ -36685,6 +36758,9 @@ impl WorkspaceShell {
         let active_database_source = self.panes.get(self.active_pane).and_then(|pane| {
             let pane = pane.read(cx);
             let item = pane.active_item()?;
+            if pane.relationship_viewers.contains_key(&item.id) {
+                return None;
+            }
             pane.database_source(item.id)
                 .map(|source| (item.id, source))
         });
@@ -47222,7 +47298,12 @@ mod tests {
             }
             _ => panic!("unexpected viewer request"),
         };
-        let graph = table_graph();
+        let mut graph = table_graph();
+        let mut second_table = graph.data.nodes[2].clone();
+        second_table.id = sift_protocol::CatalogObjectId("table-2".into());
+        second_table.name = "invoices".into();
+        second_table.qualified_name = "sifttest.lab.invoices".into();
+        graph.data.nodes.push(second_table);
         workspace.update(&mut cx, |shell, cx| {
             shell.on_executor_event(
                 ExecutorEvent::RelationshipViewerLoaded {
@@ -47248,7 +47329,71 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("relationship-card-0").is_some());
+        let first_card = cx.debug_bounds("relationship-card-0").unwrap();
+        cx.simulate_click(first_card.center(), Modifiers::default());
+        cx.simulate_keystrokes("j");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, cx| shell.panes[0]
+                .read(cx)
+                .relationship_viewers[&item_id]
+                .selected
+                .clone()),
+            Some(sift_protocol::CatalogObjectId("table-2".into()))
+        );
+        assert!(cx.debug_bounds("relationship-card-1").is_some());
+        cx.simulate_keystrokes("k");
+        let viewport = cx.debug_bounds("relationship-cards").unwrap();
+        let before_scroll = workspace.read_with(&cx, |shell, cx| {
+            shell.panes[0].read(cx).relationship_viewers[&item_id]
+                .scroll
+                .offset()
+                .x
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-80.), px(0.))),
+            modifiers: Modifiers::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        let after_scroll = workspace.read_with(&cx, |shell, cx| {
+            shell.panes[0].read(cx).relationship_viewers[&item_id]
+                .scroll
+                .offset()
+                .x
+        });
+        assert!(after_scroll < before_scroll);
+        assert!(cx.debug_bounds("database-breadcrumb").is_none());
         assert!(cx.debug_bounds("relationship-depth-more").is_some());
+        let scope = cx.debug_bounds("relationship-scope").unwrap();
+        cx.simulate_click(scope.center(), Modifiers::default());
+        assert!(cx.debug_bounds("relationship-scope-menu").is_some());
+        cx.simulate_click(scope.center(), Modifiers::default());
+        let fit = cx.debug_bounds("relationship-fit-width").unwrap();
+        let controls = cx.debug_bounds("relationship-controls").unwrap();
+        assert!(fit.origin.y > controls.origin.y);
+        assert!(controls.size.height <= px(38.));
+        let copy_mermaid = cx.debug_bounds("relationship-copy-mermaid").unwrap();
+        assert!(controls.right() - copy_mermaid.right() <= px(8.));
+        let more = cx.debug_bounds("relationship-depth-more").unwrap();
+        assert_eq!(more.top(), fit.top());
+        assert!(cx.debug_bounds("relationship-details").is_none());
+        cx.simulate_click(fit.center(), Modifiers::default());
+        cx.run_until_parked();
+        if cx.debug_bounds("relationship-details").is_some() {
+            let fit = cx.debug_bounds("relationship-fit-width").unwrap();
+            cx.simulate_click(fit.center(), Modifiers::default());
+            cx.run_until_parked();
+        }
+        assert!(cx.debug_bounds("relationship-details").is_none());
+        let fitted_viewport = cx.debug_bounds("relationship-cards").unwrap();
+        workspace.read_with(&cx, |shell, cx| {
+            let viewer = &shell.panes[0].read(cx).relationship_viewers[&item_id];
+            assert!(1620.0 * viewer.zoom <= f32::from(fitted_viewport.size.width) - 24.0);
+        });
+        let actual_size = cx.debug_bounds("relationship-fit-width").unwrap();
+        cx.simulate_click(actual_size.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("relationship-details").is_some());
         let more = cx.debug_bounds("relationship-depth-more").unwrap();
         cx.simulate_click(more.center(), Modifiers::default());
         assert!(matches!(
@@ -47300,6 +47445,38 @@ mod tests {
         assert!(std::iter::from_fn(|| receiver.try_recv().ok()).any(|command| {
             matches!(command, ExecutorCommand::LoadRelationshipViewer { item_id: requested, depth: 2, .. } if requested == item_id)
         }));
+        let expand = cx.debug_bounds("relationship-expand").unwrap();
+        cx.simulate_click(expand.center(), Modifiers::default());
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.modal.clone()),
+            Some(Modal::RelationshipViewer(item_id))
+        );
+        assert!(cx.debug_bounds("relationship-large-view-body").is_some());
+        assert_eq!(
+            workspace.read_with(&cx, |shell, cx| shell.panes[0]
+                .read(cx)
+                .expanded_relationship_item),
+            Some(item_id)
+        );
+        let close = cx.debug_bounds("close-large-relationship-view").unwrap();
+        cx.simulate_click(close.center(), Modifiers::default());
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.modal.clone()),
+            None
+        );
+        assert_eq!(
+            workspace.read_with(&cx, |shell, cx| shell.panes[0]
+                .read(cx)
+                .expanded_relationship_item),
+            None
+        );
+        let expand = cx.debug_bounds("relationship-expand").unwrap();
+        cx.simulate_click(expand.center(), Modifiers::default());
+        cx.simulate_keystrokes("escape");
+        assert_eq!(
+            workspace.read_with(&cx, |shell, _| shell.modal.clone()),
+            None
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ impl WorkspaceShell {
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
             let command_palette = matches!(modal, Modal::CommandPalette);
-            let data_results = matches!(modal, Modal::DataResults(_));
+            let data_results = matches!(modal, Modal::DataResults(_) | Modal::RelationshipViewer(_));
             let padded = !database_connection && !command_palette && !data_results && !account && !server_picker;
             let card_width = modal_layout::content_width(modal, self.database_wizard_step)
                 + if padded { 24.0 } else { 0.0 };
@@ -1157,6 +1157,46 @@ impl WorkspaceShell {
                         .child("These query results are no longer available")
                         .into_any_element(),
                 },
+                Modal::RelationshipViewer(item_id) => {
+                    let viewer = self.panes.iter().find_map(|pane| {
+                        let title = pane
+                            .read(cx)
+                            .relationship_viewers
+                            .get(item_id)
+                            .map(|viewer| format!("{}.{}", viewer.source.schema, viewer.source.object))?;
+                        let content = pane.update(cx, |pane, cx| {
+                            pane.render_relationship_viewer(*item_id, cx)
+                        });
+                        Some((title, content))
+                    });
+                    match viewer {
+                        Some((title, content)) => div()
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .h(px(36.))
+                                    .flex_none()
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .border_b_1()
+                                    .border_color(colors.subtle_border)
+                                    .bg(colors.toolbar)
+                                    .child(div().flex_1().min_w_0().truncate().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Relationships · {title}")))
+                                    .child(IconButton::new("close-large-relationship-view", IconName::Close, "Close large relationship view")
+                                        .debug_selector("close-large-relationship-view")
+                                        .square(px(26.))
+                                        .on_click(cx.listener(|shell, _, window, cx| {
+                                            shell.dismiss_modal(&DismissModal, window, cx)
+                                        }))),
+                            )
+                            .child(div().debug_selector(|| "relationship-large-view-body".into()).flex_1().min_h_0().min_w_0().overflow_hidden().child(content))
+                            .into_any_element(),
+                        None => div().size_full().flex().items_center().justify_center().text_color(colors.muted_text).child("Relationship viewer is no longer available").into_any_element(),
+                    }
+                }
                 Modal::ServerPicker => {
                     let current_id = self
                         .lifecycle

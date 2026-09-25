@@ -8,7 +8,7 @@ use sift_workspace_ui::results::{
     MoveCellDown, MoveCellUp, PreparedResultPage, ResultColumn, ResultData, ResultState,
     ResultsView,
 };
-use sift_workspace_ui::{PresentationState, UserSettings, WorkspaceShell};
+use sift_workspace_ui::{DatabaseObjectSource, PresentationState, UserSettings, WorkspaceShell};
 
 const LARGE_SQL_LINES: usize = 8_000;
 const FIRST_PAGE_ROWS: usize = 500;
@@ -20,6 +20,178 @@ const OUTLINE_SYMBOLS: usize = 4_000;
 const CHANGE_LEDGER_ROWS: usize = 1_000;
 const SCHEMA_OBJECTS: usize = 100_000;
 const VISIBLE_RESULT_SET_TABS: usize = 8;
+const RELATIONSHIP_TABLES: usize = 128;
+
+fn relationship_diagram(
+    table_count: usize,
+    columns_per_table: usize,
+    with_edges: bool,
+) -> sift_protocol::CatalogDiagram {
+    use sift_protocol::{
+        CatalogColumnPair, CatalogCompleteness, CatalogDiagram, CatalogEdge, CatalogEdgeCertainty,
+        CatalogEdgeKind, CatalogNode, CatalogNodeDetails, CatalogNodeKind, CatalogObjectId,
+        CatalogRevision,
+    };
+    let schema = CatalogObjectId("schema".into());
+    let node = |id: CatalogObjectId, kind, name: String, parent_id| CatalogNode {
+        id,
+        native_id: None,
+        kind,
+        qualified_name: format!("lab.{name}"),
+        name,
+        parent_id,
+        ordinal: None,
+        definition_digest: None,
+        completeness: CatalogCompleteness::Complete,
+        details: CatalogNodeDetails::None,
+        extra: Default::default(),
+    };
+    let mut nodes = vec![node(
+        schema.clone(),
+        CatalogNodeKind::Schema,
+        "lab".into(),
+        None,
+    )];
+    for table in 0..table_count {
+        let table_id = CatalogObjectId(format!("table-{table}"));
+        nodes.push(node(
+            table_id.clone(),
+            CatalogNodeKind::Table,
+            format!("orders_{table:03}"),
+            Some(schema.clone()),
+        ));
+        for column in 0..columns_per_table {
+            let mut column_node = node(
+                CatalogObjectId(format!("column-{table}-{column}")),
+                CatalogNodeKind::Column,
+                format!("column_{column}"),
+                Some(table_id.clone()),
+            );
+            column_node.details = CatalogNodeDetails::Column {
+                column: ColumnMetadata::new(
+                    format!("column_{column}"),
+                    TypeRef::Primitive(PrimitiveType::Int64),
+                ),
+            };
+            nodes.push(column_node);
+        }
+    }
+    let edges = (1..table_count)
+        .filter(|_| with_edges)
+        .map(|table| {
+            let (from, to) = if table < table_count / 2 {
+                (table, 0)
+            } else {
+                (0, table)
+            };
+            CatalogEdge {
+                from: CatalogObjectId(format!("table-{from}")),
+                to: Some(CatalogObjectId(format!("table-{to}"))),
+                kind: CatalogEdgeKind::ForeignKey,
+                certainty: CatalogEdgeCertainty::CatalogProven,
+                referenced_path: None,
+                column_pairs: vec![CatalogColumnPair {
+                    from: CatalogObjectId(format!("column-{from}-0")),
+                    to: CatalogObjectId(format!("column-{to}-0")),
+                }],
+            }
+        })
+        .collect();
+    CatalogDiagram {
+        catalog_revision: CatalogRevision(1),
+        catalog_digest: "relationship-benchmark".into(),
+        nodes,
+        edges,
+        omitted_nodes: 0,
+        omitted_edges: 0,
+        inaccessible_boundaries: 0,
+        partial: false,
+    }
+}
+
+#[gpui::bench(fps = 120)]
+fn relationship_viewer_horizontal_scroll(cx: &mut BenchAppContext) {
+    benchmark_relationship_viewer_horizontal_scroll(cx, RELATIONSHIP_TABLES, 6, true, true);
+}
+
+#[gpui::bench(fps = 120)]
+fn relationship_viewer_horizontal_scroll_small(cx: &mut BenchAppContext) {
+    benchmark_relationship_viewer_horizontal_scroll(cx, 12, 6, true, true);
+}
+
+#[gpui::bench(fps = 120)]
+fn relationship_viewer_horizontal_scroll_no_details(cx: &mut BenchAppContext) {
+    benchmark_relationship_viewer_horizontal_scroll(cx, RELATIONSHIP_TABLES, 6, true, false);
+}
+
+#[gpui::bench(fps = 120)]
+fn relationship_viewer_horizontal_scroll_empty(cx: &mut BenchAppContext) {
+    benchmark_relationship_viewer_horizontal_scroll(cx, 0, 0, false, true);
+}
+
+fn benchmark_relationship_viewer_horizontal_scroll(
+    cx: &mut BenchAppContext,
+    table_count: usize,
+    columns_per_table: usize,
+    with_edges: bool,
+    details_open: bool,
+) {
+    let mut window = cx.add_empty_window();
+    let shell = window
+        .replace_root_view(|window, cx| {
+            let mut shell = WorkspaceShell::new(
+                PresentationState::default(),
+                UserSettings::default(),
+                None,
+                None,
+                window,
+                cx,
+            );
+            shell.seed_relationship_viewer_benchmark(
+                DatabaseObjectSource {
+                    instance_id: "benchmark".into(),
+                    tenant_id: 1,
+                    profile_id: 1,
+                    profile_name: "Benchmark".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    catalog: None,
+                    schema: "lab".into(),
+                    object: "orders_000".into(),
+                    object_kind: sift_protocol::ObjectKind::Table,
+                    last_refreshed_at_ms: None,
+                },
+                sift_protocol::CatalogObjectId("table-0".into()),
+                relationship_diagram(table_count, columns_per_table, with_edges),
+                details_open,
+                cx,
+            );
+            shell
+        })
+        .unwrap();
+    let mut delta = -56.0;
+    cx.bench_renderer(shell, move |shell, window, cx| {
+        shell.scroll_relationship_viewer_benchmark(delta, window, cx);
+        delta = -delta;
+    });
+}
+
+#[gpui::bench(fps = 120)]
+fn workspace_empty_refresh(cx: &mut BenchAppContext) {
+    let mut window = cx.add_empty_window();
+    let shell = window
+        .replace_root_view(|window, cx| {
+            WorkspaceShell::new(
+                PresentationState::default(),
+                UserSettings::default(),
+                None,
+                None,
+                window,
+                cx,
+            )
+        })
+        .unwrap();
+    cx.bench_renderer(shell, |_, window, _| window.refresh());
+}
 
 fn large_sql() -> String {
     (0..LARGE_SQL_LINES)
@@ -684,6 +856,11 @@ gpui::bench_group!(
     object_browser_navigation,
     query_outline_first_frame,
     query_outline_navigation,
-    change_ledger_first_frame
+    change_ledger_first_frame,
+    relationship_viewer_horizontal_scroll,
+    relationship_viewer_horizontal_scroll_small,
+    relationship_viewer_horizontal_scroll_no_details,
+    relationship_viewer_horizontal_scroll_empty,
+    workspace_empty_refresh
 );
 gpui::bench_main!(benches);

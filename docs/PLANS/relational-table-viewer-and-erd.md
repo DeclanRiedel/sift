@@ -2,7 +2,8 @@
 
 Status: **implementation underway, 2026-09-25.** The command-opened viewer,
 Objects-style toolbar, scoped catalog requests, table picker, FK diagram and
-details, zoom, fit-width, and Mermaid copy are implemented. Remaining design
+details, zoom, fit-width, and Mermaid copy are implemented. The first styling
+revision adds compact field rows, type icons, and cardinality marks. Remaining design
 items below are candidates for later passes; this document retains the complete
 feature map.
 
@@ -70,23 +71,24 @@ through explicit actions.
 
 Use the same inset, height, theme tokens, picker style, focus treatment, and
 overflow behavior as the Objects tab's two-row toolbar. First row establishes
-context: **Connection › Catalog › Schema › Anchor table**, searchable scope
-picker, and coverage/revision status. Second row controls the projection:
+context with a table picker and quiet connection/catalog label, plus coverage
+and revision status. Second row controls the projection:
 **References / Referenced by**, hop depth, object-kind/edge filters, search,
-node budget, **Fit**, **Refresh**, **Copy Mermaid**, and an overflow menu for
-DDL, data, compare, and other contextual actions. Keep primary scope and
-refresh controls visible at narrow widths; overflow secondary actions. Changing
+node budget, **Copy Mermaid**, and an overflow menu for
+DDL, data, compare, and other contextual actions. Fit and zoom belong in a
+bottom-right canvas control. The viewer updates when schema metadata changes.
+Keep primary scope controls visible at narrow widths. Changing
 connection clears incompatible scope and selection rather than showing old
 graph data under a new breadcrumb. Explicit Apply may be needed for broad scope
 changes to avoid repeated server requests while adjusting controls.
 
 ```text
-RELATIONSHIPS   Connection ▾  Database ▾  Schema ▾  Anchor: public.orders ▾
-Scope: 1 hop ▾  [→ References] [← Referenced by]  Search…  [Fit] [Refresh] [⋯]
+TABLE   [public.orders ▾]  connection / database                    3 tables · revision 7
+1 hop  [→ References] [← Referenced by]  Search…  [Copy Mermaid]
 ┌─ tables / paths ─┐  ┌──────────── canvas ────────────┐  ┌─ details ───┐
 │ orders           │  │ customers.id ← orders.customer_id│  │ FK name     │
 │ customers        │  │    [customers] ←── [orders]      │  │ column pairs│
-│ order_items      │  │                      ↑            │  │ Open / DDL  │
+│ order_items      │  │                      ↑     [− 100% + Fit]│ │ Open / DDL │
 └──────────────────┘  └──────────────────────────────────┘  └─────────────┘
 ```
 
@@ -119,8 +121,11 @@ then remaining fields, with name, type, and PK/FK/nullable marks. Expand a card
 to show all fields. The edge connects specific field anchors where column pairs
 are known. Edge selection shows constraint name, each ordered pair, source and
 target, certainty, and available actions in a side inspector. Distinguish
-outgoing/incoming by arrow direction and text; do not claim cardinality from an
-FK alone. Self references loop visibly. Parallel FKs remain distinct and
+outgoing/incoming by text. Use crow's-foot marks: referencing-column nullability
+determines whether the referenced end is `1` or `0..1`; a complete unique key
+on the referencing columns determines whether the other end is `0..1` or
+`0..*`. Partial unique indexes do not prove uniqueness across all rows. Mark
+unknown cardinality as unknown, rather than guessing. Self references loop visibly. Parallel FKs remain distinct and
 selectable. Views and other dependency kinds can be a separate overlay; the
 default ER layer shows table-like objects and catalog-proven FKs.
 

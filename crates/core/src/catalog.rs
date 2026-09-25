@@ -977,11 +977,16 @@ pub fn project_diagram(
                 .nodes
                 .iter()
                 .filter(|node| {
-                    node.kind == CatalogNodeKind::Column
-                        && node
-                            .parent_id
-                            .as_ref()
-                            .is_some_and(|parent| selected_objects.contains(parent))
+                    matches!(
+                        node.kind,
+                        CatalogNodeKind::Column
+                            | CatalogNodeKind::Index
+                            | CatalogNodeKind::Constraint
+                            | CatalogNodeKind::Trigger
+                    ) && node
+                        .parent_id
+                        .as_ref()
+                        .is_some_and(|parent| selected_objects.contains(parent))
                 })
                 .map(|node| node.id.clone()),
         );
@@ -1515,6 +1520,77 @@ mod tests {
             right.nodes.iter().map(|node| &node.id).collect::<Vec<_>>()
         );
         assert_eq!(left.edges, right.edges);
+    }
+
+    #[test]
+    fn diagram_with_columns_keeps_key_details_for_cardinality() {
+        let mut table = ObjectInfo::new("child", ObjectKind::Table);
+        table.columns.push(ColumnMetadata::new(
+            "parent_id",
+            TypeRef::Primitive(PrimitiveType::Int64),
+        ));
+        table.indexes.push(sift_protocol::IndexInfo {
+            name: "child_parent_unique".into(),
+            columns: vec!["parent_id".into()],
+            unique: true,
+            primary_key: false,
+            kind: sift_protocol::IndexKind::Btree,
+            partial_predicate: None,
+        });
+        let data = graph_from_trees(
+            &[CatalogTree {
+                name: "db".into(),
+                schemas: vec![SchemaTree {
+                    name: "public".into(),
+                    objects: vec![table],
+                }],
+            }],
+            CatalogCoverage::complete(),
+            "provider:db",
+        );
+        let table_id = data
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Table)
+            .unwrap()
+            .id
+            .clone();
+        let graph = CatalogGraph {
+            revision: sift_protocol::CatalogRevision(1),
+            content_digest: "fixture".into(),
+            invalidation_epoch: 1,
+            captured_at: chrono::Utc::now(),
+            provider: sift_protocol::ProviderRef {
+                provider_id: sift_protocol::ProviderId::new("test/provider").unwrap(),
+                dialect_id: sift_protocol::DialectId::new("test/dialect").unwrap(),
+                provider_version: "1".into(),
+            },
+            database_identity: "db".into(),
+            data,
+        };
+        let diagram = project_diagram(
+            &graph,
+            &CatalogDiagramRequest {
+                expected_revision: graph.revision,
+                schemas: vec![],
+                object_ids: vec![table_id],
+                edge_kinds: vec![CatalogEdgeKind::ForeignKey],
+                neighborhood_depth: 1,
+                include_columns: true,
+                include_routines: false,
+                max_nodes: Some(100),
+            },
+            100,
+        )
+        .unwrap();
+        assert!(diagram
+            .nodes
+            .iter()
+            .any(|node| node.kind == CatalogNodeKind::Column));
+        assert!(diagram
+            .nodes
+            .iter()
+            .any(|node| node.kind == CatalogNodeKind::Index));
     }
 
     #[test]
