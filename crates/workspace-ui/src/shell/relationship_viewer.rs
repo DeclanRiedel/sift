@@ -2067,7 +2067,6 @@ impl Pane {
         if let Some(viewer) = self.relationship_viewers.get_mut(&item_id) {
             if viewer.fit_active {
                 viewer.zoom = 1.0;
-                viewer.details_open = true;
                 viewer.fit_active = false;
                 viewer.auto_fit_pending = false;
                 cx.notify();
@@ -2078,9 +2077,8 @@ impl Pane {
             if width <= 0.0 {
                 return;
             }
-            let available_width = width + if viewer.details_open { 300.0 } else { 0.0 };
             let zoom = relationship_fit_zoom(
-                available_width,
+                width,
                 f32::from(bounds.height),
                 viewer
                     .index
@@ -2088,7 +2086,6 @@ impl Pane {
                     .map_or(280.0, |index| index.scene_height),
             );
             viewer.zoom = zoom;
-            viewer.details_open = false;
             viewer.fit_active = true;
             viewer.auto_fit_pending = false;
             viewer.scroll.set_offset(gpui::point(px(0.), px(0.)));

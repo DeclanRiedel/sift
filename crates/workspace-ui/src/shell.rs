@@ -47380,11 +47380,6 @@ mod tests {
         assert!(cx.debug_bounds("relationship-incoming").is_none());
         cx.simulate_click(fit.center(), Modifiers::default());
         cx.run_until_parked();
-        if cx.debug_bounds("relationship-details").is_some() {
-            let fit = cx.debug_bounds("relationship-fit-width").unwrap();
-            cx.simulate_click(fit.center(), Modifiers::default());
-            cx.run_until_parked();
-        }
         assert!(cx.debug_bounds("relationship-details").is_none());
         let fitted_viewport = cx.debug_bounds("relationship-cards").unwrap();
         workspace.read_with(&cx, |shell, cx| {
@@ -47394,7 +47389,10 @@ mod tests {
         let actual_size = cx.debug_bounds("relationship-fit-width").unwrap();
         cx.simulate_click(actual_size.center(), Modifiers::default());
         cx.run_until_parked();
-        assert!(cx.debug_bounds("relationship-details").is_some());
+        assert!(cx.debug_bounds("relationship-details").is_none());
+        let show_details = cx.debug_bounds("relationship-details-toggle").unwrap();
+        cx.simulate_click(show_details.center(), Modifiers::default());
+        cx.run_until_parked();
         let close_details = cx.debug_bounds("relationship-close-details").unwrap();
         cx.simulate_click(close_details.center(), Modifiers::default());
         cx.run_until_parked();
