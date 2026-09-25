@@ -225,6 +225,7 @@ mod tests {
             assert!(view.sorts.is_empty());
         });
         let add_sort = cx.debug_bounds("filter-add-sort").expect("add sort");
+        assert!(add_sort.size.width <= px(24.), "sort action stays compact");
         cx.simulate_click(add_sort.center(), gpui::Modifiers::default());
         assert_eq!(
             view.read_with(&cx, |view, _| view
@@ -345,13 +346,6 @@ pub(super) struct FilterDraft {
     picker: Option<(usize, usize, bool)>, // group, condition, column (otherwise operator); usize::MAX group = sort
     search: Entity<TextInput>,
     _search_subscription: Subscription,
-}
-
-fn logic_label(logic: ResultFilterLogic) -> &'static str {
-    match logic {
-        ResultFilterLogic::All => "All",
-        ResultFilterLogic::Any => "Any",
-    }
 }
 
 fn toggle(logic: &mut ResultFilterLogic) {
@@ -981,7 +975,6 @@ impl ResultsView {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_1()
                     .px_2()
                     .py_1()
                     .children((group_index > 0).then(|| {
@@ -1003,12 +996,21 @@ impl ResultsView {
                         div()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .children((group_index == 0).then(|| div().text_sm().child("Filter")))
+                            .gap_1()
+                            .children((group_index == 0).then(|| {
+                                div()
+                                    .text_sm()
+                                    .text_color(colors.muted_text)
+                                    .child("Filter")
+                            }))
                             .children((group.conditions.len() > 1).then(|| {
                                 Button::new(
                                     ("filter-group-logic", group_index),
-                                    format!("Match {}", logic_label(group.logic)),
+                                    if group.logic == ResultFilterLogic::All {
+                                        "AND"
+                                    } else {
+                                        "OR"
+                                    },
                                 )
                                 .tone(ButtonTone::Ghost)
                                 .on_click(cx.listener(
@@ -1023,10 +1025,16 @@ impl ResultsView {
                                 ))
                             }))
                             .child(
-                                Button::new(("filter-add-condition", group_index), "+")
-                                    .tone(ButtonTone::Ghost)
-                                    .disabled(group.conditions.len() >= 64)
-                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                IconButton::new(
+                                    ("filter-add-condition", group_index),
+                                    IconName::Add,
+                                    "Add condition",
+                                )
+                                .square(px(21.))
+                                .icon_size(12.)
+                                .disabled(group.conditions.len() >= 64)
+                                .on_click(cx.listener(
+                                    move |view, _, window, cx| {
                                         let row = Self::new_filter_condition(
                                             view.grid_transform_column.unwrap_or(0),
                                             cx,
@@ -1036,13 +1044,20 @@ impl ResultsView {
                                         draft.picker = None;
                                         draft.groups[group_index].conditions.push(row);
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new(("filter-add-group", group_index), "+ Group")
-                                    .tone(ButtonTone::Ghost)
-                                    .disabled(draft.groups.len() >= 16)
-                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                IconButton::new(
+                                    ("filter-add-group", group_index),
+                                    IconName::Add,
+                                    "Add group",
+                                )
+                                .text("Group")
+                                .icon_size(12.)
+                                .disabled(draft.groups.len() >= 16)
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| {
                                         let draft = view.filter_draft.as_mut().unwrap();
                                         draft.picker = None;
                                         draft.groups.insert(
@@ -1053,29 +1068,33 @@ impl ResultsView {
                                             },
                                         );
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                             .children((draft.groups.len() > 1).then(|| {
-                                Button::new(("filter-remove-group", group_index), "×")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                IconButton::new(
+                                    ("filter-remove-group", group_index),
+                                    IconName::Close,
+                                    "Remove group",
+                                )
+                                .square(px(21.))
+                                .icon_size(12.)
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| {
                                         let draft = view.filter_draft.as_mut().unwrap();
                                         draft.picker = None;
                                         draft.groups.remove(group_index);
                                         cx.notify();
-                                    }))
+                                    },
+                                ))
+                            }))
+                            .children(group.conditions.is_empty().then(|| {
+                                div()
+                                    .text_sm()
+                                    .text_color(colors.muted_text)
+                                    .child("Add a condition")
                             })),
                     )
-                    .when(group.conditions.is_empty(), |group| {
-                        group.child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .text_sm()
-                                .text_color(colors.muted_text)
-                                .child("Add filter criteria"),
-                        )
-                    })
                     .children(group.conditions.iter().enumerate().map(|(row_index, row)| {
                         let id = group_index * 64 + row_index;
                         let selected_index = draft
@@ -1095,7 +1114,6 @@ impl ResultsView {
                                 colors.subtle_border
                             })
                             .pl_2()
-                            .when(selected, |row| row.bg(colors.active_surface))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |view, _, _, cx| {
@@ -1149,10 +1167,16 @@ impl ResultsView {
                                 )
                             })
                             .child(
-                                Button::new(("filter-insert-condition", id), "+")
-                                    .tone(ButtonTone::Ghost)
-                                    .disabled(group.conditions.len() >= 64)
-                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                IconButton::new(
+                                    ("filter-insert-condition", id),
+                                    IconName::Add,
+                                    "Insert condition",
+                                )
+                                .square(px(21.))
+                                .icon_size(12.)
+                                .disabled(group.conditions.len() >= 64)
+                                .on_click(cx.listener(
+                                    move |view, _, window, cx| {
                                         let column = view.filter_draft.as_ref().unwrap().groups
                                             [group_index]
                                             .conditions[row_index]
@@ -1166,17 +1190,25 @@ impl ResultsView {
                                             .conditions
                                             .insert(row_index + 1, row);
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new(("filter-remove-condition", id), "×")
-                                    .tone(ButtonTone::Ghost)
-                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                IconButton::new(
+                                    ("filter-remove-condition", id),
+                                    IconName::Close,
+                                    "Remove condition",
+                                )
+                                .square(px(21.))
+                                .icon_size(12.)
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| {
                                         let draft = view.filter_draft.as_mut().unwrap();
                                         draft.picker = None;
                                         draft.groups[group_index].conditions.remove(row_index);
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                     }))
             })
@@ -1204,7 +1236,7 @@ impl ResultsView {
                                 "↓ DESC"
                             },
                         )
-                        .tone(ButtonTone::Accent)
+                        .tone(ButtonTone::Ghost)
                         .on_click(cx.listener(move |view, _, _, cx| {
                             let direction = &mut view.filter_draft.as_mut().unwrap().sorts[index].1;
                             *direction = if *direction == SortDirection::Ascending {
@@ -1216,14 +1248,19 @@ impl ResultsView {
                         })),
                     )
                     .child(
-                        Button::new(("filter-remove-sort", index), "×")
-                            .tone(ButtonTone::Ghost)
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                let draft = view.filter_draft.as_mut().unwrap();
-                                draft.picker = None;
-                                draft.sorts.remove(index);
-                                cx.notify();
-                            })),
+                        IconButton::new(
+                            ("filter-remove-sort", index),
+                            IconName::Close,
+                            "Remove sort",
+                        )
+                        .square(px(21.))
+                        .icon_size(12.)
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            let draft = view.filter_draft.as_mut().unwrap();
+                            draft.picker = None;
+                            draft.sorts.remove(index);
+                            cx.notify();
+                        })),
                     )
             })
             .collect::<Vec<_>>();
@@ -1448,19 +1485,23 @@ impl ResultsView {
                     )
                     .child(
                         div()
-                            .border_t_1()
-                            .border_color(colors.subtle_border)
                             .px_2()
                             .py_1()
                             .flex()
                             .flex_wrap()
                             .items_center()
-                            .gap_2()
-                            .child("Sort By")
+                            .gap_1()
                             .child(
-                                Button::new("filter-add-sort", "+")
+                                div()
+                                    .text_sm()
+                                    .text_color(colors.muted_text)
+                                    .child("Sort By"),
+                            )
+                            .child(
+                                IconButton::new("filter-add-sort", IconName::Add, "Add sort")
                                     .debug_selector("filter-add-sort")
-                                    .tone(ButtonTone::Ghost)
+                                    .square(px(21.))
+                                    .icon_size(12.)
                                     .disabled(
                                         draft.sorts.len() >= self.rendered_columns.len().min(8),
                                     )
@@ -1481,7 +1522,7 @@ impl ResultsView {
                                     div()
                                         .text_sm()
                                         .text_color(colors.muted_text)
-                                        .child("Click + to add sort criteria"),
+                                        .child("Add a sort column"),
                                 )
                             })
                             .children(sort_rows),
@@ -1546,7 +1587,7 @@ impl ResultsView {
                             } else if draft.database {
                                 "Run query"
                             } else {
-                                "Apply Filter & Sort"
+                                "Apply"
                             },
                         )
                         .debug_selector("filter-apply")

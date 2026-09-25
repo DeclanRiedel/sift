@@ -3293,7 +3293,7 @@ impl ResultsView {
         cx.notify();
     }
 
-    fn close_grid_transform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_grid_transform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.filter_draft = None;
         self.grid_transform_column = None;
         self.focus_handle.focus(window, cx);

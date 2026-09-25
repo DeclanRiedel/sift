@@ -17373,9 +17373,41 @@ impl WorkspaceShell {
     ) {
         match self.result_transform_sql(pane_index, item_id, sql, transform, cx) {
             Ok(sql) => {
-                self.active_pane = pane_index;
                 let sql = sql.trim_end().trim_end_matches(';').trim_end();
-                self.open_sql_scratch("filter-sort.sql".into(), format!("{sql};\n"), window, cx);
+                let Some(pane) = self.panes.get(pane_index).cloned() else {
+                    return;
+                };
+                let Some(editor) = pane.read(cx).editor(item_id) else {
+                    return;
+                };
+                let sql = format!("{sql};\n");
+                let changed = editor.update(cx, |editor, cx| {
+                    editor.replace_text_with_generated_sql(&sql, cx)
+                });
+                if !changed && editor.read(cx).document().text() != sql {
+                    self.show_error_toast("Query editor is read-only".into(), cx);
+                    return;
+                }
+                if changed {
+                    pane.update(cx, |pane, cx| {
+                        if pane.database_item_views.get(&item_id) == Some(&DatabaseItemView::Query)
+                        {
+                            pane.database_query_texts.insert(item_id, sql.clone());
+                        }
+                        if let Some(item) = pane.items.iter_mut().find(|item| item.id == item_id) {
+                            item.dirty = pane
+                                .clean_documents
+                                .get(&item_id)
+                                .is_none_or(|clean| clean != &sql);
+                        }
+                        cx.notify();
+                    });
+                }
+                if let Some(results) = pane.read(cx).results.get(&item_id).cloned() {
+                    results.update(cx, |results, cx| results.close_grid_transform(window, cx));
+                }
+                self.active_pane = pane_index;
+                editor.focus_handle(cx).focus(window, cx);
             }
             Err(error) => self.show_error_toast(error, cx),
         }
@@ -43795,7 +43827,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn table_filter_sql_opens_a_full_editable_query(cx: &mut TestAppContext) {
+    fn table_filter_sql_updates_current_query_without_replacing_results(cx: &mut TestAppContext) {
         let window = shell(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = window.root(&mut cx).unwrap();
@@ -43818,6 +43850,16 @@ mod tests {
                 cx,
             );
             let item_id = shell.panes[0].read(cx).active_item().unwrap().id;
+            let results = shell.panes[0].read(cx).results[&item_id].clone();
+            results.update(cx, |results, cx| {
+                results.set_state(
+                    ResultState::Ready(crate::results::ResultData {
+                        rows: vec![sift_protocol::Row::new(vec![sift_protocol::Value::Int64(42)])],
+                        ..crate::results::ResultData::default()
+                    }),
+                    cx,
+                );
+            });
             shell.open_result_transform_sql(
                 0,
                 item_id,
@@ -43839,12 +43881,14 @@ mod tests {
             );
             let pane = shell.panes[0].read(cx);
             let opened = pane.active_item().unwrap();
-            assert_ne!(opened.id, item_id);
-            assert!(opened.source.is_none());
+            assert_eq!(opened.id, item_id);
+            assert!(opened.dirty);
             assert_eq!(
-                pane.editor(opened.id).unwrap().read(cx).document().text(),
+                pane.editor(item_id).unwrap().read(cx).document().text(),
                 "SELECT * FROM (SELECT * FROM \"main\".\"order_items\" LIMIT 100) AS sift_result WHERE (\"status\" = 'open');\n"
             );
+            assert_eq!(pane.database_query_texts[&item_id], pane.editor(item_id).unwrap().read(cx).document().text());
+            assert!(matches!(results.read(cx).state(), ResultState::Ready(data) if data.rows.len() == 1));
         });
     }
 

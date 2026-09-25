@@ -1626,6 +1626,25 @@ impl QueryEditor {
         cx.notify();
     }
 
+    /// Insert generated SQL as a normal edit: preserve undo, dirty tracking,
+    /// and room synchronization while leaving the current results untouched.
+    pub(crate) fn replace_text_with_generated_sql(
+        &mut self,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.read_only || self.document.text() == text {
+            return false;
+        }
+        self.document.end_undo_group();
+        let length = self.document.text().len();
+        self.document.replace_range(0..length, text);
+        self.document.end_undo_group();
+        self.resync_keymap_after_external_change(cx);
+        self.edited_with_auto_completion(false, cx);
+        true
+    }
+
     /// External replacements bypass ModalKit's edit path. Rebuild its rope and
     /// cursor group from the canonical document before accepting more input.
     fn resync_keymap_after_external_change(&mut self, cx: &mut Context<Self>) {
@@ -6349,6 +6368,17 @@ mod tests {
 
     fn doc(text: &str) -> QueryDocument {
         QueryDocument::new(7, text)
+    }
+
+    #[gpui::test]
+    fn generated_sql_is_one_undoable_edit(cx: &mut TestAppContext) {
+        let editor = cx.new(|cx| QueryEditor::new(doc("SELECT 1;"), cx));
+        editor.update(cx, |editor, cx| {
+            assert!(editor.replace_text_with_generated_sql("SELECT 2;", cx));
+            assert!(!editor.replace_text_with_generated_sql("SELECT 2;", cx));
+            assert!(editor.document.undo());
+            assert_eq!(editor.document.text(), "SELECT 1;");
+        });
     }
 
     #[test]
