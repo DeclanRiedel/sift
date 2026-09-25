@@ -5471,6 +5471,145 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadRelationshipViewer {
+                item_id,
+                request_id,
+                source,
+                depth,
+            } => {
+                let result =
+                    match query_context(&context, &parked_contexts, Some(source.profile_id)) {
+                        Some(opened) => match opened
+                            .client
+                            .catalog_graph(
+                                opened.session,
+                                opened.metadata_connection,
+                                sift_protocol::CatalogGraphRequest::default(),
+                            )
+                            .await
+                        {
+                            Ok(graph) => {
+                                let nodes = graph
+                                    .data
+                                    .nodes
+                                    .iter()
+                                    .map(|node| (&node.id, node))
+                                    .collect::<std::collections::HashMap<_, _>>();
+                                let anchor = graph
+                                    .data
+                                    .nodes
+                                    .iter()
+                                    .find(|node| {
+                                        if node.name != source.object
+                                            || !matches!(node.kind,
+                                    sift_protocol::CatalogNodeKind::Table
+                                        | sift_protocol::CatalogNodeKind::PartitionedTable
+                                        | sift_protocol::CatalogNodeKind::ForeignTable)
+                                        {
+                                            return false;
+                                        }
+                                        let Some(schema) =
+                                            node.parent_id.as_ref().and_then(|id| nodes.get(id))
+                                        else {
+                                            return false;
+                                        };
+                                        if schema.name != source.schema {
+                                            return false;
+                                        }
+                                        source.catalog.as_ref().is_none_or(|catalog| {
+                                            schema
+                                                .parent_id
+                                                .as_ref()
+                                                .and_then(|id| nodes.get(id))
+                                                .is_some_and(|parent| &parent.name == catalog)
+                                        })
+                                    })
+                                    .map(|node| node.id.clone());
+                                let mut available_tables = graph
+                                    .data
+                                    .nodes
+                                    .iter()
+                                    .filter_map(|node| {
+                                        let kind = match node.kind {
+                                            sift_protocol::CatalogNodeKind::Table => {
+                                                sift_protocol::ObjectKind::Table
+                                            }
+                                            sift_protocol::CatalogNodeKind::PartitionedTable => {
+                                                sift_protocol::ObjectKind::PartitionedTable
+                                            }
+                                            sift_protocol::CatalogNodeKind::ForeignTable => {
+                                                sift_protocol::ObjectKind::ForeignTable
+                                            }
+                                            _ => return None,
+                                        };
+                                        let schema =
+                                            node.parent_id.as_ref().and_then(|id| nodes.get(id))?;
+                                        let catalog =
+                                            schema.parent_id.as_ref().and_then(|id| nodes.get(id));
+                                        Some(sift_workspace_ui::DatabaseObjectSource {
+                                            catalog: catalog.map(|node| node.name.clone()),
+                                            schema: schema.name.clone(),
+                                            object: node.name.clone(),
+                                            object_kind: kind,
+                                            ..source.clone()
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                available_tables.sort_by(|left, right| {
+                                    (&left.catalog, &left.schema, &left.object).cmp(&(
+                                        &right.catalog,
+                                        &right.schema,
+                                        &right.object,
+                                    ))
+                                });
+                                match anchor {
+                                    Some(anchor) => opened
+                                        .client
+                                        .catalog_diagram(
+                                            opened.session,
+                                            opened.metadata_connection,
+                                            sift_protocol::CatalogDiagramRequest {
+                                                expected_revision: graph.revision,
+                                                schemas: Vec::new(),
+                                                object_ids: vec![anchor.clone()],
+                                                edge_kinds: vec![
+                                                    sift_protocol::CatalogEdgeKind::ForeignKey,
+                                                ],
+                                                neighborhood_depth: depth,
+                                                include_columns: true,
+                                                include_routines: false,
+                                                max_nodes: Some(500),
+                                            },
+                                        )
+                                        .await
+                                        .map(|diagram| {
+                                            (anchor, Box::new(diagram), available_tables)
+                                        })
+                                        .map_err(|error| {
+                                            format!("loading relationships failed: {error}")
+                                        }),
+                                    None => {
+                                        Err("Table is absent from the visible catalog graph".into())
+                                    }
+                                }
+                            }
+                            Err(error) => Err(format!("loading catalog graph failed: {error}")),
+                        },
+                        None => Err(
+                            "Connect to this table's database before loading relationships".into(),
+                        ),
+                    };
+                if events
+                    .send(ExecutorEvent::RelationshipViewerLoaded {
+                        item_id,
+                        request_id,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::TerminateDatabaseProcess { process_id } => {
                 let result = match context.as_ref() {
                     Some(opened) => opened

@@ -56,6 +56,7 @@ mod catalog_diagram;
 mod commands;
 mod data_window;
 mod dispatch;
+mod relationship_viewer;
 pub use dispatch::ExecutorSender;
 mod benchmark_library;
 mod database_monitor;
@@ -86,6 +87,7 @@ use app_bar::AppBarMenu;
 use catalog_diagram::CatalogDiagramState;
 use database_monitor::{DatabaseAlertKind, DatabaseMonitorState, DatabaseMonitorView};
 pub use pane_layout::SplitDirection;
+use relationship_viewer::RelationshipViewerState;
 
 const PALETTE_VISIBLE_ROWS: usize = 4;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
@@ -1467,6 +1469,7 @@ struct TabTransfer {
     database_json_text: Option<String>,
     database_json_baseline: Option<String>,
     object_browser: Option<ObjectBrowserState>,
+    relationship_viewer: Option<RelationshipViewerState>,
 }
 
 #[derive(Debug, Clone)]
@@ -2807,6 +2810,12 @@ pub enum PaneEvent {
     },
     ObjectBrowserOpenRequested {
         source: DatabaseObjectSource,
+    },
+    RelationshipViewerOpenRequested {
+        source: DatabaseObjectSource,
+    },
+    RelationshipViewerRefreshRequested {
+        item_id: u64,
     },
     ObjectBrowserConnectionRequested {
         item_id: u64,
@@ -4178,6 +4187,12 @@ pub enum ExecutorCommand {
         generation: u64,
     },
     LoadCatalogDiagram,
+    LoadRelationshipViewer {
+        item_id: u64,
+        request_id: u64,
+        source: DatabaseObjectSource,
+        depth: u8,
+    },
     TerminateDatabaseProcess {
         process_id: i64,
     },
@@ -4794,6 +4809,18 @@ pub enum ExecutorEvent {
         message: String,
     },
     CatalogDiagramLoaded(Result<Box<sift_protocol::CatalogDiagram>, String>),
+    RelationshipViewerLoaded {
+        item_id: u64,
+        request_id: u64,
+        result: Result<
+            (
+                sift_protocol::CatalogObjectId,
+                Box<sift_protocol::CatalogDiagram>,
+                Vec<DatabaseObjectSource>,
+            ),
+            String,
+        >,
+    },
     DatabaseProcessTerminated {
         process_id: i64,
         result: Result<bool, String>,
@@ -5037,6 +5064,7 @@ pub struct Pane {
     database_json_texts: HashMap<u64, String>,
     database_json_baselines: HashMap<u64, String>,
     object_browsers: HashMap<u64, ObjectBrowserState>,
+    relationship_viewers: HashMap<u64, RelationshipViewerState>,
     object_browser_rows: HashMap<u64, Entity<ObjectBrowserRowsView>>,
     /// Transient wrapper sizes while dragging. Keeping these on the pane avoids
     /// invalidating and repainting the result grid for every pointer event.
@@ -5190,6 +5218,7 @@ impl Pane {
             database_json_texts: HashMap::new(),
             database_json_baselines: HashMap::new(),
             object_browsers: HashMap::new(),
+            relationship_viewers: HashMap::new(),
             object_browser_rows: HashMap::new(),
             live_result_extents: HashMap::new(),
             result_resize_frame_pending: false,
@@ -5879,6 +5908,7 @@ impl Pane {
         self.database_json_texts.remove(&item_id);
         self.database_json_baselines.remove(&item_id);
         self.object_browsers.remove(&item_id);
+        self.relationship_viewers.remove(&item_id);
         self.object_browser_rows.remove(&item_id);
         if self.pending_close_item == Some(item_id) {
             self.pending_close_item = None;
@@ -6488,6 +6518,12 @@ impl Pane {
                 ObjectBrowserActionRequirement::Selection,
             ),
             (
+                "object-browser-relationships",
+                "Relationships",
+                'r',
+                ObjectBrowserActionRequirement::Table,
+            ),
+            (
                 "object-browser-delete",
                 "Delete",
                 'x',
@@ -6577,6 +6613,7 @@ impl Pane {
             'o' => cx.emit(PaneEvent::ObjectBrowserOpenRequested { source }),
             'n' => cx.emit(PaneEvent::ObjectBrowserNewTableRequested { source }),
             'd' => cx.emit(PaneEvent::ObjectBrowserDesignRequested { source }),
+            'r' => cx.emit(PaneEvent::RelationshipViewerOpenRequested { source }),
             'x' => cx.emit(PaneEvent::ObjectBrowserDeleteRequested { source }),
             'i' => cx.emit(PaneEvent::ObjectBrowserImportRequested { source }),
             'e' => cx.emit(PaneEvent::ObjectBrowserExportRequested { source }),
@@ -7507,6 +7544,7 @@ impl Pane {
         let editor = self.editors.remove(&item_id);
         let run_configuration = self.run_configuration_editors.remove(&item_id);
         let object_browser = self.object_browsers.remove(&item_id);
+        let relationship_viewer = self.relationship_viewers.remove(&item_id);
         self.result_subscriptions.remove(&item_id);
         let results = self.results.remove(&item_id);
         let clean_text = self.clean_documents.remove(&item_id).unwrap_or_default();
@@ -7529,6 +7567,7 @@ impl Pane {
             database_json_text,
             database_json_baseline,
             object_browser,
+            relationship_viewer,
         })
     }
 
@@ -7578,6 +7617,10 @@ impl Pane {
             self.object_browsers.insert(item_id, browser);
             self.ensure_object_browser_rows(item_id, cx);
             self.subscribe_object_browser_search(item_id, cx);
+        }
+        if let Some(viewer) = transfer.relationship_viewer {
+            self.relationship_viewers.insert(item_id, viewer);
+            self.subscribe_relationship_viewer_search(item_id, cx);
         }
         if let Some(results) = transfer.results {
             self.attach_results(item_id, results, cx);
@@ -8439,7 +8482,9 @@ impl gpui::Render for Pane {
         } else if active.as_ref().is_some_and(|item| {
             self.database_ddl_texts.contains_key(&item.id)
                 || self.database_json_texts.contains_key(&item.id)
-                || (item.kind == ItemKind::Schema && self.object_browsers.contains_key(&item.id))
+                || (item.kind == ItemKind::Schema
+                    && (self.object_browsers.contains_key(&item.id)
+                        || self.relationship_viewers.contains_key(&item.id)))
                 || (item.kind == ItemKind::RunConfiguration
                     && self.run_configuration_editors.contains_key(&item.id))
                 || (item.kind == ItemKind::Configuration && item.title == "sift.toml")
@@ -9590,7 +9635,11 @@ impl gpui::Render for Pane {
                         }
                     }
                     Some(item) if item.kind == ItemKind::Schema => {
-                        body.child(self.render_object_browser(item.id, cx))
+                        if self.relationship_viewers.contains_key(&item.id) {
+                            body.child(self.render_relationship_viewer(item.id, cx))
+                        } else {
+                            body.child(self.render_object_browser(item.id, cx))
+                        }
                     }
                     Some(item) => {
                         let definition = ItemRegistry::definition(&item.kind);
@@ -10782,6 +10831,7 @@ pub struct WorkspaceShell {
     pending_production_execution: Option<PendingProductionExecution>,
     pending_database_explain: Option<PendingDatabaseExplain>,
     catalog_diagram: CatalogDiagramState,
+    pending_relationship_viewers: HashSet<u64>,
     catalog_diff: Option<Box<sift_protocol::SchemaDiff>>,
     catalog_migration_plan: Option<Box<sift_protocol::MigrationPlan>>,
     catalog_migration_pending: bool,
@@ -12124,6 +12174,7 @@ impl WorkspaceShell {
             pending_production_execution: None,
             pending_database_explain: None,
             catalog_diagram: CatalogDiagramState::default(),
+            pending_relationship_viewers: HashSet::new(),
             catalog_diff: None,
             catalog_migration_plan: None,
             catalog_migration_pending: false,
@@ -12299,6 +12350,9 @@ impl WorkspaceShell {
             CommandId::ImportCsv => sift_protocol::OperationKind::ImportCsv,
             CommandId::ListenPostgres => sift_protocol::OperationKind::Listen,
             CommandId::OpenCatalogDiagram => sift_protocol::OperationKind::ProjectCatalogDiagram,
+            CommandId::OpenTableRelationships => {
+                sift_protocol::OperationKind::ProjectCatalogDiagram
+            }
             CommandId::CaptureCatalogSnapshot => {
                 sift_protocol::OperationKind::CreateCatalogSnapshot
             }
@@ -13432,6 +13486,54 @@ impl WorkspaceShell {
                     self.operation_capabilities.clear();
                 }
                 self.connection_status = status.clone();
+                self.pending_relationship_viewers.retain(|item_id| {
+                    self.panes
+                        .iter()
+                        .any(|pane| pane.read(cx).relationship_viewers.contains_key(item_id))
+                });
+                if let ConnectionStatus::Connected { profile_id, .. } = &status {
+                    let ready =
+                        self.pending_relationship_viewers
+                            .iter()
+                            .copied()
+                            .filter(|item_id| {
+                                self.panes.iter().any(|pane| {
+                                    pane.read(cx).relationship_viewers.get(item_id).is_some_and(
+                                        |viewer| viewer.source.profile_id == *profile_id,
+                                    )
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                    for item_id in ready {
+                        self.pending_relationship_viewers.remove(&item_id);
+                        self.refresh_relationship_viewer(item_id, cx);
+                    }
+                }
+                if let ConnectionStatus::Failed { profile_id, reason } = &status {
+                    let failed =
+                        self.pending_relationship_viewers
+                            .iter()
+                            .copied()
+                            .filter(|item_id| {
+                                self.panes.iter().any(|pane| {
+                                    pane.read(cx).relationship_viewers.get(item_id).is_some_and(
+                                        |viewer| viewer.source.profile_id == *profile_id,
+                                    )
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                    for item_id in failed {
+                        self.pending_relationship_viewers.remove(&item_id);
+                        for pane in &self.panes {
+                            pane.update(cx, |pane, cx| {
+                                if let Some(viewer) = pane.relationship_viewers.get_mut(&item_id) {
+                                    viewer.finish(viewer.request_id, Err(reason.clone()));
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }
+                }
                 self.invalidate_connection_projection();
                 self.invalidate_command_projection();
                 match &status {
@@ -16322,6 +16424,20 @@ impl WorkspaceShell {
             ExecutorEvent::CatalogDiagramLoaded(result) => {
                 self.catalog_diagram.finish_loading(result);
                 cx.notify();
+            }
+            ExecutorEvent::RelationshipViewerLoaded {
+                item_id,
+                request_id,
+                result,
+            } => {
+                for pane in &self.panes {
+                    pane.update(cx, |pane, cx| {
+                        if let Some(viewer) = pane.relationship_viewers.get_mut(&item_id) {
+                            viewer.finish(request_id, result.clone());
+                            cx.notify();
+                        }
+                    });
+                }
             }
             ExecutorEvent::DatabaseProcessTerminated { process_id, result } => {
                 match result {
@@ -29102,6 +29218,14 @@ impl WorkspaceShell {
                     self.open_schema_search_target(target, window, cx);
                 }
             }
+            PaneEvent::RelationshipViewerOpenRequested { source } => {
+                self.active_pane = index;
+                self.open_table_relationship_viewer(source.clone(), cx);
+            }
+            PaneEvent::RelationshipViewerRefreshRequested { item_id } => {
+                self.active_pane = index;
+                self.refresh_relationship_viewer(*item_id, cx);
+            }
             PaneEvent::ObjectBrowserConnectionRequested {
                 item_id,
                 profile_id,
@@ -31230,6 +31354,158 @@ impl WorkspaceShell {
             self.catalog_diagram.start_loading();
             self.modal = Some(Modal::CatalogDiagram);
             cx.notify();
+        }
+    }
+
+    fn open_table_relationship_viewer_command(&mut self, cx: &mut Context<Self>) {
+        let source = self
+            .panes
+            .get(self.active_pane)
+            .and_then(|pane| {
+                let pane = pane.read(cx);
+                let item = pane.active_item()?;
+                pane.object_browsers
+                    .get(&item.id)
+                    .and_then(|browser| browser.selected_row().map(|row| row.source.clone()))
+                    .or_else(|| pane.database_source(item.id))
+            })
+            .or_else(|| {
+                let item = self
+                    .visible_connection_items()
+                    .get(self.connection_nav_selected)?
+                    .clone();
+                let target = match item.action {
+                    ConnectionTreeAction::Object(target)
+                    | ConnectionTreeAction::FavoriteObject(target)
+                    | ConnectionTreeAction::RecentObject(target) => target,
+                    _ => return None,
+                };
+                Some(DatabaseObjectSource {
+                    instance_id: self
+                        .selected_instance_id
+                        .clone()
+                        .unwrap_or_else(|| "local".into()),
+                    tenant_id: target.connection.tenant_id,
+                    profile_id: target.connection.id,
+                    profile_name: target.connection.name,
+                    provider_id: target.connection.provider_id,
+                    catalog: Some(target.catalog),
+                    schema: target.schema,
+                    object: target.object,
+                    object_kind: target.object_kind,
+                    last_refreshed_at_ms: None,
+                })
+            });
+        let Some(source) = source.filter(|source| is_table_like_object(source.object_kind)) else {
+            self.show_toast(
+                "Select a table in Objects or open a table tab first".into(),
+                cx,
+            );
+            return;
+        };
+        self.open_table_relationship_viewer(source, cx);
+    }
+
+    fn open_table_relationship_viewer(
+        &mut self,
+        source: DatabaseObjectSource,
+        cx: &mut Context<Self>,
+    ) {
+        if !is_table_like_object(source.object_kind)
+            || !self.require_operation(
+                sift_protocol::OperationKind::ProjectCatalogDiagram,
+                "Open relationship viewer",
+                cx,
+            )
+        {
+            return;
+        }
+        let item_id = self.next_id;
+        self.next_id += 1;
+        let Some(pane) = self.panes.get(self.active_pane) else {
+            return;
+        };
+        let item_id = pane.update(cx, |pane, cx| {
+            pane.open_relationship_viewer(
+                ItemPresentation {
+                    id: item_id,
+                    kind: ItemKind::Schema,
+                    title: format!("relations · {}", source.object),
+                    dirty: false,
+                    source: Some(ItemSource::DatabaseObject(source.clone())),
+                    last_result: None,
+                },
+                source,
+                cx,
+            )
+        });
+        self.refresh_relationship_viewer(item_id, cx);
+        self.persist(cx);
+    }
+
+    fn refresh_relationship_viewer(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let Some(pane) = self
+            .panes
+            .iter()
+            .find(|pane| pane.read(cx).relationship_viewers.contains_key(&item_id))
+            .cloned()
+        else {
+            return;
+        };
+        let (request_id, source, depth) = pane.update(cx, |pane, cx| {
+            let viewer = pane
+                .relationship_viewers
+                .get_mut(&item_id)
+                .expect("viewer exists");
+            let request_id = viewer.start();
+            cx.notify();
+            (request_id, viewer.source.clone(), viewer.depth)
+        });
+        let fail = |pane: &Entity<Pane>, message: &str, cx: &mut Context<Self>| {
+            pane.update(cx, |pane, cx| {
+                if let Some(viewer) = pane.relationship_viewers.get_mut(&item_id) {
+                    viewer.finish(request_id, Err(message.into()));
+                    cx.notify();
+                }
+            });
+        };
+        if source.instance_id != self.selected_instance_id.as_deref().unwrap_or("local") {
+            fail(&pane, "This viewer belongs to another server instance", cx);
+            return;
+        }
+        if !matches!(self.connection_status, ConnectionStatus::Connected { profile_id, .. } if profile_id == source.profile_id)
+        {
+            let connection = self
+                .lifecycle
+                .tenants
+                .iter()
+                .flat_map(|tenant| tenant.connections.iter())
+                .find(|connection| {
+                    connection.id == source.profile_id && connection.tenant_id == source.tenant_id
+                })
+                .cloned();
+            if let Some(connection) = connection {
+                self.pending_relationship_viewers.insert(item_id);
+                self.ensure_object_browser_connection(&connection, false, cx);
+            } else {
+                fail(&pane, "Connection profile is unavailable", cx);
+            }
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            fail(&pane, "Connect before loading relationships", cx);
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::LoadRelationshipViewer {
+                item_id,
+                request_id,
+                source,
+                depth,
+            })
+            .is_err()
+        {
+            fail(&pane, "Relationship request could not be sent", cx);
         }
     }
 
@@ -35475,6 +35751,7 @@ impl WorkspaceShell {
                 self.prompt_csv_import(cx)
             }
             CommandId::OpenCatalogDiagram => self.open_catalog_diagram(cx),
+            CommandId::OpenTableRelationships => self.open_table_relationship_viewer_command(cx),
             CommandId::CaptureCatalogSnapshot => self.capture_catalog_snapshot(cx),
             CommandId::CompareCatalogSnapshot => self.open_catalog_snapshots(cx),
             CommandId::ExportCsv => self.export_active_result(sift_protocol::ExportFormat::Csv, cx),
@@ -46913,6 +47190,116 @@ mod tests {
             .unwrap();
         assert!(mermaid.starts_with("flowchart LR\n"));
         assert!(mermaid.contains("-->|DependsOn|"));
+    }
+
+    #[gpui::test]
+    fn table_relationship_viewer_opens_on_command_and_scopes_requests(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
+        let mut source = object_source(sift_protocol::ObjectKind::Table);
+        source.catalog = Some("sifttest".into());
+        source.schema = "lab".into();
+        source.object = "people".into();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 2,
+                name: "Demo".into(),
+            };
+            shell.open_table_relationship_viewer(source.clone(), cx);
+        });
+        let (item_id, request_id) = match receiver.try_recv() {
+            Ok(ExecutorCommand::LoadRelationshipViewer {
+                item_id,
+                request_id,
+                source: requested,
+                depth: 1,
+            }) => {
+                assert_eq!(requested.object, "people");
+                (item_id, request_id)
+            }
+            _ => panic!("unexpected viewer request"),
+        };
+        let graph = table_graph();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::RelationshipViewerLoaded {
+                    item_id,
+                    request_id,
+                    result: Ok((
+                        sift_protocol::CatalogObjectId("table".into()),
+                        Box::new(sift_protocol::CatalogDiagram {
+                            catalog_revision: graph.revision,
+                            catalog_digest: graph.content_digest,
+                            nodes: graph.data.nodes,
+                            edges: Vec::new(),
+                            omitted_nodes: 0,
+                            omitted_edges: 0,
+                            inaccessible_boundaries: 0,
+                            partial: false,
+                        }),
+                        vec![source.clone()],
+                    )),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("relationship-card-0").is_some());
+        assert!(cx.debug_bounds("relationship-depth-more").is_some());
+        let more = cx.debug_bounds("relationship-depth-more").unwrap();
+        cx.simulate_click(more.center(), Modifiers::default());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::LoadRelationshipViewer { depth: 2, .. })
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::RelationshipViewerLoaded {
+                    item_id,
+                    request_id,
+                    result: Err("obsolete response".into()),
+                },
+                cx,
+            );
+            let pane = shell.panes[0].read(cx);
+            let viewer = pane.relationship_viewers.get(&item_id).unwrap();
+            assert!(viewer.loading);
+            assert!(viewer.error.is_none());
+        });
+        workspace.update(&mut cx, |shell, cx| {
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: vec![ConnectionNavEntry {
+                    id: 2,
+                    tenant_id: 1,
+                    name: "Demo".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    tags: Vec::new(),
+                }],
+            }];
+            shell.connection_status = ConnectionStatus::Connecting { profile_id: 2 };
+            shell.refresh_relationship_viewer(item_id, cx);
+            assert!(shell.pending_relationship_viewers.contains(&item_id));
+        });
+        assert!(receiver.try_recv().is_err());
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::Connection(ConnectionStatus::Connected {
+                    profile_id: 2,
+                    name: "Demo".into(),
+                }),
+                cx,
+            );
+            assert!(!shell.pending_relationship_viewers.contains(&item_id));
+        });
+        assert!(std::iter::from_fn(|| receiver.try_recv().ok()).any(|command| {
+            matches!(command, ExecutorCommand::LoadRelationshipViewer { item_id: requested, depth: 2, .. } if requested == item_id)
+        }));
     }
 
     #[test]

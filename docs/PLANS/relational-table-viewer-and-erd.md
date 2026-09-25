@@ -1,16 +1,22 @@
 # Relational table viewer and ER diagram
 
-Status: **design draft, 2026-09-25. No implementation authorized by this plan.**
+Status: **implementation underway, 2026-09-25.** The command-opened viewer,
+Objects-style toolbar, scoped catalog requests, table picker, FK diagram and
+details, zoom, fit-width, and Mermaid copy are implemented. Remaining design
+items below are candidates for later passes; this document retains the complete
+feature map.
 
-Scope: the Sift workspace UI for browsing database tables and their structure.
+Scope: a command-opened Sift workspace viewer for database tables and their
+relationships. Selecting or opening a table does not open this viewer by
+default. The existing Objects and object tabs keep their current entry behavior.
 “ER diagram” here means a navigable view of actual catalog relationships, not a
 data model that invents relationships from matching names. This plan builds on
 ADR-033 and the existing table definition inspector and catalog diagram API.
 
 ## Product jobs
 
-1. Open a table and answer: what are its columns, keys, indexes, constraints,
-   and nearby tables?
+1. Invoke the viewer for a selected table and answer: what are its columns,
+   keys, indexes, constraints, and nearby tables?
 2. Trace a foreign key in either direction, including its ordered column pairs,
    without losing the original table.
 3. Explore a small neighborhood visually, then expand it deliberately. Keep a
@@ -30,6 +36,10 @@ using only the keyboard or pointer. Partial metadata must remain visibly partial
 - `CatalogGraph` supplies stable opaque object ids, column metadata, constraint
   details, foreign-key edges with ordered column pairs, certainty, revision, and
   coverage. `CatalogDiagramRequest` projects a bounded neighborhood.
+- The Objects tab uses a compact two-row toolbar inside its workspace item,
+  with connection/catalog/schema pickers, filters, and contextual actions.
+  This is the visual and interaction pattern for the new viewer toolbar; it is
+  distinct from the window's global app bar.
 - The current Catalog Diagram modal renders up to 100 object cards with text
   relationships and can copy Mermaid or open comparison. It does not position
   tables or draw inspectable FK connections.
@@ -43,64 +53,66 @@ client presentation state.
 
 ## Information architecture
 
-### Table viewer
+### Entry and workspace item
 
-The object tab remains the home for a single table. Its header shows qualified
-name, object kind, connection, catalog revision/refresh state, and actions:
-**View data**, **Copy name**, **DDL**, **Show in diagram**, **Design** (when
-authorized). The active content has two clear views:
+Add **Open Relationship Viewer for Table** to the selected table's context
+menu, object tab, Objects row actions, and command palette. One command receives
+the selected table identity and opens or focuses a dedicated viewer tab in the
+current pane. The table is its initial scope, with one FK hop and a bounded node
+budget. No automatic opening on selection, search, or table tab creation.
 
-- **Data**: existing result preview and editing flow.
-- **Structure**: one scrollable, read-only table profile. The current definition
-  inspector can evolve into this view. It has sections for Columns, Keys and
-  constraints, Relationships, Indexes, Triggers, and Dependencies. Section links
-  and counts stay visible in a narrow navigation strip or compact menu.
+The existing database-wide Catalog Diagram command may open the same viewer
+with an empty scope and prompt for a schema/table. Existing table data, DDL,
+design, and results stay in their existing tabs. The viewer links to those tabs
+through explicit actions.
 
-Keep a shortcut between Data and Structure, and remember the chosen view per
-object tab. Opening from schema search should show Structure; opening a table
-for row work should show Data. Design is a separate explicit state entered from
-Structure, never an implicit effect of clicking a field or ER edge.
+### Viewer toolbar, following Objects
 
-Suggested Structure layout at normal width:
+Use the same inset, height, theme tokens, picker style, focus treatment, and
+overflow behavior as the Objects tab's two-row toolbar. First row establishes
+context: **Connection › Catalog › Schema › Anchor table**, searchable scope
+picker, and coverage/revision status. Second row controls the projection:
+**References / Referenced by**, hop depth, object-kind/edge filters, search,
+node budget, **Fit**, **Refresh**, **Copy Mermaid**, and an overflow menu for
+DDL, data, compare, and other contextual actions. Keep primary scope and
+refresh controls visible at narrow widths; overflow secondary actions. Changing
+connection clears incompatible scope and selection rather than showing old
+graph data under a new breadcrumb. Explicit Apply may be needed for broad scope
+changes to avoid repeated server requests while adjusting controls.
 
 ```text
-public.orders  · Table  · DB: sales     [Data] [Structure] [Diagram] [DDL] [Design]
-Columns (8) | Relationships (3) | Indexes (2) | Constraints (4) | ...
-Name          Type             Nullable   Key / default
-id            bigint           No         PK · identity
-customer_id   bigint           No         FK → customers.id
-...
-Outgoing (1)                         Incoming (2)
-orders.customer_id → customers.id     order_items.order_id → orders.id
-                                     payments.order_id → orders.id
+RELATIONSHIPS   Connection ▾  Database ▾  Schema ▾  Anchor: public.orders ▾
+Scope: 1 hop ▾  [→ References] [← Referenced by]  Search…  [Fit] [Refresh] [⋯]
+┌─ tables / paths ─┐  ┌──────────── canvas ────────────┐  ┌─ details ───┐
+│ orders           │  │ customers.id ← orders.customer_id│  │ FK name     │
+│ customers        │  │    [customers] ←── [orders]      │  │ column pairs│
+│ order_items      │  │                      ↑            │  │ Open / DDL  │
+└──────────────────┘  └──────────────────────────────────┘  └─────────────┘
 ```
 
-At narrow widths, stack column attributes and relation endpoints; keep names
-copyable and full text accessible. Never rely on truncated labels or color alone.
+### Viewer body
+
+Use a resizable workspace item/pane for exploration. Default body combines a
+searchable table list, a central canvas, and a contextual detail panel. The
+list and details may collapse on narrow panes. A compact **Table details** view
+inside the viewer shows the selected table's columns, keys, constraints,
+indexes, triggers, and incoming/outgoing relationships; selecting a different
+card changes this inspection target while the scope anchor stays put. Label
+anchor and selection separately.
+
+The canvas owns pan, zoom, fit, and reset. Add a minimap only if usability tests
+show a need. The companion list exposes the same nodes and edges for keyboard
+and assistive access. Relationship rows split **References** and **Referenced
+by**, show constraint name, qualified endpoints, ordered column pairs, and
+certainty. Selecting one highlights participating columns. Actions include
+**Open table**, **Focus graph here**, **Copy JOIN** when catalog-proven and
+supported by existing generation, and **DDL** when available.
 
 Column rows show ordinal, name, native/display type, nullability (`Unknown`
-stays unknown), PK/FK/unique role when proven, and available default/generated
-facets. Selecting a column opens a small detail area with exact metadata and
-links to participating constraints and indexes. If a field is absent from the
-protocol, omit it or label it unavailable; do not infer it from DDL text.
-
-Relationship rows split **References** (outgoing) and **Referenced by**
-(incoming). Show constraint name, qualified source/target, ordered column pairs,
-and certainty. Selecting a row highlights its columns and offers **Open table**,
-**Show path in diagram**, **Copy JOIN** (only when catalog-proven and the existing
-join generator can produce it), and **DDL** when available. Preserve separate
-rows for multiple FKs between the same tables, self references, and composite
-keys. Never turn a hidden policy boundary into a named target.
-
-### ER canvas
-
-Use a resizable workspace item/pane, not the current modal, for exploration.
-The modal's command can open this pane. Opening from a table starts at that
-table plus one FK hop; opening from the database command starts with a schema or
-table picker and a bounded initial selection. Provide search, schema filters,
-incoming/outgoing toggles, and depth control. The canvas owns pan, zoom, fit,
-reset, and minimap only if navigation testing shows a need. A companion list
-exposes the same nodes and edges for keyboard and assistive access.
+stays unknown), and proven PK/FK/unique role. Show available default/generated
+facets in expanded detail. If a field is absent from the protocol, omit it or
+label it unavailable; do not infer it from DDL text. At narrow widths, stack
+attributes and endpoints; keep names copyable and full text accessible.
 
 Each table card shows qualified name and a compact field list: key fields first,
 then remaining fields, with name, type, and PK/FK/nullable marks. Expand a card
@@ -112,15 +124,6 @@ FK alone. Self references loop visibly. Parallel FKs remain distinct and
 selectable. Views and other dependency kinds can be a separate overlay; the
 default ER layer shows table-like objects and catalog-proven FKs.
 
-```text
-Search tables...  Schema: public  Depth: 1  [Incoming ✓] [Outgoing ✓] [Fit]
-┌─ tables / paths ─┐  ┌──────────── canvas ────────────┐  ┌─ details ───┐
-│ orders           │  │ customers.id ← orders.customer_id│  │ FK name     │
-│ customers        │  │    [customers] ←── [orders]      │  │ column pairs│
-│ order_items      │  │                      ↑            │  │ Open / DDL  │
-└──────────────────┘  └──────────────────────────────────┘  └─────────────┘
-```
-
 Canvas layout is deterministic for a given visible set, with no moving nodes
 after an unrelated refresh. Local drag positions may be saved as presentation
 preferences keyed by connection/profile, database identity, object id, and
@@ -129,12 +132,47 @@ positions and filters contain no graph truth or row data. Export uses the exact
 visible projection and records partial/omitted state in the output. Existing
 Mermaid copy remains; image export is a later design choice.
 
+## UI rendering options
+
+| Option | Appearance and use | Performance shape | Assessment |
+| --- | --- | --- | --- |
+| Master-detail list | Objects-like table list with relationships and fields in a side panel | Simple row virtualization; excellent for huge scopes | Strong accessible fallback; weak spatial understanding |
+| GPUI element cards and edge elements | Easy theme reuse and native focus/hover, with flexible card layout | Element count and layout/hit testing grow with visible nodes and edges | Fine for small neighborhoods; risky as the only large-graph renderer |
+| Hybrid GPUI scene | Native toolbar/list/details and table cards; custom painted, batched edge layer with viewport culling | Bounded visible elements and paint work; requires geometry, routing, and hit-test model | **Recommended** for first canvas, paired with master-detail list |
+| Embedded web graph | Many diagram libraries and visual effects | Second UI runtime, bridge, theme/focus/accessibility duplication | Avoid unless GPUI prototype proves insufficient |
+
+Recommended visual language: Sift's theme tokens and Objects toolbar, restrained
+card surfaces, crisp type, aligned column anchors, subdued edges, strong
+selection, and readable labels at each zoom level. Use a grid or lane layout
+to keep the anchor stable. Emphasize FK direction with arrow and label, not
+color alone. At low zoom, collapse field rows to table names and key counts;
+zooming in reveals fields. Selected/hovered edges get stronger contrast while
+unrelated edges recede. Keep cards stable during pan, filter, and refresh.
+
+Performance design for the hybrid scene:
+
+- Request bounded neighborhoods from `CatalogDiagramRequest`; never ask for or
+  lay out an entire large catalog as a default view. Show omitted counts and a
+  clear expand action.
+- Build an indexed, immutable scene from authorized graph data. Compute layout
+  and edge routes away from the UI thread, cancel obsolete work, and swap only
+  when the scope/revision token matches.
+- Cull cards and edges against the viewport plus a small margin. Keep a spatial
+  index for hit testing. Pan/zoom updates transform and visible set; it does not
+  rebuild every card or reshape all labels.
+- Cache card dimensions and text shaping by node id, graph revision, theme,
+  and zoom detail level. Batch edge paths by style; paint highlights separately.
+  Reuse the repository's existing GPUI custom-paint and retained-row patterns.
+- Keep selected item, toolbar, inspector, and status responsive while layout or
+  fetch runs. Measure first open, pan/zoom frame time, peak retained memory,
+  and dense-hub expansion before setting production node budgets.
+
 ## Interaction and state
 
-- **Find → inspect → follow → return:** schema search selects an object; Enter
-  opens it; Relationships selects an FK; Enter opens its target in a new or
-  reused tab according to the normal tab rule; Back returns to prior selection.
-  Diagram selection can open the same Structure view. Focus and scroll restore.
+- **Invoke → scope → inspect → follow → return:** select a table in Objects,
+  explorer, or its object tab; run the viewer command; adjust scope in its
+  toolbar; select an FK or table; Open uses normal tab rules; Back returns to
+  prior selection. Focus and scroll restore within the viewer.
 - **Vim only:** normal mode `j/k` moves rows/list entries, `h/l` changes section
   or graph neighbor where unambiguous, `/` searches within the active view,
   Enter opens/expands, Escape backs out of detail/search before leaving the
@@ -152,7 +190,7 @@ Mermaid copy remains; image export is a later design choice.
   capability, permission boundary, truncated/partial coverage, stale catalog,
   and request failure. Show omitted node/edge counts where supplied. Offer
   bounded retry/refresh. Shallow/deep schema metadata can still populate basic
-  Structure content when graph capability is missing; graph-dependent controls
+  table details when graph capability is missing; graph-dependent controls
   explain why they are unavailable.
 - **Safety:** browsing, projection, DDL retrieval, export, and navigation use
   existing audited operations. Design and migration stay in their review and
@@ -164,8 +202,8 @@ Mermaid copy remains; image export is a later design choice.
 
 | Capability | First release | Later, if useful |
 | --- | --- | --- |
-| Table profile | Readable columns, keys, outgoing/incoming FKs, indexes, constraints, triggers, dependencies | Engine-specific facets and richer column details as protocol supports them |
-| Navigation | Search → table → related table; data/structure/DDL/diagram handoff; back/forward | Saved object collections |
+| Table profile | Readable selected-table details inside viewer: columns, keys, outgoing/incoming FKs, indexes, constraints, triggers, dependencies | Engine-specific facets and richer column details as protocol supports them |
+| Navigation | Explicit command from selected table; scope in viewer; related-table/data/DDL handoff; back/forward | Saved object collections |
 | Diagram | Focused one-hop canvas, expand/collapse, pan/zoom/fit, FK pair inspector, list alternative | Multiple layouts, larger custom scopes, overview minimap |
 | Filtering | Schema, text, direction, depth, bounded node count | Dependency overlays and custom views |
 | Sharing | Copy Mermaid with coverage note; copy qualified names | Image/SVG export, shareable layout presets |
@@ -177,11 +215,13 @@ Mermaid copy remains; image export is a later design choice.
    authorized graph; index by opaque id; preserve ordered pairs, certainty,
    incoming/outgoing direction, and coverage. Check whether default/generated
    column facets and FK actions need protocol additions before promising them.
-2. **Table viewer:** improve the existing object tab and inspector, wire
-   navigation/actions through existing commands, and keep Data/Design behavior.
-3. **Diagram pane:** reuse `CatalogDiagramRequest`; add bounded layout and edge
-   routing off the UI thread, a list equivalent, selection/focus, and local
-   layout persistence. Retire the card modal only after command parity.
+2. **Entry and toolbar:** add a viewer item and context-aware command for a
+   selected table. Reuse Objects toolbar components/patterns for connection,
+   scope, filters, status, and actions. Leave object tab defaults unchanged.
+3. **Viewer body:** reuse `CatalogDiagramRequest`; build hybrid GPUI canvas,
+   selected-table details, list equivalent, selection/focus, bounded layout and
+   routing, and local layout state. Retire the card modal only after command
+   parity.
 4. **Polish:** export, dense/large-schema behavior, accessibility, and visual
    review across light/dark themes and narrow panes.
 
@@ -197,8 +237,10 @@ authorization, audit, and capability review before coding it.
 - Incoming and outgoing views agree on source, target, and ordered pairs.
   Partial, stale, truncated, unresolved, and inaccessible edges never appear
   complete or leak hidden names.
-- Opening a related table, returning, switching Data/Structure, changing pane,
-  and refreshing preserve sensible selection/focus. No background editor
+- Invoking the command opens the viewer on the chosen table; ordinary table
+  selection never does. Scope controls update the viewer without changing the
+  original table tab. Opening a related table, returning, changing pane, and
+  refreshing preserve sensible selection/focus. No background editor
   receives diagram/viewer keys.
 - A focused neighborhood opens quickly without waiting for whole-database
   layout. Expanding a dense hub remains bounded and explains omissions.
@@ -209,8 +251,8 @@ authorization, audit, and capability review before coding it.
 
 ## Decisions to settle before implementation
 
-1. Should Structure open by default for table selection, or only when selection
-   comes from schema search? The proposal above uses the entry point.
+1. Should the initial body favor canvas or table details when a small pane
+   leaves room for only one? Prototype both, with list access in either case.
 2. Should saved diagram layouts be per user and connection profile, or only for
    the current workspace session? Start with session state until value is clear.
 3. Which native column defaults/generated attributes and FK update/delete
