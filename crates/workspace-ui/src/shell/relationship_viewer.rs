@@ -699,13 +699,13 @@ fn relationship_card_surface(
             } else {
                 let kind_label = kind.to_owned();
                 for (value, text_style, x, y, width, size) in [
-                    (&title, &name_style, 32.0, 10.0, 184.0, 15.0),
+                    (&title, &name_style, 32.0, 7.0, 184.0, 17.0),
                     (&kind_label, &type_style, 222.0, 13.0, 54.0, 10.0),
                     (&footer, &type_style, 10.0, 185.0, 264.0, 10.0),
                 ] {
                     let mut text_style = text_style.clone();
                     text_style.font_size = px(size * zoom).into();
-                    if size == 15.0 {
+                    if size == 17.0 {
                         text_style.font_weight = gpui::FontWeight::BOLD;
                     }
                     let line = window.text_system().shape_line(
@@ -797,11 +797,11 @@ fn relationship_card_surface(
                     bounds.origin
                         + gpui::point(
                             px(if zoom < 0.6 { 4.0 } else { 9.0 * zoom }),
-                            px(if zoom < 0.6 { 6.0 } else { 11.0 * zoom }),
+                            px(if zoom < 0.6 { 6.0 } else { 10.5 * zoom }),
                         ),
                     gpui::size(
-                        px(if zoom < 0.6 { 10.0 } else { 15.0 * zoom }),
-                        px(if zoom < 0.6 { 10.0 } else { 15.0 * zoom }),
+                        px(if zoom < 0.6 { 10.0 } else { 16.0 * zoom }),
+                        px(if zoom < 0.6 { 10.0 } else { 16.0 * zoom }),
                     ),
                 ),
                 icon.path().into(),
