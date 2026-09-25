@@ -1957,11 +1957,7 @@ impl Pane {
                                     .child(icon(object_icon(selected_kind), colors.accent, 14.))
                                     .child(div().flex_1().min_w_0().flex().flex_col()
                                         .child(div().truncate().child(selected_title))
-                                        .child(div().text_xs().text_color(colors.muted_text).font_weight(gpui::FontWeight::NORMAL).child(selected_schema)))
-                                    .child(IconButton::new("relationship-close-details", IconName::CloseRightPane, "Hide details")
-                                        .debug_selector("relationship-close-details")
-                                        .square(px(22.)).icon_size(12.)
-                                        .on_click(cx.listener(move |pane, _, _, cx| pane.toggle_relationship_details(item_id, cx)))),
+                                        .child(div().text_xs().text_color(colors.muted_text).font_weight(gpui::FontWeight::NORMAL).child(selected_schema))),
                             )
                             .child(div().px_2().pb_1().flex().gap_1()
                                 .children(selected_source.clone().map(|source| {

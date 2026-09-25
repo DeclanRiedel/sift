@@ -47393,8 +47393,9 @@ mod tests {
         let show_details = cx.debug_bounds("relationship-details-toggle").unwrap();
         cx.simulate_click(show_details.center(), Modifiers::default());
         cx.run_until_parked();
-        let close_details = cx.debug_bounds("relationship-close-details").unwrap();
-        cx.simulate_click(close_details.center(), Modifiers::default());
+        assert!(cx.debug_bounds("relationship-close-details").is_none());
+        let details_toggle = cx.debug_bounds("relationship-details-toggle").unwrap();
+        cx.simulate_click(details_toggle.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("relationship-details").is_none());
         let show_details = cx.debug_bounds("relationship-details-toggle").unwrap();
