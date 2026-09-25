@@ -522,9 +522,19 @@ fn relationship_port_key(
     )
 }
 
-fn relationship_port_anchor(anchor: f32, index: usize, count: usize) -> f32 {
-    let offset = (index as f32 - (count.saturating_sub(1)) as f32 / 2.0) * 14.0;
-    (anchor + offset).clamp(CARD_HEADER_HEIGHT + 8.0, CARD_HEIGHT - 8.0)
+fn record_relationship_port(
+    ports: &mut HashMap<(u32, u32, u32, bool), Cardinality>,
+    key: (u32, u32, u32, bool),
+    cardinality: Cardinality,
+) {
+    ports
+        .entry(key)
+        .and_modify(|existing| {
+            if *existing != cardinality {
+                *existing = Cardinality::Unknown;
+            }
+        })
+        .or_insert(cardinality);
 }
 
 fn draw_relationship_wire(
@@ -575,18 +585,6 @@ fn draw_relationship_wire(
     path.line_to(end);
 }
 
-fn draw_relationship_lead(
-    path: &mut gpui::PathBuilder,
-    card_edge: gpui::Point<gpui::Pixels>,
-    mark: gpui::Point<gpui::Pixels>,
-) {
-    let elbow_x = (card_edge.x + mark.x) / 2.0;
-    path.move_to(card_edge);
-    path.line_to(gpui::point(elbow_x, card_edge.y));
-    path.line_to(gpui::point(elbow_x, mark.y));
-    path.line_to(mark);
-}
-
 fn draw_cardinality_mark(
     path: &mut gpui::PathBuilder,
     at: gpui::Point<gpui::Pixels>,
@@ -602,10 +600,16 @@ fn draw_cardinality_mark(
     };
     match cardinality {
         Cardinality::One => {
+            path.move_to(at);
+            path.line_to(offset(15., 0.));
             bar(path, 6.);
             bar(path, 12.);
         }
         Cardinality::ZeroOrOne | Cardinality::ZeroOrMany => {
+            path.move_to(at);
+            path.line_to(offset(15.5, 0.));
+            path.move_to(offset(22.5, 0.));
+            path.line_to(offset(26., 0.));
             if cardinality == Cardinality::ZeroOrOne {
                 bar(path, 6.);
             } else {
@@ -1193,6 +1197,7 @@ impl Pane {
         let mut detail_rows = Vec::new();
         let mut auxiliary_rows = Vec::new();
         let mut scene_edges = Vec::new();
+        let mut port_cardinalities = HashMap::new();
         let mut scene_height = 240.0_f32;
         let zoom = viewer.zoom;
         let mut summary = if viewer.loading {
@@ -1397,8 +1402,6 @@ impl Pane {
                                 .and_then(|pair| column_anchors.get(&pair.to))
                                 .copied()
                                 .unwrap_or(CARD_MIDPOINT_Y),
-                            0.0_f32,
-                            0.0_f32,
                             route_offset,
                             edge_cardinalities[index],
                             selected.is_some_and(|id| id == &from.id || id == &to.id),
@@ -1406,31 +1409,17 @@ impl Pane {
                     }
                 }
             }
-            let mut port_counts = HashMap::new();
-            for (from, to, from_anchor, to_anchor, ..) in &scene_edges {
-                *port_counts
-                    .entry(relationship_port_key(*from, *from_anchor, from.0 <= to.0))
-                    .or_insert(0_usize) += 1;
-                *port_counts
-                    .entry(relationship_port_key(*to, *to_anchor, from.0 >= to.0))
-                    .or_insert(0_usize) += 1;
-            }
-            let mut port_indices = HashMap::new();
-            for (from, to, from_anchor, to_anchor, from_mark_offset, to_mark_offset, ..) in
-                &mut scene_edges
-            {
-                let from_key = relationship_port_key(*from, *from_anchor, from.0 <= to.0);
-                let from_index = port_indices.entry(from_key).or_insert(0_usize);
-                *from_mark_offset =
-                    relationship_port_anchor(*from_anchor, *from_index, port_counts[&from_key])
-                        - *from_anchor;
-                *from_index += 1;
-                let to_key = relationship_port_key(*to, *to_anchor, from.0 >= to.0);
-                let to_index = port_indices.entry(to_key).or_insert(0_usize);
-                *to_mark_offset =
-                    relationship_port_anchor(*to_anchor, *to_index, port_counts[&to_key])
-                        - *to_anchor;
-                *to_index += 1;
+            for (from, to, from_anchor, to_anchor, _, (child, parent), _) in &scene_edges {
+                record_relationship_port(
+                    &mut port_cardinalities,
+                    relationship_port_key(*from, *from_anchor, from.0 <= to.0),
+                    *child,
+                );
+                record_relationship_port(
+                    &mut port_cardinalities,
+                    relationship_port_key(*to, *to_anchor, from.0 >= to.0),
+                    *parent,
+                );
             }
             if let Some(table) = selected_table.filter(|_| viewer.details_open) {
                 for column in index
@@ -1680,15 +1669,14 @@ impl Pane {
                 let viewport = scene_scroll.bounds();
                 let mut muted_path = gpui::PathBuilder::stroke(px(1.25));
                 let mut accent_path = gpui::PathBuilder::stroke(px(1.75));
+                let mut visible_ports = HashMap::new();
                 for (
                     (from_x, from_y),
                     (to_x, to_y),
                     from_anchor,
                     to_anchor,
-                    from_mark_offset,
-                    to_mark_offset,
                     route_offset,
-                    (child, parent),
+                    _,
                     highlighted,
                 ) in &scene_edges
                 {
@@ -1716,18 +1704,22 @@ impl Pane {
                     let end = bounds.origin
                         + gpui::point(px(end_x * zoom), px((*to_y + *to_anchor) * zoom));
                     let end_direction = if from_x == to_x { 1.0 } else { -direction };
-                    let start_mark = start
-                        + gpui::point(px(8.0 * direction * zoom), px(*from_mark_offset * zoom));
-                    let end_mark = end
-                        + gpui::point(px(8.0 * end_direction * zoom), px(*to_mark_offset * zoom));
+                    let from_key =
+                        relationship_port_key((*from_x, *from_y), *from_anchor, direction > 0.0);
+                    let to_key =
+                        relationship_port_key((*to_x, *to_y), *to_anchor, end_direction > 0.0);
+                    let child = port_cardinalities[&from_key];
+                    let parent = port_cardinalities[&to_key];
+                    let start_mark = start + gpui::point(px(8.0 * direction * zoom), px(0.));
+                    let end_mark = end + gpui::point(px(8.0 * end_direction * zoom), px(0.));
                     let wire_start = start_mark
                         + gpui::point(
-                            px(cardinality_wire_offset(*child) * direction * zoom),
+                            px(cardinality_wire_offset(child) * direction * zoom),
                             px(0.),
                         );
                     let wire_end = end_mark
                         + gpui::point(
-                            px(cardinality_wire_offset(*parent) * end_direction * zoom),
+                            px(cardinality_wire_offset(parent) * end_direction * zoom),
                             px(0.),
                         );
                     let lane_x = if from_x == to_x {
@@ -1749,11 +1741,26 @@ impl Pane {
                             continue;
                         }
                     }
-                    draw_relationship_lead(path, start, start_mark);
-                    draw_relationship_lead(path, end, end_mark);
                     draw_relationship_wire(path, wire_start, wire_end, lane_x);
-                    draw_cardinality_mark(path, start_mark, direction, *child, zoom);
-                    draw_cardinality_mark(path, end_mark, end_direction, *parent, zoom);
+                    visible_ports
+                        .entry(from_key)
+                        .and_modify(|(_, _, _, active)| *active |= *highlighted)
+                        .or_insert((start, direction, child, *highlighted));
+                    visible_ports
+                        .entry(to_key)
+                        .and_modify(|(_, _, _, active)| *active |= *highlighted)
+                        .or_insert((end, end_direction, parent, *highlighted));
+                }
+                for (_, (card_edge, direction, cardinality, highlighted)) in visible_ports {
+                    let path = if highlighted {
+                        &mut accent_path
+                    } else {
+                        &mut muted_path
+                    };
+                    let mark = card_edge + gpui::point(px(8.0 * direction * zoom), px(0.));
+                    path.move_to(card_edge);
+                    path.line_to(mark);
+                    draw_cardinality_mark(path, mark, direction, cardinality, zoom);
                 }
                 if let Ok(path) = muted_path.build() {
                     window.paint_path(path, colors.muted_text);
@@ -2235,16 +2242,23 @@ mod cardinality_tests {
     }
 
     #[test]
-    fn colliding_relationship_ports_spread_around_column_anchor() {
-        let anchors = (0..3)
-            .map(|index| relationship_port_anchor(99.0, index, 3))
-            .collect::<Vec<_>>();
-        assert_eq!(anchors, [85.0, 99.0, 113.0]);
-        assert_eq!(relationship_port_anchor(99.0, 0, 1), 99.0);
+    fn relationship_port_identity_includes_card_and_side() {
         assert_ne!(
             relationship_port_key((1.0, 2.0), 99.0, true),
             relationship_port_key((1.0, 2.0), 99.0, false)
         );
+        assert_ne!(
+            relationship_port_key((1.0, 2.0), 99.0, true),
+            relationship_port_key((1.0, 3.0), 99.0, true)
+        );
+        let key = relationship_port_key((1.0, 2.0), 99.0, true);
+        let mut ports = HashMap::new();
+        record_relationship_port(&mut ports, key, Cardinality::One);
+        record_relationship_port(&mut ports, key, Cardinality::One);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[&key], Cardinality::One);
+        record_relationship_port(&mut ports, key, Cardinality::ZeroOrMany);
+        assert_eq!(ports[&key], Cardinality::Unknown);
     }
 
     #[test]
