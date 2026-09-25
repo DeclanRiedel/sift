@@ -681,13 +681,13 @@ fn relationship_card_surface(
             } else {
                 let kind_label = kind.to_owned();
                 for (value, text_style, x, y, width, size) in [
-                    (&title, &name_style, 32.0, 9.0, 184.0, 13.0),
+                    (&title, &name_style, 32.0, 10.0, 184.0, 15.0),
                     (&kind_label, &type_style, 222.0, 13.0, 54.0, 10.0),
-                    (&footer, &type_style, 10.0, 190.0, 264.0, 10.0),
+                    (&footer, &type_style, 10.0, 185.0, 264.0, 10.0),
                 ] {
                     let mut text_style = text_style.clone();
                     text_style.font_size = px(size * zoom).into();
-                    if size == 13.0 {
+                    if size == 15.0 {
                         text_style.font_weight = gpui::FontWeight::BOLD;
                     }
                     let line = window.text_system().shape_line(
@@ -779,11 +779,11 @@ fn relationship_card_surface(
                     bounds.origin
                         + gpui::point(
                             px(if zoom < 0.6 { 4.0 } else { 9.0 * zoom }),
-                            px(if zoom < 0.6 { 6.0 } else { 12.0 * zoom }),
+                            px(if zoom < 0.6 { 6.0 } else { 11.0 * zoom }),
                         ),
                     gpui::size(
-                        px(if zoom < 0.6 { 10.0 } else { 14.0 * zoom }),
-                        px(if zoom < 0.6 { 10.0 } else { 14.0 * zoom }),
+                        px(if zoom < 0.6 { 10.0 } else { 15.0 * zoom }),
+                        px(if zoom < 0.6 { 10.0 } else { 15.0 * zoom }),
                     ),
                 ),
                 icon.path().into(),
@@ -804,10 +804,11 @@ fn relationship_card_surface(
             }
             for (line, relative_origin, width) in lines.drain(..) {
                 let origin = bounds.origin + relative_origin;
+                let line_height = (bounds.bottom() - origin.y).min(px(CARD_ROW_HEIGHT * zoom));
                 if line.width() <= width {
                     let _ = line.paint(
                         origin,
-                        px(CARD_ROW_HEIGHT * zoom),
+                        line_height,
                         TextAlign::Left,
                         Some(width),
                         window,
@@ -816,15 +817,12 @@ fn relationship_card_surface(
                 } else {
                     window.with_content_mask(
                         Some(ContentMask {
-                            bounds: gpui::Bounds::new(
-                                origin,
-                                gpui::size(width, px(CARD_ROW_HEIGHT * zoom)),
-                            ),
+                            bounds: gpui::Bounds::new(origin, gpui::size(width, line_height)),
                         }),
                         |window| {
                             let _ = line.paint(
                                 origin,
-                                px(CARD_ROW_HEIGHT * zoom),
+                                line_height,
                                 TextAlign::Left,
                                 Some(width),
                                 window,
