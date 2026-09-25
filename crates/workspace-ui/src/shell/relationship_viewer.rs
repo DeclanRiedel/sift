@@ -2,12 +2,15 @@
 
 use super::*;
 
-const CARD_WIDTH: f32 = 308.0;
-const LANE_STEP: f32 = 408.0;
-const SCENE_WIDTH: f32 = 1620.0;
-const CARD_MIDPOINT_Y: f32 = 112.0;
-const LINK_ROW_STEP: f32 = 56.0;
-const RELATION_ROW_STEP: f32 = 64.0;
+const CARD_WIDTH: f32 = 284.0;
+const CARD_HEIGHT: f32 = 206.0;
+const CARD_HEADER_HEIGHT: f32 = 39.0;
+const CARD_ROW_HEIGHT: f32 = 24.0;
+const CARD_VERTICAL_STEP: f32 = 244.0;
+const LANE_STEP: f32 = 368.0;
+const SCENE_WIDTH: f32 = 1472.0;
+const CARD_MIDPOINT_Y: f32 = CARD_HEIGHT / 2.0;
+const RELATION_ROW_STEP: f32 = 56.0;
 
 fn relationship_fit_zoom(width: f32, height: f32, scene_height: f32) -> f32 {
     let width_zoom = ((width - 32.0) / SCENE_WIDTH).max(0.0);
@@ -210,7 +213,7 @@ impl RelationshipViewerState {
         let x = x * self.zoom + 12.0;
         let y = y * self.zoom + 12.0;
         let right = x + CARD_WIDTH * self.zoom;
-        let bottom = y + 226.0 * self.zoom;
+        let bottom = y + CARD_HEIGHT * self.zoom;
         let left_visible = -f32::from(offset.x);
         let top_visible = -f32::from(offset.y);
         let width = f32::from(viewport.width);
@@ -358,13 +361,14 @@ impl RelationshipViewerIndex {
                 id.clone(),
                 (
                     24.0 + lane as f32 * LANE_STEP,
-                    30.0 + lane_counts[lane] as f32 * 274.0,
+                    30.0 + lane_counts[lane] as f32 * CARD_VERTICAL_STEP,
                 ),
             );
             lane_counts[lane] += 1;
         }
         self.scene_height =
-            (lane_counts.into_iter().max().unwrap_or(0) as f32 * 274.0 + 42.0).max(280.0);
+            (lane_counts.into_iter().max().unwrap_or(0) as f32 * CARD_VERTICAL_STEP + 42.0)
+                .max(280.0);
     }
 }
 
@@ -659,7 +663,7 @@ fn relationship_card_surface(
                         &footer,
                         &type_style,
                         5.0,
-                        226.0 * zoom - 14.0,
+                        CARD_HEIGHT * zoom - 14.0,
                         CARD_WIDTH * zoom - 10.0,
                         9.0,
                     ),
@@ -677,13 +681,13 @@ fn relationship_card_surface(
             } else {
                 let kind_label = kind.to_owned();
                 for (value, text_style, x, y, width, size) in [
-                    (&title, &name_style, 34.0, 10.0, 204.0, 14.0),
-                    (&kind_label, &type_style, 246.0, 14.0, 54.0, 10.0),
-                    (&footer, &type_style, 10.0, 205.0, 290.0, 10.0),
+                    (&title, &name_style, 32.0, 9.0, 184.0, 13.0),
+                    (&kind_label, &type_style, 222.0, 13.0, 54.0, 10.0),
+                    (&footer, &type_style, 10.0, 190.0, 264.0, 10.0),
                 ] {
                     let mut text_style = text_style.clone();
                     text_style.font_size = px(size * zoom).into();
-                    if size == 14.0 {
+                    if size == 13.0 {
                         text_style.font_weight = gpui::FontWeight::BOLD;
                     }
                     let line = window.text_system().shape_line(
@@ -699,11 +703,11 @@ fn relationship_card_surface(
                     ));
                 }
                 for (index, (key, name, data_type)) in rows.iter().enumerate() {
-                    let y = px((46.0 + 26.0 * index as f32) * zoom);
+                    let y = px((CARD_HEADER_HEIGHT + 2.0 + CARD_ROW_HEIGHT * index as f32) * zoom);
                     for (value, text_style, x, width) in [
-                        (key, &key_style, 10.0, 22.0),
-                        (name, &name_style, 39.0, 151.0),
-                        (data_type, &type_style, 194.0, 104.0),
+                        (key, &key_style, 9.0, 20.0),
+                        (name, &name_style, 37.0, 138.0),
+                        (data_type, &type_style, 180.0, 94.0),
                     ] {
                         if value.is_empty() {
                             continue;
@@ -746,7 +750,11 @@ fn relationship_card_surface(
                     bounds.origin,
                     gpui::size(
                         bounds.size.width,
-                        px(if zoom < 0.6 { 24.0 } else { 43.0 * zoom }),
+                        px(if zoom < 0.6 {
+                            24.0
+                        } else {
+                            CARD_HEADER_HEIGHT * zoom
+                        }),
                     ),
                 ),
                 colors.accent_muted,
@@ -755,7 +763,12 @@ fn relationship_card_surface(
                 gpui::Bounds::new(
                     gpui::point(
                         bounds.left(),
-                        bounds.top() + px(if zoom < 0.6 { 23.0 } else { 42.0 * zoom }),
+                        bounds.top()
+                            + px(if zoom < 0.6 {
+                                23.0
+                            } else {
+                                (CARD_HEADER_HEIGHT - 1.0) * zoom
+                            }),
                     ),
                     gpui::size(bounds.size.width, px(1.0)),
                 ),
@@ -765,12 +778,12 @@ fn relationship_card_surface(
                 gpui::Bounds::new(
                     bounds.origin
                         + gpui::point(
-                            px(if zoom < 0.6 { 4.0 } else { 10.0 * zoom }),
-                            px(if zoom < 0.6 { 6.0 } else { 14.0 * zoom }),
+                            px(if zoom < 0.6 { 4.0 } else { 9.0 * zoom }),
+                            px(if zoom < 0.6 { 6.0 } else { 12.0 * zoom }),
                         ),
                     gpui::size(
-                        px(if zoom < 0.6 { 10.0 } else { 15.0 * zoom }),
-                        px(if zoom < 0.6 { 10.0 } else { 15.0 * zoom }),
+                        px(if zoom < 0.6 { 10.0 } else { 14.0 * zoom }),
+                        px(if zoom < 0.6 { 10.0 } else { 14.0 * zoom }),
                     ),
                 ),
                 icon.path().into(),
@@ -781,7 +794,8 @@ fn relationship_card_surface(
             );
             let mut separators = gpui::PathBuilder::stroke(px(1.0));
             for row in 1..=row_count {
-                let y = bounds.top() + px((43.0 + row as f32 * 26.0) * zoom);
+                let y =
+                    bounds.top() + px((CARD_HEADER_HEIGHT + row as f32 * CARD_ROW_HEIGHT) * zoom);
                 separators.move_to(gpui::point(bounds.left(), y));
                 separators.line_to(gpui::point(bounds.right(), y));
             }
@@ -793,7 +807,7 @@ fn relationship_card_surface(
                 if line.width() <= width {
                     let _ = line.paint(
                         origin,
-                        px(26.0 * zoom),
+                        px(CARD_ROW_HEIGHT * zoom),
                         TextAlign::Left,
                         Some(width),
                         window,
@@ -802,12 +816,15 @@ fn relationship_card_surface(
                 } else {
                     window.with_content_mask(
                         Some(ContentMask {
-                            bounds: gpui::Bounds::new(origin, gpui::size(width, px(26.0 * zoom))),
+                            bounds: gpui::Bounds::new(
+                                origin,
+                                gpui::size(width, px(CARD_ROW_HEIGHT * zoom)),
+                            ),
                         }),
                         |window| {
                             let _ = line.paint(
                                 origin,
-                                px(26.0 * zoom),
+                                px(CARD_ROW_HEIGHT * zoom),
                                 TextAlign::Left,
                                 Some(width),
                                 window,
@@ -833,7 +850,7 @@ fn relationship_relation_list(
     canvas(
         move |bounds, window, _| {
             let mut style = window.text_style();
-            style.font_size = px(12.0).into();
+            style.font_size = px(11.0).into();
             let font_size = style.font_size.to_pixels(window.rem_size());
             let mut main_style = style.clone();
             main_style.color = colors.text;
@@ -896,10 +913,10 @@ fn relationship_relation_list(
                     shaped
                 };
                 for (line, (x, y, width)) in shaped.into_iter().zip([
-                    (12.0, 8.0, 16.0),
-                    (32.0, 8.0, 164.0),
-                    (204.0, 8.0, 114.0),
-                    (12.0, 34.0, 306.0),
+                    (8.0, 6.0, 16.0),
+                    (28.0, 6.0, 154.0),
+                    (188.0, 6.0, 104.0),
+                    (8.0, 30.0, 284.0),
                 ]) {
                     lines.push((
                         line,
@@ -1143,8 +1160,6 @@ impl Pane {
                 .into_any_element();
         };
         let mut table_cards = Vec::new();
-        let mut link_rows = Vec::new();
-        let mut link_row_count = 0_usize;
         let mut relation_rows = Vec::new();
         let mut relation_row_count = 0_usize;
         let mut detail_rows = Vec::new();
@@ -1209,7 +1224,9 @@ impl Pane {
                 for (position, &column) in all_columns.iter().take(6).enumerate() {
                     column_anchors.insert(
                         diagram.nodes[column].id.clone(),
-                        43.0 + position as f32 * 26.0 + 13.0,
+                        CARD_HEADER_HEIGHT
+                            + position as f32 * CARD_ROW_HEIGHT
+                            + CARD_ROW_HEIGHT / 2.0,
                     );
                 }
                 let card_left = 12.0 + x * zoom;
@@ -1217,7 +1234,7 @@ impl Pane {
                 if cull_cards
                     && (card_left + CARD_WIDTH * zoom < visible_left
                         || card_left > visible_right
-                        || card_top + 226.0 * zoom < visible_top
+                        || card_top + CARD_HEIGHT * zoom < visible_top
                         || card_top > visible_bottom)
                 {
                     continue;
@@ -1257,7 +1274,7 @@ impl Pane {
                         .left(px(x * zoom))
                         .top(px(y * zoom))
                         .w(px(CARD_WIDTH * zoom))
-                        .h(px(226. * zoom))
+                        .h(px(CARD_HEIGHT * zoom))
                         .flex_none()
                         .flex()
                         .flex_col()
@@ -1271,7 +1288,10 @@ impl Pane {
                             colors.subtle_border
                         })
                         .bg(if selected == Some(&table.id) {
-                            colors.active_surface
+                            colors
+                                .elevated_surface
+                                .blend(colors.active_surface)
+                                .alpha(1.0)
                         } else {
                             colors.elevated_surface
                         })
@@ -1355,83 +1375,6 @@ impl Pane {
                         ));
                     }
                 }
-                if selected.is_some_and(|id| {
-                    !(viewer.outgoing && &from.id == id
-                        || viewer.incoming && to.is_some_and(|table| &table.id == id))
-                }) {
-                    continue;
-                }
-                let row_index = link_row_count;
-                link_row_count += 1;
-                let row_top = scene_height * zoom + 40.0 + row_index as f32 * LINK_ROW_STEP;
-                if cull_cards && (row_top + 44.0 < visible_top || row_top > visible_bottom) {
-                    continue;
-                }
-                let target_name =
-                    if edge.certainty == sift_protocol::CatalogEdgeCertainty::Inaccessible {
-                        "Restricted target"
-                    } else {
-                        to.map(|table| table.qualified_name.as_str())
-                            .or(edge.referenced_path.as_deref())
-                            .unwrap_or("Unresolved target")
-                    };
-                let mapping = pair_label(&nodes, edge);
-                let constraint = nodes
-                    .get(&edge.from)
-                    .map_or("Foreign key", |node| node.name.as_str());
-                let (child, parent) = edge_cardinalities[index];
-                link_rows.push(
-                    div()
-                        .id(("relationship-link", index))
-                        .absolute()
-                        .top(px(row_index as f32 * LINK_ROW_STEP))
-                        .w_full()
-                        .h(px(44.))
-                        .px_2()
-                        .py_1()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(colors.subtle_border)
-                        .bg(colors.elevated_surface)
-                        .child(icon(IconName::Table, colors.muted_text, 12.))
-                        .child(
-                            div()
-                                .w(px(150.))
-                                .truncate()
-                                .text_xs()
-                                .child(from.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(colors.accent)
-                                .child(format!(
-                                    "{}  ─  {}",
-                                    cardinality_label(child),
-                                    cardinality_label(parent)
-                                )),
-                        )
-                        .child(
-                            div()
-                                .w(px(150.))
-                                .truncate()
-                                .text_xs()
-                                .child(target_name.to_owned()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child(format!("{constraint} · {mapping}")),
-                        ),
-                );
             }
             if let Some(table) = selected_table.filter(|_| viewer.details_open) {
                 for column in index
@@ -1460,7 +1403,7 @@ impl Pane {
                     };
                     detail_rows.push(
                         div()
-                            .h(px(28.))
+                            .h(px(26.))
                             .flex()
                             .items_center()
                             .gap_2()
@@ -1483,7 +1426,7 @@ impl Pane {
                             )
                             .child(
                                 div()
-                                    .max_w(px(96.))
+                                    .max_w(px(80.))
                                     .truncate()
                                     .text_color(colors.muted_text)
                                     .child(data_type),
@@ -1537,7 +1480,7 @@ impl Pane {
                 // Avoid stale bounds when selecting a table with a different
                 // column count; the overscan covers the header's small variance.
                 let relation_list_top =
-                    148.0 + index.columns_by_table.get(&table.id).map_or(0, Vec::len) as f32 * 28.0;
+                    120.0 + index.columns_by_table.get(&table.id).map_or(0, Vec::len) as f32 * 26.0;
                 let visible_top = -f32::from(details_offset.y) - 320.0;
                 let visible_bottom =
                     -f32::from(details_offset.y) + f32::from(details_viewport.size.height) + 320.0;
@@ -1836,41 +1779,13 @@ impl Pane {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(
-                                Button::new("relationship-incoming", "Referenced by")
-                                    .tone(if incoming {
-                                        ButtonTone::Accent
-                                    } else {
-                                        ButtonTone::Ghost
-                                    })
-                                    .on_click(cx.listener(move |pane, _, _, cx| {
-                                        if let Some(viewer) =
-                                            pane.relationship_viewers.get_mut(&item_id)
-                                        {
-                                            viewer.incoming = !viewer.incoming;
-                                            cx.notify();
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Button::new("relationship-outgoing", "References")
-                                    .tone(if outgoing {
-                                        ButtonTone::Accent
-                                    } else {
-                                        ButtonTone::Ghost
-                                    })
-                                    .on_click(cx.listener(move |pane, _, _, cx| {
-                                        if let Some(viewer) =
-                                            pane.relationship_viewers.get_mut(&item_id)
-                                        {
-                                            viewer.outgoing = !viewer.outgoing;
-                                            cx.notify();
-                                        }
-                                    })),
-                            )
                             .child(div().w(px(180.)).flex_none().child(viewer.search_input.clone()))
                             .child(div().flex_1())
                             .child(div().flex_none().text_xs().text_color(colors.muted_text).child(summary))
+                            .child(Button::new("relationship-details-toggle", if viewer.details_open { "Hide details" } else { "Details" })
+                                .debug_selector("relationship-details-toggle")
+                                .tone(if viewer.details_open { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                                .on_click(cx.listener(move |pane, _, _, cx| pane.toggle_relationship_details(item_id, cx))))
                             .children((self.expanded_relationship_item != Some(item_id)).then(|| {
                                 IconButton::new("relationship-expand", IconName::Maximize, "Open large relationship view")
                                     .debug_selector("relationship-expand")
@@ -1980,9 +1895,7 @@ impl Pane {
                             .gap_3()
                             .child(div().relative().w(px(SCENE_WIDTH * zoom)).h(px(scene_height * zoom))
                                 .child(edge_layer)
-                                .children(table_cards))
-                            .child(SectionLabel::new("FOREIGN KEYS"))
-                            .child(div().relative().w_full().h(px(link_row_count as f32 * LINK_ROW_STEP)).children(link_rows)))
+                                .children(table_cards)))
                         .child(div().absolute().right(px(16.)).bottom(px(16.))
                             .h(px(30.)).px_1().flex().items_center().gap_1()
                             .rounded_sm().border_1().border_color(colors.strong_border)
@@ -1995,16 +1908,6 @@ impl Pane {
                             .child(div().h(px(16.)).w(px(1.)).mx_1().bg(colors.subtle_border))
                             .child(Button::new("relationship-fit-width", if viewer.fit_active { "Actual size" } else { "Fit graph" }).debug_selector("relationship-fit-width").tone(ButtonTone::Ghost)
                                 .on_click(cx.listener(move |pane, _, _, cx| pane.fit_relationship_width(item_id, cx))))
-                            .child(Button::new("relationship-details-toggle", if viewer.details_open { "Hide details" } else { "Details" })
-                                .tone(ButtonTone::Ghost)
-                                .on_click(cx.listener(move |pane, _, _, cx| {
-                                    if let Some(viewer) = pane.relationship_viewers.get_mut(&item_id) {
-                                        viewer.details_open = !viewer.details_open;
-                                        viewer.fit_active = false;
-                                        viewer.auto_fit_pending = false;
-                                        cx.notify();
-                                    }
-                                })))
                             .child(div().h(px(16.)).w(px(1.)).mx_1().bg(colors.subtle_border))
                             .child(Button::new("relationship-depth-less", "−").tone(ButtonTone::Ghost)
                                 .disabled(depth <= 1 || loading)
@@ -2020,7 +1923,7 @@ impl Pane {
                         div()
                             .id(("relationship-details", item_id as usize))
                             .debug_selector(|| "relationship-details".into())
-                            .w(px(330.))
+                            .w(px(300.))
                             .flex_none()
                             .min_h_0()
                             .overflow_y_scroll()
@@ -2050,15 +1953,19 @@ impl Pane {
                             .bg(colors.panel)
                             .child(
                                 div()
-                                    .px_3().pt_3().pb_2()
+                                    .px_2().pt_2().pb_1()
                                     .flex().items_center().gap_2()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(icon(object_icon(selected_kind), colors.accent, 14.))
                                     .child(div().flex_1().min_w_0().flex().flex_col()
                                         .child(div().truncate().child(selected_title))
-                                        .child(div().text_xs().text_color(colors.muted_text).font_weight(gpui::FontWeight::NORMAL).child(selected_schema))),
+                                        .child(div().text_xs().text_color(colors.muted_text).font_weight(gpui::FontWeight::NORMAL).child(selected_schema)))
+                                    .child(IconButton::new("relationship-close-details", IconName::CloseRightPane, "Hide details")
+                                        .debug_selector("relationship-close-details")
+                                        .square(px(22.)).icon_size(12.)
+                                        .on_click(cx.listener(move |pane, _, _, cx| pane.toggle_relationship_details(item_id, cx)))),
                             )
-                            .child(div().px_3().pb_2().flex().gap_1()
+                            .child(div().px_2().pb_1().flex().gap_1()
                                 .children(selected_source.clone().map(|source| {
                                     Button::new("relationship-open-table", "Open table")
                                         .tone(ButtonTone::Neutral)
@@ -2083,20 +1990,33 @@ impl Pane {
                                 })))
                             .child(
                                 div()
-                                    .px_3()
+                                    .px_2()
                                     .text_xs()
                                     .text_color(colors.muted_text)
                                     .child("COLUMNS"),
                             )
-                            .child(div().px_3().text_xs().text_color(colors.muted_text).child("● required   ○ nullable   ? unknown"))
-                            .child(div().px_3().children(detail_rows))
-                            .child(
-                                div()
-                                    .p_3()
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child("RELATIONSHIPS"),
-                            )
+                            .child(div().px_2().text_xs().text_color(colors.muted_text).child("● required   ○ nullable   ? unknown"))
+                            .child(div().px_2().children(detail_rows))
+                            .child(div().px_2().py_1().flex().items_center().gap_1()
+                                .child(div().flex_1().text_xs().text_color(colors.muted_text).child("RELATIONSHIPS"))
+                                .child(Button::new("relationship-incoming", "Incoming")
+                                    .debug_selector("relationship-incoming")
+                                    .tone(if incoming { ButtonTone::Accent } else { ButtonTone::Ghost })
+                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                        if let Some(viewer) = pane.relationship_viewers.get_mut(&item_id) {
+                                            viewer.incoming = !viewer.incoming;
+                                            cx.notify();
+                                        }
+                                    })))
+                                .child(Button::new("relationship-outgoing", "Outgoing")
+                                    .debug_selector("relationship-outgoing")
+                                    .tone(if outgoing { ButtonTone::Accent } else { ButtonTone::Ghost })
+                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                        if let Some(viewer) = pane.relationship_viewers.get_mut(&item_id) {
+                                            viewer.outgoing = !viewer.outgoing;
+                                            cx.notify();
+                                        }
+                                    }))))
                             .child(relationship_relation_list(
                                 relation_rows,
                                 relation_row_count,
@@ -2104,11 +2024,20 @@ impl Pane {
                                 viewer.relation_text_cache.clone(),
                                 viewer.details_scroll.clone(),
                             ))
-                            .child(div().p_3().text_xs().text_color(colors.muted_text).child("INDEXES · CONSTRAINTS · TRIGGERS"))
-                            .child(div().px_3().children(auxiliary_rows)),
+                            .child(div().p_2().text_xs().text_color(colors.muted_text).child("INDEXES · CONSTRAINTS · TRIGGERS"))
+                            .child(div().px_2().children(auxiliary_rows)),
                     )),
             )
             .into_any_element()
+    }
+
+    fn toggle_relationship_details(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        if let Some(viewer) = self.relationship_viewers.get_mut(&item_id) {
+            viewer.details_open = !viewer.details_open;
+            viewer.fit_active = false;
+            viewer.auto_fit_pending = false;
+            cx.notify();
+        }
     }
 
     fn change_relationship_depth(&mut self, item_id: u64, delta: i8, cx: &mut Context<Self>) {
@@ -2151,7 +2080,7 @@ impl Pane {
             if width <= 0.0 {
                 return;
             }
-            let available_width = width + if viewer.details_open { 330.0 } else { 0.0 };
+            let available_width = width + if viewer.details_open { 300.0 } else { 0.0 };
             let zoom = relationship_fit_zoom(
                 available_width,
                 f32::from(bounds.height),
@@ -2243,8 +2172,8 @@ mod cardinality_tests {
 
     #[test]
     fn graph_fit_uses_narrower_of_width_and_height() {
-        assert_eq!(relationship_fit_zoom(842.0, 800.0, 400.0), 0.5);
-        assert_eq!(relationship_fit_zoom(1620.0, 432.0, 800.0), 0.5);
+        assert_eq!(relationship_fit_zoom(768.0, 800.0, 400.0), 0.5);
+        assert_eq!(relationship_fit_zoom(1472.0, 432.0, 800.0), 0.5);
         assert_eq!(relationship_fit_zoom(200.0, 200.0, 800.0), 0.2);
     }
 

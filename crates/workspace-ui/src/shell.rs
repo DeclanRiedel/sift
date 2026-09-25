@@ -47377,6 +47377,7 @@ mod tests {
         let more = cx.debug_bounds("relationship-depth-more").unwrap();
         assert_eq!(more.top(), fit.top());
         assert!(cx.debug_bounds("relationship-details").is_none());
+        assert!(cx.debug_bounds("relationship-incoming").is_none());
         cx.simulate_click(fit.center(), Modifiers::default());
         cx.run_until_parked();
         if cx.debug_bounds("relationship-details").is_some() {
@@ -47388,12 +47389,22 @@ mod tests {
         let fitted_viewport = cx.debug_bounds("relationship-cards").unwrap();
         workspace.read_with(&cx, |shell, cx| {
             let viewer = &shell.panes[0].read(cx).relationship_viewers[&item_id];
-            assert!(1620.0 * viewer.zoom <= f32::from(fitted_viewport.size.width) - 24.0);
+            assert!(1472.0 * viewer.zoom <= f32::from(fitted_viewport.size.width) - 24.0);
         });
         let actual_size = cx.debug_bounds("relationship-fit-width").unwrap();
         cx.simulate_click(actual_size.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("relationship-details").is_some());
+        let close_details = cx.debug_bounds("relationship-close-details").unwrap();
+        cx.simulate_click(close_details.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("relationship-details").is_none());
+        let show_details = cx.debug_bounds("relationship-details-toggle").unwrap();
+        cx.simulate_click(show_details.center(), Modifiers::default());
+        cx.run_until_parked();
+        let details = cx.debug_bounds("relationship-details").unwrap();
+        assert_eq!(details.size.width, px(300.));
+        assert!(cx.debug_bounds("relationship-incoming").is_some());
         let more = cx.debug_bounds("relationship-depth-more").unwrap();
         cx.simulate_click(more.center(), Modifiers::default());
         assert!(matches!(
