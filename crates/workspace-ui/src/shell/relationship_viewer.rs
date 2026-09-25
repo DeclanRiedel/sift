@@ -523,7 +523,7 @@ fn relationship_port_key(
 }
 
 fn relationship_port_anchor(anchor: f32, index: usize, count: usize) -> f32 {
-    let offset = (index as f32 - (count.saturating_sub(1)) as f32 / 2.0) * 10.0;
+    let offset = (index as f32 - (count.saturating_sub(1)) as f32 / 2.0) * 14.0;
     (anchor + offset).clamp(CARD_HEADER_HEIGHT + 8.0, CARD_HEIGHT - 8.0)
 }
 
@@ -573,6 +573,18 @@ fn draw_relationship_wire(
         gpui::point(lane_x, end.y),
     );
     path.line_to(end);
+}
+
+fn draw_relationship_lead(
+    path: &mut gpui::PathBuilder,
+    card_edge: gpui::Point<gpui::Pixels>,
+    mark: gpui::Point<gpui::Pixels>,
+) {
+    let elbow_x = (card_edge.x + mark.x) / 2.0;
+    path.move_to(card_edge);
+    path.line_to(gpui::point(elbow_x, card_edge.y));
+    path.line_to(gpui::point(elbow_x, mark.y));
+    path.line_to(mark);
 }
 
 fn draw_cardinality_mark(
@@ -1385,6 +1397,8 @@ impl Pane {
                                 .and_then(|pair| column_anchors.get(&pair.to))
                                 .copied()
                                 .unwrap_or(CARD_MIDPOINT_Y),
+                            0.0_f32,
+                            0.0_f32,
                             route_offset,
                             edge_cardinalities[index],
                             selected.is_some_and(|id| id == &from.id || id == &to.id),
@@ -1402,15 +1416,20 @@ impl Pane {
                     .or_insert(0_usize) += 1;
             }
             let mut port_indices = HashMap::new();
-            for (from, to, from_anchor, to_anchor, ..) in &mut scene_edges {
+            for (from, to, from_anchor, to_anchor, from_mark_offset, to_mark_offset, ..) in
+                &mut scene_edges
+            {
                 let from_key = relationship_port_key(*from, *from_anchor, from.0 <= to.0);
                 let from_index = port_indices.entry(from_key).or_insert(0_usize);
-                *from_anchor =
-                    relationship_port_anchor(*from_anchor, *from_index, port_counts[&from_key]);
+                *from_mark_offset =
+                    relationship_port_anchor(*from_anchor, *from_index, port_counts[&from_key])
+                        - *from_anchor;
                 *from_index += 1;
                 let to_key = relationship_port_key(*to, *to_anchor, from.0 >= to.0);
                 let to_index = port_indices.entry(to_key).or_insert(0_usize);
-                *to_anchor = relationship_port_anchor(*to_anchor, *to_index, port_counts[&to_key]);
+                *to_mark_offset =
+                    relationship_port_anchor(*to_anchor, *to_index, port_counts[&to_key])
+                        - *to_anchor;
                 *to_index += 1;
             }
             if let Some(table) = selected_table.filter(|_| viewer.details_open) {
@@ -1666,6 +1685,8 @@ impl Pane {
                     (to_x, to_y),
                     from_anchor,
                     to_anchor,
+                    from_mark_offset,
+                    to_mark_offset,
                     route_offset,
                     (child, parent),
                     highlighted,
@@ -1695,12 +1716,16 @@ impl Pane {
                     let end = bounds.origin
                         + gpui::point(px(end_x * zoom), px((*to_y + *to_anchor) * zoom));
                     let end_direction = if from_x == to_x { 1.0 } else { -direction };
-                    let wire_start = start
+                    let start_mark = start
+                        + gpui::point(px(8.0 * direction * zoom), px(*from_mark_offset * zoom));
+                    let end_mark = end
+                        + gpui::point(px(8.0 * end_direction * zoom), px(*to_mark_offset * zoom));
+                    let wire_start = start_mark
                         + gpui::point(
                             px(cardinality_wire_offset(*child) * direction * zoom),
                             px(0.),
                         );
-                    let wire_end = end
+                    let wire_end = end_mark
                         + gpui::point(
                             px(cardinality_wire_offset(*parent) * end_direction * zoom),
                             px(0.),
@@ -1724,9 +1749,11 @@ impl Pane {
                             continue;
                         }
                     }
+                    draw_relationship_lead(path, start, start_mark);
+                    draw_relationship_lead(path, end, end_mark);
                     draw_relationship_wire(path, wire_start, wire_end, lane_x);
-                    draw_cardinality_mark(path, start, direction, *child, zoom);
-                    draw_cardinality_mark(path, end, end_direction, *parent, zoom);
+                    draw_cardinality_mark(path, start_mark, direction, *child, zoom);
+                    draw_cardinality_mark(path, end_mark, end_direction, *parent, zoom);
                 }
                 if let Ok(path) = muted_path.build() {
                     window.paint_path(path, colors.muted_text);
@@ -2212,7 +2239,7 @@ mod cardinality_tests {
         let anchors = (0..3)
             .map(|index| relationship_port_anchor(99.0, index, 3))
             .collect::<Vec<_>>();
-        assert_eq!(anchors, [89.0, 99.0, 109.0]);
+        assert_eq!(anchors, [85.0, 99.0, 113.0]);
         assert_eq!(relationship_port_anchor(99.0, 0, 1), 99.0);
         assert_ne!(
             relationship_port_key((1.0, 2.0), 99.0, true),
