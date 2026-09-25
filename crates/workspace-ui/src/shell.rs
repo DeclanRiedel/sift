@@ -47378,6 +47378,14 @@ mod tests {
         assert_eq!(more.top(), fit.top());
         assert!(cx.debug_bounds("relationship-details").is_none());
         assert!(cx.debug_bounds("relationship-incoming").is_none());
+        let initially_fitted = workspace.read_with(&cx, |shell, cx| {
+            shell.panes[0].read(cx).relationship_viewers[&item_id].fit_active
+        });
+        if initially_fitted {
+            cx.simulate_click(fit.center(), Modifiers::default());
+            cx.run_until_parked();
+        }
+        let fit = cx.debug_bounds("relationship-fit-width").unwrap();
         cx.simulate_click(fit.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("relationship-details").is_none());

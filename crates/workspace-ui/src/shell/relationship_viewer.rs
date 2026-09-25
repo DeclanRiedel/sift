@@ -58,7 +58,7 @@ pub(super) struct RelationshipViewerState {
     pub scope_picker_open: bool,
     pub zoom: f32,
     details_open: bool,
-    fit_active: bool,
+    pub(super) fit_active: bool,
     auto_fit_pending: bool,
     pub scroll: ScrollHandle,
     details_scroll: ScrollHandle,
@@ -507,6 +507,24 @@ fn scroll_needs_rebuild(
 ) -> bool {
     f32::from(current.x - rendered.x).abs() >= threshold
         || f32::from(current.y - rendered.y).abs() >= threshold
+}
+
+fn relationship_port_key(
+    position: (f32, f32),
+    anchor: f32,
+    right_side: bool,
+) -> (u32, u32, u32, bool) {
+    (
+        position.0.to_bits(),
+        position.1.to_bits(),
+        anchor.to_bits(),
+        right_side,
+    )
+}
+
+fn relationship_port_anchor(anchor: f32, index: usize, count: usize) -> f32 {
+    let offset = (index as f32 - (count.saturating_sub(1)) as f32 / 2.0) * 10.0;
+    (anchor + offset).clamp(CARD_HEADER_HEIGHT + 8.0, CARD_HEIGHT - 8.0)
 }
 
 fn draw_relationship_wire(
@@ -1374,6 +1392,27 @@ impl Pane {
                     }
                 }
             }
+            let mut port_counts = HashMap::new();
+            for (from, to, from_anchor, to_anchor, ..) in &scene_edges {
+                *port_counts
+                    .entry(relationship_port_key(*from, *from_anchor, from.0 <= to.0))
+                    .or_insert(0_usize) += 1;
+                *port_counts
+                    .entry(relationship_port_key(*to, *to_anchor, from.0 >= to.0))
+                    .or_insert(0_usize) += 1;
+            }
+            let mut port_indices = HashMap::new();
+            for (from, to, from_anchor, to_anchor, ..) in &mut scene_edges {
+                let from_key = relationship_port_key(*from, *from_anchor, from.0 <= to.0);
+                let from_index = port_indices.entry(from_key).or_insert(0_usize);
+                *from_anchor =
+                    relationship_port_anchor(*from_anchor, *from_index, port_counts[&from_key]);
+                *from_index += 1;
+                let to_key = relationship_port_key(*to, *to_anchor, from.0 >= to.0);
+                let to_index = port_indices.entry(to_key).or_insert(0_usize);
+                *to_anchor = relationship_port_anchor(*to_anchor, *to_index, port_counts[&to_key]);
+                *to_index += 1;
+            }
             if let Some(table) = selected_table.filter(|_| viewer.details_open) {
                 for column in index
                     .columns_by_table
@@ -2166,6 +2205,19 @@ mod cardinality_tests {
         assert_eq!(relationship_fit_zoom(768.0, 800.0, 400.0), 0.5);
         assert_eq!(relationship_fit_zoom(1472.0, 432.0, 800.0), 0.5);
         assert_eq!(relationship_fit_zoom(200.0, 200.0, 800.0), 0.2);
+    }
+
+    #[test]
+    fn colliding_relationship_ports_spread_around_column_anchor() {
+        let anchors = (0..3)
+            .map(|index| relationship_port_anchor(99.0, index, 3))
+            .collect::<Vec<_>>();
+        assert_eq!(anchors, [89.0, 99.0, 109.0]);
+        assert_eq!(relationship_port_anchor(99.0, 0, 1), 99.0);
+        assert_ne!(
+            relationship_port_key((1.0, 2.0), 99.0, true),
+            relationship_port_key((1.0, 2.0), 99.0, false)
+        );
     }
 
     #[test]
