@@ -13,10 +13,11 @@ claims.
       The graph now keeps SQLite foreign keys within their source schema,
       adds catalog-proven trigger targets, parsed trigger-body dependencies,
       parsed direct view reads, and FTS5 external-content dependencies. Missing
-      or ambiguous targets stay unresolved. Object-level gap markers identify
-      omitted definitions. Expression dependencies, unsupported virtual-table
-      modules, and unparsed trigger/view SQL remain explicit coverage gaps; the
-      graph is still partial.
+      or ambiguous targets stay unresolved. Parsed CHECK and partial-index
+      predicates link to referenced columns. Object-level gap markers identify
+      omitted definitions. Generated-column and expression-index dependencies,
+      unsupported virtual-table modules, table functions in views, and unparsed
+      trigger/view SQL remain explicit coverage gaps; the graph is still partial.
 - [ ] Add schema snapshots, diff, migration preview/apply, and designer changes
       only for DDL shapes the native model can round-trip. Reject lossy changes.
 - [x] Improve CHECK metadata coverage while stored native SQL remains
