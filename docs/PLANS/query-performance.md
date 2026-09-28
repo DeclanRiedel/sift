@@ -110,6 +110,22 @@ See Microsoft's [`SET STATISTICS XML` permission and output contract](https://le
   parameterized capture, oversized-result refusal, and restricted-login
   `SHOWPLAN` grant/revoke acceptance pass.
 - [ ] SQLite plan and timing; capability-gated deeper runtime counters.
+
+### SQLite measured-read profile design
+
+Use the existing audited Profile operation and dedicated connection. For SQLite,
+capture `EXPLAIN QUERY PLAN` as an **estimated** plan, then execute exactly one
+validated read in a read-only transaction on the same disposable connection.
+Fully drain or refuse the result at the profile's row/byte limits. Report
+server-observed dispatch-to-consumption time and completed row count separately
+from the estimated plan. Native per-node rows, cost, execution clocks, and
+statement-status counters remain unavailable: the `Driver` trait exposes none
+of them, and estimated plan nodes must not be relabelled as actual. Reuse the
+Profile timeout, cancel token, per-query resource reservation, permission
+recheck, source disconnect cancellation, and bounded connection cleanup. The
+desktop's existing Profile action labels SQLite evidence explicitly. Real-file
+HTTP tests must prove a successful parameterized read, a write refusal, and a
+bounded-result refusal without changing the source database.
 - [~] Raw JSON and a normalized plan tree are available; explicit
   estimate/actual deltas and node links remain open.
 - [ ] Evidence-based scans/sorts/spills findings without double-counting nested
