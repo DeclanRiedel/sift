@@ -2360,12 +2360,27 @@ recovery because their context cannot be isolated by tenant. Imported schedules
 and projections are disabled, repository credentials removed and active work
 made terminal. Opaque extension storage requires a future migration contract.
 
+The operator selects `backup restore-tenant --tenant-id ID`; preview is the
+default and requires the stopped-server maintenance lock. An existing tenant
+must match the source name and kind. The recovered subtree includes memberships,
+connection profiles and credentials, rooms and documents, saved queries and
+scoped history, workspaces and checkpoints, DDL, run definitions and history,
+transfer recipes, plans, catalog snapshots, and vaults. Filesystem projections
+stay disabled. Artifacts, projection reconciliation state, repository credentials,
+unscoped principal history, and external database state are excluded. No
+scheduler resumes imported work automatically.
+
 Portable connection/vault secrets are copied into a staged destination store
 under fresh handles; source authentication keys are never imported. Preview
 validates the full staged result with audit-only destination writes. Apply
 installs secrets before metadata using the existing recoverable journal.
-Cross-instance identity migration and external database DR orchestration remain
-separate work. Details and exclusions: [tenant recovery design](PLANS/tenant-selective-restore.md).
+File-secret archives and destinations are supported; memory mode requires no
+selected secret references. Old unreferenced destination secrets remain for
+separate garbage collection. Apply first creates an encrypted rescue backup.
+Tests cover two tenants sharing a principal, scoped recovery, unchanged unrelated
+authentication and secrets, identity/ID/FK/schema refusal, secret remapping,
+and rescue-journal recovery. Cross-instance identity migration and external
+database DR orchestration remain separate work.
 
 ## ADR-060 — Private Immutable Benchmark Snapshots
 
