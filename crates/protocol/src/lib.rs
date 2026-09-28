@@ -39,6 +39,8 @@ pub mod plan;
 pub use performance::*;
 pub mod policy;
 pub mod process;
+pub mod query_store;
+pub use query_store::{QueryStorePlan, QueryStoreReport, QueryStoreState};
 pub mod provider;
 pub use maintenance::{
     PostgresMaintenanceAction, PostgresMaintenanceReport, PostgresMaintenanceRequest,

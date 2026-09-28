@@ -235,6 +235,25 @@ pub(super) async fn list_processes(
     Ok(Json(processes))
 }
 
+pub(super) async fn read_query_store(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+) -> ApiResult<Json<sift_protocol::QueryStoreReport>> {
+    let _guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(session)?.map(|id| id.0);
+    let report = finish_operation_as(
+        &state.sessions,
+        Operation::ReadQueryStore {
+            session,
+            connection,
+        },
+        crate::query_store::read(&state.sessions, session, connection).await,
+        actor,
+        |report| Some(report.plans.len() as i64),
+    )?;
+    Ok(Json(report))
+}
+
 pub(super) async fn postgres_maintenance(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

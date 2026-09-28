@@ -236,6 +236,10 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         BulkInsert if engine != Some(Engine::SqlServer) => {
             Some("bulk insert is only supported by SQL Server")
         }
+        ReadQueryStore if !has_connection => Some("connection context required"),
+        ReadQueryStore if engine != Some(Engine::SqlServer) => {
+            Some("Query Store is only supported by SQL Server")
+        }
         CloseConnection
         | PingConnection
         | RefreshSchema
@@ -271,6 +275,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | BenchmarkQuery
         | CancelBenchmark
         | ListProcesses
+        | ReadQueryStore
         | KillProcess
         | ImportCsv
         | BulkInsert
@@ -317,6 +322,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | BenchmarkQuery
         | CancelBenchmark
         | ListProcesses
+        | ReadQueryStore
         | KillProcess
         | ImportCsv
         | BulkInsert

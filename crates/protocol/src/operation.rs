@@ -583,6 +583,10 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
     },
+    ReadQueryStore {
+        session: SessionId,
+        connection: ConnectionId,
+    },
     KillProcess {
         session: SessionId,
         connection: ConnectionId,
@@ -817,6 +821,7 @@ impl Operation {
             Self::BenchmarkQuery { .. } => OperationKind::BenchmarkQuery,
             Self::CancelBenchmark { .. } => OperationKind::CancelBenchmark,
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
+            Self::ReadQueryStore { .. } => OperationKind::ReadQueryStore,
             Self::KillProcess { .. } => OperationKind::KillProcess,
             Self::ImportCsv { .. } => OperationKind::ImportCsv,
             Self::BulkInsert { .. } => OperationKind::BulkInsert,
@@ -1243,6 +1248,9 @@ impl Operation {
             }
             Operation::ListProcesses { connection, .. } => {
                 summary("list", "process", Some(connection.0 as i64))
+            }
+            Operation::ReadQueryStore { connection, .. } => {
+                summary("read", "query_store", Some(connection.0 as i64))
             }
             Operation::KillProcess { request, .. } => {
                 summary("kill", "process", Some(request.process_id))

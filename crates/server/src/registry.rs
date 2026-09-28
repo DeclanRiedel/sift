@@ -230,6 +230,7 @@ impl BuiltinProviderAdapter {
                     "driver.cancel@1",
                     "driver.bulk@1",
                     "driver.process-control@1",
+                    "driver.query-store@1",
                     "driver.explain@1",
                 ],
             ),
@@ -602,6 +603,7 @@ impl RuntimeDriver {
             OperationKind::Listen => "driver.notifications@1",
             OperationKind::Explain => "driver.explain@1",
             OperationKind::ListProcesses | OperationKind::KillProcess => "driver.process-control@1",
+            OperationKind::ReadQueryStore => "driver.query-store@1",
             OperationKind::GenerateDdl
             | OperationKind::Complete
             | OperationKind::OpenSemanticDocument

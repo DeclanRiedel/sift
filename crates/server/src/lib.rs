@@ -43,6 +43,7 @@ pub mod plan;
 pub mod postgres_backup;
 pub mod process;
 pub mod process_alerts;
+pub mod query_store;
 pub mod rate_limit;
 pub mod registry;
 pub mod remote_agent;
