@@ -1,4 +1,4 @@
-use sift_protocol::DatabaseProcess;
+use sift_protocol::{DatabaseDeadlockEvent, DatabaseProcess};
 
 use super::RequestState;
 
@@ -7,6 +7,8 @@ pub(super) enum DatabaseMonitorView {
     #[default]
     Activity,
     Locks,
+    Deadlocks,
+    History,
     Alerts,
 }
 
@@ -30,7 +32,9 @@ impl DatabaseAlertKind {
 #[derive(Debug, Default)]
 pub(super) struct DatabaseMonitorState {
     processes: Vec<DatabaseProcess>,
+    deadlocks: Vec<DatabaseDeadlockEvent>,
     request: RequestState,
+    deadlock_request: RequestState,
     selected: Option<i64>,
     view: DatabaseMonitorView,
     alerts: std::collections::HashMap<i64, DatabaseAlertKind>,
@@ -39,6 +43,34 @@ pub(super) struct DatabaseMonitorState {
 impl DatabaseMonitorState {
     pub(super) fn request(&self) -> &RequestState {
         &self.request
+    }
+
+    pub(super) fn deadlock_request(&self) -> &RequestState {
+        &self.deadlock_request
+    }
+
+    pub(super) fn deadlocks(&self) -> &[DatabaseDeadlockEvent] {
+        &self.deadlocks
+    }
+
+    pub(super) fn start_deadlocks(&mut self) {
+        self.deadlocks.clear();
+        self.deadlock_request.start();
+    }
+
+    pub(super) fn fail_deadlocks(&mut self, message: impl Into<String>) {
+        self.deadlocks.clear();
+        self.deadlock_request.fail(message);
+    }
+
+    pub(super) fn finish_deadlocks(&mut self, result: Result<Vec<DatabaseDeadlockEvent>, String>) {
+        match result {
+            Ok(events) => {
+                self.deadlocks = events;
+                self.deadlock_request.succeed();
+            }
+            Err(message) => self.deadlock_request.fail(message),
+        }
     }
 
     pub(super) fn selected(&self) -> Option<i64> {
@@ -54,6 +86,8 @@ impl DatabaseMonitorState {
         if self.selected.is_some_and(|selected| match view {
             DatabaseMonitorView::Activity => false,
             DatabaseMonitorView::Locks => !self.lock_process_ids().contains(&selected),
+            DatabaseMonitorView::Deadlocks => !self.deadlock_process_ids().contains(&selected),
+            DatabaseMonitorView::History => true,
             DatabaseMonitorView::Alerts => !self.alerts.contains_key(&selected),
         }) {
             self.selected = None;
@@ -64,6 +98,8 @@ impl DatabaseMonitorState {
         let included = match self.view {
             DatabaseMonitorView::Activity => return self.processes.clone(),
             DatabaseMonitorView::Locks => self.lock_process_ids(),
+            DatabaseMonitorView::Deadlocks => self.deadlock_process_ids(),
+            DatabaseMonitorView::History => return Vec::new(),
             DatabaseMonitorView::Alerts => self.alerts.keys().copied().collect(),
         };
         self.processes
@@ -81,6 +117,10 @@ impl DatabaseMonitorState {
         self.alerts.len()
     }
 
+    pub(super) fn deadlock_process_count(&self) -> usize {
+        self.deadlock_process_ids().len()
+    }
+
     pub(super) fn alert(&self, process_id: i64) -> Option<DatabaseAlertKind> {
         self.alerts.get(&process_id).copied()
     }
@@ -92,6 +132,13 @@ impl DatabaseMonitorState {
             .flat_map(|process| {
                 std::iter::once(process.process_id).chain(process.blocked_by.iter().copied())
             })
+            .collect()
+    }
+
+    fn deadlock_process_ids(&self) -> std::collections::HashSet<i64> {
+        self.alerts
+            .iter()
+            .filter_map(|(id, kind)| (*kind == DatabaseAlertKind::DeadlockRisk).then_some(*id))
             .collect()
     }
 
@@ -115,6 +162,7 @@ impl DatabaseMonitorState {
                 }
                 self.alerts = classify_alerts(&processes, chrono::Utc::now());
                 self.processes = processes;
+                self.set_view(self.view);
                 self.request.succeed();
             }
             Err(message) => self.request.fail(message),
@@ -216,6 +264,9 @@ mod tests {
             state_changed_at: None,
             wait: None,
             blocked_by,
+            lock_wait: None,
+            held_locks: Vec::new(),
+            held_locks_truncated: false,
         }
     }
 
@@ -237,6 +288,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
+        monitor.toggle(1);
+        monitor.finish_loading(Ok(vec![process(1, vec![]), process(2, vec![])]));
+        assert_eq!(monitor.selected(), None);
     }
 
     #[test]
@@ -257,5 +311,25 @@ mod tests {
         assert_eq!(alerts.get(&11), Some(&DatabaseAlertKind::IdleInTransaction));
         assert_eq!(alerts.get(&12), Some(&DatabaseAlertKind::DeadlockRisk));
         assert_eq!(alerts.get(&13), Some(&DatabaseAlertKind::DeadlockRisk));
+    }
+
+    #[test]
+    fn deadlock_view_contains_only_cycle_participants() {
+        let mut monitor = DatabaseMonitorState::default();
+        monitor.finish_loading(Ok(vec![
+            process(1, vec![2]),
+            process(2, vec![1]),
+            process(3, vec![2]),
+        ]));
+        monitor.set_view(DatabaseMonitorView::Deadlocks);
+        assert_eq!(monitor.deadlock_process_count(), 2);
+        assert_eq!(
+            monitor
+                .visible_processes()
+                .iter()
+                .map(|process| process.process_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 }

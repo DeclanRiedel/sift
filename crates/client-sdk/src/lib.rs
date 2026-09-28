@@ -183,6 +183,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listPlanCaptures",
     "listPrincipalKeys",
     "listProcesses",
+    "listDeadlocks",
     "watchProcessAlerts",
     "listProviders",
     "listRoomResults",
@@ -385,10 +386,10 @@ use sift_protocol::{
     CancelRequest, ChangePasswordRequest, ConnectionId, ConnectionInfo, ConnectionPolicy,
     CreateGithubAllowlistRequest, CreateTenantInvitationRequest, CsvImportRequest,
     CsvImportResponse, CursorId, CursorPage, DataSearchRequest, DataSearchResponse,
-    DatabaseProcess, DdlSource, DdlSourceId, DdlSourceModel, DisconnectManagedConnectionsResponse,
-    EditPlan, EndTransactionRequest, ExecuteRequestHttp, ExecuteResponse, ExpectedRevision,
-    ExplainRequest, ExplainResponse, ExtensionDescriptor, ExtensionDiagnostics,
-    ExtensionGrantRequest, ExtensionPurgeResponse, ExtensionSelectionRequest,
+    DatabaseDeadlockEvent, DatabaseProcess, DdlSource, DdlSourceId, DdlSourceModel,
+    DisconnectManagedConnectionsResponse, EditPlan, EndTransactionRequest, ExecuteRequestHttp,
+    ExecuteResponse, ExpectedRevision, ExplainRequest, ExplainResponse, ExtensionDescriptor,
+    ExtensionDiagnostics, ExtensionGrantRequest, ExtensionPurgeResponse, ExtensionSelectionRequest,
     ExtensionTenantSelectionRequest, GithubNativeAuthExchangeRequest,
     GithubNativeAuthStartResponse, GovernedToolDescriptor, HandshakeClientKind, HandshakeRequest,
     HandshakeResponse, Health, HostingRepositoryCandidate, HostingRepositorySummary,
@@ -1597,6 +1598,17 @@ impl Client {
     ) -> Result<Vec<DatabaseProcess>> {
         self.get(&format!(
             "/v1/sessions/{session}/connections/{connection}/processes"
+        ))
+        .await
+    }
+
+    pub async fn list_deadlocks(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<Vec<DatabaseDeadlockEvent>> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/deadlocks"
         ))
         .await
     }

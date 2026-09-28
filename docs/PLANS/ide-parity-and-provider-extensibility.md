@@ -239,15 +239,26 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Query duration and state
 - [x] PostgreSQL activity metadata
 - [x] SQL Server request metadata
-- [ ] Lock manager UI
+- [x] Lock manager UI (waiting resource, mode, and wait age plus a bounded
+      held-lock inventory in the process monitor)
 - [x] Blocking-chain visualization
-- [ ] Deadlock inspection
+- [~] Deadlock inspection (live Cycles view and bounded SQL Server
+      `system_health` history; PostgreSQL historical events remain)
 - [x] Long-running-query alerts (bounded API subscriptions)
 - [x] Idle-in-transaction alerts (bounded API subscriptions)
 - [ ] Server dashboard
 - [x] Query-performance history (scoped hourly API summaries)
 - [~] Query performance workbench: profiling, repeatable benchmarks, saved runs
   and comparisons — [implementation checklist](query-performance.md)
+
+Historical deadlock design: read at most 50 recent `xml_deadlock_report` events
+from SQL Server's `system_health` ring buffer, with an explicit permission error
+when the connection cannot read it. Project only timestamp, victim session,
+participating sessions, and bounded wait-resource details; do not return raw
+graph XML or statement text. This is retained ring-buffer history, not a durable
+archive. PostgreSQL exposes current waits and a deadlock count through catalog
+views; event history requires an operator-supplied log source and remains a
+separate design. The history read is a distinct audited operation.
 
 ### Security and administration
 

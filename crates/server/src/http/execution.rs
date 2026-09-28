@@ -235,6 +235,22 @@ pub(super) async fn list_processes(
     Ok(Json(processes))
 }
 
+pub(super) async fn list_deadlocks(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+) -> ApiResult<Json<Vec<sift_protocol::DatabaseDeadlockEvent>>> {
+    let events = finish_operation(
+        &state.sessions,
+        Operation::ListDeadlocks {
+            session,
+            connection,
+        },
+        crate::process::list_deadlocks(&state.sessions, session, connection).await,
+        |events| Some(events.len() as i64),
+    )?;
+    Ok(Json(events))
+}
+
 pub(super) async fn postgres_maintenance(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

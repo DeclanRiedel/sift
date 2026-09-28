@@ -18,6 +18,47 @@ pub struct DatabaseProcess {
     pub wait: Option<String>,
     #[serde(default)]
     pub blocked_by: Vec<i64>,
+    /// Waiting lock, when the provider exposes one in its process snapshot.
+    #[serde(default)]
+    pub lock_wait: Option<DatabaseLockWait>,
+    /// First sixteen granted locks in deterministic order. The source can
+    /// expose more, as indicated by `held_locks_truncated`.
+    #[serde(default)]
+    pub held_locks: Vec<DatabaseHeldLock>,
+    #[serde(default)]
+    pub held_locks_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseLockWait {
+    pub resource: String,
+    pub mode: String,
+    #[serde(default)]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseHeldLock {
+    pub resource: String,
+    pub mode: String,
+}
+
+/// A retained SQL Server system_health deadlock event. The server projects a
+/// bounded summary and never sends the raw graph or statement text.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseDeadlockEvent {
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+    pub participants: Vec<DatabaseDeadlockParticipant>,
+    pub participants_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseDeadlockParticipant {
+    pub process_id: i64,
+    pub victim: bool,
+    pub wait_resource: Option<String>,
+    pub lock_mode: Option<String>,
+    pub wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
