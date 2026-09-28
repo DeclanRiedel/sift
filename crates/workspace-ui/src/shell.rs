@@ -71,6 +71,7 @@ pub use benchmark_library::{BenchmarkLibraryAction, BenchmarkLibraryReply};
 mod pane_layout;
 mod result_editing;
 mod sql_drafts;
+mod sqlserver_maintenance;
 mod status_bar;
 use sql_drafts::*;
 mod vault_actions;
@@ -89,6 +90,7 @@ use catalog_diagram::CatalogDiagramState;
 use database_monitor::{DatabaseAlertKind, DatabaseMonitorState, DatabaseMonitorView};
 pub use pane_layout::SplitDirection;
 use relationship_viewer::RelationshipViewerState;
+use sqlserver_maintenance::{MaintenanceAction, MaintenanceMode, MaintenanceState};
 
 const PALETTE_VISIBLE_ROWS: usize = 4;
 const PALETTE_ROW_HEIGHT: f32 = 30.0;
@@ -3747,6 +3749,15 @@ pub enum ExecutorCommand {
     LoadQueryStore,
     LoadAgentJobs,
     LoadSqlServerSettings,
+    SqlServerRecovery {
+        generation: u64,
+        apply: bool,
+        request: sift_protocol::SqlServerRecoveryRequest,
+    },
+    SqlServerIntegrity {
+        generation: u64,
+        physical_only: bool,
+    },
     LoadRoomMembers {
         room_id: i64,
     },
@@ -4619,6 +4630,15 @@ pub enum ExecutorEvent {
     QueryStoreLoaded(Result<sift_protocol::QueryStoreReport, String>),
     AgentJobsLoaded(Result<sift_protocol::AgentJobsReport, String>),
     SqlServerSettingsLoaded(Result<sift_protocol::SqlServerSettingsReport, String>),
+    SqlServerRecoveryFinished {
+        generation: u64,
+        apply: bool,
+        result: Result<sift_protocol::SqlServerRecoveryReport, String>,
+    },
+    SqlServerIntegrityFinished {
+        generation: u64,
+        result: Result<sift_protocol::IntegrityCheckReport, String>,
+    },
     RoomMembersLoaded {
         room_id: i64,
         result: Result<Vec<sift_api_types::RoomMember>, String>,
@@ -10906,6 +10926,7 @@ pub struct WorkspaceShell {
     modal_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
 
     database_monitor: DatabaseMonitorState,
+    maintenance: MaintenanceState,
     transaction_state: TransactionUiState,
     savepoints: Vec<String>,
     next_savepoint: u64,
@@ -11643,6 +11664,28 @@ impl WorkspaceShell {
         .detach();
         let database_name_input =
             cx.new(|cx| TextInput::new("", "Display name", cx).aria_label("Connection name"));
+        let maintenance_database_input = cx.new(|cx| TextInput::new("", "Database name", cx));
+        let maintenance_archive_input =
+            cx.new(|cx| TextInput::new("", "Absolute path on SQL Server host", cx));
+        let maintenance_backup_set_input =
+            cx.new(|cx| TextInput::new("1", "Backup set number", cx));
+        let maintenance_moves_input = cx.new(|cx| TextInput::new("", "MOVE mappings JSON", cx));
+        let maintenance_confirmation_input =
+            cx.new(|cx| TextInput::new("", "Type confirmation phrase", cx));
+        for input in [
+            &maintenance_database_input,
+            &maintenance_archive_input,
+            &maintenance_backup_set_input,
+            &maintenance_moves_input,
+        ] {
+            cx.subscribe(input, |shell, _, event: &TextInputEvent, cx| {
+                if *event == TextInputEvent::Changed {
+                    shell.maintenance.form_changed();
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         let database_host_input =
             cx.new(|cx| TextInput::new("", "Database host", cx).aria_label("Host"));
         let database_port_input = cx.new(|cx| TextInput::new("", "Port", cx));
@@ -12267,6 +12310,22 @@ impl WorkspaceShell {
             modal_bounds: Default::default(),
 
             database_monitor: DatabaseMonitorState::default(),
+            maintenance: MaintenanceState {
+                database: maintenance_database_input,
+                archive: maintenance_archive_input,
+                backup_set: maintenance_backup_set_input,
+                moves: maintenance_moves_input,
+                confirmation: maintenance_confirmation_input,
+                mode: MaintenanceMode::Backup,
+                physical_only: false,
+                pending: None,
+                generation: 0,
+                preview: None,
+                preview_request: None,
+                last_recovery: None,
+                integrity: None,
+                message: None,
+            },
             transaction_state: TransactionUiState::Idle,
             savepoints: Vec::new(),
             next_savepoint: 1,
@@ -13655,6 +13714,10 @@ impl WorkspaceShell {
                     self.operation_capabilities.clear();
                 }
                 self.connection_status = status.clone();
+                self.maintenance.invalidate();
+                self.maintenance
+                    .confirmation
+                    .update(cx, |input, cx| input.set_text("", cx));
                 if self.database_monitor.view() == DatabaseMonitorView::QueryStore
                     && (!matches!(&status, ConnectionStatus::Connected { .. })
                         || self.active_connection_provider_id()
@@ -16751,6 +16814,59 @@ impl WorkspaceShell {
             ExecutorEvent::SqlServerSettingsLoaded(result) => {
                 self.database_monitor.finish_sqlserver_settings(result);
                 cx.notify();
+            }
+            ExecutorEvent::SqlServerRecoveryFinished {
+                generation,
+                apply,
+                result,
+            } => {
+                let action = if apply {
+                    MaintenanceAction::Apply
+                } else {
+                    MaintenanceAction::Preview
+                };
+                if self.maintenance.accepts(generation, action) {
+                    self.maintenance.pending = None;
+                    match result {
+                        Ok(report) => {
+                            if action == MaintenanceAction::Preview {
+                                // The matching request was retained when dispatching the preview.
+                                if let Some(request) = self.maintenance.preview_request.take() {
+                                    self.maintenance.preview = Some((request, report));
+                                }
+                            } else {
+                                self.maintenance.preview = None;
+                                self.maintenance.message = Some(
+                                    if report.applied {
+                                        "Recovery operation completed"
+                                    } else {
+                                        "Recovery operation was not applied"
+                                    }
+                                    .into(),
+                                );
+                                self.maintenance.last_recovery = Some(report);
+                            }
+                        }
+                        Err(message) => {
+                            self.maintenance.preview = None;
+                            self.maintenance.message = Some(message);
+                        }
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::SqlServerIntegrityFinished { generation, result } => {
+                if self
+                    .maintenance
+                    .accepts(generation, MaintenanceAction::Integrity)
+                {
+                    self.maintenance.pending = None;
+                    match result {
+                        Ok(report) => self.maintenance.integrity = Some(report),
+                        Err(message) => self.maintenance.message = Some(message),
+                    }
+                    cx.notify();
+                }
             }
             ExecutorEvent::CatalogDiagramLoaded(result) => {
                 self.catalog_diagram.finish_loading(result);
@@ -27316,6 +27432,170 @@ impl WorkspaceShell {
                 .database_monitor
                 .move_sqlserver_settings_selection(event.keystroke.key.as_str()),
             "r" => self.load_sqlserver_settings(cx),
+            "escape" => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn maintenance_request(
+        &self,
+        cx: &App,
+    ) -> Result<sift_protocol::SqlServerRecoveryRequest, String> {
+        sqlserver_maintenance::recovery_request(
+            self.maintenance.mode,
+            self.maintenance.database.read(cx).text(),
+            self.maintenance.archive.read(cx).text(),
+            self.maintenance.backup_set.read(cx).text(),
+            self.maintenance.moves.read(cx).text(),
+        )
+    }
+
+    fn preview_sqlserver_recovery(&mut self, cx: &mut Context<Self>) {
+        if self.maintenance.pending.is_some() {
+            return;
+        }
+        let request = match self.maintenance_request(cx) {
+            Ok(request) => request,
+            Err(message) => {
+                self.maintenance.message = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.maintenance.message = Some("Database executor is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let generation = self.maintenance.begin(MaintenanceAction::Preview);
+        self.maintenance.preview = None;
+        self.maintenance.preview_request = Some(request.clone());
+        self.maintenance.last_recovery = None;
+        if sender
+            .send(ExecutorCommand::SqlServerRecovery {
+                generation,
+                apply: false,
+                request,
+            })
+            .is_err()
+        {
+            self.maintenance.invalidate();
+            self.maintenance.message = Some("Database executor is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn apply_sqlserver_recovery(&mut self, cx: &mut Context<Self>) {
+        if self.maintenance.pending.is_some() {
+            return;
+        }
+        let request = match (
+            self.maintenance_request(cx),
+            self.maintenance.preview.as_ref(),
+        ) {
+            (Ok(current), Some((preview, _))) => sqlserver_maintenance::confirmed_apply(
+                &current,
+                preview,
+                self.maintenance.confirmation.read(cx).text(),
+            ),
+            (Err(message), _) => Err(message),
+            (_, None) => Err("Preview recovery before applying".into()),
+        };
+        let request = match request {
+            Ok(request) => request,
+            Err(message) => {
+                self.maintenance.message = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.maintenance.message = Some("Database executor is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let generation = self.maintenance.begin(MaintenanceAction::Apply);
+        if sender
+            .send(ExecutorCommand::SqlServerRecovery {
+                generation,
+                apply: true,
+                request,
+            })
+            .is_err()
+        {
+            self.maintenance.invalidate();
+            self.maintenance.message = Some("Database executor is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn run_sqlserver_integrity(&mut self, cx: &mut Context<Self>) {
+        if self.maintenance.pending.is_some() {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.maintenance.message = Some("Database executor is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let physical_only = self.maintenance.physical_only;
+        let generation = self.maintenance.begin(MaintenanceAction::Integrity);
+        self.maintenance.integrity = None;
+        if sender
+            .send(ExecutorCommand::SqlServerIntegrity {
+                generation,
+                physical_only,
+            })
+            .is_err()
+        {
+            self.maintenance.invalidate();
+            self.maintenance.message = Some("Database executor is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn handle_sqlserver_maintenance_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        if self.maintenance.pending.is_some() && event.keystroke.key != "escape" {
+            return;
+        }
+        if [
+            &self.maintenance.database,
+            &self.maintenance.archive,
+            &self.maintenance.backup_set,
+            &self.maintenance.moves,
+            &self.maintenance.confirmation,
+        ]
+        .iter()
+        .any(|input| input.focus_handle(cx).is_focused(window))
+        {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "b" => {
+                self.maintenance.mode = MaintenanceMode::Backup;
+                self.maintenance.invalidate();
+            }
+            "n" => {
+                self.maintenance.mode = MaintenanceMode::Restore;
+                self.maintenance.invalidate();
+            }
+            "i" => {
+                self.maintenance.mode = MaintenanceMode::Integrity;
+                self.maintenance.invalidate();
+            }
+            "p" => self.preview_sqlserver_recovery(cx),
+            "a" => self.apply_sqlserver_recovery(cx),
+            "r" => self.run_sqlserver_integrity(cx),
             "escape" => self.focus_active_pane(window, cx),
             _ => return,
         }
@@ -59213,5 +59493,137 @@ mod tests {
         );
         assert_eq!(params.len(), 3);
         assert_eq!(variable_context.unwrap().descriptors.len(), 3);
+    }
+
+    #[gpui::test]
+    fn sqlserver_recovery_preview_gates_apply_and_rejects_stale_response(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell
+                .maintenance
+                .database
+                .update(cx, |input, cx| input.set_text("source", cx));
+            shell
+                .maintenance
+                .archive
+                .update(cx, |input, cx| input.set_text("/backups/source.bak", cx));
+        });
+        cx.run_until_parked();
+        workspace.update(&mut cx, |shell, cx| shell.preview_sqlserver_recovery(cx));
+        let (generation, request) = match commands.try_recv().expect("preview command") {
+            ExecutorCommand::SqlServerRecovery {
+                generation,
+                apply: false,
+                request,
+            } => (generation, request),
+            _ => panic!("expected recovery preview"),
+        };
+        assert!(matches!(
+            request,
+            sift_protocol::SqlServerRecoveryRequest::Backup { apply: false, .. }
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SqlServerRecoveryFinished {
+                    generation,
+                    apply: false,
+                    result: Ok(sift_protocol::SqlServerRecoveryReport {
+                        applied: false,
+                        sql: "BACKUP DATABASE [source]".into(),
+                        source_database: None,
+                        warnings: Vec::new(),
+                    }),
+                },
+                cx,
+            );
+            assert!(shell.maintenance.preview.is_some());
+            shell.apply_sqlserver_recovery(cx);
+            assert!(commands.try_recv().is_err());
+            shell
+                .maintenance
+                .confirmation
+                .update(cx, |input, cx| input.set_text("BACKUP source", cx));
+            shell.apply_sqlserver_recovery(cx);
+        });
+        let applied_generation = match commands.try_recv().expect("apply command") {
+            ExecutorCommand::SqlServerRecovery {
+                generation,
+                apply: true,
+                request,
+            } => {
+                assert!(matches!(
+                    request,
+                    sift_protocol::SqlServerRecoveryRequest::Backup { apply: true, .. }
+                ));
+                generation
+            }
+            _ => panic!("expected confirmed recovery apply"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.maintenance.invalidate();
+            shell.on_executor_event(
+                ExecutorEvent::SqlServerRecoveryFinished {
+                    generation: applied_generation,
+                    apply: true,
+                    result: Ok(sift_protocol::SqlServerRecoveryReport {
+                        applied: true,
+                        sql: "BACKUP DATABASE [source]".into(),
+                        source_database: None,
+                        warnings: Vec::new(),
+                    }),
+                },
+                cx,
+            );
+            assert!(shell.maintenance.message.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn sqlserver_integrity_dispatches_current_database_check(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.maintenance.mode = MaintenanceMode::Integrity;
+            shell.maintenance.physical_only = true;
+            shell.run_sqlserver_integrity(cx);
+        });
+        let generation = match commands.try_recv().expect("integrity command") {
+            ExecutorCommand::SqlServerIntegrity {
+                generation,
+                physical_only: true,
+            } => generation,
+            _ => panic!("expected physical-only integrity check"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SqlServerIntegrityFinished {
+                    generation,
+                    result: Ok(sift_protocol::IntegrityCheckReport {
+                        check: sift_protocol::IntegrityCheckRequest::SqlServer {
+                            physical_only: true,
+                        },
+                        outcome: sift_protocol::IntegrityOutcome::NoIssuesReported,
+                        findings: Vec::new(),
+                        warnings: Vec::new(),
+                    }),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell
+                    .maintenance
+                    .integrity
+                    .as_ref()
+                    .map(|report| report.outcome),
+                Some(sift_protocol::IntegrityOutcome::NoIssuesReported)
+            );
+        });
     }
 }

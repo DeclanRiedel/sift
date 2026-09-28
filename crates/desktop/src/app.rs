@@ -2915,6 +2915,53 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::SqlServerRecovery {
+                generation,
+                apply,
+                request,
+            } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .sql_server_recovery(opened.session, opened.metadata_connection, request)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before running SQL Server recovery".into()),
+                };
+                if events
+                    .send(ExecutorEvent::SqlServerRecoveryFinished {
+                        generation,
+                        apply,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SqlServerIntegrity {
+                generation,
+                physical_only,
+            } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .check_integrity(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::IntegrityCheckRequest::SqlServer { physical_only },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before checking SQL Server integrity".into()),
+                };
+                if events
+                    .send(ExecutorEvent::SqlServerIntegrityFinished { generation, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadRoomMembers { room_id } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
