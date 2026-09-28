@@ -114,9 +114,12 @@ Monitor header only; controls inside each view remain separate audit work.
       `:` palette. All default leader bindings are checked for collisions and
       reachability. Settings, Quit, transaction controls, theme, and results
       layout gained leader paths; clipboard actions became palette entries.
-      Other pointer surfaces and context-local actions still need equivalent
-      audits before this can be marked complete. External Wiki and License
-      links are outside the command registry and remain to be covered.
+      The Monitor header now renders from one tab model and supports
+      `<leader> d h/l` navigation across engine-available tabs; generated
+      tests cover reachability, ordering, and skipped disabled tabs. Other
+      pointer surfaces and context-local actions still need equivalent audits
+      before this can be marked complete. External Wiki and License links are
+      outside the command registry and remain to be covered.
 - [x] Add versioned `keymaps.json` overrides with compact modal and full-file
       editors; validate command ids, leader syntax, and duplicate sequences.
 
