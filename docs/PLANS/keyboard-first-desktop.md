@@ -85,7 +85,11 @@ prefixes display a compact which-key strip generated from the same vocabulary.
       and their remaining local motions/operators. Inspector uses `h/l` views,
       `j/k`, `gg/G`, and Enter for field projection; result tabs use `H/L`; the
       read-only Problems item retains full Vim navigation and visual yank.
-- [ ] Add grid visual selection and system-clipboard `yc`, `yy`, `yh`, and `p`.
+- [x] Add grid visual selection and system-clipboard `yc`, `yy`, `yh`, and `p`.
+      Visual selection extends with Vim motions; `yc` copies selected cells,
+      `yy` copies the focused row, `yh` copies selected headers, and `p`
+      stages pasted values through the existing edit path. Visual `y` keeps
+      the existing headers-and-values yank.
 - [ ] Add editable-result `i`, `dd`, `o`, undo/redo, Preview, Apply, Revert.
 - [ ] Add generated keyboard-equivalence tests proving every visible action has
       a command path.
