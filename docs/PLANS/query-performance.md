@@ -48,6 +48,26 @@ library implemented; profiling, definitions and advanced tools remain in progres
 
 ## Milestone 2 — profile and Performance panel
 
+### PostgreSQL Profile foundation design
+
+Profile is a separate audited operation and result population. It accepts one
+frozen SQL statement, bind values, a run ID, timeout, and explicit workload
+confirmation. The server admits only a classifiable read query and requires
+both Profile and ordinary query permission. It opens a dedicated connection,
+starts a read-only transaction, and executes `EXPLAIN (ANALYZE, BUFFERS, FORMAT
+JSON)` there. The read-only transaction is a database-enforced DML boundary;
+external functions may still have effects, so confirmation remains required.
+The editor's connection and transaction are never used for instrumentation.
+
+A supervised task owns the dedicated connection until rollback and close. A
+per-source run registration supports explicit cancellation; timeout and
+cancellation interrupt execution, attempt driver cancellation, and discard the
+connection. The plan result is capped in bytes before parsing. The response
+keeps raw JSON and a normalized tree, and labels PostgreSQL planning/execution
+durations separately from Sift's server-observed elapsed time. Missing native
+counters remain unavailable. The Performance panel presents this measured plan
+apart from estimated Explain and serial Benchmark results.
+
 - [ ] Current statement/selection targeting, explicit execution preview.
 - [ ] Summary, Runs, Plan, Compare and Saved sections; keyboard navigation.
 - [x] Initial Performance tab: summary, virtualized samples, in-memory baseline,
