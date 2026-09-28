@@ -726,7 +726,7 @@ fn mask_connection_url_password(content: &str) -> String {
     };
     let authority_start = scheme_end + 3;
     let authority_end = content[authority_start..]
-        .find(|c| matches!(c, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .map_or(content.len(), |end| authority_start + end);
     let authority = &content[authority_start..authority_end];
     let authority_at = authority.rfind('@').map(|at| authority_start + at);
