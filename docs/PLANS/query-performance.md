@@ -70,6 +70,31 @@ durations separately from Sift's server-observed elapsed time. Missing native
 counters remain unavailable. The Performance panel presents this measured plan
 apart from estimated Explain and serial Benchmark results.
 
+### SQL Server measured-plan design
+
+SQL Server Profile uses the same audited request, run registration, dedicated
+connection, supervisor, timeout and cancel endpoint. It requires both Profile
+and Execute permission, a classifiable single read query, and explicit workload
+confirmation. SQL Server has no read-only transaction equivalent for this path;
+the UI must say that the login should have read-only database permissions and
+that read classification does not contain side effects of called functions.
+The database separately enforces `SHOWPLAN` on every referenced database for
+`SET STATISTICS XML` output. Refusals remain errors, never empty plans.
+
+The dedicated TDS session enables `STATISTICS XML` before the read and disables
+it after completion. It never changes the editor session. The driver streams
+and discards ordinary result rows, counting rows and estimated encoded bytes;
+if either cap is reached, it cancels and discards the dedicated connection.
+Only one bounded Showplan XML document is accepted and parsed. Timeout or
+explicit cancellation aborts the driver task, invokes its abort-and-discard
+cancel path when a cursor exists, then closes the dedicated connection. A
+failed OFF/reset also discards that connection. The server labels wall-clock
+duration as Sift-observed and extracts SQL Server `QueryTimeStats` timing only
+when present. Per-node runtime and IO counters come from Showplan XML.
+`SET STATISTICS IO/TIME` textual messages are not exposed by the current TDS
+driver and remain unsupported rather than guessed or summed from nested nodes.
+See Microsoft's [`SET STATISTICS XML` permission and output contract](https://learn.microsoft.com/en-us/sql/t-sql/statements/set-statistics-xml-transact-sql?view=sql-server-ver17).
+
 - [~] Current statement/selection targeting uses the query tab's target; an
   explicit SQL and parameter preview before execution remains open.
 - [ ] Summary, Runs, Plan, Compare and Saved sections; keyboard navigation.
