@@ -125,6 +125,17 @@ artifacts. These contain database data; do not publish them as logs. SQLite
 quarantine uses one transaction; PostgreSQL and SQL Server retain the existing
 row-at-a-time commit behavior. Parquet quarantine remains unsupported.
 
+The desktop lists the newest 100 unexpired quarantine reports in a workspace.
+The metadata list requires room read access and the audited `ReadTransferRecipe`
+operation; it contains no artifact bytes. Select a report to open the same
+viewer used for a new import. Download remains the only content endpoint and
+checks the active instance and workspace. Reports expire after seven days, and
+the server may reject a download that expires after listing. New reports have a
+dedicated content type so the history cannot mistake arbitrary JSON exports
+for rejected rows; older generic-JSON reports remain available by ID or from
+their original import result. The history does not offer a general artifact
+browser, pagination past 100, or pinning.
+
 ## Durable CSV resume
 
 CSV upload-to-table recipes can opt into target-side checkpoints:
