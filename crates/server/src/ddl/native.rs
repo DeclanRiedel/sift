@@ -44,6 +44,33 @@ pub(super) async fn foreign_table(
     definition(driver, handle, sql, engine).await
 }
 
+pub(super) async fn synonym(
+    driver: &dyn Driver,
+    handle: sift_driver_api::ConnHandle,
+    object: &ObjectPath,
+    engine: Engine,
+) -> Result<String, DriverError> {
+    if engine != Engine::SqlServer {
+        return Err(DriverError::new(
+            Code::UnsupportedForEngine,
+            "synonyms are only supported by SQL Server",
+        )
+        .with_engine(engine));
+    }
+    let qname = qualified_name(object, engine).replace('\'', "''");
+    let sql = format!(
+        r#"SELECT CASE
+WHEN HAS_PERMS_BY_NAME(N'{qname}', 'OBJECT', 'VIEW DEFINITION') <> 1
+THEN N'sift:denied:synonym definition requires VIEW DEFINITION'
+ELSE N'CREATE SYNONYM ' + QUOTENAME(schema_info.name) + N'.' + QUOTENAME(synonym_info.name)
+   + N' FOR ' + synonym_info.base_object_name + N';' END
+FROM sys.synonyms synonym_info
+JOIN sys.schemas schema_info ON schema_info.schema_id = synonym_info.schema_id
+WHERE synonym_info.object_id = OBJECT_ID(N'{qname}', N'SN')"#
+    );
+    definition(driver, handle, sql, engine).await
+}
+
 pub(super) async fn trigger(
     driver: &dyn Driver,
     handle: sift_driver_api::ConnHandle,

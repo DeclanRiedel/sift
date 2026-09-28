@@ -1621,6 +1621,73 @@ ORDER BY source_schema.name, source_table.name, fk.name, fkc.constraint_column_i
         }
     }
     mssql_enrich_dependencies(conn, graph).await?;
+    mssql_enrich_synonym_dependencies(conn, graph).await?;
+    Ok(())
+}
+
+async fn mssql_enrich_synonym_dependencies(
+    conn: &mut MssqlConn,
+    graph: &mut sift_protocol::CatalogGraphData,
+) -> Result<(), DriverError> {
+    use sift_protocol::{CatalogEdgeCertainty, CatalogEdgeKind, CatalogNodeKind};
+
+    let synonyms = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == CatalogNodeKind::Synonym)
+        .filter_map(|node| {
+            let id = node.native_id.as_ref()?.strip_prefix("mssql:object:")?;
+            Some((id.parse::<i32>().ok()?, node.id.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    if synonyms.is_empty() {
+        return Ok(());
+    }
+    let ids = synonyms.keys().copied().collect::<Vec<_>>();
+    for chunk in ids.chunks(256) {
+        let id_list = chunk
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let rows = conn
+            .query(
+                &format!(
+                    "SELECT object_id, base_object_name FROM sys.synonyms WHERE object_id IN ({id_list})"
+                ),
+                &[],
+            )
+            .await
+            .map_err(ms_err)?
+            .into_first_result()
+            .await
+            .map_err(ms_err)?;
+        for row in rows {
+            let Some(object_id) = row.try_get::<i32, _>(0).map_err(ms_err)? else {
+                continue;
+            };
+            let Some(from) = synonyms.get(&object_id) else {
+                continue;
+            };
+            if graph.edges.iter().any(|edge| {
+                edge.from == *from && edge.kind == CatalogEdgeKind::DependsOn && edge.to.is_some()
+            }) {
+                continue;
+            }
+            let base_object_name = mssql_string(&row, 1)?;
+            if base_object_name.is_empty() {
+                continue;
+            }
+            graph.edges.push(sift_protocol::CatalogEdge {
+                from: from.clone(),
+                to: None,
+                kind: CatalogEdgeKind::DependsOn,
+                certainty: CatalogEdgeCertainty::Unresolved,
+                referenced_path: Some(base_object_name),
+                column_pairs: Vec::new(),
+            });
+        }
+    }
     Ok(())
 }
 
