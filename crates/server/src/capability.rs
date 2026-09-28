@@ -288,6 +288,8 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ListDeadlocks
         | ListPostgresSettings
         | ListPostgresObjects
+        | ReadPostgresReplication
+        | ReadPostgresStatistics
         | PreviewPostgresObject
         | ApplyPostgresObject
         | ReadQueryStore
@@ -306,7 +308,11 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         ProfileQuery | CancelProfile if engine != Some(Engine::Postgres) => {
             Some("Profile is currently available only for PostgreSQL")
         }
-        ListPostgresObjects | PreviewPostgresObject | ApplyPostgresObject
+        ListPostgresObjects
+        | PreviewPostgresObject
+        | ApplyPostgresObject
+        | ReadPostgresReplication
+        | ReadPostgresStatistics
             if engine != Some(Engine::Postgres) =>
         {
             Some("PostgreSQL objects require a PostgreSQL connection")
@@ -355,6 +361,8 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ListDeadlocks
         | ListPostgresSettings
         | ListPostgresObjects
+        | ReadPostgresReplication
+        | ReadPostgresStatistics
         | PreviewPostgresObject
         | ApplyPostgresObject
         | ReadQueryStore

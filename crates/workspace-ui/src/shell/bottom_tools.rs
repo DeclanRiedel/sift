@@ -45,6 +45,12 @@ pub(super) fn render_bottom_panel(
         )
         .when(
             shell.active_bottom_tool == BottomTool::Monitor
+                && matches!(shell.database_monitor.view(), DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics),
+            |dock| dock.key_context("SiftPostgresDiagnostics")
+                .on_key_down(cx.listener(WorkspaceShell::handle_postgres_diagnostics_key)),
+        )
+        .when(
+            shell.active_bottom_tool == BottomTool::Monitor
                 && shell.database_monitor.view() == DatabaseMonitorView::AgentJobs,
             |dock| {
                 dock.key_context("SiftAgentJobs")
@@ -301,6 +307,18 @@ pub(super) fn render_bottom_panel(
                                 .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
                                 .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Partitions, cx))),
                         )
+                        .child(
+                            Button::new("monitor-view-replication", "Replication")
+                                .tone(if view == DatabaseMonitorView::Replication { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
+                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Replication, cx))),
+                        )
+                        .child(
+                            Button::new("monitor-view-statistics", "Statistics")
+                                .tone(if view == DatabaseMonitorView::Statistics { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
+                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Statistics, cx))),
+                        )
                 })),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {
@@ -310,6 +328,10 @@ pub(super) fn render_bottom_panel(
                 render_postgres_settings(shell, cx).into_any_element()
             } else if matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions) {
                 render_postgres_objects(shell, cx).into_any_element()
+            } else if shell.database_monitor.view() == DatabaseMonitorView::Replication {
+                render_postgres_replication(shell, cx).into_any_element()
+            } else if shell.database_monitor.view() == DatabaseMonitorView::Statistics {
+                render_postgres_statistics(shell, cx).into_any_element()
             } else if shell.database_monitor.view() == DatabaseMonitorView::QueryStore {
                 render_query_store(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::AgentJobs {
@@ -486,6 +508,7 @@ pub(super) fn render_bottom_panel(
                                     }
                                     DatabaseMonitorView::Settings => unreachable!(),
                                     DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions => unreachable!(),
+                                    DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics => unreachable!(),
                                     DatabaseMonitorView::QueryStore => unreachable!(),
                                     DatabaseMonitorView::AgentJobs => unreachable!(),
                                     DatabaseMonitorView::SqlServerSettings => unreachable!(),
@@ -1731,6 +1754,207 @@ fn render_postgres_objects(
                         .on_click(cx.listener(|shell, _, _, cx| shell.apply_postgres_object(cx))),
                 )
         }))
+}
+
+fn render_postgres_replication(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> impl IntoElement {
+    let colors = cx.theme().colors;
+    let state = &shell.database_monitor;
+    let report = state.replication();
+    let selected = state.replication_selected();
+    let mut index = 0;
+    let mut rows = Vec::new();
+    if let Some(report) = report {
+        for sender in &report.senders {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "Sender {} · {} · {} · sync {} · write/flush/replay lag {} / {} / {} ms",
+                        sender.pid,
+                        sender.application_name,
+                        sender.state,
+                        sender.sync_state,
+                        sender
+                            .write_lag_ms
+                            .map_or_else(|| "unknown".into(), |v| v.to_string()),
+                        sender
+                            .flush_lag_ms
+                            .map_or_else(|| "unknown".into(), |v| v.to_string()),
+                        sender
+                            .replay_lag_ms
+                            .map_or_else(|| "unknown".into(), |v| v.to_string())
+                    ))
+                    .into_any_element(),
+            );
+            index += 1;
+        }
+        if let Some(receiver) = &report.receiver {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "WAL receiver · {} · received {} · latest {}",
+                        receiver.status,
+                        receiver.received_lsn.as_deref().unwrap_or("unknown"),
+                        receiver.latest_end_lsn.as_deref().unwrap_or("unknown")
+                    ))
+                    .into_any_element(),
+            );
+            index += 1;
+        }
+        for slot in &report.slots {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "Slot {} · {} · database {} · {} · restart {} · confirmed {}",
+                        slot.name,
+                        slot.slot_type,
+                        slot.database.as_deref().unwrap_or("none"),
+                        if slot.active { "active" } else { "inactive" },
+                        slot.restart_lsn.as_deref().unwrap_or("unknown"),
+                        slot.confirmed_flush_lsn.as_deref().unwrap_or("unknown")
+                    ))
+                    .into_any_element(),
+            );
+            index += 1;
+        }
+    }
+    div()
+        .debug_selector(|| "postgres-replication-browser".into())
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .flex_col()
+        .child(
+            div()
+                .h(px(30.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(SectionLabel::new("POSTGRESQL REPLICATION"))
+                .child(div().text_xs().child(
+                    "Snapshot · lag is not catch-up ETA · j/k select · r refresh · Esc exit",
+                ))
+                .child(div().flex_1())
+                .child(
+                    Button::new("pg-replication-refresh", "Refresh")
+                        .tone(ButtonTone::Ghost)
+                        .disabled(state.replication_request().loading())
+                        .on_click(
+                            cx.listener(|shell, _, _, cx| shell.load_postgres_replication(cx)),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .id("postgres-replication-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .children(rows),
+        )
+        .children(
+            report
+                .filter(|report| report.senders_truncated || report.slots_truncated)
+                .map(|_| {
+                    div()
+                        .px_3()
+                        .text_color(colors.warning)
+                        .child("Snapshot truncated at 200 senders or slots")
+                }),
+        )
+        .children((report.is_some() && index == 0).then(|| {
+            div()
+                .p_4()
+                .text_center()
+                .child("No replication senders, receiver, or slots reported.")
+        }))
+        .children(state.replication_request().error().map(|message| {
+            div()
+                .px_3()
+                .text_color(colors.danger)
+                .child(message.to_string())
+        }))
+}
+
+fn render_postgres_statistics(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> impl IntoElement {
+    let colors = cx.theme().colors;
+    let state = &shell.database_monitor;
+    let report = state.statistics();
+    let offset = state.statistics_offset();
+    let next = report.and_then(|report| report.next_offset);
+    let selected = state.statistics_selected();
+    div().debug_selector(|| "postgres-statistics-browser".into()).flex().flex_1().min_h_0().flex_col()
+        .child(div().h(px(30.)).px_3().flex().items_center().gap_2()
+            .child(SectionLabel::new("POSTGRESQL STATISTICS"))
+            .child(div().text_xs().child("Cumulative snapshot · j/k select · n/p pages · r refresh"))
+            .child(div().flex_1())
+            .child(Button::new("pg-statistics-prev", "Previous").tone(ButtonTone::Ghost)
+                .disabled(offset == 0 || state.statistics_request().loading())
+                .on_click(cx.listener(move |shell, _, _, cx| shell.load_postgres_statistics(offset.saturating_sub(100), cx))))
+            .child(Button::new("pg-statistics-next", "Next").tone(ButtonTone::Ghost)
+                .disabled(next.is_none() || state.statistics_request().loading())
+                .on_click(cx.listener(move |shell, _, _, cx| { if let Some(next) = next { shell.load_postgres_statistics(next, cx); } })))
+            .child(Button::new("pg-statistics-refresh", "Refresh").tone(ButtonTone::Ghost)
+                .disabled(state.statistics_request().loading())
+                .on_click(cx.listener(move |shell, _, _, cx| shell.load_postgres_statistics(offset, cx)))))
+        .children(report.map(|report| {
+            let db = &report.database;
+            div().px_3().py_2().border_b_1().border_color(colors.subtle_border)
+                .child(format!("Database {} · {} backends · {} commits · {} rollbacks · {} blocks read / {} hit · reset {}",
+                    db.database, db.backends, db.commits, db.rollbacks, db.blocks_read, db.blocks_hit,
+                    db.stats_reset.as_deref().unwrap_or("unknown")))
+                .child(div().text_xs().child(format!("Tuples returned {} · fetched {} · inserted {} · updated {} · deleted {}",
+                    db.tuples_returned, db.tuples_fetched, db.tuples_inserted, db.tuples_updated, db.tuples_deleted)))
+        }))
+        .child(div().id("postgres-statistics-list").flex_1().min_h_0().overflow_y_scroll()
+            .children(report.into_iter().flat_map(|report| report.tables.iter().enumerate()).map(|(index, table)| {
+                div().px_3().py_2().border_b_1().border_color(colors.subtle_border)
+                    .bg(if index == selected { colors.accent_muted } else { colors.panel })
+                    .child(format!("{}.{} · seq scans {} · index scans {} · live/dead estimate {} / {}",
+                        table.schema, table.table, table.sequential_scans,
+                        table.index_scans.map_or_else(|| "unavailable".into(), |v| v.to_string()),
+                        table.live_tuples_estimate, table.dead_tuples_estimate))
+                    .child(div().text_xs().child(format!("Vacuum {} · auto {} · analyze {} · auto {}",
+                        table.last_vacuum.as_deref().unwrap_or("never"),
+                        table.last_autovacuum.as_deref().unwrap_or("never"),
+                        table.last_analyze.as_deref().unwrap_or("never"),
+                        table.last_autoanalyze.as_deref().unwrap_or("never"))))
+            })))
+        .children(report.filter(|report| report.tables.is_empty()).map(|_| div().p_4().text_center().child("No accessible user-table statistics on this page.")))
+        .children(state.statistics_request().error().map(|message| div().px_3().text_color(colors.danger).child(message.to_string())))
 }
 
 #[derive(Clone)]

@@ -20,6 +20,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listPostgresSettings",
     "listPostgresExtensions",
     "listPostgresPartitions",
+    "readPostgresReplication",
+    "readPostgresStatistics",
     "previewPostgresObject",
     "applyPostgresObject",
     "getBenchmarkRun",
@@ -1655,6 +1657,27 @@ impl Client {
         query: sift_protocol::PostgresObjectPageQuery,
     ) -> Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPartition>> {
         self.get(&format!("/v1/sessions/{session}/connections/{connection}/postgres/partitions?offset={}&limit={}",
+            query.offset, query.limit.unwrap_or(100))).await
+    }
+
+    pub async fn read_postgres_replication(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<sift_protocol::PostgresReplicationReport> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/postgres/replication"
+        ))
+        .await
+    }
+
+    pub async fn read_postgres_statistics(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        query: sift_protocol::PostgresStatisticsQuery,
+    ) -> Result<sift_protocol::PostgresStatisticsReport> {
+        self.get(&format!("/v1/sessions/{session}/connections/{connection}/postgres/statistics?offset={}&limit={}",
             query.offset, query.limit.unwrap_or(100))).await
     }
 

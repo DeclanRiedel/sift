@@ -350,7 +350,9 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [~] PostgreSQL extensions and partition management UI (bounded catalog views,
       Vim preview/apply for extension install/drop and partition detach;
       attach, update, and dependency previews remain)
-- [ ] PostgreSQL replication and statistics UI
+- [x] PostgreSQL replication and statistics inspection UI (bounded, audited
+      read-only snapshots of senders, receiver, slots, database and accessible
+      table counters; explicit replication privilege errors, Vim Monitor views)
 - [x] PostgreSQL settings browser (read-only, bounded paging, role-visible
       `pg_settings`, sensitive-value redaction, audited API and Vim desktop view)
 - [x] SQL Server Query Store (read-only, bounded database-state and plan inspection)

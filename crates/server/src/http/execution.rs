@@ -313,6 +313,47 @@ pub(super) async fn list_postgres_partitions(
     Ok(Json(page))
 }
 
+pub(super) async fn read_postgres_replication(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+) -> ApiResult<Json<sift_protocol::PostgresReplicationReport>> {
+    let report = finish_operation(
+        &state.sessions,
+        Operation::ReadPostgresReplication {
+            session,
+            connection,
+        },
+        crate::postgres_diagnostics::replication(&state.sessions, session, connection).await,
+        |report| {
+            Some(
+                (report.senders.len() + report.slots.len() + usize::from(report.receiver.is_some()))
+                    as i64,
+            )
+        },
+    )?;
+    Ok(Json(report))
+}
+
+pub(super) async fn read_postgres_statistics(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Query(query): Query<sift_protocol::PostgresStatisticsQuery>,
+) -> ApiResult<Json<sift_protocol::PostgresStatisticsReport>> {
+    let operation = Operation::ReadPostgresStatistics {
+        session,
+        connection,
+        offset: query.offset,
+        limit: query.limit.unwrap_or(100),
+    };
+    let report = finish_operation(
+        &state.sessions,
+        operation,
+        crate::postgres_diagnostics::statistics(&state.sessions, session, connection, query).await,
+        |report| Some(report.tables.len() as i64),
+    )?;
+    Ok(Json(report))
+}
+
 pub(super) async fn preview_postgres_object(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

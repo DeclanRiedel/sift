@@ -40,6 +40,7 @@ pub mod performance;
 pub mod plan;
 pub use performance::*;
 pub mod policy;
+pub mod postgres_diagnostics;
 pub mod postgres_settings;
 pub mod postgres_workbench;
 pub mod process;
@@ -128,6 +129,11 @@ pub use policy::{
     ApiErrorResponse, ConnectionPolicy, DisconnectManagedConnectionsResponse, RateLimitClass,
     SchemaSelector, TenantResource, TenantResourceLimits, TenantResourceUsage, TenantRole,
     TenantUsageSnapshot, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest,
+};
+pub use postgres_diagnostics::{
+    PostgresDatabaseStatistics, PostgresReplicationReport, PostgresReplicationSender,
+    PostgresReplicationSlot, PostgresStatisticsQuery, PostgresStatisticsReport,
+    PostgresTableStatistics, PostgresWalReceiver,
 };
 pub use postgres_settings::{PostgresSetting, PostgresSettingsPage, PostgresSettingsQuery};
 pub use postgres_workbench::{
