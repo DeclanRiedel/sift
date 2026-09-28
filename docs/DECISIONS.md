@@ -2563,3 +2563,22 @@ snapshots therefore fingerprint advanced constraint state and fence structural
 migrations for affected tables, including unsupported replication flags. A
 live fixture replays generated DDL into a second schema and compares the
 regenerated native definition before this support is claimed.
+## ADR-068 — PostgreSQL policy renames use a guarded workbench action
+
+**Status:** Accepted (2026-09-29)
+
+The first row-level security editor slice lists policies through a bounded
+PostgreSQL catalog query and permits a typed policy rename. A rename preserves
+the policy command, roles, expressions, and permissive mode while giving users
+a useful, low-risk correction path. Policy expressions are display-only; the
+server never accepts expression text as a SQL fragment.
+
+Only the table owner (including effective role membership) or a superuser may
+preview a rename. Preview captures the policy and table catalog state and the
+absence of the target name in a digest. Apply requires that digest, explicit
+confirmation, production confirmation, and a fresh authority/state lookup.
+The database remains the final authority if state changes between lookup and
+execution. Both reads and writes use the existing supervised PostgreSQL object
+operations and audit path. The desktop exposes this through the Vim Monitor
+workbench. Broader policy definition editing requires a separate design for
+expressions, role semantics, and reversible security changes.
