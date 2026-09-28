@@ -160,6 +160,7 @@ pub(super) fn render_database_breadcrumb(
             breadcrumb = breadcrumb.child(icon(IconName::ChevronRight, colors.disabled_text, 9.));
         }
         let source = source.clone();
+        let tooltip_label = label.clone();
         breadcrumb = breadcrumb.child(
             div()
                 .id(format!("database-breadcrumb-segment-{item_id}-{index}"))
@@ -189,6 +190,7 @@ pub(super) fn render_database_breadcrumb(
                 .on_click(cx.listener(move |shell, _, window, cx| {
                     shell.reveal_database_object(&source, level, window, cx);
                 }))
+                .tooltip(move |_, cx| cx.new(|_| Tooltip::new(tooltip_label.clone())).into())
                 .child(label),
         );
     }

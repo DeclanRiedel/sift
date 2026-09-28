@@ -36863,6 +36863,7 @@ impl WorkspaceShell {
             .or_else(|| {
                 query_context.map(|target| {
                     let database = target.database.clone();
+                    let profile_tooltip = target.profile_name.clone();
                     let aria_label = database.as_ref().map_or_else(
                         || format!("Query connection {}", target.profile_name),
                         |database| {
@@ -36884,12 +36885,17 @@ impl WorkspaceShell {
                         .aria_label(aria_label)
                         .child(
                             div()
+                                .id("query-connection-profile-label")
                                 .max_w(px(180.))
                                 .truncate()
                                 .text_color(colors.muted_text)
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| Tooltip::new(profile_tooltip.clone())).into()
+                                })
                                 .child(target.profile_name),
                         )
                         .children(database.map(|database| {
+                            let database_tooltip = database.clone();
                             div()
                                 .flex()
                                 .min_w_0()
@@ -36898,9 +36904,14 @@ impl WorkspaceShell {
                                 .child(icon(IconName::ChevronRight, colors.disabled_text, 9.))
                                 .child(
                                     div()
+                                        .id("query-connection-database-label")
                                         .max_w(px(180.))
                                         .truncate()
                                         .text_color(colors.text)
+                                        .tooltip(move |_, cx| {
+                                            cx.new(|_| Tooltip::new(database_tooltip.clone()))
+                                                .into()
+                                        })
                                         .child(database),
                                 )
                         }))
