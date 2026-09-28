@@ -72,9 +72,11 @@ helpers; tests create isolated objects and do not reset demo/user databases.
 Local connections exercised socket trust and SQL Server encrypted transport with
 TrustServerCertificate. Production certificate verification, other platforms and
 large enterprise catalogs remain unverified and outside this scoped acceptance.
-SQL Server money/smallmoney currently pass through Tiberius floating decoding;
-use an explicit CAST to decimal for exact financial values. Opaque UDT/sql_variant
-results and native parameters are excluded from lossless transfer.
+SQL Server money/smallmoney passed through Tiberius floating decoding at this
+acceptance point. The later local Tiberius patch retains their signed TDS
+ten-thousandths and was verified against live minimum/maximum and fractional
+values. Opaque UDT/sql_variant results and native parameters remain excluded
+from lossless transfer.
 
 Commands: `cargo test -p sift-driver-postgres --features live-pg --test live_pg`,
 `cargo test -p sift-driver-sqlserver --features live-mssql --test live_mssql`, and

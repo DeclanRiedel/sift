@@ -101,6 +101,50 @@ async fn open_ping_execute_close() {
 }
 
 #[tokio::test]
+async fn money_and_smallmoney_decode_exactly_from_tds() {
+    let driver = MssqlDriver::new();
+    let conn = driver.open(&spec()).await.expect("open succeeds");
+    let pages = drain(
+        driver
+            .execute(
+                conn.clone(),
+                ExecuteRequest::new(
+                    "SELECT CAST('922337203685477.5807' AS money), \
+                            CAST('-922337203685477.5808' AS money), \
+                            CAST('-0.0001' AS money), \
+                            CAST('214748.3647' AS smallmoney), \
+                            CAST('-214748.3648' AS smallmoney), \
+                            CAST('0.0001' AS smallmoney), \
+                            CAST(NULL AS money), CAST(NULL AS smallmoney)",
+                ),
+            )
+            .await
+            .expect("execute money boundaries"),
+    )
+    .await;
+    let values = pages
+        .iter()
+        .find_map(|page| match page {
+            Page::Rows { rows } => rows.first().map(|row| &row.values),
+            _ => None,
+        })
+        .expect("money row");
+    let expected = [
+        "922337203685477.5807",
+        "-922337203685477.5808",
+        "-0.0001",
+        "214748.3647",
+        "-214748.3648",
+        "0.0001",
+    ];
+    for (value, expected) in values.iter().zip(expected) {
+        assert_eq!(value, &Value::Decimal(expected.into()));
+    }
+    assert_eq!(&values[6..], &[Value::Null, Value::Null]);
+    driver.close(conn).await.expect("close succeeds");
+}
+
+#[tokio::test]
 async fn execute_batch_streams_each_result_set() {
     let driver = MssqlDriver::new();
     let conn = driver.open(&spec()).await.expect("open succeeds");
