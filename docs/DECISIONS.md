@@ -2463,3 +2463,21 @@ before sending a normal audited execution request. Existing target tables use
 their actual column types. For a new table, skip and quarantine ingestion casts
 against the same explicit types used in CREATE TABLE. Durable resume remains
 incompatible with explicit type mappings and table creation.
+## ADR-063 — A Connection Dashboard Is A Bounded Read-Only Snapshot
+
+The database server dashboard is a per-connection inspection surface. Its
+server-owned response contains a sample time, engine, a bounded process-count
+summary, and the effective capability states for its drill-down views. It
+never returns SQL text, connection secrets, or a raw process list. The process
+summary reuses the existing 500-row PostgreSQL and SQL Server monitor query;
+at the cap it reports that the counts may be incomplete. SQLite reports the
+process section as unsupported while still returning its connection and
+capability state.
+
+`ReadServerDashboard` is a distinct audited read operation. The handler checks
+connection ownership and effective authorization before sampling. A missing
+database monitoring privilege produces a section-level permission state, so
+the rest of the dashboard remains usable. Driver calls retain the existing
+execution timeout and cancellation boundary. No `Driver` trait method is
+added. The desktop opens the Overview tab through a Vim-accessible command
+and refreshes on demand; it does not poll in the background.
