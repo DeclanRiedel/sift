@@ -109,7 +109,10 @@ See Microsoft's [`SET STATISTICS XML` permission and output contract](https://le
   IO/TIME` messages remain unavailable through the current TDS driver. Live
   parameterized capture, oversized-result refusal, and restricted-login
   `SHOWPLAN` grant/revoke acceptance pass.
-- [ ] SQLite plan and timing; capability-gated deeper runtime counters.
+- [~] SQLite estimated plan and bounded measured-read timing/row count use the
+      existing Profile path. Native per-node runtime counters are still
+      unavailable through the locked Driver trait; the API and UI leave those
+      fields absent rather than synthesizing them.
 
 ### SQLite measured-read profile design
 

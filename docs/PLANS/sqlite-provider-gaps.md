@@ -34,8 +34,11 @@ claims.
 
 - [ ] Add bounded native bulk/transfer targets with explicit affinity and
       decimal-conversion limits.
-- [ ] Decide whether an actual-plan or runtime-profile workflow has useful
-      SQLite evidence; estimated `EXPLAIN QUERY PLAN` must not invent costs.
+- [x] Provide a bounded runtime profile with useful SQLite evidence. The
+      dedicated read-only execution reports Sift-observed full-consumption
+      timing and completed rows alongside an estimated `EXPLAIN QUERY PLAN`.
+      Native per-node actual rows, timing, and costs remain unavailable and
+      are not inferred from the estimated plan.
 - [ ] Add scoped maintenance and database creation workflows for configured
       server roots, with preview, backup expectations, and audit.
 - [x] Open the authorized CSV quarantine artifact from an import result in the

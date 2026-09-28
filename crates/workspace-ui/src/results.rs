@@ -6705,7 +6705,7 @@ impl ResultsView {
                     .disabled(pending).on_click(cx.listener(|view, _, window, cx| view.cycle_benchmark_iterations(&CycleBenchmarkIterations, window, cx))))
                 .child(div().debug_selector(|| "benchmark-run".into()).child(Button::new("benchmark-run", self.benchmark_limits(cx).map_or_else(|_| "[r] Check configuration".into(), |limits| format!("[r] Confirm & run {} reads", limits.iterations + limits.warmups)))
                     .disabled(pending).on_click(cx.listener(|view, _, window, cx| view.run_benchmark(&RunBenchmark, window, cx)))))
-                .child(Button::new("profile-run", "[p] Confirm & profile current read (PostgreSQL / SQL Server)").disabled(pending)
+                .child(Button::new("profile-run", "[p] Confirm & profile current read").disabled(pending)
                     .on_click(cx.listener(|view, _, window, cx| view.run_profile(&RunProfile, window, cx))))
                 .child(Button::new("benchmark-cancel", "[Esc] Cancel active run").disabled(!pending)
                     .on_click(cx.listener(|view, _, window, cx| view.stop_benchmark(&StopBenchmark, window, cx))))
@@ -6724,11 +6724,12 @@ impl ResultsView {
             .children(self.benchmark_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
             .children(self.profile_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
             .children(self.profile_result.as_ref().map(|profile| div().flex().flex_col().gap_1()
-                .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Profile · measured {} plan", profile.plan.engine)))
-                .child(div().text_xs().child(format!("Native planning {} ms · native execution {} ms · Sift plan capture elapsed {} ms · {} plan nodes",
+                .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Profile · {} {} plan", if profile.plan.analyzed { "measured" } else { "estimated with measured read" }, profile.plan.engine)))
+                .child(div().text_xs().child(format!("Native planning {} ms · native execution {} ms · Sift observed elapsed {} ms · completed rows {} · {} plan nodes",
                     profile.planning_ms.map_or_else(|| "unavailable".into(), |ms| format!("{ms:.2}")),
                     profile.execution_ms.map_or_else(|| "unavailable".into(), |ms| format!("{ms:.2}")),
-                    profile.server_elapsed_ns as f64 / 1_000_000.0, self.profile_nodes.len())))
+                    profile.server_elapsed_ns as f64 / 1_000_000.0,
+                    profile.rows_returned.map_or_else(|| "unavailable".into(), |rows| rows.to_string()), self.profile_nodes.len())))
                 .child(div().text_xs().text_color(colors.muted_text).child(profile.warnings.join(" · ")))))
             .children((!self.profile_nodes.is_empty()).then(|| uniform_list("profile-plan-nodes", self.profile_nodes.len(), cx.processor(|view, range: Range<usize>, _, _| {
                 range.filter_map(|index| view.profile_nodes.get(index)).map(|node| {

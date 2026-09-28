@@ -222,7 +222,11 @@ impl SessionStore {
                             handle,
                             sift_protocol::TxMode {
                                 access: sift_protocol::TxAccessMode::ReadOnly,
-                                ..Default::default()
+                                isolation: if engine == Engine::Sqlite {
+                                    sift_protocol::IsolationLevel::Serializable
+                                } else {
+                                    sift_protocol::IsolationLevel::ReadCommitted
+                                },
                             },
                         )
                         .await

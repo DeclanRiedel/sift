@@ -88,8 +88,9 @@ pub struct ExplainResponse {
     pub warnings: Vec<DriverWarning>,
 }
 
-/// One instrumented read execution on PostgreSQL or SQL Server. Native plan
-/// clocks and Sift-observed elapsed are separate timing populations.
+/// One instrumented read execution. Native plan clocks and Sift-observed
+/// elapsed are separate timing populations. SQLite supplies an estimated plan
+/// alongside server-observed read timing and row count.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProfileRequest {
     pub connection: ConnectionId,
@@ -106,6 +107,10 @@ pub struct ProfileResponse {
     pub run_id: Uuid,
     pub plan: ExplainResponse,
     pub server_elapsed_ns: u64,
+    /// Complete ordinary result rows consumed by Sift. Unavailable for native
+    /// plan-only responses; never a per-node actual row estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_returned: Option<u64>,
     #[serde(default)]
     pub planning_ms: Option<f64>,
     #[serde(default)]
