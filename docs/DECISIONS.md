@@ -2501,3 +2501,27 @@ the rest of the dashboard remains usable. Driver calls retain the existing
 execution timeout and cancellation boundary. No `Driver` trait method is
 added. The desktop opens the Overview tab through a Vim-accessible command
 and refreshes on demand; it does not poll in the background.
+
+## ADR-065 — PostgreSQL administration starts with bounded catalogs and typed changes
+
+Status: accepted. Date: 2026-09-29.
+
+The first database administration slice exposes bounded PostgreSQL role,
+schema, database, and explicit schema-grant catalogs. Role passwords and
+connection credentials never enter these responses. Catalog reads use the
+existing supervised PostgreSQL connection and audited object-read operation.
+
+Role creation, schema privilege grants and revocations, and database or schema
+ownership changes use typed actions. The server quotes every identifier,
+generates the SQL for preview, hashes the observed catalog state with that SQL,
+and repeats the read and policy checks at apply. Apply requires both preview
+matching and explicit production confirmation, independent of any desktop
+prompt. PostgreSQL remains the final authority for ownership, role membership,
+and privilege delegation. The server checks visible ownership and role-creation
+authority early and surfaces PostgreSQL's rejection if permissions change.
+The existing supervised execution path supplies timeouts and cancellation;
+administrative writes cannot join an active editor transaction.
+
+This is a foundation for the database administration editor. Password rotation,
+role attribute changes, membership delegation, object-level grants, default
+privileges, and a complete privilege matrix require separate designs.
