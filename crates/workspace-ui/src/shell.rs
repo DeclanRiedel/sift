@@ -3722,7 +3722,9 @@ pub enum ExecutorCommand {
         profile_id: i64,
     },
     LoadServerDashboard,
-    LoadDatabaseProcesses,
+    LoadDatabaseProcesses {
+        generation: u64,
+    },
     LoadDatabaseDeadlocks,
     LoadPostgresSettings {
         offset: u32,
@@ -4289,6 +4291,8 @@ pub enum ExecutorCommand {
     },
     TerminateDatabaseProcess {
         process_id: i64,
+        profile_id: i64,
+        sequence: u64,
     },
     LoadTableDefinition {
         item_id: u64,
@@ -4618,7 +4622,10 @@ pub enum ExecutorEvent {
     },
     ProfileDeletionFailed(String),
     ServerDashboardLoaded(Result<sift_protocol::ServerDashboard, String>),
-    DatabaseProcessesLoaded(Result<Vec<sift_protocol::DatabaseProcess>, String>),
+    DatabaseProcessesLoaded {
+        generation: u64,
+        result: Result<Vec<sift_protocol::DatabaseProcess>, String>,
+    },
     DatabaseDeadlocksLoaded(Result<Vec<sift_protocol::DatabaseDeadlockEvent>, String>),
     PostgresSettingsLoaded {
         offset: u32,
@@ -4993,6 +5000,7 @@ pub enum ExecutorEvent {
     },
     DatabaseProcessTerminated {
         process_id: i64,
+        sequence: u64,
         result: Result<bool, String>,
     },
     TableDefinitionLoaded {
@@ -13700,6 +13708,10 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::Connection(status) => {
+                self.database_monitor.clear_processes();
+                if matches!(self.modal, Some(Modal::ConfirmTerminateProcess(_))) {
+                    self.modal = None;
+                }
                 self.database_monitor.clear_dashboard();
                 self.database_monitor.clear_query_store();
                 self.database_monitor.clear_objects();
@@ -13823,6 +13835,18 @@ impl WorkspaceShell {
                 self.sync_database_item_states(cx);
                 match status {
                     ConnectionStatus::Connected { profile_id, .. } => {
+                        if self.active_bottom_tool == BottomTool::Monitor
+                            && self.bottom_dock.presentation.open
+                            && matches!(
+                                self.database_monitor.view(),
+                                DatabaseMonitorView::Activity
+                                    | DatabaseMonitorView::Locks
+                                    | DatabaseMonitorView::Deadlocks
+                                    | DatabaseMonitorView::Alerts
+                            )
+                        {
+                            self.load_database_processes(cx);
+                        }
                         let pending = self.pending_database_execution.take().filter(|pending| {
                             pending.source.profile_id == profile_id
                                 && pending.source.instance_id
@@ -16792,8 +16816,8 @@ impl WorkspaceShell {
                 self.database_monitor.finish_dashboard(result);
                 cx.notify();
             }
-            ExecutorEvent::DatabaseProcessesLoaded(result) => {
-                self.database_monitor.finish_loading(result);
+            ExecutorEvent::DatabaseProcessesLoaded { generation, result } => {
+                self.database_monitor.finish_loading(generation, result);
                 cx.notify();
             }
             ExecutorEvent::DatabaseDeadlocksLoaded(result) => {
@@ -16946,10 +16970,19 @@ impl WorkspaceShell {
                     });
                 }
             }
-            ExecutorEvent::DatabaseProcessTerminated { process_id, result } => {
+            ExecutorEvent::DatabaseProcessTerminated {
+                process_id,
+                sequence,
+                result,
+            } => {
+                if !self
+                    .database_monitor
+                    .finish_termination(sequence, process_id)
+                {
+                    return;
+                }
                 match result {
                     Ok(true) => {
-                        self.database_monitor.terminated(process_id);
                         self.show_success_toast(format!("Terminated process {process_id}"), cx);
                     }
                     Ok(false) => self
@@ -16960,6 +16993,7 @@ impl WorkspaceShell {
                     }
                 }
                 self.modal = None;
+                self.load_database_processes(cx);
                 cx.notify();
             }
         }
@@ -27339,8 +27373,14 @@ impl WorkspaceShell {
                 .fail_loading("Database executor is unavailable");
             return;
         };
-        if sender.send(ExecutorCommand::LoadDatabaseProcesses).is_ok() {
-            self.database_monitor.start_loading();
+        let generation = self.database_monitor.start_loading();
+        if sender
+            .send(ExecutorCommand::LoadDatabaseProcesses { generation })
+            .is_ok()
+        {
+            if matches!(self.modal, Some(Modal::ConfirmTerminateProcess(_))) {
+                self.modal = None;
+            }
         } else {
             self.database_monitor
                 .fail_loading("Database executor is unavailable");
@@ -28385,8 +28425,79 @@ impl WorkspaceShell {
         ) {
             return;
         }
+        if !self.database_monitor.preview_termination(process_id) {
+            self.show_toast(
+                "Refresh the process list before terminating this session".into(),
+                cx,
+            );
+            return;
+        }
         self.modal = Some(Modal::ConfirmTerminateProcess(process_id));
         cx.notify();
+    }
+
+    fn handle_sqlserver_process_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        if let Some(Modal::ConfirmTerminateProcess(process_id)) = self.modal {
+            match event.keystroke.key.as_str() {
+                "enter" => self.confirm_terminate_process(process_id, cx),
+                "escape" => self.dismiss_modal(&DismissModal, window, cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if self.modal.is_some() {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "j" => self.database_monitor.move_process_cursor(1),
+            "k" => self.database_monitor.move_process_cursor(-1),
+            "enter" => {
+                if let Some(process_id) = self.database_monitor.process_cursor() {
+                    self.select_database_process(process_id, cx);
+                }
+            }
+            "d" => {
+                if let Some(process_id) = self.database_monitor.process_cursor() {
+                    self.request_terminate_process(process_id, cx);
+                }
+            }
+            "r" => self.load_database_processes(cx),
+            "escape" => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn handle_modal_shortcut_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(Modal::ConfirmTerminateProcess(process_id)) = self.modal {
+            if event.keystroke.modifiers.modified() {
+                return;
+            }
+            match event.keystroke.key.as_str() {
+                "enter" => self.confirm_terminate_process(process_id, cx),
+                "escape" => self.dismiss_modal(&DismissModal, window, cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+            return;
+        }
+        self.handle_tailnet_key(event, window, cx);
     }
 
     fn select_database_process(&mut self, process_id: i64, cx: &mut Context<Self>) {
@@ -28406,8 +28517,41 @@ impl WorkspaceShell {
     }
 
     fn confirm_terminate_process(&mut self, process_id: i64, cx: &mut Context<Self>) {
-        if let Some(sender) = &self.executor_sender {
-            let _ = sender.send(ExecutorCommand::TerminateDatabaseProcess { process_id });
+        if self.modal != Some(Modal::ConfirmTerminateProcess(process_id))
+            || !self.require_operation(
+                sift_protocol::OperationKind::KillProcess,
+                "Terminate database process",
+                cx,
+            )
+        {
+            return;
+        }
+        let ConnectionStatus::Connected { profile_id, .. } = &self.connection_status else {
+            return;
+        };
+        let profile_id = *profile_id;
+        let Some(sequence) = self.database_monitor.start_termination(process_id) else {
+            self.modal = None;
+            self.show_toast(
+                "Process snapshot changed; refresh before terminating".into(),
+                cx,
+            );
+            return;
+        };
+        let sent = self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::TerminateDatabaseProcess {
+                    process_id,
+                    profile_id,
+                    sequence,
+                })
+                .is_ok()
+        });
+        if !sent {
+            self.database_monitor
+                .finish_termination(sequence, process_id);
+            self.modal = None;
+            self.show_error_toast("Database executor is unavailable".into(), cx);
         }
         cx.notify();
     }
@@ -37046,6 +37190,9 @@ impl WorkspaceShell {
 
     fn dismiss_modal(&mut self, _: &DismissModal, window: &mut Window, cx: &mut Context<Self>) {
         self.ide_input = None;
+        if matches!(self.modal, Some(Modal::ConfirmTerminateProcess(_))) {
+            self.database_monitor.clear_termination_preview();
+        }
         if cx.stop_active_drag(window) {
             self.clear_tab_drag_previews(cx);
             cx.notify();
@@ -56055,33 +56202,52 @@ mod tests {
         let (sender, mut commands) = ExecutorSender::channel(128);
         workspace.update(&mut cx, |shell, cx| {
             shell.executor_sender = Some(sender);
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: vec![ConnectionNavEntry {
+                    id: 7,
+                    tenant_id: 1,
+                    name: "SQL Server".into(),
+                    provider_id: sift_protocol::Engine::SqlServer.provider_id(),
+                    tags: Vec::new(),
+                }],
+            }];
+            shell.connection_status = ConnectionStatus::Connected {
+                profile_id: 7,
+                name: "SQL Server".into(),
+            };
             shell.select_bottom_tool(BottomTool::Monitor, cx);
         });
-        assert!(matches!(
-            commands.try_recv(),
-            Ok(ExecutorCommand::LoadDatabaseProcesses)
-        ));
+        let generation = match commands.try_recv() {
+            Ok(ExecutorCommand::LoadDatabaseProcesses { generation }) => generation,
+            other => panic!("expected process load, got {other:?}"),
+        };
         workspace.update(&mut cx, |shell, cx| {
             shell.on_executor_event(
-                ExecutorEvent::DatabaseProcessesLoaded(Ok(vec![sift_protocol::DatabaseProcess {
-                    engine: sift_protocol::Engine::Postgres,
-                    process_id: 42,
-                    user: Some("analyst".into()),
-                    database: Some("warehouse".into()),
-                    state: Some("active".into()),
-                    statement: Some("select * from events".into()),
-                    started_at: None,
-                    transaction_started_at: None,
-                    state_changed_at: None,
-                    wait: Some("Lock".into()),
-                    blocked_by: vec![7],
-                    lock_wait: None,
-                    held_locks: vec![sift_protocol::DatabaseHeldLock {
-                        resource: "relation:42".into(),
-                        mode: "AccessShareLock".into(),
-                    }],
-                    held_locks_truncated: false,
-                }])),
+                ExecutorEvent::DatabaseProcessesLoaded {
+                    generation,
+                    result: Ok(vec![sift_protocol::DatabaseProcess {
+                        engine: sift_protocol::Engine::SqlServer,
+                        process_id: 42,
+                        user: Some("analyst".into()),
+                        database: Some("warehouse".into()),
+                        state: Some("active".into()),
+                        statement: Some("select * from events".into()),
+                        started_at: None,
+                        transaction_started_at: None,
+                        state_changed_at: None,
+                        wait: Some("Lock".into()),
+                        blocked_by: vec![7],
+                        lock_wait: None,
+                        held_locks: vec![sift_protocol::DatabaseHeldLock {
+                            resource: "relation:42".into(),
+                            mode: "AccessShareLock".into(),
+                        }],
+                        held_locks_truncated: false,
+                    }]),
+                },
                 cx,
             );
         });
@@ -56110,14 +56276,18 @@ mod tests {
         cx.simulate_click(statement.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("database-process-details-42").is_none());
-        workspace.update(&mut cx, |shell, cx| {
-            shell.request_terminate_process(42, cx);
-            assert_eq!(shell.modal, Some(Modal::ConfirmTerminateProcess(42)));
-            shell.confirm_terminate_process(42, cx);
+        cx.simulate_keystrokes("d");
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.modal, Some(Modal::ConfirmTerminateProcess(42)))
         });
+        cx.simulate_keystrokes("enter");
         assert!(matches!(
             commands.try_recv(),
-            Ok(ExecutorCommand::TerminateDatabaseProcess { process_id: 42 })
+            Ok(ExecutorCommand::TerminateDatabaseProcess {
+                process_id: 42,
+                profile_id: 7,
+                ..
+            })
         ));
     }
 
@@ -56134,7 +56304,7 @@ mod tests {
         });
         assert!(matches!(
             commands.try_recv(),
-            Ok(ExecutorCommand::LoadDatabaseProcesses)
+            Ok(ExecutorCommand::LoadDatabaseProcesses { .. })
         ));
         assert!(matches!(
             commands.try_recv(),

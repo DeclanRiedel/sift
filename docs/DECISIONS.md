@@ -2587,7 +2587,7 @@ This is a foundation for the editor. Login creation/password rotation, user
 mapping, DENY handling, ownership changes, fixed-role permission explanation,
 and a complete effective-privilege matrix remain separate work.
 
-## ADR-069 — SQL Server process termination uses a fresh Monitor target
+## ADR-070 — SQL Server process termination uses a fresh Monitor target
 
 Status: accepted. Date: 2026-09-29.
 

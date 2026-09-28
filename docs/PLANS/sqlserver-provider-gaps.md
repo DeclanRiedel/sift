@@ -63,8 +63,10 @@ acceptance matrix and workspace gates remain separate.
 - [x] Configure and retry durable CSV import from the desktop using a target
       checkpoint table and stable run UUID.
 - [x] Reopen retained CSV quarantine reports through a workspace history view.
-- [ ] Finish plan, process-control, and bulk-import desktop workflows currently
-      marked partial in the product inventory; retain SQL Server's documented
+- [~] Finish plan, process-control, and bulk-import desktop workflows. SQL Server
+      process control now uses Vim Monitor selection, reviewed termination,
+      capability reasons, and stale-response guards; plan and bulk-import
+      desktop workflows remain. Retain SQL Server's documented
       abort-and-discard cancellation and savepoint limits.
 - [x] Add read-only Query Store inspection before designing any plan-forcing
       action. The audited API and desktop monitor show database state, permission

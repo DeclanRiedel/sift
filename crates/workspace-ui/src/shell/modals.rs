@@ -4821,15 +4821,28 @@ impl WorkspaceShell {
                 }
                 Modal::ConfirmTerminateProcess(process_id) => {
                     let process_id = *process_id;
+                    let preview = self.database_monitor.termination_preview();
+                    let target = preview.map(|preview| {
+                        let process = &preview.process;
+                        format!("{} @ {} · {}",
+                            process.user.as_deref().unwrap_or("unknown login"),
+                            process.database.as_deref().unwrap_or("unknown database"),
+                            process.state.as_deref().unwrap_or("unknown state"))
+                    });
+                    let ready = preview.is_some_and(|preview| preview.process.process_id == process_id)
+                        && !self.database_monitor.termination_pending()
+                        && self.operation_unavailable_reason(sift_protocol::OperationKind::KillProcess).is_none();
                     div()
                         .flex()
                         .flex_col()
                         .gap_4()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Terminate database process {process_id}?")))
+                        .children(target.map(|target| div().text_sm().child(target)))
                         .child(div().text_sm().text_color(colors.muted_text).whitespace_normal().child("This asks the database server to terminate the selected process. Any open work in that process may be rolled back."))
+                        .children(self.operation_unavailable_reason(sift_protocol::OperationKind::KillProcess).map(|reason| div().text_sm().text_color(colors.warning).child(reason)))
                         .child(div().flex().justify_end().gap_2()
                             .child(Button::new("cancel-terminate-process", "Cancel").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, window, cx| shell.dismiss_modal(&DismissModal, window, cx))))
-                            .child(Button::new("confirm-terminate-process", "Terminate").tone(ButtonTone::DangerMuted).on_click(cx.listener(move |shell, _, _, cx| shell.confirm_terminate_process(process_id, cx)))))
+                            .child(Button::new("confirm-terminate-process", "Terminate").tone(ButtonTone::DangerMuted).disabled(!ready).on_click(cx.listener(move |shell, _, _, cx| shell.confirm_terminate_process(process_id, cx)))))
                         .into_any_element()
                 }
                 Modal::CatalogDiagram => {
@@ -8439,7 +8452,7 @@ impl WorkspaceShell {
                 })
                 .child(
                     modal_layout::card(data_results, padded, card_width, max_card_height, colors, cx.theme().metrics)
-                        .on_key_down(cx.listener(Self::handle_tailnet_key))
+                        .on_key_down(cx.listener(Self::handle_modal_shortcut_key))
                         .relative()
                         .left(self.modal_offset.x)
                         .top(self.modal_offset.y)
