@@ -2545,3 +2545,26 @@ administrative writes cannot join an active editor transaction.
 This is a foundation for the database administration editor. Password rotation,
 role attribute changes, membership delegation, object-level grants, default
 privileges, and a complete privilege matrix require separate designs.
+
+## ADR-067 — SQL Server security editing begins with scoped catalog snapshots
+
+Status: accepted. Date: 2026-09-29.
+
+The first SQL Server security workbench reads bounded, metadata-visible server
+logins, database principals, role membership, schema ownership, and explicit
+schema permissions. It never reads password hashes, credential material, or
+login secrets. Fixed-role and inherited permissions are omitted explicitly;
+the catalog is not an effective-privilege matrix. Each section reports when
+SQL Server denies its read rather than implying an empty result.
+
+Typed database-role creation, membership changes, and schema SELECT grants or
+revocations use server-generated SQL with escaped identifiers. Preview checks
+the current database state and relevant authority, then hashes that state with
+the SQL. Apply repeats authorization and preview before supervised execution;
+it requires the matching preview token and an explicit production confirmation.
+SQL Server is the final authority for permissions at execution time. The API
+does not manage logins or passwords, and it does not accept SQL fragments.
+
+This is a foundation for the editor. Login creation/password rotation, user
+mapping, DENY handling, ownership changes, fixed-role permission explanation,
+and a complete effective-privilege matrix remain separate work.
