@@ -124,6 +124,11 @@ fn editor_key_bindings() -> Vec<gpui::KeyBinding> {
             Some("SiftPerformance && !SiftTextInput"),
         ),
         gpui::KeyBinding::new(
+            "p",
+            res::RunProfile,
+            Some("SiftPerformance && !SiftTextInput"),
+        ),
+        gpui::KeyBinding::new(
             "c",
             res::ConfigureBenchmark,
             Some("SiftPerformance && !SiftTextInput"),

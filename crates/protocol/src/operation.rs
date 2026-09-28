@@ -579,6 +579,17 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
     },
+    /// Instrumented read-only execution on a dedicated connection.
+    ProfileQuery {
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+    },
+    CancelProfile {
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+    },
     ListProcesses {
         session: SessionId,
         connection: ConnectionId,
@@ -818,6 +829,8 @@ impl Operation {
             Self::SearchSchema { .. } => OperationKind::SearchSchema,
             Self::SearchData { .. } => OperationKind::SearchData,
             Self::Explain { .. } => OperationKind::Explain,
+            Self::ProfileQuery { .. } => OperationKind::ProfileQuery,
+            Self::CancelProfile { .. } => OperationKind::CancelProfile,
             Self::BenchmarkQuery { .. } => OperationKind::BenchmarkQuery,
             Self::CancelBenchmark { .. } => OperationKind::CancelBenchmark,
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
@@ -1239,6 +1252,12 @@ impl Operation {
             }
             Operation::Explain { connection, .. } => {
                 summary("explain", "query", Some(connection.0 as i64))
+            }
+            Operation::ProfileQuery { connection, .. } => {
+                summary("profile", "query", Some(connection.0 as i64))
+            }
+            Operation::CancelProfile { connection, .. } => {
+                summary("cancel_profile", "query", Some(connection.0 as i64))
             }
             Operation::BenchmarkQuery { connection, .. } => {
                 summary("benchmark", "query", Some(connection.0 as i64))

@@ -987,6 +987,7 @@ actions!(
         PreviousResultTab,
         NextResultTab,
         RunBenchmark,
+        RunProfile,
         StopBenchmark,
         CycleBenchmarkIterations,
         ConfigureBenchmark,
@@ -1112,6 +1113,12 @@ pub enum ResultsEvent {
         run_id: uuid::Uuid,
         limits: sift_protocol::BenchmarkLimits,
     },
+    ProfileRequested {
+        run_id: uuid::Uuid,
+    },
+    CancelProfileRequested {
+        run_id: uuid::Uuid,
+    },
     SaveBenchmarkRequested,
     CancelBenchmarkRequested {
         run_id: uuid::Uuid,
@@ -1234,6 +1241,7 @@ struct RenderedPlanNode {
     relation: Option<SharedString>,
     estimated: SharedString,
     actual: Option<SharedString>,
+    runtime: Option<SharedString>,
 }
 
 fn flatten_plan(root: &PlanNode) -> Vec<RenderedPlanNode> {
@@ -1260,12 +1268,29 @@ fn flatten_plan(root: &PlanNode) -> Vec<RenderedPlanNode> {
         .flatten()
         .collect::<Vec<_>>()
         .join("  ·  ");
+        let runtime = [
+            "Shared Hit Blocks",
+            "Shared Read Blocks",
+            "Shared Dirtied Blocks",
+            "Shared Written Blocks",
+            "Local Hit Blocks",
+            "Local Read Blocks",
+            "Temp Read Blocks",
+            "Temp Written Blocks",
+            "I/O Read Time",
+            "I/O Write Time",
+        ]
+        .into_iter()
+        .filter_map(|key| node.extra.get(key).map(|value| format!("{key} {value}")))
+        .collect::<Vec<_>>()
+        .join("  ·  ");
         rows.push(RenderedPlanNode {
             depth,
             op: node.op.clone().into(),
             relation: node.relation.clone().map(Into::into),
             estimated: estimated.into(),
             actual: (!actual.is_empty()).then(|| actual.into()),
+            runtime: (!runtime.is_empty()).then(|| runtime.into()),
         });
         stack.extend(
             node.children
@@ -1363,6 +1388,10 @@ pub struct ResultsView {
     benchmark_report: Option<sift_protocol::BenchmarkReport>,
     benchmark_baseline: Option<sift_protocol::BenchmarkReport>,
     benchmark_error: Option<String>,
+    profile_pending: Option<uuid::Uuid>,
+    profile_result: Option<sift_protocol::ProfileResponse>,
+    profile_error: Option<String>,
+    profile_nodes: Vec<RenderedPlanNode>,
     benchmark_inputs: Option<[Entity<TextInput>; 5]>,
     _benchmark_subscriptions: Vec<Subscription>,
     rendered_plan_nodes: Vec<RenderedPlanNode>,
@@ -1485,6 +1514,10 @@ impl ResultsView {
             benchmark_report: None,
             benchmark_baseline: None,
             benchmark_error: None,
+            profile_pending: None,
+            profile_result: None,
+            profile_error: None,
+            profile_nodes: Vec::new(),
             benchmark_inputs: None,
             _benchmark_subscriptions: Vec::new(),
             rendered_plan_nodes: Vec::new(),
@@ -6411,6 +6444,27 @@ impl ResultsView {
         cx.notify();
     }
 
+    pub(crate) fn set_profile_result(
+        &mut self,
+        run_id: uuid::Uuid,
+        result: Result<sift_protocol::ProfileResponse, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.profile_pending != Some(run_id) {
+            return;
+        }
+        self.profile_pending = None;
+        match result {
+            Ok(response) => {
+                self.profile_nodes = flatten_plan(&response.plan.root);
+                self.profile_result = Some(response);
+                self.profile_error = None;
+            }
+            Err(error) => self.profile_error = Some(error),
+        }
+        cx.notify();
+    }
+
     pub(crate) fn show_performance(&mut self, cx: &mut Context<Self>) {
         self.ensure_benchmark_inputs(cx);
         self.collapsed = false;
@@ -6450,7 +6504,10 @@ impl ResultsView {
     }
 
     fn run_benchmark(&mut self, _: &RunBenchmark, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tab != ResultTab::Performance || self.benchmark_pending.is_some() {
+        if self.tab != ResultTab::Performance
+            || self.benchmark_pending.is_some()
+            || self.profile_pending.is_some()
+        {
             return;
         }
         let limits = match self.benchmark_limits(cx) {
@@ -6468,9 +6525,25 @@ impl ResultsView {
         cx.emit(ResultsEvent::BenchmarkRequested { run_id, limits });
         cx.notify();
     }
+    fn run_profile(&mut self, _: &RunProfile, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab != ResultTab::Performance
+            || self.profile_pending.is_some()
+            || self.benchmark_pending.is_some()
+        {
+            return;
+        }
+        let run_id = uuid::Uuid::new_v4();
+        self.profile_pending = Some(run_id);
+        self.profile_error = None;
+        self.focus_handle.focus(window, cx);
+        cx.emit(ResultsEvent::ProfileRequested { run_id });
+        cx.notify();
+    }
     fn stop_benchmark(&mut self, _: &StopBenchmark, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(run_id) = self.benchmark_pending {
             cx.emit(ResultsEvent::CancelBenchmarkRequested { run_id });
+        } else if let Some(run_id) = self.profile_pending {
+            cx.emit(ResultsEvent::CancelProfileRequested { run_id });
         }
     }
     fn cycle_benchmark_iterations(
@@ -6563,7 +6636,7 @@ impl ResultsView {
 
     fn render_performance(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = cx.theme().colors;
-        let pending = self.benchmark_pending.is_some();
+        let pending = self.benchmark_pending.is_some() || self.profile_pending.is_some();
         let summary = self.benchmark_report.as_ref().map(|report| {
             let measured = report
                 .samples
@@ -6603,7 +6676,9 @@ impl ResultsView {
                     .disabled(pending).on_click(cx.listener(|view, _, window, cx| view.cycle_benchmark_iterations(&CycleBenchmarkIterations, window, cx))))
                 .child(div().debug_selector(|| "benchmark-run".into()).child(Button::new("benchmark-run", self.benchmark_limits(cx).map_or_else(|_| "[r] Check configuration".into(), |limits| format!("[r] Confirm & run {} reads", limits.iterations + limits.warmups)))
                     .disabled(pending).on_click(cx.listener(|view, _, window, cx| view.run_benchmark(&RunBenchmark, window, cx)))))
-                .child(Button::new("benchmark-cancel", "[Esc] Cancel").disabled(!pending)
+                .child(Button::new("profile-run", "[p] Confirm & profile current read (PostgreSQL)").disabled(pending)
+                    .on_click(cx.listener(|view, _, window, cx| view.run_profile(&RunProfile, window, cx))))
+                .child(Button::new("benchmark-cancel", "[Esc] Cancel active run").disabled(!pending)
                     .on_click(cx.listener(|view, _, window, cx| view.stop_benchmark(&StopBenchmark, window, cx))))
                 .child(Button::new("benchmark-baseline", "[b] Pin baseline").disabled(self.benchmark_report.is_none() || pending)
                     .on_click(cx.listener(|view, _, window, cx| view.pin_benchmark_baseline(&PinBenchmarkBaseline, window, cx))))
@@ -6616,8 +6691,24 @@ impl ResultsView {
                     div().w(px(145.)).flex().flex_col().gap_1().child(div().text_xs().child(label)).child(input.clone())))))
             .child(div().text_sm().text_color(colors.muted_text).child(
                 "Current statement or selection · warm-ups excluded · full result drain, no retained rows. Total budget may stop a run early. Repeated reads can load production databases and invoke side effects. Use a read-only account. Tab/Shift-Tab navigates settings; Tab after delay returns to run controls. p95 needs 100 successful samples; p99 needs 1,000."))
-            .children(pending.then(|| div().text_sm().child("Benchmark running on a dedicated connection… Results arrive when the run finishes or is cancelled.")))
+            .children(pending.then(|| div().text_sm().child(if self.profile_pending.is_some() { "Profile running on a dedicated read-only connection…" } else { "Benchmark running on a dedicated connection… Results arrive when the run finishes or is cancelled." })))
             .children(self.benchmark_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
+            .children(self.profile_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
+            .children(self.profile_result.as_ref().map(|profile| div().flex().flex_col().gap_1()
+                .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child("Profile · measured PostgreSQL plan"))
+                .child(div().text_xs().child(format!("PostgreSQL planning {} ms · execution {} ms · Sift plan capture elapsed {} ms · {} plan nodes",
+                    profile.planning_ms.map_or_else(|| "unavailable".into(), |ms| format!("{ms:.2}")),
+                    profile.execution_ms.map_or_else(|| "unavailable".into(), |ms| format!("{ms:.2}")),
+                    profile.server_elapsed_ns as f64 / 1_000_000.0, self.profile_nodes.len())))
+                .child(div().text_xs().text_color(colors.muted_text).child(profile.warnings.join(" · ")))))
+            .children((!self.profile_nodes.is_empty()).then(|| uniform_list("profile-plan-nodes", self.profile_nodes.len(), cx.processor(|view, range: Range<usize>, _, _| {
+                range.filter_map(|index| view.profile_nodes.get(index)).map(|node| {
+                    div().h(px(28.)).pl(px(8. + node.depth.min(24) as f32 * 16.)).text_sm()
+                        .child(format!("{} · estimate {} · actual {}{}", node.op, node.estimated,
+                            node.actual.as_ref().map_or("unavailable", |value| value.as_ref()),
+                            node.runtime.as_ref().map_or_else(String::new, |value| format!(" · {value}"))))
+                }).collect::<Vec<_>>()
+            })).h(px(180.))))
             .children(summary.map(|s| div().text_sm().child(s)))
             .children(comparison.map(|s| div().text_sm().text_color(colors.muted_text).child(s)))
             .children(self.benchmark_report.as_ref().map(|report| div().text_xs().text_color(colors.muted_text).child(report.warnings.join(" · "))))
@@ -7789,6 +7880,7 @@ impl gpui::Render for ResultsView {
                 "SiftResults"
             })
             .on_action(cx.listener(Self::run_benchmark))
+            .on_action(cx.listener(Self::run_profile))
             .on_action(cx.listener(Self::stop_benchmark))
             .on_action(cx.listener(Self::cycle_benchmark_iterations))
             .on_action(cx.listener(Self::configure_benchmark))

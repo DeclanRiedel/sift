@@ -1214,6 +1214,14 @@ pub fn app(state: AppState) -> Router {
             post_with(post_explain, doc("explainQuery", "Capture a typed execution plan")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/profile",
+            post_with(post_profile, doc("profileQuery", "Capture a bounded PostgreSQL read-only actual plan")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/profile/:run_id/cancel",
+            post_with(post_cancel_profile, doc("cancelProfile", "Cancel an active PostgreSQL Profile run")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/benchmark",
             post_with(post_benchmark, doc("benchmarkQuery", "Run a bounded read-query benchmark on a dedicated connection")),
         )
@@ -1689,6 +1697,7 @@ fn rate_limit_class(method: &axum::http::Method, path: &str) -> sift_protocol::R
     }
     if path.ends_with("/queries")
         || path.ends_with("/explain")
+        || path.ends_with("/profile")
         || path.contains("/benchmark")
         || path.ends_with("/search/data")
         || path.ends_with("/edits/apply")
@@ -9692,6 +9701,50 @@ async fn post_explain(
         |_| None,
     )?;
     Ok(Json(resp))
+}
+
+async fn post_profile(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::ProfileRequest>,
+) -> ApiResult<Json<sift_protocol::ProfileResponse>> {
+    let operation = Operation::ProfileQuery {
+        session,
+        connection,
+        run_id: request.run_id,
+    };
+    let response = tokio::spawn(async move {
+        finish_operation(
+            &state.sessions,
+            operation,
+            state.sessions.profile(session, connection, request).await,
+            |_| None,
+        )
+    })
+    .await
+    .map_err(|_| ApiError::Internal("profile supervisor failed".into()))??;
+    Ok(Json(response))
+}
+
+async fn post_cancel_profile(
+    State(state): State<AppState>,
+    Path((session, connection, run_id)): Path<(
+        sift_protocol::SessionId,
+        sift_protocol::ConnectionId,
+        uuid::Uuid,
+    )>,
+) -> ApiResult<Json<serde_json::Value>> {
+    finish_operation(
+        &state.sessions,
+        Operation::CancelProfile {
+            session,
+            connection,
+            run_id,
+        },
+        state.sessions.cancel_profile(session, connection, run_id),
+        |_| None,
+    )?;
+    Ok(Json(serde_json::json!({"cancel_requested": true})))
 }
 
 async fn post_benchmark(

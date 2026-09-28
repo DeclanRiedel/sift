@@ -2350,6 +2350,74 @@ async fn run_query_executor(
                     });
                 }
             }
+            ExecutorCommand::Profile {
+                item_id,
+                profile_id,
+                mut request,
+            } => {
+                let run_id = request.run_id;
+                if let Some(opened) = context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == profile_id)
+                    .or_else(|| parked_contexts.get(&profile_id))
+                {
+                    let client = opened.client.clone();
+                    let session = opened.session;
+                    let connection = opened.connection;
+                    request.connection = connection;
+                    let events = events.clone();
+                    std::mem::drop(tokio::spawn(async move {
+                        let response = client
+                            .profile(session, connection, request)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = events.send(ExecutorEvent::ProfileFinished {
+                            item_id,
+                            run_id,
+                            response,
+                        });
+                    }));
+                } else {
+                    let _ = events.send(ExecutorEvent::ProfileFinished {
+                        item_id,
+                        run_id,
+                        response: Err("Connect this database before profiling".into()),
+                    });
+                }
+            }
+            ExecutorCommand::CancelProfile { profile_id, run_id } => {
+                if let Some(opened) = context
+                    .as_ref()
+                    .filter(|opened| opened.profile_id == profile_id)
+                    .or_else(|| parked_contexts.get(&profile_id))
+                {
+                    let client = opened.client.clone();
+                    let session = opened.session;
+                    let connection = opened.connection;
+                    let events = events.clone();
+                    std::mem::drop(tokio::spawn(async move {
+                        let mut failure = None;
+                        for attempt in 0..4 {
+                            match client.cancel_profile(session, connection, run_id).await {
+                                Ok(()) => return,
+                                Err(error) => failure = Some(error.to_string()),
+                            }
+                            if attempt < 3 {
+                                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            }
+                        }
+                        let _ = events.send(ExecutorEvent::ProfileCancelFailed {
+                            run_id,
+                            message: failure.unwrap_or_else(|| "Cancellation unavailable".into()),
+                        });
+                    }));
+                } else {
+                    let _ = events.send(ExecutorEvent::ProfileCancelFailed {
+                        run_id,
+                        message: "Original database connection is no longer available".into(),
+                    });
+                }
+            }
             ExecutorCommand::CancelBenchmark { profile_id, run_id } => {
                 if let Some(opened) = context
                     .as_ref()

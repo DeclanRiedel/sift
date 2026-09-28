@@ -1,7 +1,8 @@
 # Query performance workbench
 
-Status: serial benchmarks, configurable Performance panel and private saved-run
-library implemented; profiling, definitions and advanced tools remain in progress.
+Status: serial benchmarks, a PostgreSQL measured-plan Profile foundation,
+configurable Performance panel and private saved-run library implemented;
+broader profiling, definitions and advanced tools remain in progress.
 
 ## Design contract
 
@@ -44,7 +45,7 @@ library implemented; profiling, definitions and advanced tools remain in progres
 - [ ] Full profiling capability matrix and captured environment context.
 - [x] Versioned benchmark report and audited Benchmark/cancel API actions.
 - [x] Dedicated audited save/list/get/delete snapshot actions.
-- [ ] Dedicated Profile action.
+- [x] Dedicated audited PostgreSQL Profile and cancel actions.
 
 ## Milestone 2 — profile and Performance panel
 
@@ -62,21 +63,25 @@ The editor's connection and transaction are never used for instrumentation.
 A supervised task owns the dedicated connection until rollback and close. A
 per-source run registration supports explicit cancellation; timeout and
 cancellation interrupt execution, attempt driver cancellation, and discard the
-connection. The plan result is capped in bytes before parsing. The response
+connection. Text plan payloads are capped before JSON decoding, and all plans
+are capped before normalized-tree parsing. The response
 keeps raw JSON and a normalized tree, and labels PostgreSQL planning/execution
 durations separately from Sift's server-observed elapsed time. Missing native
 counters remain unavailable. The Performance panel presents this measured plan
 apart from estimated Explain and serial Benchmark results.
 
-- [ ] Current statement/selection targeting, explicit execution preview.
+- [~] Current statement/selection targeting uses the query tab's target; an
+  explicit SQL and parameter preview before execution remains open.
 - [ ] Summary, Runs, Plan, Compare and Saved sections; keyboard navigation.
 - [x] Initial Performance tab: summary, virtualized samples, in-memory baseline,
   JSON clipboard export and keyboard controls. Open through the command palette
   (`Query Performance: Open Benchmark Panel`) without executing anything.
-- [ ] PostgreSQL JSON actual plan, buffers and supported runtime counters.
+- [x] PostgreSQL JSON actual plan and available per-node runtime/buffer counters;
+  unavailable counters remain absent.
 - [ ] SQL Server actual plans and supported statistics IO/time collection.
 - [ ] SQLite plan and timing; capability-gated deeper runtime counters.
-- [ ] Raw and normalized plans, estimate/actual differences and node links.
+- [~] Raw JSON and a normalized plan tree are available; explicit
+  estimate/actual deltas and node links remain open.
 - [ ] Evidence-based scans/sorts/spills findings without double-counting nested
   node time; instrumentation overhead labelled.
 - [ ] Throttled background progress, virtualized samples, bounded memory;
@@ -146,6 +151,25 @@ apart from estimated Explain and serial Benchmark results.
 - [ ] Graduate stable cross-layer decisions into docs/DECISIONS.md.
 
 ## Implementation log
+
+- PostgreSQL Profile foundation: `ProfileQuery` and `CancelProfile` are separate
+  audited operations and SDK calls. The server requires ordinary query and
+  Profile authorization, a confirmed single read, and a PostgreSQL connection.
+  Each run owns a dedicated connection and read-only transaction; `SET LOCAL`
+  applies the validated statement timeout before `EXPLAIN (ANALYZE, BUFFERS,
+  FORMAT JSON)`. The plan stream is bounded by the result byte limit, and a
+  supervisor handles cancellation, timeout, rollback and connection cleanup.
+  The response separates PostgreSQL planning/execution milliseconds from Sift's
+  plan-capture elapsed nanoseconds. The Performance panel has a distinct
+  measured-plan section, a Profile action and cancellation; bind values use
+  the query tab's remembered parameters. UI confirmation is the Profile button,
+  and SQL/parameter preview remains open. The read-only transaction protects
+  database writes, but external function side effects and cache state remain
+  unknown. Focused server tests cover the measured response, write rejection,
+  cancellation and source-connection survival. Verification: formatting,
+  server/SDK and desktop/workspace UI checks, and the two focused Profile
+  integration tests pass; strict workspace Clippy and full tests await the
+  integration gate.
 
 - Timing dimensions milestone: report version 2 records server-side client
   elapsed at task completion, first nonempty row page, and full consumption at

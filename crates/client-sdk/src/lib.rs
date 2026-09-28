@@ -2338,6 +2338,34 @@ impl Client {
         .await
     }
 
+    pub async fn profile(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::ProfileRequest,
+    ) -> Result<sift_protocol::ProfileResponse> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/profile"),
+            &request,
+        )
+        .await
+    }
+
+    pub async fn cancel_profile(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        run_id: uuid::Uuid,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .post(
+                &format!("/v1/sessions/{session}/connections/{connection}/profile/{run_id}/cancel"),
+                &serde_json::json!({}),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn cancel_benchmark(
         &self,
         session: SessionId,
