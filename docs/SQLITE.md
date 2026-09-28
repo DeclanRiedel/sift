@@ -63,8 +63,10 @@ WAL and shared-memory sidecars. Sift preserves their journal and sync settings.
   [transaction semantics](https://www.sqlite.org/lang_transaction.html).
 - Main/TEMP explorer, columns, PK/FK/unique indexes, generated/hidden columns,
   STRICT/WITHOUT ROWID behavior, native table/view/index/trigger DDL and refresh
-  after changes from another connection. CHECK metadata is included when parsed;
-  native DDL remains authoritative for all expressions and trigger bodies.
+  after changes from another connection. Ordinary table and column CHECK clauses
+  expose their names, scope, and expression text from native CREATE SQL.
+  Native DDL remains authoritative for every expression and trigger body; CHECK
+  metadata is omitted for virtual tables and CREATE SQL larger than 1 MiB.
 - SQLite completion, aliases/CTEs, statement selection, formatting and
   diagnostics. Native SQLite executes SQL independently of the editor parser;
   parser coverage is incomplete for some SQLite DDL, including trigger bodies.

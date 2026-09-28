@@ -255,53 +255,218 @@ fn table_rows(
     Ok((count <= limit).then_some(count))
 }
 
+struct DdlToken {
+    value: String,
+    start: usize,
+    end: usize,
+    depth: usize,
+    quoted: bool,
+}
+
+fn ddl_tokens(sql: &str) -> Vec<DdlToken> {
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let (mut i, mut depth) = (0, 0usize);
+    while i < bytes.len() {
+        let start = i;
+        match bytes[i] {
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && &bytes[i..i + 2] != b"*/" {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            b'\'' | b'"' | b'`' | b'[' => {
+                let open = bytes[i];
+                let close = if open == b'[' { b']' } else { open };
+                i += 1;
+                let content = i;
+                while i < bytes.len() {
+                    if bytes[i] == close {
+                        if bytes.get(i + 1) == Some(&close) {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                let value = sql[content..i].replace(
+                    &format!("{}{}", close as char, close as char),
+                    &(close as char).to_string(),
+                );
+                i = (i + 1).min(bytes.len());
+                if open != b'\'' {
+                    tokens.push(DdlToken {
+                        value,
+                        start,
+                        end: i,
+                        depth,
+                        quoted: true,
+                    });
+                }
+            }
+            b'(' => {
+                tokens.push(DdlToken {
+                    value: "(".into(),
+                    start,
+                    end: i + 1,
+                    depth,
+                    quoted: false,
+                });
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                tokens.push(DdlToken {
+                    value: ")".into(),
+                    start,
+                    end: i + 1,
+                    depth,
+                    quoted: false,
+                });
+                i += 1;
+            }
+            b',' => {
+                tokens.push(DdlToken {
+                    value: ",".into(),
+                    start,
+                    end: i + 1,
+                    depth,
+                    quoted: false,
+                });
+                i += 1;
+            }
+            b if b.is_ascii_alphabetic() || b == b'_' || b >= 0x80 => {
+                i += 1;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] >= 0x80)
+                {
+                    i += 1;
+                }
+                tokens.push(DdlToken {
+                    value: sql[start..i].into(),
+                    start,
+                    end: i,
+                    depth,
+                    quoted: false,
+                });
+            }
+            _ => i += 1,
+        }
+    }
+    tokens
+}
+
+fn native_checks(sql: &str) -> Vec<ConstraintInfo> {
+    const MAX_CHECK_SQL: usize = 1024 * 1024;
+    if sql.len() > MAX_CHECK_SQL {
+        return Vec::new();
+    }
+    let tokens = ddl_tokens(sql);
+    let Some(body) = tokens.iter().position(|t| t.value == "(" && t.depth == 0) else {
+        return Vec::new();
+    };
+    let prefix = &tokens[..body];
+    if !prefix
+        .first()
+        .is_some_and(|t| t.value.eq_ignore_ascii_case("CREATE"))
+        || !prefix
+            .iter()
+            .any(|t| !t.quoted && t.value.eq_ignore_ascii_case("TABLE"))
+        || prefix
+            .iter()
+            .any(|t| !t.quoted && t.value.eq_ignore_ascii_case("VIRTUAL"))
+    {
+        return Vec::new();
+    }
+    let mut checks = Vec::new();
+    let mut segment = body + 1;
+    for end in body + 1..tokens.len() {
+        if !(tokens[end].value == "," && tokens[end].depth == 1
+            || tokens[end].value == ")" && tokens[end].depth == 0)
+        {
+            continue;
+        }
+        let top = tokens[segment..end]
+            .iter()
+            .filter(|t| t.depth == 1)
+            .collect::<Vec<_>>();
+        let table_constraint = top.first().is_some_and(|t| {
+            !t.quoted
+                && ["CONSTRAINT", "CHECK", "PRIMARY", "UNIQUE", "FOREIGN"]
+                    .iter()
+                    .any(|keyword| t.value.eq_ignore_ascii_case(keyword))
+        });
+        let column = (!table_constraint)
+            .then(|| top.first().map(|t| t.value.clone()))
+            .flatten();
+        for (index, token) in top.iter().enumerate() {
+            if checks.len() >= MAX_OBJECTS {
+                return checks;
+            }
+            if token.quoted || !token.value.eq_ignore_ascii_case("CHECK") {
+                continue;
+            }
+            let Some(open) = top.get(index + 1).filter(|t| t.value == "(") else {
+                continue;
+            };
+            let next = tokens.partition_point(|t| t.start <= open.start);
+            let Some(close) = tokens[next..]
+                .iter()
+                .find(|t| t.start > open.start && t.depth == 1 && t.value == ")")
+            else {
+                continue;
+            };
+            let clause_start = top[..index]
+                .iter()
+                .rposition(|prior| !prior.quoted && prior.value.eq_ignore_ascii_case("CHECK"))
+                .map_or(0, |prior| prior + 1);
+            let name = top[clause_start..index]
+                .windows(2)
+                .rev()
+                .find(|pair| !pair[0].quoted && pair[0].value.eq_ignore_ascii_case("CONSTRAINT"))
+                .map(|pair| pair[1].value.clone())
+                .unwrap_or_else(|| {
+                    column.as_ref().map_or_else(
+                        || format!("CHECK {}", checks.len() + 1),
+                        |name| format!("CHECK {name}"),
+                    )
+                });
+            checks.push(ConstraintInfo {
+                name,
+                kind: ConstraintKind::Check,
+                columns: column.iter().cloned().collect(),
+                definition: Some(sql[open.end..close.start].trim().into()),
+                references: None,
+            });
+        }
+        if tokens[end].value == ")" {
+            break;
+        }
+        segment = end + 1;
+    }
+    checks
+}
+
 fn deepen(
     conn: &Connection,
     schema: &str,
     object: &mut ObjectInfo,
     sql: &str,
 ) -> Result<(), DriverError> {
-    // SQLite keeps CHECK expressions in its native CREATE statement, not a
-    // PRAGMA. Add parsed expressions when supported; native DDL remains the
-    // authority for syntax outside the parser's coverage.
-    if let Ok(statements) =
-        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, sql)
-    {
-        for statement in statements {
-            if let sqlparser::ast::Statement::CreateTable(table) = statement {
-                for constraint in table.constraints {
-                    if let sqlparser::ast::TableConstraint::Check { name, expr } = constraint {
-                        object.constraints.push(ConstraintInfo {
-                            name: name.map_or_else(
-                                || format!("CHECK {}", object.constraints.len() + 1),
-                                |n| n.value,
-                            ),
-                            kind: ConstraintKind::Check,
-                            columns: vec![],
-                            definition: Some(expr.to_string()),
-                            references: None,
-                        });
-                    }
-                }
-                for column in table.columns {
-                    for option in column.options {
-                        if let sqlparser::ast::ColumnOption::Check(expr) = option.option {
-                            object.constraints.push(ConstraintInfo {
-                                name: option.name.map_or_else(
-                                    || format!("CHECK {}", column.name.value),
-                                    |n| n.value,
-                                ),
-                                kind: ConstraintKind::Check,
-                                columns: vec![column.name.value.clone()],
-                                definition: Some(expr.to_string()),
-                                references: None,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // SQLite exposes CHECK only inside sqlite_schema.sql. The editor parser
+    // rejects valid native table forms, so scan just the table body and retain
+    // the exact expression text. Stored native DDL remains authoritative.
+    object.constraints.extend(native_checks(sql));
     let mut stmt = conn
         .prepare("SELECT name,\"unique\",origin,partial FROM pragma_index_list(?1,?2) ORDER BY seq LIMIT 10001")
         .map_err(db_error)?;
@@ -554,4 +719,24 @@ pub fn ddl(conn: &Connection, object: &ObjectPath) -> Result<String, DriverError
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod check_tests {
+    use super::native_checks;
+
+    #[test]
+    fn unsupported_shapes_do_not_invent_check_metadata() {
+        assert!(
+            native_checks("CREATE VIRTUAL TABLE docs USING fts5(body, CHECK(value))").is_empty()
+        );
+        let oversized = format!(
+            "CREATE TABLE t(a CHECK(a > 0)) /*{}*/",
+            "x".repeat(1024 * 1024)
+        );
+        assert!(native_checks(&oversized).is_empty());
+        assert!(native_checks("CREATE TABLE copy AS SELECT 1 CHECK (fake)").is_empty());
+        let unicode = native_checks("CREATE TABLE t(名 INTEGER CHECK(名 > 0))");
+        assert_eq!(unicode[0].columns, ["名"]);
+    }
 }

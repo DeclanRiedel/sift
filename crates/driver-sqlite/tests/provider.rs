@@ -401,6 +401,10 @@ async fn native_schema_ddl_and_external_refresh_preserve_file_semantics() {
         .await
         .unwrap();
     let table = &snapshot.trees[0].schemas[0].objects[0];
+    assert!(table
+        .constraints
+        .iter()
+        .any(|c| { c.kind == ConstraintKind::Check && c.definition.as_deref() == Some("b>0") }));
     assert_eq!(table.columns[2].facets.sqlite.as_ref().unwrap().hidden, 3);
     assert!(table.indexes.iter().any(|i| i.partial_predicate.is_some()));
     let sql = f.driver.object_ddl(c.clone(), path).await.unwrap();
@@ -444,6 +448,66 @@ async fn native_schema_ddl_and_external_refresh_preserve_file_semantics() {
         snapshot.trees[0].schemas[0].objects[0].columns[0].nullable,
         Nullability::Nullable
     );
+    f.driver.close(c).await.unwrap();
+}
+
+#[tokio::test]
+async fn native_check_metadata_keeps_names_scopes_and_expression_text() {
+    let f = Fixture::new(1);
+    let c = f.open(SqliteOpenMode::ReadWrite).await;
+    let ddl = r#"CREATE TABLE checks(
+        "CHECK" TEXT CHECK (length("CHECK") > 0),
+        amount INTEGER CONSTRAINT "amount positive" CHECK (amount > 0) CHECK (amount < 10),
+        note TEXT CHECK (note <> 'CHECK (fake, value)') /* CHECK (ignored) */,
+        CONSTRAINT [table check] CHECK (length(note) > 1 AND amount IN (1,2,3))
+    ) STRICT"#;
+    execute(&f.driver, &c, ddl, vec![]).await.unwrap();
+    let path = ObjectPath::new("checks");
+    let snapshot = f
+        .driver
+        .schema(c.clone(), SchemaScope::deep(path.clone()))
+        .await
+        .unwrap();
+    let checks = &snapshot.trees[0].schemas[0].objects[0].constraints;
+    assert_eq!(checks.len(), 5);
+    assert_eq!(checks[0].name, "CHECK CHECK");
+    assert_eq!(checks[0].columns, ["CHECK"]);
+    assert_eq!(
+        checks[0].definition.as_deref(),
+        Some("length(\"CHECK\") > 0")
+    );
+    assert_eq!(checks[1].name, "amount positive");
+    assert_eq!(checks[1].columns, ["amount"]);
+    assert_eq!(checks[1].definition.as_deref(), Some("amount > 0"));
+    assert_eq!(checks[2].name, "CHECK amount");
+    assert_eq!(checks[2].columns, ["amount"]);
+    assert_eq!(checks[2].definition.as_deref(), Some("amount < 10"));
+    assert_eq!(checks[3].name, "CHECK note");
+    assert_eq!(checks[3].columns, ["note"]);
+    assert_eq!(
+        checks[3].definition.as_deref(),
+        Some("note <> 'CHECK (fake, value)'")
+    );
+    assert_eq!(checks[4].name, "table check");
+    assert!(checks[4].columns.is_empty());
+    assert_eq!(
+        checks[4].definition.as_deref(),
+        Some("length(note) > 1 AND amount IN (1,2,3)")
+    );
+    assert!(execute(
+        &f.driver,
+        &c,
+        "INSERT INTO checks(amount,note) VALUES (0,'valid')",
+        vec![]
+    )
+    .await
+    .is_err());
+    assert!(f
+        .driver
+        .object_ddl(c.clone(), path)
+        .await
+        .unwrap()
+        .contains(ddl));
     f.driver.close(c).await.unwrap();
 }
 
