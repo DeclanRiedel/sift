@@ -533,7 +533,11 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       expiry or revocation reaches its dedicated degraded state even without
       user activity.
 - [ ] Meet measured performance and memory budgets on representative large
-      schemas, documents, results, diagrams, histories, and logs.
+      schemas, documents, results, diagrams, histories, and logs. A 2026-09-28
+      Linux `release-dev` run measured a 100,000-object schema-filter p95 of
+      11.821 ms over 52 frames (all over the 8.33 ms CPU budget); a 500-row
+      first-result-page p95 was 5.419 ms over 1,906 frames. Benchmark-process
+      memory is recorded separately; desktop and platform ceilings remain open.
 - [ ] Validate dark/light themes, scaling, IME, keyboard layouts, clipboard,
       dialogs, window chrome, packaging, and updates on Linux/macOS/Windows.
 - [ ] Design, build, and validate signed desktop artifacts through the existing

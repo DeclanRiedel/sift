@@ -1,5 +1,34 @@
 # Desktop performance measurements
 
+## M6 Linux measurement (2026-09-28)
+
+Repeated the existing `release-dev` benchmark binary on Linux x86_64 (Intel
+Core i7-13620H, binary built with Rust 1.98.1) after concurrent builds stopped.
+Criterion used 30 samples, two seconds of warmup, and five seconds of
+measurement. GPUI's dirty-to-draw report includes warmup and calibration
+frames. The first-page fixture starts with a result page already available, so
+database and network execution are excluded.
+
+| Fixture | Observed frames | Dirty-to-draw p50 | p95 | Frames over 8.33 ms |
+|---|---:|---:|---:|---:|
+| `schema_tree_filter` (100,000 objects) | 52 | 11.166 ms | 11.821 ms | 52 |
+| `first_result_page` (500 rows) | 1,906 | 5.177 ms | 5.419 ms | 0 |
+
+Criterion mean iterations were 6.928 ms and 5.188 ms respectively. The schema
+filter still misses the 120 Hz CPU-frame target despite its mean iteration
+time, so the M6 responsiveness gate stays open. An earlier run while other
+builds were active produced only two observed schema frames and is excluded
+from acceptance. A separate direct executable run of the schema fixture with
+`/usr/bin/time -v` peaked at 193,200 KiB (about 188.7 MiB) resident memory and
+exited successfully. That is the benchmark process peak for one fixture, not
+steady desktop memory or a per-window ceiling.
+
+The commands used the already built `target/release-dev/deps/frame_budget-*`
+binary with `--bench`, fixture name, `--sample-size`, `--warm-up-time`, and
+`--measurement-time` arguments inside the Nix dev environment. These are
+headless CPU-renderer observations; physical display latency and platform
+memory acceptance remain unmeasured.
+
 Correction (2026-09-09): the historical `vim_typing_large_document` runs below
 did not install the desktop Backspace binding in the standalone GPUI fixture.
 They measured insertion with a non-editing Backspace event, not a stable-length
