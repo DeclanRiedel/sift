@@ -8,8 +8,11 @@ current public support boundary.
 
 ## Values, plans, and native definitions
 
-- [ ] Decode `money` and `smallmoney` without a floating-point round trip;
-      test exact boundary and fractional values through live TDS responses.
+- [x] Decode `money` and `smallmoney` without a floating-point round trip;
+      exact positive/negative boundaries, fractions, and NULLs pass through
+      live TDS responses. The local Tiberius 0.12.3 patch retains signed
+      ten-thousandths as `Numeric(scale=4)` before the driver formats
+      `Value::Decimal`; revisit the patch on upstream upgrades.
 - [ ] Decide a lossless representation and bind contract for supported
       `sql_variant`/UDT families; retain explicit unsupported errors for others.
 - [ ] Add actual execution plans with scoped permissions, supervised execution,

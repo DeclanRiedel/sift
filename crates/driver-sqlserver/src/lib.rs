@@ -2051,8 +2051,11 @@ fn ms_value(row: &tiberius::Row, idx: usize) -> Value {
         ColumnType::Int8 => ms_decode::<i64>(row, idx, ty, Value::Int64),
         ColumnType::Float4 | ColumnType::Floatn => ms_decode::<f32>(row, idx, ty, Value::Float32),
         ColumnType::Float8 => ms_decode::<f64>(row, idx, ty, Value::Float64),
-        ColumnType::Money => ms_decode::<f64>(row, idx, ty, |v| Value::Decimal(format!("{v:.4}"))),
-        ColumnType::Money4 => ms_decode::<f32>(row, idx, ty, |v| Value::Decimal(format!("{v:.4}"))),
+        ColumnType::Money | ColumnType::Money4 => {
+            ms_decode::<tiberius::numeric::Numeric>(row, idx, ty, |v| {
+                Value::Decimal(format_money_units(v.value()))
+            })
+        }
         ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image => {
             ms_decode::<&[u8]>(row, idx, ty, |v| Value::Blob(v.to_vec()))
         }
@@ -2080,6 +2083,19 @@ fn ms_value(row: &tiberius::Row, idx: usize) -> Value {
         },
         _ => ms_decode::<&str>(row, idx, ty, |v| Value::Text(v.to_string())),
     }
+}
+
+/// SQL Server money types use signed ten-thousandths. Avoid Numeric's Display
+/// for negative fractions; its signed remainder would render `0.-0001`.
+fn format_money_units(units: i128) -> String {
+    let absolute = units.unsigned_abs();
+    let sign = if units < 0 { "-" } else { "" };
+    format!(
+        "{}{whole}.{fraction:04}",
+        sign,
+        whole = absolute / 10_000,
+        fraction = absolute % 10_000
+    )
 }
 
 /// Decode one cell as `T` and map it to a [`Value`]. A decode *error* is
@@ -2900,6 +2916,19 @@ mod tests {
             type_name: "not-a-real-type".into(),
         }])
         .is_err());
+    }
+
+    #[test]
+    fn money_units_format_exact_boundaries_and_negative_fractions() {
+        assert_eq!(format_money_units(i64::MAX as i128), "922337203685477.5807");
+        assert_eq!(
+            format_money_units(i64::MIN as i128),
+            "-922337203685477.5808"
+        );
+        assert_eq!(format_money_units(i32::MAX as i128), "214748.3647");
+        assert_eq!(format_money_units(i32::MIN as i128), "-214748.3648");
+        assert_eq!(format_money_units(-1), "-0.0001");
+        assert_eq!(format_money_units(0), "0.0000");
     }
 
     #[tokio::test]
