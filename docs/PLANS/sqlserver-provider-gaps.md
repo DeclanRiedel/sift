@@ -75,8 +75,15 @@ acceptance matrix and workspace gates remain separate.
 - [x] Add a read-only SQL Server server-settings browser with bounded
       `sys.configurations` reads, permission-aware state, audit, and Vim desktop
       view. Live SQL Server 2022 role-specific acceptance remains open.
-- [ ] Add login, user, role, permission, grant, and ownership editors with
-      audited preview/apply paths.
+- [~] Add login, user, role, permission, grant, and ownership editors with
+      audited preview/apply paths. Bounded metadata-visible catalogs and Vim
+      inspection cover logins, database principals, role membership, schema
+      owners, and explicit schema permissions. Typed API preview/apply covers
+      database role creation, user-defined role membership, and schema SELECT
+      grant/revoke with production confirmation. The Vim view previews and
+      applies removal of a selected membership or schema SELECT grant.
+      Login credentials, user
+      mapping, ownership editing, and effective-privilege matrix remain open.
 - [x] Connect existing copy-only backup/new-name restore and integrity-check
       APIs to Linux desktop workflows. The Vim monitor previews recovery SQL,
       requires an exact typed confirmation for apply, and shows integrity

@@ -3007,6 +3007,63 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadSqlServerSecurity => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .read_sqlserver_security(opened.session, opened.metadata_connection)
+                        .await
+                        .map_err(|error| format!("loading SQL Server security failed: {error}")),
+                    None => Err("Connect before inspecting SQL Server security".into()),
+                };
+                if events
+                    .send(ExecutorEvent::SqlServerSecurityLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::PreviewSqlServerSecurity { action } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .preview_sqlserver_security(
+                            opened.session,
+                            opened.metadata_connection,
+                            action,
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before previewing SQL Server security".into()),
+                };
+                if events
+                    .send(ExecutorEvent::SqlServerSecurityPreviewed(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ApplySqlServerSecurity { request } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .apply_sqlserver_security(
+                            opened.session,
+                            opened.metadata_connection,
+                            request,
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before applying SQL Server security".into()),
+                };
+                if events
+                    .send(ExecutorEvent::SqlServerSecurityApplied(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::SqlServerRecovery {
                 generation,
                 apply,

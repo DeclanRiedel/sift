@@ -296,6 +296,9 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ReadQueryStore
         | ReadAgentJobs
         | ReadSqlServerSettings
+        | ReadSqlServerSecurity
+        | PreviewSqlServerSecurity
+        | ApplySqlServerSecurity
         | KillProcess
         | ImportCsv
         | BulkInsert
@@ -319,6 +322,11 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
             if engine != Some(Engine::Postgres) =>
         {
             Some("PostgreSQL objects require a PostgreSQL connection")
+        }
+        ReadSqlServerSecurity | PreviewSqlServerSecurity | ApplySqlServerSecurity
+            if engine != Some(Engine::SqlServer) =>
+        {
+            Some("SQL Server security requires a SQL Server connection")
         }
         ExecuteRun if !has_connection => Some("connection context required"),
         ExecuteQuery if has_active_transaction && !selected_transaction => {
@@ -372,6 +380,9 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ReadQueryStore
         | ReadAgentJobs
         | ReadSqlServerSettings
+        | ReadSqlServerSecurity
+        | PreviewSqlServerSecurity
+        | ApplySqlServerSecurity
         | KillProcess
         | ImportCsv
         | BulkInsert

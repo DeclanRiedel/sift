@@ -25,6 +25,7 @@ pub(super) enum DatabaseMonitorView {
     QueryStore,
     AgentJobs,
     SqlServerSettings,
+    Security,
     Maintenance,
 }
 
@@ -39,6 +40,7 @@ impl DatabaseMonitorView {
         Self::QueryStore,
         Self::AgentJobs,
         Self::SqlServerSettings,
+        Self::Security,
         Self::Maintenance,
         Self::Settings,
         Self::Extensions,
@@ -62,6 +64,7 @@ impl DatabaseMonitorView {
             Self::QueryStore => "monitor-view-query-store",
             Self::AgentJobs => "monitor-view-agent-jobs",
             Self::SqlServerSettings => "monitor-view-sqlserver-settings",
+            Self::Security => "monitor-view-sqlserver-security",
             Self::Maintenance => "monitor-view-sqlserver-maintenance",
             Self::Settings => "monitor-view-settings",
             Self::Extensions => "monitor-view-extensions",
@@ -86,6 +89,7 @@ impl DatabaseMonitorView {
             Self::QueryStore => "Query Store".into(),
             Self::AgentJobs => "Agent jobs".into(),
             Self::SqlServerSettings => "Server settings".into(),
+            Self::Security => "Security".into(),
             Self::Maintenance => "Maintenance".into(),
             Self::Settings => "Settings".into(),
             Self::Extensions => "Extensions".into(),
@@ -101,9 +105,11 @@ impl DatabaseMonitorView {
 
     pub(super) fn available_for(self, provider: Option<&str>, connected: bool) -> bool {
         match self {
-            Self::QueryStore | Self::AgentJobs | Self::SqlServerSettings | Self::Maintenance => {
-                connected && provider == Some("sift/sql-server")
-            }
+            Self::QueryStore
+            | Self::AgentJobs
+            | Self::SqlServerSettings
+            | Self::Security
+            | Self::Maintenance => connected && provider == Some("sift/sql-server"),
             Self::Settings
             | Self::Extensions
             | Self::Partitions
@@ -207,6 +213,11 @@ pub(super) struct DatabaseMonitorState {
     agent_jobs_request: RequestState,
     agent_jobs_selected: usize,
     sqlserver_settings: Option<sift_protocol::SqlServerSettingsReport>,
+    security: Option<sift_protocol::SqlServerSecurityReport>,
+    security_request: RequestState,
+    security_selected: usize,
+    security_preview: Option<sift_protocol::SqlServerSecurityPreview>,
+    security_action_request: RequestState,
     sqlserver_settings_request: RequestState,
     sqlserver_settings_selected: usize,
 }
@@ -494,6 +505,138 @@ impl DatabaseMonitorState {
         self.sqlserver_settings.as_ref()
     }
 
+    pub(super) fn security(&self) -> Option<&sift_protocol::SqlServerSecurityReport> {
+        self.security.as_ref()
+    }
+    pub(super) fn security_request(&self) -> &RequestState {
+        &self.security_request
+    }
+    pub(super) fn security_selected(&self) -> usize {
+        self.security_selected
+    }
+    pub(super) fn security_preview(&self) -> Option<&sift_protocol::SqlServerSecurityPreview> {
+        self.security_preview.as_ref()
+    }
+    pub(super) fn security_action_request(&self) -> &RequestState {
+        &self.security_action_request
+    }
+    pub(super) fn selected_security_action(
+        &self,
+    ) -> Option<sift_protocol::SqlServerSecurityAction> {
+        let report = self.security.as_ref()?;
+        if let Some(item) = report.memberships.items.get(self.security_selected) {
+            return Some(sift_protocol::SqlServerSecurityAction::DropRoleMember {
+                role: item.role.clone(),
+                member: item.member.clone(),
+            });
+        }
+        let index = self
+            .security_selected
+            .checked_sub(report.memberships.items.len())?;
+        let item = report
+            .schema_permissions
+            .items
+            .iter()
+            .filter(|item| {
+                item.permission == "SELECT"
+                    && (item.state == "GRANT" || item.state == "GRANT_WITH_GRANT_OPTION")
+            })
+            .nth(index)?;
+        Some(sift_protocol::SqlServerSecurityAction::RevokeSchemaSelect {
+            schema: item.schema.clone(),
+            grantee: item.grantee.clone(),
+        })
+    }
+    pub(super) fn move_security_selection(&mut self, delta: isize) {
+        let Some(report) = &self.security else {
+            return;
+        };
+        let count = report.memberships.items.len()
+            + report
+                .schema_permissions
+                .items
+                .iter()
+                .filter(|item| {
+                    item.permission == "SELECT"
+                        && (item.state == "GRANT" || item.state == "GRANT_WITH_GRANT_OPTION")
+                })
+                .count();
+        if count > 0 {
+            self.security_selected = self
+                .security_selected
+                .saturating_add_signed(delta)
+                .min(count - 1);
+        }
+    }
+    pub(super) fn clear_security_preview(&mut self) {
+        self.security_preview = None;
+        self.security_action_request = RequestState::default();
+    }
+    pub(super) fn start_security_action(&mut self) {
+        self.security_action_request.start();
+    }
+    pub(super) fn fail_security_action(&mut self, message: impl Into<String>) {
+        self.security_action_request.fail(message);
+    }
+    pub(super) fn finish_security_preview(
+        &mut self,
+        result: Result<sift_protocol::SqlServerSecurityPreview, String>,
+    ) {
+        if !self.security_action_request.loading() || self.view != DatabaseMonitorView::Security {
+            return;
+        }
+        match result {
+            Ok(preview) => {
+                self.security_preview = Some(preview);
+                self.security_action_request.succeed();
+            }
+            Err(message) => self.security_action_request.fail(message),
+        }
+    }
+    pub(super) fn finish_security_apply(&mut self, result: Result<(), String>) -> bool {
+        if !self.security_action_request.loading() {
+            return false;
+        }
+        match result {
+            Ok(()) => {
+                self.security_preview = None;
+                self.security_action_request.succeed();
+                true
+            }
+            Err(message) => {
+                self.security_action_request.fail(message);
+                false
+            }
+        }
+    }
+    pub(super) fn start_security(&mut self) {
+        self.security = None;
+        self.security_selected = 0;
+        self.clear_security_preview();
+        self.security_request.start();
+    }
+    pub(super) fn clear_security(&mut self) {
+        self.security = None;
+        self.security_selected = 0;
+        self.clear_security_preview();
+        self.security_request = RequestState::Idle;
+        if self.view == DatabaseMonitorView::Security {
+            self.view = DatabaseMonitorView::Activity;
+        }
+    }
+    pub(super) fn finish_security(
+        &mut self,
+        result: Result<sift_protocol::SqlServerSecurityReport, String>,
+    ) {
+        match result {
+            Ok(report) => {
+                self.security = Some(report);
+                self.security_request.succeed();
+            }
+            Err(message) => self.security_request.fail(message),
+        }
+    }
+
     pub(super) fn sqlserver_settings_request(&self) -> &RequestState {
         &self.sqlserver_settings_request
     }
@@ -603,6 +746,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::QueryStore => true,
             DatabaseMonitorView::AgentJobs => true,
             DatabaseMonitorView::SqlServerSettings => true,
+            DatabaseMonitorView::Security => true,
             DatabaseMonitorView::Maintenance => true,
         }) {
             self.selected = None;
@@ -630,6 +774,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::QueryStore => return Vec::new(),
             DatabaseMonitorView::AgentJobs => return Vec::new(),
             DatabaseMonitorView::SqlServerSettings => return Vec::new(),
+            DatabaseMonitorView::Security => return Vec::new(),
             DatabaseMonitorView::Maintenance => return Vec::new(),
         };
         self.processes

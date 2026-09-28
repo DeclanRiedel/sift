@@ -280,6 +280,7 @@ pub(super) async fn read_server_dashboard(
             OperationKind::ReadQueryStore,
             OperationKind::ReadAgentJobs,
             OperationKind::ReadSqlServerSettings,
+            OperationKind::ReadSqlServerSecurity,
         ];
         let capabilities = all
             .into_iter()
@@ -646,6 +647,75 @@ pub(super) async fn read_sqlserver_settings(
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
+}
+
+pub(super) async fn read_sqlserver_security(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+) -> ApiResult<Response> {
+    let _guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(session)?.map(|id| id.0);
+    let report = finish_operation_as(
+        &state.sessions,
+        Operation::ReadSqlServerSecurity {
+            session,
+            connection,
+        },
+        crate::sql_server_security::read(&state.sessions, session, connection).await,
+        actor,
+        |report| {
+            Some(
+                (report.logins.items.len()
+                    + report.principals.items.len()
+                    + report.memberships.items.len()
+                    + report.schemas.items.len()
+                    + report.schema_permissions.items.len()) as i64,
+            )
+        },
+    )?;
+    let mut response = Json(report).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+pub(super) async fn preview_sqlserver_security(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(action): Json<sift_protocol::SqlServerSecurityAction>,
+) -> ApiResult<Json<sift_protocol::SqlServerSecurityPreview>> {
+    let operation = Operation::PreviewSqlServerSecurity {
+        session,
+        connection,
+        action: action.clone(),
+    };
+    let preview = finish_operation(
+        &state.sessions,
+        operation,
+        crate::sql_server_security::preview(&state.sessions, session, connection, action).await,
+        |_| None,
+    )?;
+    Ok(Json(preview))
+}
+
+pub(super) async fn apply_sqlserver_security(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::ApplySqlServerSecurityRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let operation = Operation::ApplySqlServerSecurity {
+        session,
+        connection,
+        action: request.action.clone(),
+    };
+    finish_operation(
+        &state.sessions,
+        operation,
+        crate::sql_server_security::apply(&state.sessions, session, connection, request).await,
+        |_| None,
+    )?;
+    Ok(Json(serde_json::json!({"applied": true})))
 }
 
 pub(super) async fn postgres_maintenance(

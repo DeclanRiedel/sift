@@ -283,7 +283,10 @@ separate design. The history read is a distinct audited operation.
 - [~] PostgreSQL row-level security editor (bounded policy catalog and guarded
       policy rename through the Vim Monitor; policy definitions, roles,
       creation/deletion, and table RLS toggles remain)
-- [ ] SQL Server login and permission editor
+- [~] SQL Server login and permission editor (bounded login, database principal,
+      role membership, schema owner, and explicit schema permission inspection
+      in a Vim Monitor view; guarded role and schema SELECT API changes; login
+      credentials, user mapping, ownership editing, and effective permissions remain)
 
 ### Import, export, and transfer
 

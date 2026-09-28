@@ -26,6 +26,9 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listPostgresSchemaGrants",
     "readPostgresReplication",
     "readPostgresStatistics",
+    "readSqlServerSecurity",
+    "previewSqlServerSecurity",
+    "applySqlServerSecurity",
     "previewPostgresObject",
     "applyPostgresObject",
     "getBenchmarkRun",
@@ -1793,6 +1796,43 @@ impl Client {
         self.get(&format!(
             "/v1/sessions/{session}/connections/{connection}/settings/sqlserver"
         ))
+        .await
+    }
+
+    pub async fn read_sqlserver_security(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<sift_protocol::SqlServerSecurityReport> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/sqlserver/security"
+        ))
+        .await
+    }
+
+    pub async fn preview_sqlserver_security(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        action: sift_protocol::SqlServerSecurityAction,
+    ) -> Result<sift_protocol::SqlServerSecurityPreview> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/sqlserver/security/preview"),
+            &action,
+        )
+        .await
+    }
+
+    pub async fn apply_sqlserver_security(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::ApplySqlServerSecurityRequest,
+    ) -> Result<serde_json::Value> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/sqlserver/security/apply"),
+            &request,
+        )
         .await
     }
 
