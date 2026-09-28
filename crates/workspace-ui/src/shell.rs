@@ -27340,6 +27340,21 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn move_database_monitor_tab(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let provider = self
+            .active_connection_provider_id()
+            .map(|id| id.as_str().to_owned());
+        let connected = matches!(self.connection_status, ConnectionStatus::Connected { .. });
+        let next = self.database_monitor.view().adjacent_available(
+            forward,
+            provider.as_deref(),
+            connected,
+        );
+        self.active_bottom_tool = BottomTool::Monitor;
+        self.bottom_dock.presentation.open = true;
+        self.set_database_monitor_view(next, cx);
+    }
+
     fn load_query_store(&mut self, cx: &mut Context<Self>) {
         if self.database_monitor.query_store_request().loading() {
             return;
@@ -37248,6 +37263,8 @@ impl WorkspaceShell {
                 self.set_database_monitor_view(DatabaseMonitorView::Overview, cx);
                 self.focus_handle.focus(window, cx);
             }
+            CommandId::PreviousMonitorTab => self.move_database_monitor_tab(false, cx),
+            CommandId::NextMonitorTab => self.move_database_monitor_tab(true, cx),
             CommandId::ShowBenchmarkLibrary => {
                 self.open_benchmark_library(None, cx);
                 self.focus_handle.focus(window, cx);

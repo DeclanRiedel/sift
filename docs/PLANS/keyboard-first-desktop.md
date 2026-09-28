@@ -65,6 +65,19 @@ prefixes display a compact which-key strip generated from the same vocabulary.
 
 ## Delivery order
 
+### Monitor tab equivalence design
+
+The Monitor header is one coherent pointer surface. Its tab order, stable
+button ids, labels, and engine availability belong in one view model used by
+both button rendering and Vim navigation. `<leader> d s` opens the Monitor;
+`<leader> d h/l` move between available tabs through the command registry.
+The movement calls the same view-selection path as a click, including its
+loads and permission errors. It skips engine-disabled tabs and wraps at the
+ends. Tests derive from the tab model and assert every rendered tab is
+reachable for at least one supported engine, every available tab is reachable
+from the dashboard command, and disabled tabs are skipped. This covers the
+Monitor header only; controls inside each view remain separate audit work.
+
 - [x] Route Vim-normal `:` to the command palette.
 - [x] Add dynamic editor key contexts so normal-mode mappings cannot steal
       insert-mode characters.
@@ -101,9 +114,12 @@ prefixes display a compact which-key strip generated from the same vocabulary.
       `:` palette. All default leader bindings are checked for collisions and
       reachability. Settings, Quit, transaction controls, theme, and results
       layout gained leader paths; clipboard actions became palette entries.
-      Other pointer surfaces and context-local actions still need equivalent
-      audits before this can be marked complete. External Wiki and License
-      links are outside the command registry and remain to be covered.
+      The Monitor header now renders from one tab model and supports
+      `<leader> d h/l` navigation across engine-available tabs; generated
+      tests cover reachability, ordering, and skipped disabled tabs. Other
+      pointer surfaces and context-local actions still need equivalent audits
+      before this can be marked complete. External Wiki and License links are
+      outside the command registry and remain to be covered.
 - [x] Add versioned `keymaps.json` overrides with compact modal and full-file
       editors; validate command ids, leader syntax, and duplicate sequences.
 

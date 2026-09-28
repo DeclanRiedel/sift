@@ -10,10 +10,6 @@ pub(super) fn render_bottom_panel(
     debug_assert_eq!(dock.id, DockId::Bottom);
     let theme = cx.theme();
     let colors = theme.colors;
-    let query_store_available =
-        matches!(shell.connection_status, ConnectionStatus::Connected { .. })
-            && shell.active_connection_provider_id()
-                == Some(&sift_protocol::Engine::SqlServer.provider_id());
     let body = match shell.active_bottom_tool {
         BottomTool::Console => Some("Press <leader> q n to open a query tab.".to_owned()),
         BottomTool::Monitor => None,
@@ -153,195 +149,26 @@ pub(super) fn render_bottom_panel(
                     }),
                 )
                 .children((shell.active_bottom_tool == BottomTool::Monitor).then(|| {
-                    let view = shell.database_monitor.view();
+                    let selected = shell.database_monitor.view();
+                    let provider = shell.active_connection_provider_id().map(|id| id.as_str());
+                    let connected =
+                        matches!(shell.connection_status, ConnectionStatus::Connected { .. });
                     div()
                         .flex()
                         .items_center()
                         .gap_1()
-                        .child(
-                            Button::new("monitor-view-overview", "Overview")
-                                .tone(if view == DatabaseMonitorView::Overview {
+                        .children(DatabaseMonitorView::ALL.into_iter().map(|view| {
+                            Button::new(view.button_id(), view.label(&shell.database_monitor))
+                                .tone(if selected == view {
                                     ButtonTone::Neutral
                                 } else {
                                     ButtonTone::Ghost
                                 })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(DatabaseMonitorView::Overview, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("monitor-view-activity", "Activity")
-                                .tone(if view == DatabaseMonitorView::Activity {
-                                    ButtonTone::Neutral
-                                } else {
-                                    ButtonTone::Ghost
-                                })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(
-                                        DatabaseMonitorView::Activity,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            Button::new(
-                                "monitor-view-locks",
-                                format!("Locks {}", shell.database_monitor.lock_process_count()),
-                            )
-                            .tone(if view == DatabaseMonitorView::Locks {
-                                ButtonTone::Neutral
-                            } else {
-                                ButtonTone::Ghost
-                            })
-                            .on_click(cx.listener(
-                                |shell, _, _, cx| {
-                                    shell.set_database_monitor_view(DatabaseMonitorView::Locks, cx)
-                                },
-                            )),
-                        )
-                        .child(
-                            Button::new(
-                                "monitor-view-deadlocks",
-                                format!(
-                                    "Cycles {}",
-                                    shell.database_monitor.deadlock_process_count()
-                                ),
-                            )
-                            .tone(if view == DatabaseMonitorView::Deadlocks {
-                                ButtonTone::Neutral
-                            } else {
-                                ButtonTone::Ghost
-                            })
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.set_database_monitor_view(DatabaseMonitorView::Deadlocks, cx)
-                            })),
-                        )
-                        .child(
-                            Button::new(
-                                "monitor-view-deadlock-history",
-                                format!("History {}", shell.database_monitor.deadlocks().len()),
-                            )
-                            .tone(if view == DatabaseMonitorView::History {
-                                ButtonTone::Neutral
-                            } else {
-                                ButtonTone::Ghost
-                            })
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.set_database_monitor_view(DatabaseMonitorView::History, cx)
-                            })),
-                        )
-                        .child(
-                            Button::new(
-                                "monitor-view-alerts",
-                                format!("Alerts {}", shell.database_monitor.alert_count()),
-                            )
-                            .tone(if view == DatabaseMonitorView::Alerts {
-                                ButtonTone::Neutral
-                            } else {
-                                ButtonTone::Ghost
-                            })
-                            .on_click(cx.listener(
-                                |shell, _, _, cx| {
-                                    shell.set_database_monitor_view(DatabaseMonitorView::Alerts, cx)
-                                },
-                            )),
-                        )
-                        .child(
-                            Button::new("monitor-view-query-store", "Query Store")
-                                .disabled(!query_store_available)
-                                .tone(if view == DatabaseMonitorView::QueryStore {
-                                    ButtonTone::Neutral
-                                } else {
-                                    ButtonTone::Ghost
-                                })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(
-                                        DatabaseMonitorView::QueryStore,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            Button::new("monitor-view-agent-jobs", "Agent jobs")
-                                .disabled(!query_store_available)
-                                .tone(if view == DatabaseMonitorView::AgentJobs {
-                                    ButtonTone::Neutral
-                                } else {
-                                    ButtonTone::Ghost
-                                })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(
-                                        DatabaseMonitorView::AgentJobs,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            Button::new("monitor-view-sqlserver-settings", "Server settings")
-                                .disabled(!query_store_available)
-                                .tone(if view == DatabaseMonitorView::SqlServerSettings {
-                                    ButtonTone::Neutral
-                                } else {
-                                    ButtonTone::Ghost
-                                })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(
-                                        DatabaseMonitorView::SqlServerSettings,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            Button::new("monitor-view-sqlserver-maintenance", "Maintenance")
-                                .disabled(!query_store_available)
-                                .tone(if view == DatabaseMonitorView::Maintenance { ButtonTone::Neutral } else { ButtonTone::Ghost })
-                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Maintenance, cx))),
-                        )
-                        .child(
-                            Button::new("monitor-view-settings", "Settings")
-                                .tone(if view == DatabaseMonitorView::Settings {
-                                    ButtonTone::Neutral
-                                } else {
-                                    ButtonTone::Ghost
-                                })
-                                .disabled(
-                                    shell
-                                        .active_connection_provider_id()
-                                        .is_none_or(|provider| {
-                                            provider.as_str() != "sift/postgres"
-                                        }),
-                                )
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(
-                                        DatabaseMonitorView::Settings,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            Button::new("monitor-view-extensions", "Extensions")
-                                .tone(if view == DatabaseMonitorView::Extensions { ButtonTone::Neutral } else { ButtonTone::Ghost })
-                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
-                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Extensions, cx))),
-                        )
-                        .child(
-                            Button::new("monitor-view-partitions", "Partitions")
-                                .tone(if view == DatabaseMonitorView::Partitions { ButtonTone::Neutral } else { ButtonTone::Ghost })
-                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
-                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Partitions, cx))),
-                        )
-                        .child(
-                            Button::new("monitor-view-replication", "Replication")
-                                .tone(if view == DatabaseMonitorView::Replication { ButtonTone::Neutral } else { ButtonTone::Ghost })
-                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
-                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Replication, cx))),
-                        )
-                        .child(
-                            Button::new("monitor-view-statistics", "Statistics")
-                                .tone(if view == DatabaseMonitorView::Statistics { ButtonTone::Neutral } else { ButtonTone::Ghost })
-                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
-                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Statistics, cx))),
-                        )
+                                .disabled(!view.available_for(provider, connected))
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.set_database_monitor_view(view, cx)
+                                }))
+                        }))
                 })),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {

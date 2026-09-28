@@ -4,7 +4,7 @@ use sift_protocol::{
 
 use super::RequestState;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(super) enum DatabaseMonitorView {
     Overview,
     #[default]
@@ -22,6 +22,110 @@ pub(super) enum DatabaseMonitorView {
     AgentJobs,
     SqlServerSettings,
     Maintenance,
+}
+
+impl DatabaseMonitorView {
+    pub(super) const ALL: [Self; 15] = [
+        Self::Overview,
+        Self::Activity,
+        Self::Locks,
+        Self::Deadlocks,
+        Self::History,
+        Self::Alerts,
+        Self::QueryStore,
+        Self::AgentJobs,
+        Self::SqlServerSettings,
+        Self::Maintenance,
+        Self::Settings,
+        Self::Extensions,
+        Self::Partitions,
+        Self::Replication,
+        Self::Statistics,
+    ];
+
+    pub(super) const fn button_id(self) -> &'static str {
+        match self {
+            Self::Overview => "monitor-view-overview",
+            Self::Activity => "monitor-view-activity",
+            Self::Locks => "monitor-view-locks",
+            Self::Deadlocks => "monitor-view-deadlocks",
+            Self::History => "monitor-view-deadlock-history",
+            Self::Alerts => "monitor-view-alerts",
+            Self::QueryStore => "monitor-view-query-store",
+            Self::AgentJobs => "monitor-view-agent-jobs",
+            Self::SqlServerSettings => "monitor-view-sqlserver-settings",
+            Self::Maintenance => "monitor-view-sqlserver-maintenance",
+            Self::Settings => "monitor-view-settings",
+            Self::Extensions => "monitor-view-extensions",
+            Self::Partitions => "monitor-view-partitions",
+            Self::Replication => "monitor-view-replication",
+            Self::Statistics => "monitor-view-statistics",
+        }
+    }
+
+    pub(super) fn label(self, state: &DatabaseMonitorState) -> String {
+        match self {
+            Self::Overview => "Overview".into(),
+            Self::Activity => "Activity".into(),
+            Self::Locks => format!("Locks {}", state.lock_process_count()),
+            Self::Deadlocks => format!("Cycles {}", state.deadlock_process_count()),
+            Self::History => format!("History {}", state.deadlocks().len()),
+            Self::Alerts => format!("Alerts {}", state.alert_count()),
+            Self::QueryStore => "Query Store".into(),
+            Self::AgentJobs => "Agent jobs".into(),
+            Self::SqlServerSettings => "Server settings".into(),
+            Self::Maintenance => "Maintenance".into(),
+            Self::Settings => "Settings".into(),
+            Self::Extensions => "Extensions".into(),
+            Self::Partitions => "Partitions".into(),
+            Self::Replication => "Replication".into(),
+            Self::Statistics => "Statistics".into(),
+        }
+    }
+
+    pub(super) fn available_for(self, provider: Option<&str>, connected: bool) -> bool {
+        match self {
+            Self::QueryStore | Self::AgentJobs | Self::SqlServerSettings | Self::Maintenance => {
+                connected && provider == Some("sift/sql-server")
+            }
+            Self::Settings
+            | Self::Extensions
+            | Self::Partitions
+            | Self::Replication
+            | Self::Statistics => provider == Some("sift/postgres"),
+            Self::Overview
+            | Self::Activity
+            | Self::Locks
+            | Self::Deadlocks
+            | Self::History
+            | Self::Alerts => true,
+        }
+    }
+
+    pub(super) fn adjacent_available(
+        self,
+        forward: bool,
+        provider: Option<&str>,
+        connected: bool,
+    ) -> Self {
+        let len = Self::ALL.len();
+        let mut index = Self::ALL
+            .iter()
+            .position(|view| *view == self)
+            .expect("every Monitor view has a tab");
+        for _ in 0..len {
+            index = if forward {
+                (index + 1) % len
+            } else {
+                (index + len - 1) % len
+            };
+            let candidate = Self::ALL[index];
+            if candidate.available_for(provider, connected) {
+                return candidate;
+            }
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -843,7 +947,61 @@ fn classify_alerts(
 
 #[cfg(test)]
 mod tests {
+    use super::super::commands::{CommandId, CommandLanguageMatch, CommandRegistry};
     use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn every_rendered_monitor_tab_is_reachable_with_vim_commands() {
+        assert_eq!(
+            CommandRegistry::resolve_language(&["d".into(), "s".into()]),
+            CommandLanguageMatch::Command(CommandId::OpenServerDashboard)
+        );
+        assert_eq!(
+            CommandRegistry::resolve_language(&["d".into(), "h".into()]),
+            CommandLanguageMatch::Command(CommandId::PreviousMonitorTab)
+        );
+        assert_eq!(
+            CommandRegistry::resolve_language(&["d".into(), "l".into()]),
+            CommandLanguageMatch::Command(CommandId::NextMonitorTab)
+        );
+
+        let mut button_ids = HashSet::new();
+        let state = DatabaseMonitorState::default();
+        for view in DatabaseMonitorView::ALL {
+            assert!(button_ids.insert(view.button_id()));
+            assert!(!view.label(&state).is_empty());
+            assert!(
+                ["sift/postgres", "sift/sql-server", "sift/sqlite"]
+                    .into_iter()
+                    .any(|provider| view.available_for(Some(provider), true)),
+                "{} has no supported keyboard route",
+                view.button_id()
+            );
+        }
+
+        for provider in ["sift/postgres", "sift/sql-server", "sift/sqlite"] {
+            let expected = DatabaseMonitorView::ALL
+                .into_iter()
+                .filter(|view| view.available_for(Some(provider), true))
+                .collect::<HashSet<_>>();
+            let mut seen = HashSet::new();
+            let mut view = DatabaseMonitorView::Overview;
+            for _ in 0..expected.len() {
+                view = view.adjacent_available(true, Some(provider), true);
+                assert!(seen.insert(view), "Monitor navigation repeated a tab early");
+                assert!(view.available_for(Some(provider), true));
+                assert_eq!(
+                    view.adjacent_available(false, Some(provider), true)
+                        .adjacent_available(true, Some(provider), true),
+                    view
+                );
+            }
+            assert_eq!(seen, expected);
+            assert_eq!(view, DatabaseMonitorView::Overview);
+        }
+        assert!(!DatabaseMonitorView::QueryStore.available_for(Some("sift/sql-server"), false));
+    }
 
     #[test]
     fn postgres_diagnostics_ignore_stale_results_after_connection_change() {
