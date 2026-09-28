@@ -13,8 +13,12 @@ claims.
       identify omitted edges rather than presenting a full graph.
 - [ ] Add schema snapshots, diff, migration preview/apply, and designer changes
       only for DDL shapes the native model can round-trip. Reject lossy changes.
-- [ ] Improve CHECK metadata/parser coverage while stored native SQL remains
-      authoritative.
+- [x] Improve CHECK metadata coverage while stored native SQL remains
+      authoritative. Table and column clauses now scan valid SQLite table DDL
+      without depending on whole-statement editor parsing; quoted names,
+      comments, nested expressions, and native enforcement have real-file tests.
+      Metadata deliberately omits virtual-table clauses and CREATE statements
+      larger than 1 MiB; stored native SQL remains the source of truth.
 - [ ] Define safe identity and write rules for any additional editable table
       shapes; virtual tables and nullable/partial/expression keys remain gated.
 
