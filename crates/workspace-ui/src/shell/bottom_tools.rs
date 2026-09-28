@@ -59,6 +59,12 @@ pub(super) fn render_bottom_panel(
                     .on_key_down(cx.listener(WorkspaceShell::handle_sqlserver_settings_key))
             },
         )
+        .when(
+            shell.active_bottom_tool == BottomTool::Monitor
+                && shell.database_monitor.view() == DatabaseMonitorView::Maintenance,
+            |dock| dock.key_context("SiftSqlServerMaintenance")
+                .on_key_down(cx.listener(WorkspaceShell::handle_sqlserver_maintenance_key)),
+        )
         .relative()
         .h(px(dock.presentation.size))
         .flex_none()
@@ -269,6 +275,12 @@ pub(super) fn render_bottom_panel(
                                 })),
                         )
                         .child(
+                            Button::new("monitor-view-sqlserver-maintenance", "Maintenance")
+                                .disabled(!query_store_available)
+                                .tone(if view == DatabaseMonitorView::Maintenance { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Maintenance, cx))),
+                        )
+                        .child(
                             Button::new("monitor-view-settings", "Settings")
                                 .tone(if view == DatabaseMonitorView::Settings {
                                     ButtonTone::Neutral
@@ -316,6 +328,8 @@ pub(super) fn render_bottom_panel(
                 render_agent_jobs(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::SqlServerSettings {
                 render_sqlserver_settings(shell, cx)
+            } else if shell.database_monitor.view() == DatabaseMonitorView::Maintenance {
+                render_sqlserver_maintenance(shell, cx)
             } else {
                 let transaction =
                     shell.transaction_state.transaction().map(|transaction| {
@@ -489,6 +503,7 @@ pub(super) fn render_bottom_panel(
                                     DatabaseMonitorView::QueryStore => unreachable!(),
                                     DatabaseMonitorView::AgentJobs => unreachable!(),
                                     DatabaseMonitorView::SqlServerSettings => unreachable!(),
+                                    DatabaseMonitorView::Maintenance => unreachable!(),
                                 },
                             ))
                         },
@@ -1299,6 +1314,161 @@ fn render_agent_jobs(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -
             },
         )
         .into_any_element()
+}
+
+fn render_sqlserver_maintenance(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let state = &shell.maintenance;
+    let colors = cx.theme().colors;
+    let mode = state.mode;
+    let busy = state.pending.is_some();
+    let mut panel = div()
+        .debug_selector(|| "sqlserver-maintenance".into())
+        .id("sqlserver-maintenance-scroll")
+        .flex().flex_1().min_h_0().flex_col().overflow_y_scroll().p_3().gap_2()
+        .child(SectionLabel::new("SQL SERVER MAINTENANCE"))
+        .child(div().text_xs().child("Recovery requires a master connection with VIEW ANY DATABASE. Paths are on the SQL Server host. b backup · n restore · i integrity · p preview · a apply · r run check"))
+        .child(div().flex().gap_2()
+            .child(Button::new("maintenance-backup-mode", "Backup")
+                .disabled(busy)
+                .tone(if mode == MaintenanceMode::Backup { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                .on_click(cx.listener(|shell, _, _, cx| { shell.maintenance.mode = MaintenanceMode::Backup; shell.maintenance.invalidate(); cx.notify(); })))
+            .child(Button::new("maintenance-restore-mode", "Restore to new name")
+                .disabled(busy)
+                .tone(if mode == MaintenanceMode::Restore { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                .on_click(cx.listener(|shell, _, _, cx| { shell.maintenance.mode = MaintenanceMode::Restore; shell.maintenance.invalidate(); cx.notify(); })))
+            .child(Button::new("maintenance-integrity-mode", "Integrity check")
+                .disabled(busy)
+                .tone(if mode == MaintenanceMode::Integrity { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                .on_click(cx.listener(|shell, _, _, cx| { shell.maintenance.mode = MaintenanceMode::Integrity; shell.maintenance.invalidate(); cx.notify(); }))));
+    if mode == MaintenanceMode::Integrity {
+        panel = panel
+            .child("Runs DBCC CHECKDB on the connected database. No repair mode is available.")
+            .child(
+                Button::new(
+                    "maintenance-physical-only",
+                    if state.physical_only {
+                        "Physical only: on"
+                    } else {
+                        "Physical only: off"
+                    },
+                )
+                .disabled(busy)
+                .tone(ButtonTone::Ghost)
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.maintenance.physical_only = !shell.maintenance.physical_only;
+                    shell.maintenance.invalidate();
+                    cx.notify();
+                })),
+            )
+            .child(
+                Button::new(
+                    "maintenance-run-integrity",
+                    if busy {
+                        "Checking…"
+                    } else {
+                        "Run integrity check"
+                    },
+                )
+                .disabled(busy)
+                .on_click(cx.listener(|shell, _, _, cx| shell.run_sqlserver_integrity(cx))),
+            );
+        if let Some(report) = &state.integrity {
+            panel = panel.child(format!("Outcome: {:?}", report.outcome));
+            for finding in &report.findings {
+                panel = panel.child(div().child(finding.clone()));
+            }
+            for warning in &report.warnings {
+                panel = panel.child(
+                    div()
+                        .text_color(colors.warning)
+                        .child(format!("{warning:?}")),
+                );
+            }
+        }
+    } else {
+        panel = panel
+            .child(
+                div()
+                    .child(if mode == MaintenanceMode::Backup {
+                        "Existing source database"
+                    } else {
+                        "New destination database name"
+                    })
+                    .child(state.database.clone()),
+            )
+            .child(
+                div()
+                    .child("Absolute archive path on SQL Server host")
+                    .child(state.archive.clone()),
+            );
+        if mode == MaintenanceMode::Restore {
+            panel = panel
+                .child(div().child("Backup set number").child(state.backup_set.clone()))
+                .child(div().child("MOVE mappings JSON: [{\"logical_name\":\"data\",\"destination\":\"/data/new.mdf\"}]").child(state.moves.clone()));
+        }
+        panel = panel.child(
+            Button::new(
+                "maintenance-preview",
+                if busy { "Working…" } else { "Preview" },
+            )
+            .disabled(busy)
+            .on_click(cx.listener(|shell, _, _, cx| shell.preview_sqlserver_recovery(cx))),
+        );
+        if let Some((_, report)) = &state.preview {
+            panel = panel
+                .child(SectionLabel::new("PREVIEW"))
+                .child(div().font_family("monospace").child(report.sql.clone()));
+            if let Some(source) = &report.source_database {
+                panel = panel.child(format!("Source database: {source}"));
+            }
+            for warning in &report.warnings {
+                panel = panel.child(
+                    div()
+                        .text_color(colors.warning)
+                        .child(format!("{warning:?}")),
+                );
+            }
+            panel = panel
+                .child(
+                    div()
+                        .child(format!(
+                            "Type {} {} to apply",
+                            if mode == MaintenanceMode::Backup {
+                                "BACKUP"
+                            } else {
+                                "RESTORE"
+                            },
+                            state.database.read(cx).text()
+                        ))
+                        .child(state.confirmation.clone()),
+                )
+                .child(
+                    Button::new("maintenance-apply", "Apply confirmed recovery")
+                        .disabled(busy)
+                        .tone(ButtonTone::Danger)
+                        .on_click(
+                            cx.listener(|shell, _, _, cx| shell.apply_sqlserver_recovery(cx)),
+                        ),
+                );
+        }
+    }
+    if let Some(message) = &state.message {
+        panel = panel.child(div().text_color(colors.warning).child(message.clone()));
+    }
+    if let Some(report) = &state.last_recovery {
+        panel = panel.child(div().font_family("monospace").child(report.sql.clone()));
+        for warning in &report.warnings {
+            panel = panel.child(
+                div()
+                    .text_color(colors.warning)
+                    .child(format!("{warning:?}")),
+            );
+        }
+    }
+    panel.into_any_element()
 }
 
 fn render_sqlserver_settings(

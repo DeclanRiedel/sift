@@ -55,8 +55,11 @@ current public support boundary.
       view. Live SQL Server 2022 role-specific acceptance remains open.
 - [ ] Add login, user, role, permission, grant, and ownership editors with
       audited preview/apply paths.
-- [ ] Connect existing copy-only backup/new-name restore and integrity-check
-      APIs to complete Linux desktop workflows.
+- [x] Connect existing copy-only backup/new-name restore and integrity-check
+      APIs to Linux desktop workflows. The Vim monitor previews recovery SQL,
+      requires an exact typed confirmation for apply, and shows integrity
+      findings. Mocked desktop dispatch and validation tests cover the guard;
+      live backup/restore acceptance remains in the broader acceptance item.
 
 ### SQL Server desktop maintenance design
 

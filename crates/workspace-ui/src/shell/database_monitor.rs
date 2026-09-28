@@ -18,6 +18,7 @@ pub(super) enum DatabaseMonitorView {
     QueryStore,
     AgentJobs,
     SqlServerSettings,
+    Maintenance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +287,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::QueryStore => true,
             DatabaseMonitorView::AgentJobs => true,
             DatabaseMonitorView::SqlServerSettings => true,
+            DatabaseMonitorView::Maintenance => true,
         }) {
             self.selected = None;
         }
@@ -303,6 +305,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::QueryStore => return Vec::new(),
             DatabaseMonitorView::AgentJobs => return Vec::new(),
             DatabaseMonitorView::SqlServerSettings => return Vec::new(),
+            DatabaseMonitorView::Maintenance => return Vec::new(),
         };
         self.processes
             .iter()
