@@ -7807,6 +7807,24 @@ pub fn display_rects(cx: &App) -> Vec<Rect> {
 mod tests {
     use super::*;
 
+    fn fixture_handshake(generation: &str) -> sift_protocol::HandshakeResponse {
+        use sift_protocol::{
+            HandshakeDeployment, HandshakeResponse, HandshakeRuntimeMode, HandshakeTransport,
+            ProtocolRange, PROTOCOL_VERSION_NUMBER,
+        };
+        HandshakeResponse {
+            server_version: "test".into(),
+            protocol: ProtocolRange::exact(PROTOCOL_VERSION_NUMBER),
+            selected_protocol: PROTOCOL_VERSION_NUMBER,
+            instance_id: "fixture".into(),
+            daemon_generation: generation.into(),
+            deployment: HandshakeDeployment::Personal,
+            transport: HandshakeTransport::Loopback,
+            runtime_mode: HandshakeRuntimeMode::Daemon,
+            capabilities: vec![],
+        }
+    }
+
     #[tokio::test]
     async fn idle_session_detects_expired_or_revoked_auth_while_server_stays_healthy() {
         use axum::{
@@ -7814,10 +7832,7 @@ mod tests {
             routing::{get, post},
             Json, Router,
         };
-        use sift_protocol::{
-            HandshakeDeployment, HandshakeResponse, HandshakeRuntimeMode, HandshakeTransport,
-            ProtocolRange, PROTOCOL_VERSION_NUMBER,
-        };
+        use sift_protocol::PROTOCOL_VERSION_NUMBER;
 
         for (status, expected) in [
             (
@@ -7855,20 +7870,7 @@ mod tests {
                             axum::http::HeaderValue::from_str(&PROTOCOL_VERSION_NUMBER.to_string())
                                 .unwrap(),
                         );
-                        (
-                            headers,
-                            Json(HandshakeResponse {
-                                server_version: "test".into(),
-                                protocol: ProtocolRange::exact(PROTOCOL_VERSION_NUMBER),
-                                selected_protocol: PROTOCOL_VERSION_NUMBER,
-                                instance_id: "fixture".into(),
-                                daemon_generation: "generation-1".into(),
-                                deployment: HandshakeDeployment::Personal,
-                                transport: HandshakeTransport::Loopback,
-                                runtime_mode: HandshakeRuntimeMode::Daemon,
-                                capabilities: vec![],
-                            }),
-                        )
+                        (headers, Json(fixture_handshake("generation-1")))
                     }),
                 )
                 .route(
@@ -7903,6 +7905,167 @@ mod tests {
             assert_eq!(result, Err(expected));
             server.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_probe_reports_offline_start_and_server_loss() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        use sift_protocol::PROTOCOL_VERSION_NUMBER;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let client = Client::new(format!("http://{addr}"));
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                wait_for_server_loss_with_intervals(
+                    &client,
+                    std::time::Duration::from_millis(20),
+                    std::time::Duration::from_secs(1),
+                ),
+            )
+            .await
+            .unwrap(),
+            Err(sift_workspace_ui::DegradedReason::Offline),
+        );
+
+        let app = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async {
+                    (
+                        [(
+                            "X-Sift-Protocol-Version",
+                            PROTOCOL_VERSION_NUMBER.to_string(),
+                        )],
+                        Json(sift_protocol::Health {
+                            status: "ok".into(),
+                            version: "test".into(),
+                            providers: vec![],
+                        }),
+                    )
+                }),
+            )
+            .route(
+                "/v1/handshake",
+                post(|| async {
+                    (
+                        [(
+                            "X-Sift-Protocol-Version",
+                            PROTOCOL_VERSION_NUMBER.to_string(),
+                        )],
+                        Json(fixture_handshake("generation-1")),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::new(format!("http://{addr}"));
+        client.connect().await.unwrap();
+        let probe = tokio::spawn(async move {
+            wait_for_server_loss_with_intervals(
+                &client,
+                std::time::Duration::from_millis(20),
+                std::time::Duration::from_secs(1),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        server.abort();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), probe)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(sift_workspace_ui::DegradedReason::Offline),
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_probe_detects_restart_on_healthy_endpoint() {
+        use axum::{
+            extract::State,
+            routing::{get, post},
+            Json, Router,
+        };
+        use sift_protocol::PROTOCOL_VERSION_NUMBER;
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let restart_state = Arc::new((AtomicBool::new(false), AtomicUsize::new(0)));
+        let app = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async {
+                    (
+                        [(
+                            "X-Sift-Protocol-Version",
+                            PROTOCOL_VERSION_NUMBER.to_string(),
+                        )],
+                        Json(sift_protocol::Health {
+                            status: "ok".into(),
+                            version: "test".into(),
+                            providers: vec![],
+                        }),
+                    )
+                }),
+            )
+            .route(
+                "/v1/handshake",
+                post(
+                    |State(state): State<Arc<(AtomicBool, AtomicUsize)>>| async move {
+                        let generation = if state.0.load(Ordering::SeqCst) {
+                            "generation-2"
+                        } else {
+                            "generation-1"
+                        };
+                        state.1.fetch_add(1, Ordering::SeqCst);
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(fixture_handshake(generation)),
+                        )
+                    },
+                ),
+            )
+            .with_state(restart_state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::new(format!("http://{addr}"));
+        let probe = tokio::spawn(async move {
+            wait_for_server_loss_with_intervals(
+                &client,
+                std::time::Duration::from_millis(20),
+                std::time::Duration::from_millis(200),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while restart_state.1.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        restart_state.0.store(true, Ordering::SeqCst);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), probe)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(sift_workspace_ui::DegradedReason::Offline),
+        );
+        server.abort();
     }
 
     #[tokio::test]

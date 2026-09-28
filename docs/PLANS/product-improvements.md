@@ -56,6 +56,12 @@ passed; the HTTP error regression checks the typed `metadata_busy` 503.
 Generated incremental build artifacts were cleared to recover disk capacity;
 source files and dependency caches were retained.
 
+Recovery validation: the desktop lifecycle probe now has focused coverage for
+startup while the server is offline, loss of a previously healthy server,
+generation change on a healthy endpoint, and idle-session bearer rejection while
+health stays available. Native packaging,
+signed updates, and representative platform measurements remain open.
+
 ## Design: domain extraction
 
 Keep HTTP routing/middleware in `http.rs`, moving domain handlers together while
