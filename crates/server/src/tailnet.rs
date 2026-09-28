@@ -88,7 +88,13 @@ async fn output_with_input(
     )
     .await;
     match result {
-        Ok(Ok((status, bytes, _))) if status.success() && bytes.len() <= LIMIT as usize => Ok(bytes),
+        Ok(Ok((status, bytes, errors)))
+            if status.success()
+                && bytes.len() <= LIMIT as usize
+                && !errors.windows(b"open failed:".len()).any(|window| window == b"open failed:") =>
+        {
+            Ok(bytes)
+        }
         Ok(Ok((_, _, errors))) => Err(failure(format!("{stage}: {}", process_failure(&errors)))),
         _ => Err(failure(format!("{stage}: failed or timed out. Check backend daemon, SSH agent/key, known_hosts and access policy; interactive prompts are disabled"))),
     }
@@ -102,6 +108,10 @@ fn process_failure(errors: &[u8]) -> &'static str {
         "SSH host key is unknown or does not match. Read and independently verify its fingerprint in Sift."
     } else if errors.contains("Permission denied") {
         "SSH authentication denied. Check SSH user, backend agent/key and server policy."
+    } else if errors.contains("administratively prohibited") {
+        "SSH TCP forwarding denied. Permit forwarding to remote 127.0.0.1 and the database port."
+    } else if errors.contains("open failed:") {
+        "SSH forwarding could not reach the remote database port. Check forwarding policy and the database listener."
     } else if errors.contains("Connection refused") {
         "SSH port refused the connection. Check the remote SSH listener and port."
     } else {
@@ -322,6 +332,27 @@ fn ssh(
     Ok((command, known_hosts))
 }
 
+fn ssh_forward(
+    address: &str,
+    port: u16,
+    settings: &TailnetSettings,
+) -> ApiResult<(Command, Option<tempfile::NamedTempFile>)> {
+    let (command, known_hosts) = ssh(address, settings)?;
+    // OpenSSH parses -W only before the destination host.
+    let args: Vec<_> = command
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_os_string())
+        .collect();
+    let mut forward = Command::new("ssh");
+    forward
+        .args(&args[..args.len() - 1])
+        .arg("-W")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg(address);
+    Ok((forward, known_hosts))
+}
+
 fn host_fingerprint(key: &str) -> ApiResult<String> {
     use base64::Engine as _;
     use sha2::Digest as _;
@@ -401,14 +432,13 @@ pub async fn probe(request: TailnetProbeRequest) -> ApiResult<TailnetProbeReport
             message: direct.unwrap_err(),
         });
     }
-    let (mut command, _known_hosts) = ssh(&peer.address, &request.settings)?;
-    command.arg("true");
-    output(command, "SSH authentication / host verification").await?;
+    let (command, _known_hosts) = ssh_forward(&peer.address, request.port, &request.settings)?;
+    output(command, "SSH database forwarding").await?;
     Ok(TailnetProbeReport {
         stage: "ssh".into(),
         reachable: true,
         message:
-            "SSH verified. Database test will connect to remote 127.0.0.1 through a managed tunnel."
+            "SSH forwarding reached the remote database port. Test database authentication before saving."
                 .into(),
     })
 }
@@ -457,11 +487,7 @@ async fn forwarder(
                 accepted = listener.accept() => {
                     let Ok((stream, _)) = accepted else { break; };
                     if channels.len() >= 32 { continue; }
-                    let Ok((mut command, known_hosts)) = ssh(&address, &settings) else { continue; };
-                    // Insert -W before destination: OpenSSH stops parsing at host.
-                    let args: Vec<_> = command.as_std().get_args().map(|s| s.to_os_string()).collect();
-                    command = Command::new("ssh");
-                    command.args(&args[..args.len()-1]).arg("-W").arg(format!("127.0.0.1:{port}")).arg(&address);
+                    let Ok((mut command, known_hosts)) = ssh_forward(&address, port, &settings) else { continue; };
                     channels.spawn(async move {
                         let _known_hosts = known_hosts;
                         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
@@ -592,6 +618,31 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(file.unwrap().path()).unwrap(),
             format!("[100.83.175.73]:2222 {key}\n")
+        );
+    }
+
+    #[test]
+    fn probe_forward_matches_the_database_tunnel_target() {
+        let settings = TailnetSettings {
+            mode: TailnetMode::Tunnel,
+            ssh_user: "fixture".into(),
+            ssh_port: 22,
+            host_key: None,
+        };
+        let (command, _) = ssh_forward("100.83.175.73", 5432, &settings).unwrap();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            &args[args.len() - 3..],
+            ["-W", "127.0.0.1:5432", "100.83.175.73"]
+        );
+        assert!(args.iter().any(|arg| arg == "StrictHostKeyChecking=yes"));
+        assert_eq!(
+            process_failure(b"channel 0: open failed: administratively prohibited"),
+            "SSH TCP forwarding denied. Permit forwarding to remote 127.0.0.1 and the database port."
         );
     }
     #[test]

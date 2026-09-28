@@ -27,12 +27,17 @@ does not embed a second tailnet node or manage Tailscale sign-in.
    never after database authentication failure.
 4. For tunnels, enter the remote SSH user. The database target inside the tunnel
    is remote `127.0.0.1`, using the database port from the URL.
-5. **Read SSH fingerprint**, verify it independently on the database server
-   (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`), then explicitly trust it.
-   Scanning is not authentication. Pins are public keys, not private keys. Without
+5. **Read SSH fingerprint**, verify it independently, then explicitly trust it.
+   For a regular OpenSSH server, compare with the server's
+   `/etc/ssh/ssh_host_ed25519_key.pub`; Tailscale SSH has its own host key, so
+   do not compare its fingerprint with the OpenSSH key. Tailscale's `tailscale
+   ssh` wrapper verifies that key against the tailnet control plane. Scanning
+   alone is not authentication. Pins are public keys, not private keys. Without
    a pin, OpenSSH's existing backend known_hosts trust is used strictly.
-6. **Diagnose network**, then **Add & connect**. Validation happens before saving
-   new profiles and replacements. Database passwords remain in SecretStore.
+6. **Diagnose network**, then **Add & connect**. For an SSH tunnel, diagnosis
+   verifies the forwarding channel to the remote database port, not database
+   authentication. Validation happens before saving new profiles and
+   replacements. Database passwords remain in SecretStore.
 
 For saved profiles use the connection row menu's **Connection settings…**.
 The regular details form includes the same transport controls. Existing profiles
