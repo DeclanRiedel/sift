@@ -13,20 +13,26 @@ The canonical feature inventory remains the source of product feature status.
 - [x] Consolidate supported interaction paths around Vim.
 - [x] Extract metadata pool and SDK vault/automation/transfer APIs without interface changes; remaining domains are incremental.
 - [x] Establish release responsiveness and benchmark-process memory baseline.
-- [ ] Meet measured frame/memory budgets across representative platforms.
-- [ ] Complete crash/restart/offline/auth-expiry recovery validation.
+- [~] Meet measured frame/memory budgets across representative platforms; Linux
+      fixtures have measurements, but the schema-filter CPU frame budget and
+      desktop/platform memory ceilings remain open.
+- [~] Complete crash/restart/offline/auth-expiry recovery validation; focused
+      Linux lifecycle tests exist, while the full M6 recovery matrix remains.
 - [x] Verify existing inspection UI and fix independent/nested join findings.
-- [ ] Complete foreign-key JOIN assistance, then explicit multi-hop path selection.
+- [x] Complete foreign-key JOIN assistance, then explicit multi-hop path selection.
 - [x] Harden existing saved layouts and verify bounded foreign-key value selection.
-- [ ] Improve DDL fidelity and engine round-trip coverage.
-- [ ] Complete [PostgreSQL/SQL Server graduation](postgres-sqlserver-graduation.md)
+- [~] Improve DDL fidelity and engine round-trip coverage; remaining native
+      shapes and migration fidelity are tracked in the provider gap checklists.
+- [x] Complete [PostgreSQL/SQL Server graduation](postgres-sqlserver-graduation.md)
       before starting the SQLite provider; defer broad DBA functionality.
 - [x] Design [SQLite provider scope and acceptance](sqlite-provider.md).
-- [ ] Implement SQLite after the first three [overnight tasks](database-provider-overnight.md)
+- [x] Implement SQLite after the first three [overnight tasks](database-provider-overnight.md)
       establish scoped two-engine graduation.
 - [x] Add transfer dry-run preview.
-- [ ] Complete quarantine report retrieval, durable resume, and type-mapping workflows.
-- [ ] Add operational metrics/traces and monitoring workflows.
+- [x] Complete quarantine report retrieval, durable resume, and type-mapping workflows.
+- [~] Add operational metrics/traces and monitoring workflows; Prometheus,
+      OpenTelemetry, alerts, and process inspection exist, while the server
+      dashboard and broader engine statistics views remain open.
 - [ ] Complete Vim/accessibility/platform and signed-update validation.
 
 ## Design: metadata admission
