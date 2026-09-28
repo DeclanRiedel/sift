@@ -103,12 +103,12 @@ See Microsoft's [`SET STATISTICS XML` permission and output contract](https://le
   (`Query Performance: Open Benchmark Panel`) without executing anything.
 - [x] PostgreSQL JSON actual plan and available per-node runtime/buffer counters;
   unavailable counters remain absent.
-- [~] SQL Server actual plans use a supervised dedicated connection, bounded
+- [x] SQL Server actual plans use a supervised dedicated connection, bounded
   result drain, timeout/cancel and Showplan XML runtime/IO counters. Native
   `QueryTimeStats` elapsed is shown when present; textual `SET STATISTICS
   IO/TIME` messages remain unavailable through the current TDS driver. Live
-  parameterized capture and oversized-result refusal pass; restricted-login
-  `SHOWPLAN` acceptance remains open.
+  parameterized capture, oversized-result refusal, and restricted-login
+  `SHOWPLAN` grant/revoke acceptance pass.
 - [ ] SQLite plan and timing; capability-gated deeper runtime counters.
 - [~] Raw JSON and a normalized plan tree are available; explicit
   estimate/actual deltas and node links remain open.
