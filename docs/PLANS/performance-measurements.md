@@ -1,5 +1,39 @@
 # Desktop performance measurements
 
+## Historical Windows frontend / NixOS backend check (2026-09-06)
+
+The completed Windows remote-UI audit built and tested native Windows 11 and
+NixOS binaries, then connected the frontend to the backend over an SSH port
+forward. Both hosts passed formatting, strict workspace Clippy, workspace
+tests, and a normal workspace build. The Windows run passed 1,198 tests and
+the NixOS run passed 1,203; each ignored one. The rebuilt Windows frontend
+opened, handled native window messages, and exited normally. This was a
+development-session check, not signed-installer or current release validation.
+
+The process snapshots below exclude GPU allocations and are not peak or
+steady-state acceptance measurements. Idle CPU was sampled for 30 seconds
+shortly after startup, as a percentage of one logical CPU.
+
+| Process | Working set / RSS (MiB) | Private memory (MiB) | Idle CPU |
+| --- | ---: | ---: | ---: |
+| Windows desktop | 72.63 | 97.67 | 5.036% |
+| Windows SSH tunnel | 10.98 | 3.16 | 1.505% |
+| NixOS backend | 73.38 | 73.27 | 0.067% |
+
+Each route used five warmups and 50 sequential requests. Windows used .NET
+HttpClient through SSH; NixOS used Python urllib over loopback. The timings
+include transport and client overhead.
+
+| Route | Windows via SSH median / p95 | NixOS loopback median / p95 |
+| --- | ---: | ---: |
+| `GET /v1/ready` | 30.86 / 40.44 ms | 0.91 / 1.09 ms |
+| `POST /v1/handshake` | 62.20 / 92.92 ms | 0.73 / 0.79 ms |
+
+The audit's implementation milestones were `5712d95` (Windows tooling),
+`7485934` (window chrome, icon, Wiki), `2579f78` (server capabilities),
+`dde76b2` (UI errors), and `fa6a56d` (Git fixtures). Its transient backend
+and port-forward setup is historical and is not a current access path.
+
 ## M6 Linux measurement (2026-09-28)
 
 Repeated the existing `release-dev` benchmark binary on Linux x86_64 (Intel
