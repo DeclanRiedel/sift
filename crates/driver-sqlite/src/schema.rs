@@ -26,6 +26,22 @@ struct DependencySource {
     virtual_table: bool,
     table_name: String,
 }
+
+struct GeneratedSource {
+    schema: String,
+    table: String,
+    columns: Vec<String>,
+    expressions: Option<HashMap<String, String>>,
+    limited: bool,
+}
+
+struct IndexExpressionSource {
+    schema: String,
+    table: String,
+    name: String,
+    sql: Option<String>,
+    limited: bool,
+}
 fn schema_name(object: &ObjectPath) -> Result<&str, DriverError> {
     match object.schema.as_deref().unwrap_or("main") {
         name @ ("main" | "temp") => Ok(name),
@@ -83,6 +99,8 @@ fn load_once(
     let mut node_budget = 10_000usize;
     let mut count_budget = 100_000u64;
     let mut dependency_sources = Vec::new();
+    let mut generated_sources = Vec::new();
+    let mut index_expression_sources = Vec::new();
     let mut dependency_sql_budget = MAX_DEPENDENCY_SQL_BYTES;
     let mut result = SchemaSnapshot::empty(scope.clone());
     let mut catalog = CatalogTree {
@@ -213,6 +231,64 @@ fn load_once(
                     virtual_table,
                     table_name,
                 });
+                let generated_columns = object
+                    .columns
+                    .iter()
+                    .filter(|column| {
+                        column
+                            .facets
+                            .sqlite
+                            .as_ref()
+                            .is_some_and(|facets| facets.hidden >= 2)
+                    })
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>();
+                if !generated_columns.is_empty() {
+                    let allowed = sql.as_ref().is_some_and(|sql| {
+                        sql.len() <= MAX_VIEW_SQL && sql.len() <= dependency_sql_budget
+                    });
+                    let expressions = if allowed {
+                        let sql = sql.as_deref().unwrap_or_default();
+                        dependency_sql_budget -= sql.len();
+                        Some(native_generated_expressions(sql))
+                    } else {
+                        None
+                    };
+                    generated_sources.push(GeneratedSource {
+                        schema: schema.into(),
+                        table: name.clone(),
+                        columns: generated_columns,
+                        expressions,
+                        limited: sql.is_some() && !allowed,
+                    });
+                }
+                for index in &object.indexes {
+                    if !index.columns.is_empty() {
+                        continue;
+                    }
+                    let index_sql: Option<String> = conn.query_row(
+                        &format!("SELECT sql FROM {schema}.sqlite_schema WHERE type='index' AND name=?1"),
+                        [&index.name],
+                        |row| row.get(0),
+                    ).optional().map_err(db_error)?.flatten();
+                    let allowed = index_sql.as_ref().is_some_and(|sql| {
+                        sql.len() <= MAX_VIEW_SQL && sql.len() <= dependency_sql_budget
+                    });
+                    let limited = index_sql.is_some() && !allowed;
+                    let index_sql = if allowed {
+                        dependency_sql_budget -= index_sql.as_ref().map_or(0, String::len);
+                        index_sql
+                    } else {
+                        None
+                    };
+                    index_expression_sources.push(IndexExpressionSource {
+                        schema: schema.into(),
+                        table: name.clone(),
+                        name: index.name.clone(),
+                        sql: index_sql,
+                        limited,
+                    });
+                }
             }
             tree.objects.push(object);
         }
@@ -230,7 +306,7 @@ fn load_once(
         coverage.failures.push(CatalogCoverageFailure {
             stage: "dependencies".into(),
             schema: None,
-            code: "sqlite_generated_and_index_expression_dependencies_unavailable".into(),
+            code: "sqlite_expression_parser_coverage_partial".into(),
         });
         // Counts describe current data, not schema identity. Keep them in the
         // navigation trees without invalidating catalog revisions after DML.
@@ -245,6 +321,11 @@ fn load_once(
         let mut graph = sift_core::catalog::graph_from_trees(&schema_trees, coverage, identity);
         enrich_dependencies(&mut graph, &dependency_sources);
         enrich_expression_dependencies(&mut graph);
+        enrich_stored_expression_dependencies(
+            &mut graph,
+            &generated_sources,
+            &index_expression_sources,
+        );
         if let Some(kinds) = &options.kinds {
             graph.nodes.retain(|node| kinds.contains(&node.kind));
         }
@@ -690,6 +771,215 @@ fn expression_columns(sql: &str) -> Option<Vec<String>> {
     Some(names)
 }
 
+fn index_expression_columns(sql: &str) -> Option<Vec<String>> {
+    let mut statements = Parser::parse_sql(&SQLiteDialect {}, sql).ok()?;
+    let [sqlparser::ast::Statement::CreateIndex(index)] = statements.as_mut_slice() else {
+        return None;
+    };
+    let mut names = HashSet::new();
+    for column in &index.columns {
+        for name in expression_columns_ast(&column.expr)? {
+            if names.len() >= MAX_VIEW_REFERENCES {
+                return None;
+            }
+            names.insert(name);
+        }
+    }
+    let mut names = names.into_iter().collect::<Vec<_>>();
+    names.sort_unstable();
+    Some(names)
+}
+
+fn expression_columns_ast(expression: &Expr) -> Option<Vec<String>> {
+    let mut collector = ExpressionColumns::default();
+    if expression.visit(&mut collector).is_break() {
+        return None;
+    }
+    let mut names = collector.names.into_iter().collect::<Vec<_>>();
+    names.sort_unstable();
+    Some(names)
+}
+
+fn enrich_stored_expression_dependencies(
+    graph: &mut CatalogGraphData,
+    generated: &[GeneratedSource],
+    indexes: &[IndexExpressionSource],
+) {
+    let schema_names = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == CatalogNodeKind::Schema)
+        .map(|node| (node.id.clone(), node.name.to_ascii_lowercase()))
+        .collect::<HashMap<_, _>>();
+    let tables = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == CatalogNodeKind::Table)
+        .filter_map(|node| {
+            node.parent_id
+                .as_ref()
+                .and_then(|parent| schema_names.get(parent))
+                .map(|schema| {
+                    (
+                        (schema.clone(), node.name.to_ascii_lowercase()),
+                        node.id.clone(),
+                    )
+                })
+        })
+        .collect::<HashMap<_, _>>();
+    let columns = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == CatalogNodeKind::Column)
+        .filter_map(|node| {
+            node.parent_id.as_ref().map(|parent| {
+                (
+                    (parent.clone(), node.name.to_ascii_lowercase()),
+                    node.id.clone(),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let index_ids = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == CatalogNodeKind::Index)
+        .filter_map(|node| {
+            node.parent_id.as_ref().map(|parent| {
+                (
+                    (parent.clone(), node.name.to_ascii_lowercase()),
+                    node.id.clone(),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let mut known = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == CatalogEdgeKind::DependsOn)
+        .filter_map(|edge| edge.to.as_ref().map(|to| (edge.from.clone(), to.clone())))
+        .collect::<HashSet<_>>();
+    let mut edge_budget = MAX_DEPENDENCY_EDGES;
+    for source in generated {
+        let Some(table) = tables.get(&(
+            source.schema.to_ascii_lowercase(),
+            source.table.to_ascii_lowercase(),
+        )) else {
+            continue;
+        };
+        for name in &source.columns {
+            let Some(from) = columns.get(&(table.clone(), name.to_ascii_lowercase())) else {
+                continue;
+            };
+            let Some(sql) = source
+                .expressions
+                .as_ref()
+                .and_then(|expressions| expressions.get(&name.to_ascii_lowercase()))
+            else {
+                let code = if source.limited {
+                    "sqlite_generated_sql_limit"
+                } else {
+                    "sqlite_generated_expression_unavailable"
+                };
+                coverage_failure(graph, &source.schema, code);
+                mark_dependency_gap(graph, from, code);
+                continue;
+            };
+            let Some(names) = expression_columns(sql) else {
+                coverage_failure(
+                    graph,
+                    &source.schema,
+                    "sqlite_generated_expression_unparsed",
+                );
+                mark_dependency_gap(graph, from, "generated_expression_unparsed");
+                continue;
+            };
+            add_column_dependencies(
+                graph,
+                (from, table),
+                &names,
+                &columns,
+                &mut known,
+                &mut edge_budget,
+                &source.schema,
+            );
+        }
+    }
+    for source in indexes {
+        let Some(table) = tables.get(&(
+            source.schema.to_ascii_lowercase(),
+            source.table.to_ascii_lowercase(),
+        )) else {
+            continue;
+        };
+        let Some(from) = index_ids.get(&(table.clone(), source.name.to_ascii_lowercase())) else {
+            continue;
+        };
+        let Some(sql) = source.sql.as_deref() else {
+            let code = if source.limited {
+                "sqlite_index_sql_limit"
+            } else {
+                "sqlite_index_sql_unavailable"
+            };
+            coverage_failure(graph, &source.schema, code);
+            mark_dependency_gap(graph, from, code);
+            continue;
+        };
+        let Some(names) = index_expression_columns(sql) else {
+            coverage_failure(graph, &source.schema, "sqlite_index_expression_unparsed");
+            mark_dependency_gap(graph, from, "index_expression_unparsed");
+            continue;
+        };
+        add_column_dependencies(
+            graph,
+            (from, table),
+            &names,
+            &columns,
+            &mut known,
+            &mut edge_budget,
+            &source.schema,
+        );
+    }
+    sift_core::catalog::normalize_graph(graph);
+}
+
+fn add_column_dependencies(
+    graph: &mut CatalogGraphData,
+    source_ids: (&CatalogObjectId, &CatalogObjectId),
+    names: &[String],
+    columns: &HashMap<(CatalogObjectId, String), CatalogObjectId>,
+    known: &mut HashSet<(CatalogObjectId, CatalogObjectId)>,
+    edge_budget: &mut usize,
+    schema: &str,
+) {
+    let (from, table) = source_ids;
+    for name in names {
+        if *edge_budget == 0 {
+            coverage_failure(graph, schema, "sqlite_expression_edge_limit");
+            mark_dependency_gap(graph, from, "expression_edge_limit");
+            break;
+        }
+        let target = columns
+            .get(&(table.clone(), name.to_ascii_lowercase()))
+            .cloned();
+        if target
+            .as_ref()
+            .is_some_and(|to| !known.insert((from.clone(), to.clone())))
+        {
+            continue;
+        }
+        push_dependency(
+            graph,
+            from.clone(),
+            target,
+            CatalogEdgeKind::DependsOn,
+            CatalogEdgeCertainty::Parsed,
+            name,
+        );
+        *edge_budget -= 1;
+    }
+}
+
 fn resolve_relation(
     relations: &HashMap<(String, String), CatalogObjectId>,
     source_schema: &str,
@@ -1101,6 +1391,64 @@ fn ddl_tokens(sql: &str) -> Vec<DdlToken> {
         }
     }
     tokens
+}
+
+fn native_generated_expressions(sql: &str) -> HashMap<String, String> {
+    let tokens = ddl_tokens(sql);
+    let Some(body) = tokens
+        .iter()
+        .position(|token| token.value == "(" && token.depth == 0)
+    else {
+        return HashMap::new();
+    };
+    let mut expressions = HashMap::new();
+    let mut segment = body + 1;
+    for end in body + 1..tokens.len() {
+        if !(tokens[end].value == "," && tokens[end].depth == 1
+            || tokens[end].value == ")" && tokens[end].depth == 0)
+        {
+            continue;
+        }
+        let top = tokens[segment..end]
+            .iter()
+            .filter(|token| token.depth == 1)
+            .collect::<Vec<_>>();
+        if let Some(column) = top.first() {
+            let table_constraint = !column.quoted
+                && ["CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"]
+                    .iter()
+                    .any(|keyword| column.value.eq_ignore_ascii_case(keyword));
+            if !table_constraint {
+                for pair in tokens[segment..end].windows(2) {
+                    let [as_token, open] = pair else {
+                        continue;
+                    };
+                    if as_token.depth != 1
+                        || as_token.quoted
+                        || !as_token.value.eq_ignore_ascii_case("AS")
+                        || open.value != "("
+                        || open.depth != 1
+                    {
+                        continue;
+                    }
+                    if let Some(close) = tokens[segment..end].iter().find(|token| {
+                        token.start > open.start && token.value == ")" && token.depth == 1
+                    }) {
+                        expressions.insert(
+                            column.value.to_ascii_lowercase(),
+                            sql[open.end..close.start].trim().to_string(),
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+        if tokens[end].value == ")" {
+            break;
+        }
+        segment = end + 1;
+    }
+    expressions
 }
 
 fn native_checks(sql: &str) -> Vec<ConstraintInfo> {
