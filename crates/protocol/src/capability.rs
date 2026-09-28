@@ -86,6 +86,8 @@ pub enum OperationKind {
     PreviewPostgresObject,
     ApplyPostgresObject,
     ReadQueryStore,
+    ReadAgentJobs,
+    ReadSqlServerSettings,
     KillProcess,
     ImportCsv,
     BulkInsert,
@@ -124,7 +126,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 116] = [
+    pub const ALL: [Self; 118] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -206,6 +208,8 @@ impl OperationKind {
         Self::PreviewPostgresObject,
         Self::ApplyPostgresObject,
         Self::ReadQueryStore,
+        Self::ReadAgentJobs,
+        Self::ReadSqlServerSettings,
         Self::KillProcess,
         Self::ImportCsv,
         Self::BulkInsert,

@@ -229,6 +229,8 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | PreviewPostgresObject
             | ApplyPostgresObject
             | ReadQueryStore
+            | ReadAgentJobs
+            | ReadSqlServerSettings
             | KillProcess
             | ImportCsv
             | BulkInsert

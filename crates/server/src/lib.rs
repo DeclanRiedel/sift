@@ -4,6 +4,7 @@
 //! WebSocket APIs (ADR-001, ADR-002). The desktop supervises a separate local
 //! server process or connects to a remote server.
 
+pub mod agent_jobs;
 pub mod authorization;
 pub mod autocomplete;
 pub mod automation;
@@ -60,6 +61,7 @@ pub mod runtime;
 pub mod scheduler;
 pub mod schema_cache;
 pub mod search;
+pub mod server_settings;
 pub mod session;
 pub mod shutdown;
 pub mod sql_policy;

@@ -625,6 +625,14 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
     },
+    ReadAgentJobs {
+        session: SessionId,
+        connection: ConnectionId,
+    },
+    ReadSqlServerSettings {
+        session: SessionId,
+        connection: ConnectionId,
+    },
     KillProcess {
         session: SessionId,
         connection: ConnectionId,
@@ -867,6 +875,8 @@ impl Operation {
             Self::PreviewPostgresObject { .. } => OperationKind::PreviewPostgresObject,
             Self::ApplyPostgresObject { .. } => OperationKind::ApplyPostgresObject,
             Self::ReadQueryStore { .. } => OperationKind::ReadQueryStore,
+            Self::ReadAgentJobs { .. } => OperationKind::ReadAgentJobs,
+            Self::ReadSqlServerSettings { .. } => OperationKind::ReadSqlServerSettings,
             Self::KillProcess { .. } => OperationKind::KillProcess,
             Self::ImportCsv { .. } => OperationKind::ImportCsv,
             Self::BulkInsert { .. } => OperationKind::BulkInsert,
@@ -1317,6 +1327,12 @@ impl Operation {
             }
             Operation::ReadQueryStore { connection, .. } => {
                 summary("read", "query_store", Some(connection.0 as i64))
+            }
+            Operation::ReadAgentJobs { connection, .. } => {
+                summary("read", "agent_jobs", Some(connection.0 as i64))
+            }
+            Operation::ReadSqlServerSettings { connection, .. } => {
+                summary("read", "sqlserver_settings", Some(connection.0 as i64))
             }
             Operation::KillProcess { request, .. } => {
                 summary("kill", "process", Some(request.process_id))

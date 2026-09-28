@@ -58,6 +58,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "bulkInsert",
     "cloneWorkspaceRepository",
     "cancelComparison",
+    "cancelProfile",
     "cancelQuery",
     "cancelMigration",
     "captureSemanticPlan",
@@ -108,6 +109,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "exchangeSshProxyCapability",
     "executeQuery",
     "explainQuery",
+    "profileQuery",
     "benchmarkQuery",
     "cancelBenchmark",
     "exportQuery",
@@ -231,6 +233,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "purgeExtension",
     "readSpilledCursorPages",
     "readQueryStore",
+    "readAgentJobs",
+    "readSqlServerSettings",
     "ready",
     "refreshAuth",
     "refreshDdlSource",
@@ -1687,6 +1691,28 @@ impl Client {
     ) -> Result<sift_protocol::QueryStoreReport> {
         self.get(&format!(
             "/v1/sessions/{session}/connections/{connection}/query-store"
+        ))
+        .await
+    }
+
+    pub async fn read_sqlserver_settings(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<sift_protocol::SqlServerSettingsReport> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/settings/sqlserver"
+        ))
+        .await
+    }
+
+    pub async fn read_agent_jobs(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<sift_protocol::AgentJobsReport> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/agent/jobs"
         ))
         .await
     }

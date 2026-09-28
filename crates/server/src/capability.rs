@@ -240,6 +240,14 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         ReadQueryStore if engine != Some(Engine::SqlServer) => {
             Some("Query Store is only supported by SQL Server")
         }
+        ReadAgentJobs if !has_connection => Some("connection context required"),
+        ReadAgentJobs if engine != Some(Engine::SqlServer) => {
+            Some("Agent jobs are only supported by SQL Server")
+        }
+        ReadSqlServerSettings if !has_connection => Some("connection context required"),
+        ReadSqlServerSettings if engine != Some(Engine::SqlServer) => {
+            Some("server settings are only supported by SQL Server")
+        }
         CloseConnection
         | PingConnection
         | RefreshSchema
@@ -283,6 +291,8 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | PreviewPostgresObject
         | ApplyPostgresObject
         | ReadQueryStore
+        | ReadAgentJobs
+        | ReadSqlServerSettings
         | KillProcess
         | ImportCsv
         | BulkInsert
@@ -348,6 +358,8 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | PreviewPostgresObject
         | ApplyPostgresObject
         | ReadQueryStore
+        | ReadAgentJobs
+        | ReadSqlServerSettings
         | KillProcess
         | ImportCsv
         | BulkInsert
