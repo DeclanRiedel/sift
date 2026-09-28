@@ -784,7 +784,7 @@ DISABLE TRIGGER {src}.changed ON {src}.items;
             .unwrap(),
     );
     assert_ne!(before_compression, after_compression);
-    execute(&driver, &conn, &format!("CREATE USER {src} WITHOUT LOGIN; GRANT SELECT ON {src}.items TO {src}; EXECUTE AS USER = '{src}';")).await;
+    execute(&driver, &conn, &format!("CREATE USER {src} WITHOUT LOGIN; GRANT SELECT ON {src}.items TO {src}; GRANT SELECT ON {src}.items_alias TO {src}; EXECUTE AS USER = '{src}';")).await;
     execute(&driver, &conn, &format!("SELECT * FROM {src}.items")).await;
     assert_write_denied(
         &driver,
@@ -796,6 +796,13 @@ DISABLE TRIGGER {src}.changed ON {src}.items;
         &driver,
         conn.clone(),
         path(&src, "items", ObjectKind::Table)
+    )
+    .await
+    .is_err());
+    assert!(generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&src, "items_alias", ObjectKind::Synonym)
     )
     .await
     .is_err());
