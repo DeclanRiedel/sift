@@ -602,10 +602,12 @@ impl RuntimeDriver {
             OperationKind::Savepoint
             | OperationKind::RollbackToSavepoint
             | OperationKind::ReleaseSavepoint => "driver.savepoints@1",
-            OperationKind::CancelQuery | OperationKind::CancelBenchmark => "driver.cancel@1",
+            OperationKind::CancelQuery
+            | OperationKind::CancelBenchmark
+            | OperationKind::CancelProfile => "driver.cancel@1",
             OperationKind::BulkInsert | OperationKind::ImportCsv => "driver.bulk@1",
             OperationKind::Listen => "driver.notifications@1",
-            OperationKind::Explain => "driver.explain@1",
+            OperationKind::Explain | OperationKind::ProfileQuery => "driver.explain@1",
             OperationKind::ListProcesses
             | OperationKind::ListDeadlocks
             | OperationKind::KillProcess => "driver.process-control@1",

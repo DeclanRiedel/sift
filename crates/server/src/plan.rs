@@ -498,7 +498,7 @@ const PG_MAPPED: &[&str] = &[
     "Plans",
 ];
 
-fn parse_pg_plan(v: &serde_json::Value) -> Result<PlanNode, DriverError> {
+pub(crate) fn parse_pg_plan(v: &serde_json::Value) -> Result<PlanNode, DriverError> {
     let plan = v
         .as_array()
         .and_then(|a| a.first())

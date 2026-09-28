@@ -70,6 +70,8 @@ pub struct SessionStore {
 
 #[path = "benchmark.rs"]
 mod benchmark;
+#[path = "profile.rs"]
+mod profile;
 
 struct SessionStoreInner {
     sessions: DashMap<SessionId, Session>,
@@ -163,6 +165,7 @@ struct SessionStoreInner {
     migration_locks: DashMap<(SessionId, ConnectionId), Arc<tokio::sync::Mutex<()>>>,
     retained_query_results: crate::comparison::RetainedQueryRegistry,
     benchmarks: Arc<DashMap<(SessionId, ConnectionId), benchmark::ActiveBenchmark>>,
+    profiles: Arc<DashMap<(SessionId, ConnectionId), profile::ActiveProfile>>,
     comparisons: crate::comparison::ComparisonRegistry,
 }
 
@@ -342,6 +345,7 @@ impl SessionStore {
                 migration_locks: DashMap::new(),
                 retained_query_results: Default::default(),
                 benchmarks: Default::default(),
+                profiles: Default::default(),
                 comparisons: Default::default(),
             }),
         };
@@ -399,6 +403,7 @@ impl SessionStore {
                 migration_locks: DashMap::new(),
                 retained_query_results: Default::default(),
                 benchmarks: Default::default(),
+                profiles: Default::default(),
                 comparisons: Default::default(),
             }),
         };
@@ -1648,6 +1653,9 @@ impl SessionStore {
         conn_id: ConnectionId,
     ) -> ApiResult<()> {
         if let Some(run) = self.inner.benchmarks.get(&(session_id, conn_id)) {
+            run.value().cancellation.cancel();
+        }
+        if let Some(run) = self.inner.profiles.get(&(session_id, conn_id)) {
             run.value().cancellation.cancel();
         }
         self.inner

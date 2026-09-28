@@ -88,6 +88,32 @@ pub struct ExplainResponse {
     pub warnings: Vec<DriverWarning>,
 }
 
+/// One PostgreSQL read-only, instrumented execution. Timings are separate
+/// populations: native PostgreSQL plan clocks and server-observed elapsed.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProfileRequest {
+    pub connection: ConnectionId,
+    pub run_id: Uuid,
+    pub sql: String,
+    #[serde(default)]
+    pub params: Vec<Value>,
+    pub timeout_ms: u64,
+    pub workload_confirmed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProfileResponse {
+    pub run_id: Uuid,
+    pub plan: ExplainResponse,
+    pub server_elapsed_ns: u64,
+    #[serde(default)]
+    pub planning_ms: Option<f64>,
+    #[serde(default)]
+    pub execution_ms: Option<f64>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct PlanCaptureId(pub Uuid);
