@@ -92,10 +92,13 @@ impl SessionStore {
         let engine = entry.driver.semantic_engine().ok_or_else(|| {
             ApiError::BadRequest("Profile requires a supported SQL dialect".into())
         })?;
-        if !matches!(engine, Engine::Postgres | Engine::SqlServer) {
+        if !matches!(
+            engine,
+            Engine::Postgres | Engine::SqlServer | Engine::Sqlite
+        ) {
             return Err(ApiError::Driver(DriverError::new(
                 Code::UnsupportedForEngine,
-                "Profile supports PostgreSQL and SQL Server",
+                "Profile requires a supported SQL engine",
             )));
         }
         benchmark::validate_read(engine, &request.sql)?;
@@ -211,6 +214,18 @@ impl SessionStore {
                 )
                 .await;
         }
+        if engine == Engine::Sqlite {
+            return self
+                .profile_owned_sqlite(
+                    session,
+                    source,
+                    dedicated.id,
+                    &entry,
+                    &request,
+                    &cancellation,
+                )
+                .await;
+        }
         let transaction = {
             let driver = entry.driver.clone();
             let handle = entry.handle.clone();
@@ -287,6 +302,209 @@ impl SessionStore {
                 .push("Dedicated connection cleanup did not complete cleanly".into());
         }
         Ok(response)
+    }
+
+    async fn profile_owned_sqlite(
+        &self,
+        session: SessionId,
+        source: ConnectionId,
+        dedicated: ConnectionId,
+        entry: &ConnectionEntryClone,
+        request: &ProfileRequest,
+        cancellation: &CancellationToken,
+    ) -> ApiResult<ProfileResponse> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(request.timeout_ms);
+        let explain_request = sift_protocol::ExplainRequest {
+            connection: dedicated,
+            sql: request.sql.clone(),
+            params: request.params.clone(),
+            analyze: false,
+        };
+        let estimated = crate::plan::explain_as(
+            self,
+            session,
+            dedicated,
+            &explain_request,
+            sift_protocol::OperationKind::ProfileQuery,
+        );
+        let plan = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(ApiError::Driver(DriverError::new(Code::QueryCanceled, "Profile cancelled"))),
+            _ = tokio::time::sleep_until(deadline) => Err(ApiError::Driver(DriverError::new(Code::QueryTimedOut, "Profile timed out"))),
+            result = estimated => result,
+        }?;
+        // The SQLite plan is an estimate. Execute separately on this owned
+        // connection so actual rows/timing cannot be attributed to plan nodes.
+        let driver = entry.driver.clone();
+        let handle = entry.handle.clone();
+        let transaction = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(ApiError::Driver(DriverError::new(Code::QueryCanceled, "Profile cancelled"))),
+            _ = tokio::time::sleep_until(deadline) => Err(ApiError::Driver(DriverError::new(Code::QueryTimedOut, "Profile timed out"))),
+            result = self.run_bounded("SQLite profile read transaction", async move {
+                driver.begin(handle, TxMode {
+                    access: TxAccessMode::ReadOnly,
+                    isolation: sift_protocol::IsolationLevel::Serializable,
+                }).await
+            }) => result,
+        }?;
+        let outcome = self
+            .profile_sqlite_read(session, source, entry, request, cancellation, deadline)
+            .await;
+        let rollback =
+            tokio::time::timeout(Duration::from_secs(5), entry.driver.rollback(transaction)).await;
+        let cleanup = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.close_connection_unchecked(session, dedicated),
+        )
+        .await;
+        let (rows_returned, server_elapsed_ns) = outcome?;
+        let mut warnings = vec![
+            "SQLite plan is estimated and captured before the measured read; concurrent schema changes can alter the executed plan. Sift-observed elapsed includes driver dispatch and full result consumption, not native execution time. No per-node actual rows or runtime counters are available".into(),
+            "Dedicated read-only transaction; cache state and external function side effects are unknown".into(),
+        ];
+        if !matches!(rollback, Ok(Ok(()))) {
+            warnings.push(
+                "Read transaction rollback did not complete cleanly; connection was discarded"
+                    .into(),
+            );
+        }
+        if !matches!(cleanup, Ok(Ok(()))) {
+            warnings.push("Dedicated connection cleanup did not complete cleanly".into());
+        }
+        Ok(ProfileResponse {
+            run_id: request.run_id,
+            plan,
+            server_elapsed_ns,
+            rows_returned: Some(rows_returned),
+            planning_ms: None,
+            execution_ms: None,
+            warnings,
+        })
+    }
+
+    async fn profile_sqlite_read(
+        &self,
+        session: SessionId,
+        source: ConnectionId,
+        entry: &ConnectionEntryClone,
+        request: &ProfileRequest,
+        cancellation: &CancellationToken,
+        deadline: tokio::time::Instant,
+    ) -> ApiResult<(u64, u64)> {
+        self.authorize_connection_operation(
+            session,
+            source,
+            sift_protocol::OperationKind::ProfileQuery,
+            Some(&request.sql),
+            &[],
+        )?;
+        self.authorize_connection_operation(
+            session,
+            source,
+            sift_protocol::OperationKind::ExecuteQuery,
+            Some(&request.sql),
+            &[],
+        )?;
+        let resources = self.reserve_query_resources(entry)?;
+        let driver = entry.driver.clone();
+        let handle = entry.handle.clone();
+        let sql = request.sql.clone();
+        let params = request.params.clone();
+        let (configured_rows, configured_bytes) = self.result_limits();
+        let max_rows = configured_rows.min(MAX_PROFILE_RESULT_ROWS);
+        let max_bytes = configured_bytes.min(16 * 1024 * 1024);
+        let cursor = Arc::new(Mutex::new(None));
+        let cursor_slot = cursor.clone();
+        let started = Instant::now();
+        let mut task = tokio::spawn(async move {
+            let _resources = resources;
+            let mut stream = driver
+                .execute(
+                    handle,
+                    ExecuteRequest {
+                        sql,
+                        params,
+                        transform: None,
+                    },
+                )
+                .await?;
+            *cursor_slot.lock().unwrap() = Some(stream.cursor_id);
+            let mut rows = 0usize;
+            let mut bytes = 0usize;
+            let mut result_set = false;
+            while let Some(page) = stream.rows.recv().await {
+                match page {
+                    Page::Rows { rows: page_rows } => {
+                        for row in page_rows {
+                            rows = rows.saturating_add(1);
+                            bytes = bytes.saturating_add(
+                                serde_json::to_vec(&row)
+                                    .map_err(|_| {
+                                        DriverError::new(
+                                            Code::DriverInternal,
+                                            "Profile row cannot be sized",
+                                        )
+                                    })?
+                                    .len(),
+                            );
+                            if rows > max_rows || bytes > max_bytes {
+                                return Err(DriverError::new(
+                                    Code::ResultTooLarge,
+                                    "SQLite profile result exceeds row or byte limit",
+                                ));
+                            }
+                        }
+                    }
+                    Page::Error { error } => return Err(error),
+                    Page::Done { .. } if result_set => {
+                        return Ok((
+                            rows as u64,
+                            started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                        ))
+                    }
+                    Page::Done { .. } => {
+                        return Err(DriverError::new(
+                            Code::UnsupportedResultShape,
+                            "SQLite profile returned no query result set",
+                        ))
+                    }
+                    Page::NextResult { .. } if !result_set => result_set = true,
+                    Page::NextResult { .. } => {
+                        return Err(DriverError::new(
+                            Code::UnsupportedResultShape,
+                            "SQLite profile returned multiple result sets",
+                        ))
+                    }
+                }
+            }
+            Err(DriverError::new(
+                Code::DriverInternal,
+                "SQLite profile stream ended without completion",
+            ))
+        });
+        let outcome = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(ApiError::Driver(DriverError::new(Code::QueryCanceled, "Profile cancelled"))),
+            _ = tokio::time::sleep_until(deadline) => Err(ApiError::Driver(DriverError::new(Code::QueryTimedOut, "Profile timed out"))),
+            result = &mut task => match result {
+                Ok(Ok(measurement)) => Ok(measurement),
+                Ok(Err(error)) => Err(ApiError::Driver(error)),
+                Err(_) => Err(ApiError::Internal("SQLite profile driver task failed".into())),
+            },
+        };
+        if outcome.is_err() {
+            task.abort();
+            let cursor_id = *cursor.lock().unwrap();
+            if let Some(cursor_id) = cursor_id {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    entry.driver.cancel(entry.handle.clone(), cursor_id),
+                )
+                .await;
+            }
+        }
+        outcome
     }
 
     async fn profile_plan(
@@ -438,6 +656,7 @@ impl SessionStore {
             run_id: request.run_id,
             plan: sift_protocol::ExplainResponse { engine: Engine::Postgres, analyzed: true, root, raw, warnings: Vec::new() },
             server_elapsed_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            rows_returned: None,
             planning_ms,
             execution_ms,
             warnings: vec!["Instrumentation adds overhead; this run used a dedicated read-only connection. Cache state and external function side effects are unknown".into()],
@@ -671,6 +890,7 @@ impl SessionStore {
                 warnings: Vec::new(),
             },
             server_elapsed_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            rows_returned: None,
             planning_ms: None,
             execution_ms,
             warnings: vec![

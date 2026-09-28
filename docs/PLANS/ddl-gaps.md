@@ -32,11 +32,12 @@ for executed evidence and [graduation](postgres-sqlserver-graduation.md) for gat
   single and multiple inheritance, table RLS policies, and rewrite rules export
   natively. Structural migrations fence these shapes.
 - SQL Server advanced temporal variants, memory/replication/policy tables,
-  most advanced storage, nonordinary indexes, untrusted/disabled constraints,
-  CLR/table types and bound defaults/rules require separate support. Basic
-  system-versioned tables, nullable sparse columns, and uniform ROW/PAGE
-  compression on ordinary rowstore tables and indexes round-trip; structural
-  migrations fence these shapes.
+  most advanced storage, nonordinary indexes, `NOT FOR REPLICATION` constraint
+  behavior, CLR/table types and bound defaults/rules require separate support.
+  Basic system-versioned tables, nullable sparse columns, uniform ROW/PAGE
+  compression on ordinary rowstore tables and indexes, and ordinary disabled or
+  untrusted CHECK/foreign-key states round-trip; structural migrations fence
+  these shapes.
 - SQL Server synonyms export native `CREATE SYNONYM` definitions; base-object
   paths remain visible as unresolved catalog dependencies when a target cannot
   be proven. PostgreSQL extension definitions remain unimplemented.
