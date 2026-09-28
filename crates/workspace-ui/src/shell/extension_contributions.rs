@@ -215,6 +215,7 @@ impl WorkspaceShell {
         if self.extension_contributions.pending {
             return;
         }
+        let context = self.current_extension_context(cx);
         let ui = &mut self.extension_contributions;
         let Some((extension_index, contribution_index)) = ui.selected else {
             return;
@@ -239,7 +240,12 @@ impl WorkspaceShell {
                 .iter()
                 .map(|input| input.read(cx).text().to_owned())
                 .collect::<Vec<_>>();
-            if form_arguments(&ui.fields, &values).ok().as_ref() != Some(&request.arguments) {
+            let scoped_context = contribution.operation.as_ref().map(|operation| {
+                scoped_extension_context(&operation.required_context, context.clone())
+            });
+            if form_arguments(&ui.fields, &values).ok().as_ref() != Some(&request.arguments)
+                || request.context != scoped_context
+            {
                 ui.error = Some("Inputs changed after approval; select the action again".into());
                 cx.notify();
                 return;
@@ -260,7 +266,7 @@ impl WorkspaceShell {
                     return;
                 }
             };
-            match invocation(extension, contribution, arguments) {
+            match invocation(extension, contribution, arguments, context) {
                 Ok(request) => request,
                 Err(error) => {
                     ui.error = Some(error);
@@ -290,6 +296,40 @@ impl WorkspaceShell {
             ui.error = Some("Extension service is unavailable".into());
         }
         cx.notify();
+    }
+
+    fn current_extension_context(&self, cx: &Context<Self>) -> sift_protocol::ToolContext {
+        let document = self.panes.get(self.active_pane).and_then(|pane| {
+            let pane = pane.read(cx);
+            match pane.active_item()?.source.as_ref()? {
+                ItemSource::RoomDocument(source) => Some((source.room_id, source.document_id)),
+                _ => None,
+            }
+        });
+        let room_id = document
+            .map(|(room, _)| room)
+            .or_else(|| self.selected_workspace().map(|workspace| workspace.room_id));
+        let tenant_id = room_id
+            .and_then(|id| {
+                self.lifecycle
+                    .tenants
+                    .iter()
+                    .flat_map(|tenant| &tenant.rooms)
+                    .find(|room| room.id.0 == id)
+                    .map(|room| room.tenant_id.0)
+            })
+            .or_else(|| self.selected_tenant_id());
+        sift_protocol::ToolContext {
+            tenant_id,
+            room_id,
+            profile_id: match self.connection_status {
+                ConnectionStatus::Connected { profile_id, .. } => Some(profile_id),
+                _ => None,
+            },
+            connection_id: matches!(self.connection_status, ConnectionStatus::Connected { .. })
+                .then(|| "active".to_owned()),
+            document_id: document.map(|(_, id)| id.to_string()),
+        }
     }
 
     fn approve_selected_extension_contribution(&mut self, cx: &mut Context<Self>) {
@@ -329,6 +369,7 @@ impl WorkspaceShell {
     ) -> gpui::AnyElement {
         let colors = cx.theme().colors;
         let ui = &self.extension_contributions;
+        let current_context = self.current_extension_context(cx);
         let contribution_count = ui
             .descriptors
             .iter()
@@ -540,6 +581,10 @@ impl WorkspaceShell {
                     .flex_col()
                     .gap_2()
                     .child(div().text_sm().child(contribution.display_name.clone()))
+                    .children(contribution.operation.as_ref().and_then(|operation| {
+                        extension_target_label(&operation.required_context, &current_context)
+                            .map(|label| div().text_xs().text_color(colors.muted_text).child(label))
+                    }))
                     .children(fields)
                     .children(contribution.invocable.then(|| {
                         Button::new(
@@ -798,6 +843,7 @@ pub(super) fn invocation(
     extension: &sift_protocol::ExtensionDescriptor,
     contribution: &sift_protocol::ContributionDescriptor,
     arguments: serde_json::Value,
+    context: sift_protocol::ToolContext,
 ) -> Result<sift_protocol::InvokeExtensionRequest, String> {
     if !extension.enabled || !contribution.active || !contribution.invocable {
         return Err("Extension action is unavailable".into());
@@ -812,6 +858,7 @@ pub(super) fn invocation(
     if !matches!(
         client,
         sift_protocol::ClientContributionDescriptor::Command { .. }
+            | sift_protocol::ClientContributionDescriptor::ContextAction { .. }
             | sift_protocol::ClientContributionDescriptor::Form { .. }
             | sift_protocol::ClientContributionDescriptor::Table { .. }
             | sift_protocol::ClientContributionDescriptor::DetailPanel { .. }
@@ -826,6 +873,43 @@ pub(super) fn invocation(
     {
         return Err("Panel has no governed data source".into());
     }
+    let required = &operation.required_context;
+    let context = scoped_extension_context(required, context);
+    let missing = required.iter().find(|scope| match scope {
+        sift_protocol::ContributionContext::Instance => false,
+        sift_protocol::ContributionContext::Tenant => context.tenant_id.is_none(),
+        sift_protocol::ContributionContext::Room => context.room_id.is_none(),
+        sift_protocol::ContributionContext::Profile => context.profile_id.is_none(),
+        sift_protocol::ContributionContext::Connection => context.connection_id.is_none(),
+        sift_protocol::ContributionContext::Document => context.document_id.is_none(),
+    });
+    if let Some(scope) = missing {
+        return Err(format!(
+            "Select a {:?} target before running this action",
+            scope
+        ));
+    }
+    let target = required.last().copied();
+    let target_kind = match target {
+        None | Some(sift_protocol::ContributionContext::Instance) => "instance",
+        Some(sift_protocol::ContributionContext::Tenant) => "tenant",
+        Some(sift_protocol::ContributionContext::Room) => "room",
+        Some(sift_protocol::ContributionContext::Profile) => "profile",
+        Some(sift_protocol::ContributionContext::Connection) => "connection",
+        Some(sift_protocol::ContributionContext::Document) => "document",
+    };
+    let target_id = match target {
+        None | Some(sift_protocol::ContributionContext::Instance) => None,
+        Some(sift_protocol::ContributionContext::Tenant) => {
+            context.tenant_id.map(|id| id.to_string())
+        }
+        Some(sift_protocol::ContributionContext::Room) => context.room_id.map(|id| id.to_string()),
+        Some(sift_protocol::ContributionContext::Profile) => {
+            context.profile_id.map(|id| id.to_string())
+        }
+        Some(sift_protocol::ContributionContext::Connection) => context.connection_id.clone(),
+        Some(sift_protocol::ContributionContext::Document) => context.document_id.clone(),
+    };
     Ok(sift_protocol::InvokeExtensionRequest {
         operation: sift_protocol::ExtensionOperation {
             extension_id: extension.id.clone(),
@@ -835,14 +919,76 @@ pub(super) fn invocation(
                 .unwrap_or_else(|| contribution.id.clone()),
             action: operation.action.clone(),
             classification: operation.classification,
-            target_kind: sift_protocol::SegmentId::new("instance".to_owned())
+            target_kind: sift_protocol::SegmentId::new(target_kind.to_owned())
                 .expect("static target kind is valid"),
-            target_id: None,
+            target_id,
             sanitized_arguments: std::collections::BTreeMap::new(),
         },
         arguments,
+        context: Some(context),
         approval_id: None,
     })
+}
+
+fn scoped_extension_context(
+    required: &[sift_protocol::ContributionContext],
+    context: sift_protocol::ToolContext,
+) -> sift_protocol::ToolContext {
+    let has = |scope| required.contains(&scope);
+    sift_protocol::ToolContext {
+        tenant_id: has(sift_protocol::ContributionContext::Tenant)
+            .then_some(context.tenant_id)
+            .flatten(),
+        room_id: has(sift_protocol::ContributionContext::Room)
+            .then_some(context.room_id)
+            .flatten(),
+        profile_id: has(sift_protocol::ContributionContext::Profile)
+            .then_some(context.profile_id)
+            .flatten(),
+        connection_id: has(sift_protocol::ContributionContext::Connection)
+            .then_some(context.connection_id)
+            .flatten(),
+        document_id: has(sift_protocol::ContributionContext::Document)
+            .then_some(context.document_id)
+            .flatten(),
+    }
+}
+
+fn extension_target_label(
+    required: &[sift_protocol::ContributionContext],
+    context: &sift_protocol::ToolContext,
+) -> Option<String> {
+    use sift_protocol::ContributionContext as Scope;
+    match required.last()? {
+        Scope::Instance => Some("Target: this instance".into()),
+        Scope::Tenant => Some(format!(
+            "Target: tenant {}",
+            context
+                .tenant_id
+                .map_or_else(|| "none selected".into(), |id| id.to_string())
+        )),
+        Scope::Room => Some(format!(
+            "Target: room {}",
+            context
+                .room_id
+                .map_or_else(|| "none selected".into(), |id| id.to_string())
+        )),
+        Scope::Profile => Some(format!(
+            "Target: profile {}",
+            context
+                .profile_id
+                .map_or_else(|| "none selected".into(), |id| id.to_string())
+        )),
+        Scope::Connection => Some(if context.connection_id.is_some() {
+            "Target: active connection".into()
+        } else {
+            "Target: no active connection".into()
+        }),
+        Scope::Document => Some(format!(
+            "Target: document {}",
+            context.document_id.as_deref().unwrap_or("none selected")
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -912,6 +1058,7 @@ mod tests {
             operation: Some(sift_protocol::ExtensionActionDescriptor {
                 action: sift_protocol::SegmentId::new("read-usage").unwrap(),
                 classification: sift_protocol::OperationClassification::Read,
+                required_context: Vec::new(),
                 input_schema: serde_json::json!({"type":"object"}),
                 output_schema: serde_json::json!({"type":"object", "properties": {
                     "count": {"type":"integer"}
@@ -942,8 +1089,39 @@ mod tests {
             revision: 1,
             contributions: vec![panel.clone()],
         };
-        let request = invocation(&extension, &panel, serde_json::json!({})).unwrap();
+        let request = invocation(
+            &extension,
+            &panel,
+            serde_json::json!({}),
+            sift_protocol::ToolContext {
+                tenant_id: None,
+                room_id: None,
+                profile_id: None,
+                connection_id: None,
+                document_id: None,
+            },
+        )
+        .unwrap();
         assert_eq!(request.operation.contribution_id, source_id);
+        let mut tenant_action = panel;
+        tenant_action.operation.as_mut().unwrap().required_context =
+            vec![sift_protocol::ContributionContext::Tenant];
+        tenant_action.client = Some(sift_protocol::ClientContributionDescriptor::ContextAction {
+            title: "Tenant usage".into(),
+            action: sift_protocol::SegmentId::new("read-usage").unwrap(),
+            target_kind: sift_protocol::SegmentId::new("tenant").unwrap(),
+        });
+        let context = sift_protocol::ToolContext {
+            tenant_id: Some(42),
+            room_id: None,
+            profile_id: None,
+            connection_id: None,
+            document_id: None,
+        };
+        let request =
+            invocation(&extension, &tenant_action, serde_json::json!({}), context).unwrap();
+        assert_eq!(request.operation.target_id.as_deref(), Some("42"));
+        assert_eq!(request.context.unwrap().tenant_id, Some(42));
         assert_eq!(request.arguments, serde_json::json!({}));
         assert!(request.operation.sanitized_arguments.is_empty());
     }

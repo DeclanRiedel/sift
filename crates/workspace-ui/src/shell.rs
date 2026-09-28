@@ -44312,6 +44312,7 @@ mod tests {
                     operation: Some(sift_protocol::ExtensionActionDescriptor {
                         action: sift_protocol::SegmentId::new("read-usage").unwrap(),
                         classification: sift_protocol::OperationClassification::Read,
+                        required_context: Vec::new(),
                         input_schema: serde_json::json!({"type":"object"}),
                         output_schema: serde_json::json!({"type":"object"}),
                         timeout_ms: 1000,

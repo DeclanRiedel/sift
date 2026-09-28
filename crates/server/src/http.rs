@@ -4065,7 +4065,7 @@ async fn list_governed_tools(
         .as_ref()
         .map(|Extension(auth)| auth)
         .ok_or(ApiError::Unauthorized)?;
-    let context = tool_context(&query);
+    let context = authorized_tool_context(&state, auth, tool_context(&query))?;
     let authorization = tool_authorization_scope(&state, auth, &context)?;
     let registry = state
         .sessions
@@ -4081,27 +4081,26 @@ async fn list_governed_tools(
 async fn invoke_governed_tool(
     State(state): State<AppState>,
     auth: Option<Extension<AuthContext>>,
-    Json(request): Json<sift_protocol::InvokeToolRequest>,
+    Json(mut request): Json<sift_protocol::InvokeToolRequest>,
 ) -> ApiResult<Json<sift_protocol::InvokeToolResponse>> {
     let auth = auth
         .as_ref()
         .map(|Extension(auth)| auth)
         .ok_or(ApiError::Unauthorized)?;
+    request.context = authorized_tool_context(&state, auth, request.context)?;
     let authorization = tool_authorization_scope(&state, auth, &request.context)?;
     let registry = state
         .sessions
         .tool_registry()
         .ok_or(ApiError::MetadataUnavailable)?;
-    let tenant_id = request.context.tenant_id;
-    let room_id = request.context.room_id;
+    let target = request.context.clone();
     let response = registry
         .invoke(
             request,
             crate::extension_dispatch::DispatchContext {
                 authorization,
                 principal_id: auth.principal_id,
-                tenant_id,
-                room_id,
+                target,
                 correlation_id: crate::correlation::current()
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             },
@@ -4114,21 +4113,36 @@ async fn invoke_governed_tool(
 async fn invoke_extension_action(
     State(state): State<AppState>,
     auth: Option<Extension<AuthContext>>,
-    Json(request): Json<sift_protocol::InvokeExtensionRequest>,
+    Json(mut request): Json<sift_protocol::InvokeExtensionRequest>,
 ) -> ApiResult<Json<sift_protocol::InvokeExtensionOutcome>> {
     let auth = auth
         .as_ref()
         .map(|Extension(auth)| auth)
         .ok_or(ApiError::Unauthorized)?;
-    let context = sift_protocol::ToolContext {
-        tenant_id: None,
-        room_id: None,
-        profile_id: None,
-        connection_id: None,
-        document_id: None,
-    };
+    let context = request
+        .context
+        .take()
+        .unwrap_or(sift_protocol::ToolContext {
+            tenant_id: None,
+            room_id: None,
+            profile_id: None,
+            connection_id: None,
+            document_id: None,
+        });
+    let context = authorized_tool_context(&state, auth, context)?;
+    request.context = Some(context.clone());
     let authorization = tool_authorization_scope(&state, auth, &context)?;
     let metadata = metadata_store_cloned(&state)?;
+    let registry = state
+        .sessions
+        .tool_registry()
+        .ok_or(ApiError::MetadataUnavailable)?;
+    let dispatcher = registry.dispatcher();
+    request.operation = dispatcher
+        .bind_operation(request.operation, &context)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    crate::authorization::authorize_extension(&authorization, request.operation.classification)
+        .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
     let operation_id = format!(
         "{}#{}",
         request.operation.contribution_id, request.operation.action
@@ -4137,8 +4151,7 @@ async fn invoke_extension_action(
         principal_id: auth.principal_id,
         operation_id,
         context_fingerprint: crate::automation::fingerprint(
-            &serde_json::to_value(&request.operation)
-                .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+            &json!({"operation": &request.operation, "context": &context}),
         )
         .map_err(|error| ApiError::BadRequest(error.to_string()))?,
         input_fingerprint: crate::automation::fingerprint(&request.arguments)
@@ -4154,20 +4167,14 @@ async fn invoke_extension_action(
             ));
         }
     }
-    let registry = state
-        .sessions
-        .tool_registry()
-        .ok_or(ApiError::MetadataUnavailable)?;
-    let (_, response) = registry
-        .dispatcher()
+    let (_, response) = dispatcher
         .dispatch(
             request.operation,
             request.arguments,
             crate::extension_dispatch::DispatchContext {
                 authorization,
                 principal_id: auth.principal_id,
-                tenant_id: None,
-                room_id: None,
+                target: context,
                 correlation_id: crate::correlation::current()
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             },
@@ -4182,7 +4189,7 @@ async fn invoke_extension_action(
 async fn create_operation_approval(
     State(state): State<AppState>,
     auth: Option<Extension<AuthContext>>,
-    Json(request): Json<sift_protocol::CreateOperationApprovalRequest>,
+    Json(mut request): Json<sift_protocol::CreateOperationApprovalRequest>,
 ) -> ApiResult<Json<sift_protocol::OperationApproval>> {
     let auth = auth
         .as_ref()
@@ -4192,9 +4199,32 @@ async fn create_operation_approval(
         "{}#{}",
         request.operation.contribution_id, request.operation.action
     );
+    let context = authorized_tool_context(
+        &state,
+        auth,
+        request.context.unwrap_or(sift_protocol::ToolContext {
+            tenant_id: None,
+            room_id: None,
+            profile_id: None,
+            connection_id: None,
+            document_id: None,
+        }),
+    )?;
+    let registry = state
+        .sessions
+        .tool_registry()
+        .ok_or(ApiError::MetadataUnavailable)?;
+    request.operation = registry
+        .dispatcher()
+        .bind_operation(request.operation, &context)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    crate::authorization::authorize_extension(
+        &tool_authorization_scope(&state, auth, &context)?,
+        request.operation.classification,
+    )
+    .map_err(|denial| ApiError::Forbidden(denial.public_reason().into()))?;
     let context_fingerprint = crate::automation::fingerprint(
-        &serde_json::to_value(&request.operation)
-            .map_err(|error| ApiError::BadRequest(error.to_string()))?,
+        &json!({"operation": &request.operation, "context": &context}),
     )
     .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     let binding = sift_metadata::ApprovalBinding {
@@ -4287,19 +4317,13 @@ fn extension_descriptor(
             operation = Some(sift_protocol::ExtensionActionDescriptor {
                 action: action.action.clone(),
                 classification: action.classification,
+                required_context: action.required_context.clone(),
                 input_schema: input_schema.clone(),
                 output_schema,
                 timeout_ms: action.timeout_ms,
                 max_result_bytes: action.max_result_bytes,
             });
-            if contribution.kind == "command"
-                && action.required_context.iter().all(|context| {
-                    matches!(
-                        context,
-                        sift_extension_protocol::ContributionContext::Instance
-                    )
-                })
-            {
+            if contribution.kind == "command" {
                 client = Some(
                     if input_schema.get("properties").is_some_and(|properties| {
                         properties
@@ -4312,9 +4336,27 @@ fn extension_descriptor(
                             schema: input_schema.clone(),
                         }
                     } else {
-                        sift_protocol::ClientContributionDescriptor::Command {
-                            title: contribution.local_id.clone(),
-                            action: action.action,
+                        if let Some(target_kind) =
+                            action.required_context.last().filter(|context| {
+                                !matches!(
+                                    context,
+                                    sift_extension_protocol::ContributionContext::Instance
+                                )
+                            })
+                        {
+                            sift_protocol::ClientContributionDescriptor::ContextAction {
+                                title: contribution.local_id.clone(),
+                                action: action.action,
+                                target_kind: sift_protocol::SegmentId::new(
+                                    format!("{target_kind:?}").to_lowercase(),
+                                )
+                                .map_err(|error| ApiError::Internal(error.to_string()))?,
+                            }
+                        } else {
+                            sift_protocol::ClientContributionDescriptor::Command {
+                                title: contribution.local_id.clone(),
+                                action: action.action,
+                            }
                         }
                     },
                 );
@@ -4342,12 +4384,6 @@ fn extension_descriptor(
                 if let [(source_kind, source)] = matches.as_slice() {
                     if source.classification
                         == sift_extension_protocol::OperationClassification::Read
-                        && source.required_context.iter().all(|context| {
-                            matches!(
-                                context,
-                                sift_extension_protocol::ContributionContext::Instance
-                            )
-                        })
                     {
                         let input = load_package_schema(
                             registry.as_ref(),
@@ -4375,6 +4411,7 @@ fn extension_descriptor(
                                 operation = Some(sift_protocol::ExtensionActionDescriptor {
                                     action: source.action.clone(),
                                     classification: source.classification,
+                                    required_context: source.required_context.clone(),
                                     input_schema: input,
                                     output_schema: output,
                                     timeout_ms: source.timeout_ms,
@@ -4625,6 +4662,124 @@ fn tool_context(query: &ToolListQuery) -> sift_protocol::ToolContext {
         connection_id: query.connection_id.clone(),
         document_id: query.document_id.clone(),
     }
+}
+
+/// Resolve every client hint against server-owned resources before either listing or
+/// dispatching an extension action. The returned IDs are canonical and mutually scoped.
+fn authorized_tool_context(
+    state: &AppState,
+    auth: &AuthContext,
+    mut context: sift_protocol::ToolContext,
+) -> ApiResult<sift_protocol::ToolContext> {
+    let metadata = metadata_store_cloned(state)?;
+    if let Some(document_id) = context.document_id.as_deref() {
+        let id = document_id
+            .parse::<i64>()
+            .map_err(|_| ApiError::BadRequest("invalid document id".into()))?;
+        let document =
+            metadata.get_document_for_principal(DocumentId(id), auth.principal_id, false)?;
+        if context
+            .room_id
+            .is_some_and(|room| room != document.room_id.0)
+        {
+            return Err(ApiError::BadRequest(
+                "document does not belong to requested room".into(),
+            ));
+        }
+        context.document_id = Some(document.id.0.to_string());
+        context.room_id = Some(document.room_id.0);
+        if let Some(profile_id) = document.connection_profile_id {
+            if context
+                .profile_id
+                .is_some_and(|profile| profile != profile_id.0)
+            {
+                return Err(ApiError::BadRequest(
+                    "document profile does not match requested profile".into(),
+                ));
+            }
+        }
+    }
+    if let Some(connection_id) = context.connection_id.as_deref() {
+        let (session, connection) = connection_id.split_once(':').ok_or_else(|| {
+            ApiError::BadRequest("connection target must be session:connection".into())
+        })?;
+        let session = session
+            .parse::<u64>()
+            .map_err(|_| ApiError::BadRequest("invalid session id".into()))?;
+        let connection = connection
+            .parse::<u64>()
+            .map_err(|_| ApiError::BadRequest("invalid connection id".into()))?;
+        let session = sift_protocol::SessionId(session);
+        let connection = sift_protocol::ConnectionId(connection);
+        if state.sessions.session_owner(session)? != Some(auth.principal_id) {
+            return Err(ApiError::Forbidden(
+                "connection belongs to another principal".into(),
+            ));
+        }
+        let entry = state.sessions.conn_entry(session, connection)?;
+        if let crate::session::ConnectionProvenance::Managed {
+            principal_id,
+            tenant_id,
+            profile_id,
+            ..
+        } = entry.provenance
+        {
+            if principal_id != auth.principal_id {
+                return Err(ApiError::Forbidden(
+                    "connection belongs to another principal".into(),
+                ));
+            }
+            if context
+                .tenant_id
+                .is_some_and(|tenant| tenant != tenant_id.0)
+                || context
+                    .profile_id
+                    .is_some_and(|profile| profile != profile_id.0)
+            {
+                return Err(ApiError::BadRequest(
+                    "connection context does not match its profile".into(),
+                ));
+            }
+            context.tenant_id = Some(tenant_id.0);
+            context.profile_id = Some(profile_id.0);
+        }
+        context.connection_id = Some(format!("{}:{}", session.0, connection.0));
+    }
+    if let Some(profile_id) = context.profile_id {
+        let profile = metadata.get_connection_profile_for_principal(
+            ConnectionProfileId(profile_id),
+            auth.principal_id,
+        )?;
+        if context
+            .tenant_id
+            .is_some_and(|tenant| tenant != profile.tenant_id.0)
+        {
+            return Err(ApiError::BadRequest(
+                "profile does not belong to requested tenant".into(),
+            ));
+        }
+        context.tenant_id = Some(profile.tenant_id.0);
+    }
+    if let Some(room_id) = context.room_id {
+        let room = metadata.get_room(RoomId(room_id))?;
+        if metadata
+            .get_room_member(room.id, auth.principal_id)?
+            .is_none()
+        {
+            return Err(ApiError::Forbidden("room membership required".into()));
+        }
+        if context
+            .tenant_id
+            .is_some_and(|tenant| tenant != room.tenant_id.0)
+        {
+            return Err(ApiError::BadRequest(
+                "room does not belong to requested tenant".into(),
+            ));
+        }
+        context.tenant_id = Some(room.tenant_id.0);
+    }
+    tool_authorization_scope(state, auth, &context)?;
+    Ok(context)
 }
 
 fn tool_authorization_scope(
