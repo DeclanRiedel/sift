@@ -1525,7 +1525,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::OpenPostgresRoles,
         "Open PostgreSQL Roles",
         "PostgreSQL roles and grants inspection",
-        "<leader> d r",
+        "<leader> d a",
         true,
         AvailabilityRule::ConnectedDatabase,
     ),
