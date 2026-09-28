@@ -3,7 +3,7 @@
 
 use sift_driver_api::{ConnHandle, Driver};
 use sift_protocol::{
-    Code, ConnectionSpec, Engine, ExecuteRequest, ObjectKind, ObjectPath, Page, SslMode,
+    ConnectionSpec, Engine, ExecuteRequest, ObjectKind, ObjectPath, Page, SslMode,
 };
 use sift_server::ddl::generate_ddl;
 
@@ -191,8 +191,14 @@ CREATE TABLE {src}.items (
 CREATE INDEX items_expr ON {src}.items ((lower(label)) DESC) INCLUDE (amount) WHERE amount > 2;
 CREATE TRIGGER changed BEFORE UPDATE ON {src}.items FOR EACH ROW EXECUTE FUNCTION {src}.changed();
 ALTER TABLE {src}.items DISABLE TRIGGER changed;
+CREATE POLICY visible_items ON {src}.items AS RESTRICTIVE FOR SELECT TO PUBLIC USING (amount > 0);
+ALTER TABLE {src}.items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE {src}.items FORCE ROW LEVEL SECURITY;
 CREATE TABLE {src}.partitioned (id int NOT NULL) PARTITION BY RANGE (id);
 CREATE TABLE {src}.child PARTITION OF {src}.partitioned FOR VALUES FROM (0) TO (10);
+CREATE TABLE {src}.policy_only (id integer);
+CREATE POLICY positive_id ON {src}.policy_only FOR SELECT TO PUBLIC USING (id > 0);
+ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
 "#
         ),
     )
@@ -211,6 +217,8 @@ CREATE TABLE {src}.child PARTITION OF {src}.partitioned FOR VALUES FROM (0) TO (
         "STORED",
         "INCLUDE",
         "DISABLE TRIGGER",
+        "CREATE POLICY visible_items",
+        "FORCE ROW LEVEL SECURITY",
     ] {
         assert!(ddl.contains(expected), "missing {expected}: {ddl}");
     }
@@ -223,14 +231,55 @@ CREATE TABLE {src}.child PARTITION OF {src}.partitioned FOR VALUES FROM (0) TO (
         ObjectKind::PartitionedTable,
     )
     .await;
-    let error = generate_ddl(
+    let child = round_trip(&driver, &conn, &src, &dst, "child", ObjectKind::Table).await;
+    assert!(child.contains("PARTITION OF"));
+    assert!(child.contains("FOR VALUES FROM (0) TO (10)"));
+    round_trip(&driver, &conn, &src, &dst, "policy_only", ObjectKind::Table).await;
+    let security_shape = |graph: &sift_protocol::CatalogGraphData| {
+        let table = graph
+            .nodes
+            .iter()
+            .find(|node| node.name == "policy_only")
+            .unwrap();
+        assert_eq!(
+            table.extra.get("migration_unsupported"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        table.extra.get("native_security_shape").cloned().unwrap()
+    };
+    let scope = sift_protocol::SchemaScope {
+        depth: sift_protocol::SchemaDepth::Graph {
+            options: sift_protocol::CatalogGraphOptions {
+                schemas: Some(vec![src.clone()]),
+                include_definitions: true,
+                ..Default::default()
+            },
+        },
+        filter: None,
+    };
+    let before = security_shape(
+        &driver
+            .schema(conn.clone(), scope.clone())
+            .await
+            .unwrap()
+            .graph
+            .unwrap(),
+    );
+    execute(
         &driver,
-        conn.clone(),
-        path(&src, "child", ObjectKind::Table),
+        &conn,
+        &format!("ALTER POLICY positive_id ON {src}.policy_only USING (id >= 0);"),
     )
-    .await
-    .unwrap_err();
-    assert_eq!(error.code, Code::UnsupportedForEngine);
+    .await;
+    let after = security_shape(
+        &driver
+            .schema(conn.clone(), scope)
+            .await
+            .unwrap()
+            .graph
+            .unwrap(),
+    );
+    assert_ne!(before, after);
     let trigger = generate_ddl(
         &driver,
         conn.clone(),
@@ -281,6 +330,13 @@ CREATE TABLE {src}.items (
  doubled AS (amount * 2) PERSISTED,
  CONSTRAINT items_pk PRIMARY KEY NONCLUSTERED (id DESC), CONSTRAINT items_check CHECK (amount > 0));
 CREATE INDEX items_label ON {src}.items (label DESC) INCLUDE (amount) WHERE amount > 2;
+CREATE TABLE {src}.sparse_items (id int NOT NULL, optional_amount int SPARSE NULL);
+CREATE TABLE {src}.temporal_items (
+ id int NOT NULL CONSTRAINT temporal_pk PRIMARY KEY,
+ valid_from datetime2 GENERATED ALWAYS AS ROW START HIDDEN NOT NULL,
+ valid_to datetime2 GENERATED ALWAYS AS ROW END NOT NULL,
+ PERIOD FOR SYSTEM_TIME (valid_from, valid_to)
+) WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = {src}.temporal_items_history));
 GO
 CREATE TRIGGER {src}.changed ON {src}.items AFTER UPDATE AS BEGIN SET NOCOUNT ON; END;
 GO
@@ -289,6 +345,39 @@ DISABLE TRIGGER {src}.changed ON {src}.items;
     round_trip(&driver, &conn, &src, &dst, "label", ObjectKind::Type).await;
     round_trip(&driver, &conn, &src, &dst, "counter", ObjectKind::Sequence).await;
     let ddl = round_trip(&driver, &conn, &src, &dst, "items", ObjectKind::Table).await;
+    let sparse = round_trip(
+        &driver,
+        &conn,
+        &src,
+        &dst,
+        "sparse_items",
+        ObjectKind::Table,
+    )
+    .await;
+    assert!(sparse.contains("SPARSE NULL"));
+    let temporal = round_trip(
+        &driver,
+        &conn,
+        &src,
+        &dst,
+        "temporal_items",
+        ObjectKind::Table,
+    )
+    .await;
+    assert!(temporal.contains("PERIOD FOR SYSTEM_TIME"));
+    assert!(temporal.contains("SYSTEM_VERSIONING = ON"));
+    assert!(temporal.contains("ROW START HIDDEN"));
+    assert_eq!(
+        generate_ddl(
+            &driver,
+            conn.clone(),
+            path(&src, "temporal_items_history", ObjectKind::Table),
+        )
+        .await
+        .unwrap_err()
+        .code,
+        sift_protocol::Code::UnsupportedForEngine,
+    );
     for expected in [
         "IDENTITY(17,3)",
         "COLLATE",
@@ -309,6 +398,31 @@ DISABLE TRIGGER {src}.changed ON {src}.items;
     .ddl;
     assert!(trigger.contains("DISABLE TRIGGER"));
     assert_migration_fenced(&driver, &conn, &src).await;
+    let graph = driver
+        .schema(
+            conn.clone(),
+            sift_protocol::SchemaScope {
+                depth: sift_protocol::SchemaDepth::Graph {
+                    options: sift_protocol::CatalogGraphOptions {
+                        schemas: Some(vec![src.clone()]),
+                        include_definitions: true,
+                        ..Default::default()
+                    },
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    for name in ["temporal_items", "sparse_items"] {
+        let table = graph.nodes.iter().find(|node| node.name == name).unwrap();
+        assert_eq!(
+            table.extra.get("migration_unsupported"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
     execute(&driver, &conn, &format!("CREATE USER {src} WITHOUT LOGIN; GRANT SELECT ON {src}.items TO {src}; EXECUTE AS USER = '{src}';")).await;
     execute(&driver, &conn, &format!("SELECT * FROM {src}.items")).await;
     assert_write_denied(
@@ -325,6 +439,6 @@ DISABLE TRIGGER {src}.changed ON {src}.items;
     .await
     .is_err());
     execute(&driver, &conn, &format!("REVERT; DROP USER {src};")).await;
-    execute(&driver,&conn,&format!("DROP TABLE {dst}.items; DROP TABLE {src}.items; DROP SEQUENCE {dst}.counter; DROP SEQUENCE {src}.counter; DROP TYPE {dst}.label; DROP TYPE {src}.label; DROP SCHEMA {dst}; DROP SCHEMA {src};")).await;
+    execute(&driver,&conn,&format!("ALTER TABLE {dst}.temporal_items SET (SYSTEM_VERSIONING = OFF); ALTER TABLE {src}.temporal_items SET (SYSTEM_VERSIONING = OFF); DROP TABLE {dst}.temporal_items; DROP TABLE {dst}.temporal_items_history; DROP TABLE {src}.temporal_items; DROP TABLE {src}.temporal_items_history; DROP TABLE {dst}.sparse_items; DROP TABLE {src}.sparse_items; DROP TABLE {dst}.items; DROP TABLE {src}.items; DROP SEQUENCE {dst}.counter; DROP SEQUENCE {src}.counter; DROP TYPE {dst}.label; DROP TYPE {src}.label; DROP SCHEMA {dst}; DROP SCHEMA {src};")).await;
     driver.close(conn).await.unwrap();
 }

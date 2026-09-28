@@ -9,10 +9,13 @@ ELSE IF HAS_PERMS_BY_NAME(@name,N'OBJECT',N'VIEW DEFINITION')<>1
     OR EXISTS (SELECT 1 FROM sys.indexes i JOIN sys.filegroups f ON f.data_space_id=i.data_space_id
         WHERE i.object_id=@id AND i.index_id=0 AND f.is_default=0)
     OR EXISTS (SELECT 1 FROM sys.tables WHERE object_id=@id AND
-    (temporal_type<>0 OR is_memory_optimized=1 OR is_filetable=1 OR is_tracked_by_cdc=1 OR is_replicated=1))
+    (temporal_type=1 OR is_memory_optimized=1 OR is_filetable=1 OR is_tracked_by_cdc=1 OR is_replicated=1))
+    OR EXISTS (SELECT 1 FROM sys.tables WHERE object_id=@id AND temporal_type=2
+        AND (history_table_id IS NULL OR OBJECT_NAME(history_table_id) IS NULL))
     OR EXISTS (SELECT 1 FROM sys.security_predicates WHERE target_object_id=@id)
     OR EXISTS (SELECT 1 FROM sys.columns WHERE object_id=@id AND
-        (is_filestream=1 OR is_sparse=1 OR is_column_set=1 OR generated_always_type<>0 OR encryption_type IS NOT NULL OR is_masked=1))
+        (is_filestream=1 OR is_column_set=1 OR generated_always_type NOT IN (0,1,2)
+         OR encryption_type IS NOT NULL OR is_masked=1))
     OR EXISTS (SELECT 1 FROM sys.indexes i LEFT JOIN sys.data_spaces d ON d.data_space_id=i.data_space_id
         WHERE i.object_id=@id AND (i.type NOT IN (0,1,2) OR i.is_disabled=1 OR i.is_hypothetical=1 OR d.type=N'PS'))
     OR EXISTS (SELECT 1 FROM sys.partitions WHERE object_id=@id AND data_compression<>0)
@@ -20,7 +23,7 @@ ELSE IF HAS_PERMS_BY_NAME(@name,N'OBJECT',N'VIEW DEFINITION')<>1
     OR EXISTS (SELECT 1 FROM sys.check_constraints WHERE parent_object_id=@id AND (is_disabled=1 OR is_not_trusted=1 OR is_not_for_replication=1))
     OR EXISTS (SELECT 1 FROM sys.columns c JOIN sys.types t ON t.user_type_id=c.user_type_id
         WHERE c.object_id=@id AND (t.is_assembly_type=1 OR c.xml_collection_id<>0 OR c.rule_object_id<>0))
-    SELECT N'sift:unsupported:table policies, temporal/memory/replication, advanced columns, storage, indexes or constraint states';
+    SELECT N'sift:unsupported:table policies, advanced temporal/memory/replication shapes, advanced columns, storage, indexes or constraint states';
 ELSE BEGIN
     DECLARE @ddl nvarchar(max);
     SELECT @ddl=N'SET ANSI_NULLS ON; SET QUOTED_IDENTIFIER ON;'+CHAR(10)+N'CREATE TABLE '+@name+N' ('+CHAR(10)+STRING_AGG(CAST(N'    '+QUOTENAME(c.name)+
@@ -34,6 +37,10 @@ ELSE BEGIN
                 WHEN ty.name IN (N'datetime2',N'datetimeoffset',N'time') THEN N'('+CONVERT(nvarchar(10),c.scale)+N')'
                 WHEN ty.name=N'float' THEN N'('+CONVERT(nvarchar(10),c.precision)+N')' ELSE N'' END END+
             CASE WHEN c.collation_name IS NOT NULL THEN N' COLLATE '+c.collation_name ELSE N'' END+
+            CASE WHEN c.is_sparse=1 THEN N' SPARSE' ELSE N'' END+
+            CASE c.generated_always_type WHEN 1 THEN N' GENERATED ALWAYS AS ROW START'
+                WHEN 2 THEN N' GENERATED ALWAYS AS ROW END' ELSE N'' END+
+            CASE WHEN c.is_hidden=1 THEN N' HIDDEN' ELSE N'' END+
             CASE WHEN c.is_identity=1 THEN N' IDENTITY('+CONVERT(nvarchar(100),ic.seed_value)+N','+CONVERT(nvarchar(100),ic.increment_value)+N')'+CASE WHEN ic.is_not_for_replication=1 THEN N' NOT FOR REPLICATION' ELSE N'' END ELSE N'' END+
             CASE WHEN c.is_rowguidcol=1 THEN N' ROWGUIDCOL' ELSE N'' END+
             CASE WHEN dc.definition IS NOT NULL THEN N' CONSTRAINT '+QUOTENAME(dc.name)+N' DEFAULT '+dc.definition ELSE N'' END+
@@ -43,6 +50,9 @@ ELSE BEGIN
     LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
     LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id WHERE c.object_id=@id;
     SELECT @ddl=@ddl+COALESCE((SELECT N','+CHAR(10)+STRING_AGG(CAST(N'    CONSTRAINT '+QUOTENAME(name)+N' CHECK '+definition AS nvarchar(max)) COLLATE DATABASE_DEFAULT,N','+CHAR(10)) FROM sys.check_constraints WHERE parent_object_id=@id),N'');
+    SELECT @ddl=@ddl+COALESCE((SELECT N','+CHAR(10)+N'    PERIOD FOR SYSTEM_TIME ('+
+        QUOTENAME(COL_NAME(@id,start_column_id))+N', '+QUOTENAME(COL_NAME(@id,end_column_id))+N')'
+        FROM sys.periods WHERE object_id=@id),N'');
     SELECT @ddl=@ddl+N');'+CHAR(10);
     SELECT @ddl=@ddl+COALESCE(STRING_AGG(CAST(
         CASE WHEN i.is_primary_key=1 OR i.is_unique_constraint=1 THEN N'ALTER TABLE '+@name+N' ADD CONSTRAINT '+QUOTENAME(i.name)+CASE WHEN i.is_primary_key=1 THEN N' PRIMARY KEY ' ELSE N' UNIQUE ' END
@@ -69,5 +79,9 @@ ELSE BEGIN
         CROSS APPLY (SELECT STRING_AGG(CAST(QUOTENAME(COL_NAME(referenced_object_id,referenced_column_id)) AS nvarchar(max)) COLLATE DATABASE_DEFAULT,N', ') WITHIN GROUP (ORDER BY constraint_column_id) cols FROM sys.foreign_key_columns WHERE constraint_object_id=f.object_id) dst
         WHERE f.parent_object_id=@id),N'');
     SELECT @ddl=@ddl+COALESCE((SELECT CHAR(10)+N'GO'+CHAR(10)+STRING_AGG(CAST(OBJECT_DEFINITION(object_id)+CHAR(10)+N'GO'+CHAR(10)+CASE WHEN is_disabled=1 THEN N'DISABLE TRIGGER '+QUOTENAME(OBJECT_SCHEMA_NAME(object_id))+N'.'+QUOTENAME(name)+N' ON '+@name+N';'+CHAR(10)+N'GO'+CHAR(10) ELSE N'' END AS nvarchar(max)) COLLATE DATABASE_DEFAULT,CHAR(10)+N'GO'+CHAR(10)) FROM sys.triggers WHERE parent_id=@id),N'');
+    SELECT @ddl=@ddl+COALESCE((SELECT CHAR(10)+N'ALTER TABLE '+@name+
+        N' SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = '+
+        QUOTENAME(OBJECT_SCHEMA_NAME(history_table_id))+N'.'+QUOTENAME(OBJECT_NAME(history_table_id))+N'));'
+        FROM sys.tables WHERE object_id=@id AND temporal_type=2),N'');
     SELECT @ddl;
 END

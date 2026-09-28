@@ -27,9 +27,24 @@ WITH target AS (
     SELECT oid, format('CONSTRAINT %I %s', conname, pg_get_constraintdef(oid)) AS definition
     FROM pg_catalog.pg_constraint WHERE conrelid=(SELECT oid FROM target) AND contype IN ('p','u','f','c','x')
 )
-SELECT CASE WHEN t.relkind NOT IN ('r','p') OR t.relispartition
+SELECT CASE WHEN t.relispartition THEN
+    CASE WHEN t.reloptions IS NOT NULL OR t.reltablespace <> 0 OR t.relrowsecurity OR t.relforcerowsecurity
+        OR EXISTS (SELECT 1 FROM pg_catalog.pg_index i WHERE i.indrelid=t.oid
+            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=i.indexrelid))
+        OR EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid=t.oid AND conislocal)
+        OR EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid=t.oid AND NOT tgisinternal)
+        OR EXISTS (SELECT 1 FROM pg_catalog.pg_policy WHERE polrelid=t.oid)
+        THEN 'sift:unsupported:partition child has local indexes, constraints, triggers, policies or storage options'
+        ELSE (SELECT format('CREATE TABLE %I.%I PARTITION OF %I.%I %s',
+                n.nspname,t.relname,pn.nspname,parent.relname,pg_get_expr(t.relpartbound,t.oid)) ||
+                CASE WHEN t.relkind='p' THEN ' PARTITION BY ' || pg_get_partkeydef(t.oid) ELSE '' END || ';'
+            FROM pg_catalog.pg_inherits inh JOIN pg_catalog.pg_class parent ON parent.oid=inh.inhparent
+            JOIN pg_catalog.pg_namespace pn ON pn.oid=parent.relnamespace
+            WHERE inh.inhrelid=t.oid)
+    END
+    WHEN t.relkind NOT IN ('r','p')
     OR EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=t.oid)
-    OR t.relrowsecurity OR t.relforcerowsecurity OR t.reloptions IS NOT NULL
+    OR t.reloptions IS NOT NULL
     OR t.reltablespace <> 0 OR (t.relam <> 0 AND t.relam <> (SELECT oid FROM pg_catalog.pg_am WHERE amname='heap'))
     OR EXISTS (SELECT 1 FROM pg_catalog.pg_index WHERE indrelid=t.oid AND (NOT indisvalid OR NOT indisready OR indisclustered OR indisreplident))
     OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type ty ON ty.oid=a.atttypid
@@ -60,5 +75,18 @@ SELECT CASE WHEN t.relkind NOT IN ('r','p') OR t.relispartition
             CASE g.tgenabled WHEN 'D' THEN format(' ALTER TABLE %I.%I DISABLE TRIGGER %I;',n.nspname,t.relname,g.tgname)
             WHEN 'R' THEN format(' ALTER TABLE %I.%I ENABLE REPLICA TRIGGER %I;',n.nspname,t.relname,g.tgname)
             WHEN 'A' THEN format(' ALTER TABLE %I.%I ENABLE ALWAYS TRIGGER %I;',n.nspname,t.relname,g.tgname) ELSE '' END,
-            E'\n' ORDER BY g.oid) FROM pg_catalog.pg_trigger g WHERE g.tgrelid=t.oid AND NOT g.tgisinternal),'') END
+            E'\n' ORDER BY g.oid) FROM pg_catalog.pg_trigger g WHERE g.tgrelid=t.oid AND NOT g.tgisinternal),'') ||
+        COALESCE((SELECT E'\n' || string_agg(
+            format('CREATE POLICY %I ON %I.%I AS %s FOR %s TO %s',
+                p.polname,n.nspname,t.relname,
+                CASE WHEN p.polpermissive THEN 'PERMISSIVE' ELSE 'RESTRICTIVE' END,
+                CASE p.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT'
+                    WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' ELSE 'ALL' END,
+                (SELECT string_agg(CASE WHEN role_id=0 THEN 'PUBLIC' ELSE quote_ident(r.rolname) END, ', ' ORDER BY role_id)
+                    FROM unnest(p.polroles) role_id LEFT JOIN pg_catalog.pg_roles r ON r.oid=role_id)) ||
+            CASE WHEN p.polqual IS NOT NULL THEN ' USING (' || pg_get_expr(p.polqual,p.polrelid) || ')' ELSE '' END ||
+            CASE WHEN p.polwithcheck IS NOT NULL THEN ' WITH CHECK (' || pg_get_expr(p.polwithcheck,p.polrelid) || ')' ELSE '' END || ';',
+            E'\n' ORDER BY p.polname) FROM pg_catalog.pg_policy p WHERE p.polrelid=t.oid),'') ||
+        CASE WHEN t.relrowsecurity THEN format(E'\nALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY;',n.nspname,t.relname) ELSE '' END ||
+        CASE WHEN t.relforcerowsecurity THEN format(E'\nALTER TABLE %I.%I FORCE ROW LEVEL SECURITY;',n.nspname,t.relname) ELSE '' END END
 FROM target t JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace

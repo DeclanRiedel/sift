@@ -23,11 +23,15 @@ for executed evidence and [graduation](postgres-sqlserver-graduation.md) for gat
 
 - Standalone index addressing: indexes are exported with tables; adding an
   ObjectKind requires a public protocol change.
-- PostgreSQL foreign tables, partition children/inheritance, RLS, rules, custom
-  storage/options and unsupported index state return explicit errors.
-- SQL Server advanced storage, temporal/memory/replication/policy tables,
-  nonordinary indexes, untrusted/disabled constraints, CLR/table types and bound
-  defaults/rules require separate support.
+- PostgreSQL foreign tables, nonpartition inheritance, rules, custom
+  storage/options and unsupported index state return explicit errors. Simple
+  partition children and table RLS policies export natively; child-local objects
+  remain unsupported, and structural migrations fence RLS tables.
+- SQL Server advanced temporal variants, memory/replication/policy tables,
+  most advanced storage, nonordinary indexes, untrusted/disabled constraints,
+  CLR/table types and bound defaults/rules require separate support. Basic
+  system-versioned tables and nullable sparse columns round-trip; structural
+  migrations fence both.
 - SQL Server synonyms and PostgreSQL extensions remain unimplemented.
 - Object grants/owners, live sequence counters, statistics, dependency-recursive
   export and full database dumps are outside object DDL. Standalone PostgreSQL

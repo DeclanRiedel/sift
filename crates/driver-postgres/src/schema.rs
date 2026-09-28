@@ -497,6 +497,31 @@ async fn enrich_graph_identity_and_foreign_keys(
         }
     }
 
+    // Row-level security is omitted from the portable schema model. Preserve a
+    // fingerprint for drift and prevent structural migrations from dropping it.
+    let security_rows = conn.query(
+        "SELECT n.nspname,c.relname,md5(concat_ws('|',c.relrowsecurity::text,c.relforcerowsecurity::text,
+            string_agg(concat_ws('|',p.polname,p.polcmd,p.polpermissive::text,
+                array_to_string(p.polroles,','),pg_get_expr(p.polqual,p.polrelid),
+                pg_get_expr(p.polwithcheck,p.polrelid)), E'\\n' ORDER BY p.polname)))
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+         LEFT JOIN pg_policy p ON p.polrelid=c.oid
+         WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p')
+         GROUP BY n.nspname,c.relname,c.relrowsecurity,c.relforcerowsecurity
+         HAVING c.relrowsecurity OR c.relforcerowsecurity OR count(p.oid)>0", &[&schemas]).await.map_err(pg_err)?;
+    for row in security_rows {
+        let key = (row.get::<_, String>(0), row.get::<_, String>(1));
+        if let Some(index) = object_nodes.get(&key).and_then(|id| node_indexes.get(id)) {
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+            graph.nodes[*index].extra.insert(
+                "native_security_shape".into(),
+                row.get::<_, String>(2).into(),
+            );
+        }
+    }
+
     let foreign_keys = conn
         .query(
             "SELECT sn.nspname, sc.relname, con.conname,
