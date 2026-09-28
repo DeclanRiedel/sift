@@ -672,7 +672,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Cut",
         "Ctrl+X",
         "",
-        false,
+        true,
         AvailabilityRule::ActiveItem,
     ),
     command(
@@ -680,7 +680,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Copy",
         "Ctrl+C",
         "",
-        false,
+        true,
         AvailabilityRule::ActiveItem,
     ),
     command(
@@ -688,7 +688,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Paste",
         "Ctrl+V",
         "",
-        false,
+        true,
         AvailabilityRule::ActiveItem,
     ),
     command(
@@ -696,7 +696,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         "Select All",
         "Ctrl+A",
         "",
-        false,
+        true,
         AvailabilityRule::ActiveItem,
     ),
     command(
@@ -887,7 +887,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::BeginTransaction,
         "Begin Transaction",
         "",
-        "",
+        "<leader> x t b",
         true,
         AvailabilityRule::NoActiveTransaction,
     ),
@@ -895,7 +895,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::CommitTransaction,
         "Commit Transaction",
         "",
-        "",
+        "<leader> x t c",
         true,
         AvailabilityRule::CommittableTransaction,
     ),
@@ -903,7 +903,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::RollbackTransaction,
         "Rollback Transaction",
         "",
-        "",
+        "<leader> x t r",
         true,
         AvailabilityRule::ActiveTransaction,
     ),
@@ -1607,7 +1607,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::ToggleQueryResultsPlacement,
         "Switch Editor | Data Layout: Vertical / Horizontal",
         "",
-        "",
+        "<leader> w v",
         true,
         AvailabilityRule::ActiveItem,
     ),
@@ -1615,8 +1615,8 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::OpenSettings,
         "Settings",
         "",
-        "",
-        false,
+        "<leader> e o",
+        true,
         AvailabilityRule::Always,
     ),
     command(
@@ -1703,7 +1703,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::ToggleTheme,
         "Toggle Light/Dark Theme",
         "",
-        "",
+        "<leader> v t",
         true,
         AvailabilityRule::Always,
     ),
@@ -1711,8 +1711,8 @@ const DEFINITIONS: &[CommandDefinition] = &[
         CommandId::Quit,
         "Quit Sift",
         "",
-        "",
-        false,
+        "<leader> w q",
+        true,
         AvailabilityRule::Always,
     ),
 ];
@@ -1746,6 +1746,69 @@ mod tests {
         for definition in DEFINITIONS {
             assert!(ids.insert(definition.id.as_str()));
             assert_eq!(CommandRegistry::definition(definition.id), definition);
+        }
+    }
+
+    #[test]
+    fn every_default_leader_command_resolves_to_its_own_action() {
+        for definition in DEFINITIONS
+            .iter()
+            .filter(|definition| definition.language.starts_with("<leader> "))
+        {
+            let keys = definition
+                .language
+                .trim_start_matches("<leader> ")
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                CommandRegistry::resolve_language(&keys),
+                CommandLanguageMatch::Command(definition.id),
+                "{} has an unreachable or conflicting Vim command path",
+                definition.id.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn every_app_bar_command_has_a_vim_keyboard_route() {
+        use super::super::app_bar::{menu_items, AppBarMenu};
+
+        let palette = CommandRegistry::palette(CommandContext::default());
+
+        for menu in [
+            AppBarMenu::Main,
+            AppBarMenu::File,
+            AppBarMenu::Edit,
+            AppBarMenu::Selection,
+            AppBarMenu::View,
+            AppBarMenu::Go,
+            AppBarMenu::Run,
+            AppBarMenu::Terminal,
+            AppBarMenu::Help,
+            AppBarMenu::Profile,
+        ] {
+            for item in menu_items(menu) {
+                let Some(id) = item.command else {
+                    continue; // External links are tracked separately from Commands.
+                };
+                let definition = CommandRegistry::definition(id);
+                // The palette opens with `:` in Vim normal mode, so every
+                // searchable entry has a keyboard route even without leader.
+                assert!(
+                    definition.palette_visible || definition.language == ":",
+                    "app-bar action {} ({menu:?}) has no Vim keyboard route",
+                    id.as_str()
+                );
+                if definition.palette_visible {
+                    assert!(
+                        palette.iter().any(|entry| entry.id == id),
+                        "app-bar action {} is absent from the command palette",
+                        id.as_str()
+                    );
+                }
+                assert_eq!(item.label, definition.label);
+            }
         }
     }
 
