@@ -8,6 +8,19 @@ current public support boundary.
 
 ## Values, plans, and native definitions
 
+### Disabled and untrusted constraint round-trip design
+
+Support the native `is_disabled` and `is_not_trusted` states of ordinary CHECK
+and foreign-key constraints on rowstore tables. Definition export creates the
+constraint, then emits `ALTER TABLE ... NOCHECK CONSTRAINT` to disable it, or
+NOCHECK followed by CHECK to restore an enabled but untrusted state. Constraint
+names are quoted and ordered. `NOT FOR REPLICATION` remains rejected until
+its syntax and behavior are tested. The catalog graph fingerprints these state
+bits and fences structural migration for affected tables, because the generic
+diff does not model them. A disposable SQL Server fixture must replay the
+generated DDL into a second schema and compare regenerated definitions and
+catalog state; a metadata-only assertion is insufficient.
+
 - [x] Decode `money` and `smallmoney` without a floating-point round trip;
       exact positive/negative boundaries, fractions, and NULLs pass through
       live TDS responses. The local Tiberius 0.12.3 patch retains signed
