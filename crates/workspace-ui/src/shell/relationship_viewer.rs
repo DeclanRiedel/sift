@@ -9,7 +9,7 @@ const CARD_ROW_HEIGHT: f32 = 24.0;
 const CARD_VERTICAL_STEP: f32 = 244.0;
 const LANE_STEP: f32 = 368.0;
 const SCENE_WIDTH: f32 = 1472.0;
-const CARD_MIDPOINT_Y: f32 = CARD_HEIGHT / 2.0;
+const CARD_OVERFLOW_ANCHOR_Y: f32 = CARD_HEIGHT - 12.0;
 const RELATION_ROW_STEP: f32 = 56.0;
 
 fn relationship_fit_zoom(width: f32, height: f32, scene_height: f32) -> f32 {
@@ -520,6 +520,14 @@ fn relationship_port_key(
         anchor.to_bits(),
         right_side,
     )
+}
+
+fn relationship_column_anchor(position: usize) -> f32 {
+    if position < 6 {
+        CARD_HEADER_HEIGHT + position as f32 * CARD_ROW_HEIGHT + CARD_ROW_HEIGHT / 2.0
+    } else {
+        CARD_OVERFLOW_ANCHOR_Y
+    }
 }
 
 fn record_relationship_port(
@@ -1224,6 +1232,14 @@ impl Pane {
                 .map(|&edge| &diagram.edges[edge])
                 .collect::<Vec<_>>();
             let edge_cardinalities = &index.edge_cardinalities;
+            let edge_columns = fk_edges
+                .iter()
+                .flat_map(|edge| {
+                    edge.column_pairs
+                        .iter()
+                        .flat_map(|pair| [&pair.from, &pair.to])
+                })
+                .collect::<HashSet<_>>();
             let positions = &index.positions;
             let mut column_anchors = HashMap::new();
             scene_height = index.scene_height;
@@ -1254,13 +1270,11 @@ impl Pane {
                     .unwrap_or(&[]);
                 let column_count = all_columns.len();
                 let hidden_columns = column_count.saturating_sub(6);
-                for (position, &column) in all_columns.iter().take(6).enumerate() {
-                    column_anchors.insert(
-                        diagram.nodes[column].id.clone(),
-                        CARD_HEADER_HEIGHT
-                            + position as f32 * CARD_ROW_HEIGHT
-                            + CARD_ROW_HEIGHT / 2.0,
-                    );
+                for (position, &column) in all_columns.iter().enumerate() {
+                    let id = &diagram.nodes[column].id;
+                    if position < 6 || edge_columns.contains(id) {
+                        column_anchors.insert(id.clone(), relationship_column_anchor(position));
+                    }
                 }
                 let card_left = 12.0 + x * zoom;
                 let card_top = 12.0 + y * zoom;
@@ -1396,12 +1410,12 @@ impl Pane {
                                 .first()
                                 .and_then(|pair| column_anchors.get(&pair.from))
                                 .copied()
-                                .unwrap_or(CARD_MIDPOINT_Y),
+                                .unwrap_or(CARD_OVERFLOW_ANCHOR_Y),
                             edge.column_pairs
                                 .first()
                                 .and_then(|pair| column_anchors.get(&pair.to))
                                 .copied()
-                                .unwrap_or(CARD_MIDPOINT_Y),
+                                .unwrap_or(CARD_OVERFLOW_ANCHOR_Y),
                             route_offset,
                             edge_cardinalities[index],
                             selected.is_some_and(|id| id == &from.id || id == &to.id),
@@ -2239,6 +2253,14 @@ mod cardinality_tests {
         assert_eq!(relationship_fit_zoom(768.0, 800.0, 400.0), 0.5);
         assert_eq!(relationship_fit_zoom(1472.0, 432.0, 800.0), 0.5);
         assert_eq!(relationship_fit_zoom(200.0, 200.0, 800.0), 0.2);
+    }
+
+    #[test]
+    fn hidden_relationship_columns_use_overflow_port_not_visible_row() {
+        assert_eq!(relationship_column_anchor(2), 99.0);
+        assert_eq!(relationship_column_anchor(6), CARD_OVERFLOW_ANCHOR_Y);
+        assert_eq!(relationship_column_anchor(9), CARD_OVERFLOW_ANCHOR_Y);
+        assert_ne!(relationship_column_anchor(2), relationship_column_anchor(6));
     }
 
     #[test]
