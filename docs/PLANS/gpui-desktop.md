@@ -528,13 +528,18 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       **Partial:** outcome-unknown results are never retried automatically and
       now require a dedicated warning review plus a second explicit action
       before the original statement can run again. Production mutation
-      confirmation still applies after that recovery confirmation.
+      confirmation still applies after that recovery confirmation. The idle
+      lifecycle probe now checks authenticated access and bounds each probe so
+      expiry or revocation reaches its dedicated degraded state even without
+      user activity.
 - [ ] Meet measured performance and memory budgets on representative large
       schemas, documents, results, diagrams, histories, and logs.
 - [ ] Validate dark/light themes, scaling, IME, keyboard layouts, clipboard,
       dialogs, window chrome, packaging, and updates on Linux/macOS/Windows.
 - [ ] Design, build, and validate signed desktop artifacts through the existing
-      update lifecycle without weakening server verification.
+      update lifecycle without weakening server verification. Native Windows
+      and macOS signing identities and test hosts are unavailable in this
+      environment; those platform results remain open.
 - [ ] Publish the desktop validation matrix and update product status docs.
 
 ### Next feature order
