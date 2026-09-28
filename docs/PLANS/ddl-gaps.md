@@ -23,8 +23,11 @@ for executed evidence and [graduation](postgres-sqlserver-graduation.md) for gat
 
 - Standalone index addressing: indexes are exported with tables; adding an
   ObjectKind requires a public protocol change.
-- PostgreSQL foreign tables, custom
-  storage/options and unsupported index state return explicit errors. Simple
+- PostgreSQL foreign tables export their server reference, table and column
+  options, defaults, collations, checks, and triggers when the reader owns the
+  table and has server USAGE. The referenced server must already exist. Foreign
+  partitions, inheritance, custom storage, rules, and unsupported index state
+  return explicit errors. Simple
   partition children (including local indexes, constraints, and triggers),
   single and multiple inheritance, table RLS policies, and rewrite rules export
   natively. Structural migrations fence these shapes.

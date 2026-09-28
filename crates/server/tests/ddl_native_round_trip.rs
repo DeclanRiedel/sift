@@ -167,6 +167,93 @@ fn schemas() -> (String, String) {
 
 #[cfg(feature = "live-pg")]
 #[tokio::test]
+async fn postgres_foreign_table_round_trip_and_restricted_metadata() {
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let (src, dst) = schemas();
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let wrapper = format!("fdw_{id}");
+    let server = format!("srv_{id}");
+    let reader = format!("reader_{id}");
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            r#"
+CREATE FOREIGN DATA WRAPPER {wrapper} NO HANDLER NO VALIDATOR;
+CREATE SERVER {server} FOREIGN DATA WRAPPER {wrapper};
+CREATE SCHEMA {src}; CREATE SCHEMA {dst};
+CREATE FUNCTION {src}.changed() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE FUNCTION {dst}.changed() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE FOREIGN TABLE {src}.remote_items (
+    id integer OPTIONS (column_name 'remote_id') NOT NULL,
+    note text COLLATE "C" DEFAULT 'it''s here',
+    CONSTRAINT positive_id CHECK (id > 0)
+) SERVER {server} OPTIONS (schema_name 'remote', table_name 'remote_items');
+CREATE TRIGGER foreign_changed BEFORE INSERT ON {src}.remote_items
+    FOR EACH ROW EXECUTE FUNCTION {src}.changed();
+ALTER TABLE {src}.remote_items DISABLE TRIGGER foreign_changed;
+CREATE TABLE {src}.partition_root (id integer) PARTITION BY RANGE (id);
+CREATE FOREIGN TABLE {src}.partition_child PARTITION OF {src}.partition_root
+    FOR VALUES FROM (0) TO (10) SERVER {server};
+CREATE ROLE {reader};
+GRANT USAGE ON SCHEMA {src} TO {reader};
+GRANT SELECT ON {src}.remote_items TO {reader};
+GRANT USAGE ON FOREIGN SERVER {server} TO {reader};
+"#
+        ),
+    )
+    .await;
+    let ddl = round_trip(
+        &driver,
+        &conn,
+        &src,
+        &dst,
+        "remote_items",
+        ObjectKind::ForeignTable,
+    )
+    .await;
+    for expected in [
+        &format!("SERVER {server}"),
+        "OPTIONS (column_name 'remote_id')",
+        "OPTIONS (schema_name 'remote', table_name 'remote_items')",
+        "CONSTRAINT positive_id CHECK",
+        "COLLATE pg_catalog.\"C\"",
+        "DISABLE TRIGGER foreign_changed",
+    ] {
+        assert!(ddl.contains(expected), "missing {expected}: {ddl}");
+    }
+    let unsupported = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&src, "partition_child", ObjectKind::ForeignTable),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unsupported.code, sift_protocol::Code::UnsupportedForEngine);
+    execute(&driver, &conn, &format!("SET ROLE {reader};")).await;
+    let denied = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&src, "remote_items", ObjectKind::ForeignTable),
+    )
+    .await
+    .unwrap_err();
+    assert!(denied.message.contains("requires table ownership"));
+    execute(&driver, &conn, "RESET ROLE;").await;
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "DROP SCHEMA {dst} CASCADE; DROP SCHEMA {src} CASCADE; DROP SERVER {server}; DROP FOREIGN DATA WRAPPER {wrapper}; DROP ROLE {reader};"
+        ),
+    )
+    .await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-pg")]
+#[tokio::test]
 async fn postgres_native_ddl_preserves_advanced_columns_types_indexes_and_triggers() {
     let driver = sift_driver_postgres::PgDriver::new();
     let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();

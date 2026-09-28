@@ -17,7 +17,10 @@ sources for current support claims.
       descendants even when those children are outside the requested schema;
       multiple inheritance also round-trips in catalog parent order. Full
       dependency order remains open.
-- [ ] Export foreign-table server/options metadata with permission-aware reads.
+- [x] Export foreign-table server, table options, and column options in native
+      DDL. Definition reads require table ownership and foreign-server USAGE;
+      a live round trip and restricted-role denial cover the supported shape.
+      The referenced foreign server must exist when replaying the DDL.
 - [~] Represent row-level security policies and rules in native DDL, with
       explicit ownership and grant boundaries. Table export now includes policies,
       ENABLE/FORCE state, rewrite rules and their enabled state, plus a migration

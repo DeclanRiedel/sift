@@ -24,6 +24,26 @@ pub(super) async fn table(
     definition(driver, handle, sql, engine).await
 }
 
+pub(super) async fn foreign_table(
+    driver: &dyn Driver,
+    handle: sift_driver_api::ConnHandle,
+    object: &ObjectPath,
+    engine: Engine,
+) -> Result<String, DriverError> {
+    if engine != Engine::Postgres {
+        return Err(DriverError::new(
+            Code::UnsupportedForEngine,
+            "foreign tables are only supported by PostgreSQL",
+        )
+        .with_engine(engine));
+    }
+    let sql = include_str!("sql/postgres-foreign-table.sql").replace(
+        "__OBJECT__",
+        &qualified_name(object, engine).replace('\'', "''"),
+    );
+    definition(driver, handle, sql, engine).await
+}
+
 pub(super) async fn trigger(
     driver: &dyn Driver,
     handle: sift_driver_api::ConnHandle,
@@ -133,6 +153,15 @@ async fn definition(
     engine: Engine,
 ) -> Result<String, DriverError> {
     let ddl = fetch_scalar_text(driver, handle, sql).await?;
+    if let Some(reason) = ddl.strip_prefix("sift:denied:") {
+        return Err(DriverError::new(
+            Code::Other {
+                message: "permission denied".into(),
+            },
+            reason,
+        )
+        .with_engine(engine));
+    }
     match ddl.strip_prefix("sift:unsupported:") {
         Some(reason) => {
             Err(DriverError::new(Code::UnsupportedForEngine, reason).with_engine(engine))
