@@ -218,7 +218,7 @@ view replacement require separate drop/recreate workflows and remain excluded.
 - [x] Declarative extension contribution renderer — instance-scoped commands,
       scalar forms, bounded read-only result tables/details, and source-bound
       read panels in the trusted desktop dialog.
-- [ ] Context-target extension action binding and rendering — derive authorized
+- [x] Context-target extension action binding and rendering — derive authorized
       tenant, room, profile, connection, and document scopes on the server.
 - [x] Shared-query browser UI
 - [ ] Reviewable AI SQL generation

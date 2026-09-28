@@ -76,6 +76,8 @@ pub struct ContributionDescriptor {
 pub struct ExtensionActionDescriptor {
     pub action: SegmentId,
     pub classification: OperationClassification,
+    #[serde(default)]
+    pub required_context: Vec<ContributionContext>,
     pub input_schema: serde_json::Value,
     pub output_schema: serde_json::Value,
     pub timeout_ms: u32,
@@ -133,6 +135,8 @@ pub struct InvokeExtensionRequest {
     pub operation: ExtensionOperation,
     pub arguments: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::ToolContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_id: Option<String>,
 }
 
@@ -152,6 +156,8 @@ pub enum InvokeExtensionOutcome {
 pub struct CreateOperationApprovalRequest {
     pub operation: ExtensionOperation,
     pub input_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::ToolContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

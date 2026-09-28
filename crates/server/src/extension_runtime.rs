@@ -754,6 +754,7 @@ fn build_extension_runtime(
             contribution_id: contribution_id.clone(),
             action: contribution.action.clone(),
             classification: contribution.classification,
+            required_context: contribution.required_context.clone(),
             input_schema: input_schema.clone(),
             output_schema: output_schema.clone(),
             timeout: Duration::from_millis(u64::from(contribution.timeout_ms)),

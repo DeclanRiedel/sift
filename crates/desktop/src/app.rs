@@ -1162,17 +1162,50 @@ async fn run_query_executor(
             ExecutorCommand::InvokeExtensionContribution {
                 generation,
                 instance_id,
-                request,
+                mut request,
             } => {
                 let server = targets.borrow().clone();
                 if server.instance().id != instance_id {
                     continue;
                 }
-                let result = match server.client().await {
-                    Ok(client) => client
-                        .invoke_extension(&request)
-                        .await
-                        .map_err(|error| error.to_string()),
+                let binding =
+                    if request
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.connection_id.as_deref())
+                        == Some("active")
+                    {
+                        match context.as_ref() {
+                            Some(opened)
+                                if opened.instance_id == instance_id
+                                    && request
+                                        .context
+                                        .as_ref()
+                                        .and_then(|context| context.profile_id)
+                                        .is_none_or(|profile| profile == opened.profile_id) =>
+                            {
+                                request
+                                    .context
+                                    .as_mut()
+                                    .expect("active target has context")
+                                    .connection_id =
+                                    Some(format!("{}:{}", opened.session.0, opened.connection.0));
+                                Ok(())
+                            }
+                            _ => Err("Active connection is unavailable for this extension action"
+                                .to_owned()),
+                        }
+                    } else {
+                        Ok(())
+                    };
+                let result = match binding {
+                    Ok(()) => match server.client().await {
+                        Ok(client) => client
+                            .invoke_extension(&request)
+                            .await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    },
                     Err(error) => Err(error),
                 };
                 if events

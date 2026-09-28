@@ -107,8 +107,10 @@ and currently authorized.
 
 ## Desktop contributions
 
-Settings → Extensions opens a fixed host-owned dialog. Instance-scoped command
-contributions render as buttons when they take no input. Flat object input
+Settings → Extensions opens a fixed host-owned dialog. Command contributions
+render as buttons when they take no input. The active tenant, workspace room,
+connection profile, runtime connection, and document supply contextual targets;
+the dialog shows the selected target. Flat object input
 schemas with string, integer, number, or boolean properties render as forms;
 unsupported nested schemas remain unavailable in the desktop. The server
 validates the complete input schema on invocation. Password-format fields are
@@ -129,13 +131,18 @@ id = "usage"
 source_action = "read-usage"
 ```
 
-The source must be instance-scoped, classified `read`, accept an empty object,
-and declare an object or array-of-objects output. The desktop shows a Refresh
-button; it invokes the source through the same audited operation path. Invalid
-or ambiguous bindings remain unavailable. Context targets beyond the instance
-need server scope binding before the desktop can
-render them safely. Extension code cannot add GPUI elements, scripts, styles,
-or layout slots.
+The source must be classified `read`, accept an empty object, and declare an
+object or array-of-objects output. The desktop shows a Refresh button; it
+invokes the source through the same audited operation path. Invalid or
+ambiguous bindings remain unavailable. Extension code cannot add GPUI elements,
+scripts, styles, or layout slots.
+
+The action API accepts a context hint. The server resolves tenant membership,
+room membership, profile ownership, document membership, and runtime connection
+ownership before dispatch. A runtime connection hint uses
+`session_id:connection_id`; the desktop substitutes its active connection at
+invocation. The dispatcher derives the extension target kind and ID from the
+registered contribution and resolved context, ignoring client target fields.
 
 ## Operator workflow
 
