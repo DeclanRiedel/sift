@@ -20,6 +20,9 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listPostgresSettings",
     "listPostgresExtensions",
     "listPostgresPartitions",
+    "listPostgresRoles",
+    "listPostgresOwners",
+    "listPostgresSchemaGrants",
     "readPostgresReplication",
     "readPostgresStatistics",
     "previewPostgresObject",
@@ -1691,6 +1694,43 @@ impl Client {
     ) -> Result<sift_protocol::PostgresStatisticsReport> {
         self.get(&format!("/v1/sessions/{session}/connections/{connection}/postgres/statistics?offset={}&limit={}",
             query.offset, query.limit.unwrap_or(100))).await
+    }
+
+    pub async fn list_postgres_roles(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        query: sift_protocol::PostgresObjectPageQuery,
+    ) -> Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresRole>> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/postgres/roles?offset={}&limit={}",
+            query.offset,
+            query.limit.unwrap_or(100)
+        ))
+        .await
+    }
+
+    pub async fn list_postgres_owners(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        query: sift_protocol::PostgresObjectPageQuery,
+    ) -> Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresOwnedObject>> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/postgres/owners?offset={}&limit={}",
+            query.offset,
+            query.limit.unwrap_or(100)
+        ))
+        .await
+    }
+
+    pub async fn list_postgres_schema_grants(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        query: sift_protocol::PostgresObjectPageQuery,
+    ) -> Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresSchemaGrant>> {
+        self.get(&format!("/v1/sessions/{session}/connections/{connection}/postgres/schema-grants?offset={}&limit={}", query.offset, query.limit.unwrap_or(100))).await
     }
 
     pub async fn preview_postgres_object(

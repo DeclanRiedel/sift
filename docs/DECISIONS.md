@@ -2521,3 +2521,45 @@ Unavailable values remain nullable, and a single snapshot does not imply a
 rate or predict replication catch-up time. Managed schema-restricted profiles
 cannot access these cross-schema catalog views. The desktop Monitor has
 explicit refresh and Vim navigation, with no automatic polling or mutation.
+
+## ADR-066 — PostgreSQL administration starts with bounded catalogs and typed changes
+
+Status: accepted. Date: 2026-09-29.
+
+The first database administration slice exposes bounded PostgreSQL role,
+schema, database, and explicit schema-grant catalogs. Role passwords and
+connection credentials never enter these responses. Catalog reads use the
+existing supervised PostgreSQL connection and audited object-read operation.
+
+Role creation, schema privilege grants and revocations, and database or schema
+ownership changes use typed actions. The server quotes every identifier,
+generates the SQL for preview, hashes the observed catalog state with that SQL,
+and repeats the read and policy checks at apply. Apply requires both preview
+matching and explicit production confirmation, independent of any desktop
+prompt. PostgreSQL remains the final authority for ownership, role membership,
+and privilege delegation. The server checks visible ownership and role-creation
+authority early and surfaces PostgreSQL's rejection if permissions change.
+The existing supervised execution path supplies timeouts and cancellation;
+administrative writes cannot join an active editor transaction.
+
+This is a foundation for the database administration editor. Password rotation,
+role attribute changes, membership delegation, object-level grants, default
+privileges, and a complete privilege matrix require separate designs.
+
+## ADR-067 — SQL Server constraint state stays native and migration-fenced
+
+Status: accepted. Date: 2026-09-29.
+
+For ordinary rowstore tables, native SQL Server table export preserves disabled
+and enabled-but-untrusted CHECK and foreign-key constraints. The exporter first
+creates each constraint, then emits ordered `NOCHECK CONSTRAINT` statements;
+an untrusted enabled constraint is re-enabled with `CHECK CONSTRAINT` without
+validating old rows. Constraint names are quoted. SQL Server's catalog remains
+the authority for each state. `NOT FOR REPLICATION` remains an explicit native
+DDL refusal until its behavior is verified.
+
+The generic catalog diff has no constraint-state model. SQL Server graph
+snapshots therefore fingerprint advanced constraint state and fence structural
+migrations for affected tables, including unsupported replication flags. A
+live fixture replays generated DDL into a second schema and compares the
+regenerated native definition before this support is claimed.

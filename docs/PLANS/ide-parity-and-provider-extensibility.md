@@ -272,9 +272,14 @@ separate design. The history read is a distinct audited operation.
 - [~] Audit log
 - [~] API tokens and signing keys
 - [~] Approval workflows
-- [ ] Database users and roles editor
-- [ ] Grants and privilege matrix
-- [ ] Database and schema ownership editor
+- [~] Database users and roles editor (bounded role catalog with Vim desktop
+      inspection and guarded `CREATE ROLE NOLOGIN` API; desktop editing, login
+      attributes, and secrets remain)
+- [~] Grants and privilege matrix (bounded explicit schema ACL catalog with
+      Vim desktop inspection and typed schema `USAGE`/`CREATE` grant or revoke
+      API; object and inherited privileges plus desktop matrix remain)
+- [~] Database and schema ownership editor (bounded owner catalog with Vim
+      desktop inspection and typed guarded owner-change API; desktop editing remains)
 - [ ] PostgreSQL row-level security editor
 - [ ] SQL Server login and permission editor
 

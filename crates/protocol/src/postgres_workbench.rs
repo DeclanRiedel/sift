@@ -19,6 +19,45 @@ pub struct PostgresPartition {
     pub bound: Option<String>,
 }
 
+/// Public role attributes only; PostgreSQL password hashes are never selected.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PostgresRole {
+    pub name: String,
+    pub can_login: bool,
+    pub can_create_role: bool,
+    pub superuser: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PostgresOwnedObject {
+    pub kind: PostgresOwnedObjectKind,
+    pub name: String,
+    pub owner: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresOwnedObjectKind {
+    Database,
+    Schema,
+}
+
+/// One explicit schema ACL entry, separate from inherited effective access.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PostgresSchemaGrant {
+    pub schema: String,
+    pub grantee: String,
+    pub privilege: String,
+    pub grantable: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresSchemaPrivilege {
+    Usage,
+    Create,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PostgresObjectPageQuery {
     #[serde(default)]
@@ -33,11 +72,28 @@ pub struct PostgresObjectPage<T> {
     pub next_offset: Option<u32>,
 }
 
-/// PostgreSQL database actions supported by the initial workbench. Extension
-/// names and qualified relation names are identifiers, never SQL fragments.
+/// Typed PostgreSQL workbench actions. Names are identifiers, never SQL fragments.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PostgresObjectAction {
+    CreateRole {
+        name: String,
+    },
+    GrantSchemaPrivilege {
+        schema: String,
+        grantee: String,
+        privilege: PostgresSchemaPrivilege,
+    },
+    RevokeSchemaPrivilege {
+        schema: String,
+        grantee: String,
+        privilege: PostgresSchemaPrivilege,
+    },
+    ChangeOwner {
+        object_kind: PostgresOwnedObjectKind,
+        name: String,
+        new_owner: String,
+    },
     InstallExtension {
         name: String,
     },
@@ -65,4 +121,6 @@ pub struct ApplyPostgresObjectRequest {
     pub action: PostgresObjectAction,
     pub precondition: String,
     pub confirmed: bool,
+    #[serde(default)]
+    pub production_confirmed: bool,
 }

@@ -2837,6 +2837,75 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadPostgresRoles { offset } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .list_postgres_roles(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::PostgresObjectPageQuery {
+                                offset,
+                                limit: Some(100),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before loading PostgreSQL roles".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresRolesLoaded { offset, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadPostgresOwners { offset } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .list_postgres_owners(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::PostgresObjectPageQuery {
+                                offset,
+                                limit: Some(100),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before loading PostgreSQL owners".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresOwnersLoaded { offset, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadPostgresSchemaGrants { offset } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .list_postgres_schema_grants(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::PostgresObjectPageQuery {
+                                offset,
+                                limit: Some(100),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before loading PostgreSQL schema grants".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresSchemaGrantsLoaded { offset, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::PreviewPostgresObject { action } => {
                 let result = match context.as_ref() {
                     Some(opened) => opened

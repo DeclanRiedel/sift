@@ -21,8 +21,8 @@ ELSE IF HAS_PERMS_BY_NAME(@name,N'OBJECT',N'VIEW DEFINITION')<>1
     OR EXISTS (SELECT 1 FROM sys.partitions WHERE object_id=@id AND data_compression NOT IN (0,1,2))
     OR EXISTS (SELECT 1 FROM sys.partitions WHERE object_id=@id GROUP BY index_id
         HAVING MIN(data_compression)<>MAX(data_compression))
-    OR EXISTS (SELECT 1 FROM sys.foreign_keys WHERE parent_object_id=@id AND (is_disabled=1 OR is_not_trusted=1 OR is_not_for_replication=1))
-    OR EXISTS (SELECT 1 FROM sys.check_constraints WHERE parent_object_id=@id AND (is_disabled=1 OR is_not_trusted=1 OR is_not_for_replication=1))
+    OR EXISTS (SELECT 1 FROM sys.foreign_keys WHERE parent_object_id=@id AND (is_not_for_replication=1 OR (is_disabled=1 AND is_not_trusted=0)))
+    OR EXISTS (SELECT 1 FROM sys.check_constraints WHERE parent_object_id=@id AND (is_not_for_replication=1 OR (is_disabled=1 AND is_not_trusted=0)))
     OR EXISTS (SELECT 1 FROM sys.columns c JOIN sys.types t ON t.user_type_id=c.user_type_id
         WHERE c.object_id=@id AND (t.is_assembly_type=1 OR c.xml_collection_id<>0 OR c.rule_object_id<>0))
     SELECT N'sift:unsupported:table policies, advanced temporal/memory/replication shapes, advanced columns, storage, indexes or constraint states';
@@ -51,7 +51,7 @@ ELSE BEGIN
     LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id
     LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
     LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id WHERE c.object_id=@id;
-    SELECT @ddl=@ddl+COALESCE((SELECT N','+CHAR(10)+STRING_AGG(CAST(N'    CONSTRAINT '+QUOTENAME(name)+N' CHECK '+definition AS nvarchar(max)) COLLATE DATABASE_DEFAULT,N','+CHAR(10)) FROM sys.check_constraints WHERE parent_object_id=@id),N'');
+    SELECT @ddl=@ddl+COALESCE((SELECT N','+CHAR(10)+STRING_AGG(CAST(N'    CONSTRAINT '+QUOTENAME(name)+N' CHECK '+definition AS nvarchar(max)) COLLATE DATABASE_DEFAULT,N','+CHAR(10)) WITHIN GROUP (ORDER BY name) FROM sys.check_constraints WHERE parent_object_id=@id),N'');
     SELECT @ddl=@ddl+COALESCE((SELECT N','+CHAR(10)+N'    PERIOD FOR SYSTEM_TIME ('+
         QUOTENAME(COL_NAME(@id,start_column_id))+N', '+QUOTENAME(COL_NAME(@id,end_column_id))+N')'
         FROM sys.periods WHERE object_id=@id),N'');
@@ -83,11 +83,17 @@ ELSE BEGIN
         FROM sys.index_columns ic JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
         WHERE ic.object_id=i.object_id AND ic.index_id=i.index_id AND ic.is_included_column=1) inc
     WHERE i.object_id=@id AND i.type IN (1,2);
-    SELECT @ddl=@ddl+COALESCE((SELECT CHAR(10)+STRING_AGG(CAST(N'ALTER TABLE '+@name+N' ADD CONSTRAINT '+QUOTENAME(f.name)+N' FOREIGN KEY ('+src.cols+N') REFERENCES '+QUOTENAME(OBJECT_SCHEMA_NAME(f.referenced_object_id))+N'.'+QUOTENAME(OBJECT_NAME(f.referenced_object_id))+N' ('+dst.cols+N') ON DELETE '+REPLACE(f.delete_referential_action_desc,N'_',N' ')+N' ON UPDATE '+REPLACE(f.update_referential_action_desc,N'_',N' ')+N';' AS nvarchar(max)) COLLATE DATABASE_DEFAULT,CHAR(10))
+    SELECT @ddl=@ddl+COALESCE((SELECT CHAR(10)+STRING_AGG(CAST(N'ALTER TABLE '+@name+N' ADD CONSTRAINT '+QUOTENAME(f.name)+N' FOREIGN KEY ('+src.cols+N') REFERENCES '+QUOTENAME(OBJECT_SCHEMA_NAME(f.referenced_object_id))+N'.'+QUOTENAME(OBJECT_NAME(f.referenced_object_id))+N' ('+dst.cols+N') ON DELETE '+REPLACE(f.delete_referential_action_desc,N'_',N' ')+N' ON UPDATE '+REPLACE(f.update_referential_action_desc,N'_',N' ')+N';' AS nvarchar(max)) COLLATE DATABASE_DEFAULT,CHAR(10)) WITHIN GROUP (ORDER BY f.name)
         FROM sys.foreign_keys f
         CROSS APPLY (SELECT STRING_AGG(CAST(QUOTENAME(COL_NAME(parent_object_id,parent_column_id)) AS nvarchar(max)) COLLATE DATABASE_DEFAULT,N', ') WITHIN GROUP (ORDER BY constraint_column_id) cols FROM sys.foreign_key_columns WHERE constraint_object_id=f.object_id) src
         CROSS APPLY (SELECT STRING_AGG(CAST(QUOTENAME(COL_NAME(referenced_object_id,referenced_column_id)) AS nvarchar(max)) COLLATE DATABASE_DEFAULT,N', ') WITHIN GROUP (ORDER BY constraint_column_id) cols FROM sys.foreign_key_columns WHERE constraint_object_id=f.object_id) dst
         WHERE f.parent_object_id=@id),N'');
+    SELECT @ddl=@ddl+COALESCE((SELECT CHAR(10)+STRING_AGG(CAST(
+        N'ALTER TABLE '+@name+N' NOCHECK CONSTRAINT '+QUOTENAME(constraint_state.name)+N';'+
+        CASE WHEN constraint_state.is_disabled=0 THEN CHAR(10)+N'ALTER TABLE '+@name+N' CHECK CONSTRAINT '+QUOTENAME(constraint_state.name)+N';' ELSE N'' END
+        AS nvarchar(max)) COLLATE DATABASE_DEFAULT,CHAR(10)) WITHIN GROUP (ORDER BY constraint_state.name)
+        FROM (SELECT name,is_disabled FROM sys.check_constraints WHERE parent_object_id=@id AND (is_disabled=1 OR is_not_trusted=1)
+              UNION ALL SELECT name,is_disabled FROM sys.foreign_keys WHERE parent_object_id=@id AND (is_disabled=1 OR is_not_trusted=1)) constraint_state),N'');
     SELECT @ddl=@ddl+COALESCE((SELECT CHAR(10)+N'GO'+CHAR(10)+STRING_AGG(CAST(OBJECT_DEFINITION(object_id)+CHAR(10)+N'GO'+CHAR(10)+CASE WHEN is_disabled=1 THEN N'DISABLE TRIGGER '+QUOTENAME(OBJECT_SCHEMA_NAME(object_id))+N'.'+QUOTENAME(name)+N' ON '+@name+N';'+CHAR(10)+N'GO'+CHAR(10) ELSE N'' END AS nvarchar(max)) COLLATE DATABASE_DEFAULT,CHAR(10)+N'GO'+CHAR(10)) FROM sys.triggers WHERE parent_id=@id),N'');
     SELECT @ddl=@ddl+COALESCE((SELECT CHAR(10)+N'ALTER TABLE '+@name+
         N' SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = '+
