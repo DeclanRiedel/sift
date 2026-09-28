@@ -95,8 +95,15 @@ prefixes display a compact which-key strip generated from the same vocabulary.
       values, and visual `d` clears the range. `u`/Ctrl+R undo and redo cell
       staging; `g p` opens the staged-edit review with an audited preview and
       Apply, while `g u` discards all staged edits. Shift+U reverts one cell.
-- [ ] Add generated keyboard-equivalence tests proving every visible action has
-      a command path.
+- [~] Add generated keyboard-equivalence tests proving every visible action has
+      a command path. The app-bar menu is now checked from its generated menu
+      model: every command item resolves through a Vim leader binding or the
+      `:` palette. All default leader bindings are checked for collisions and
+      reachability. Settings, Quit, transaction controls, theme, and results
+      layout gained leader paths; clipboard actions became palette entries.
+      Other pointer surfaces and context-local actions still need equivalent
+      audits before this can be marked complete. External Wiki and License
+      links are outside the command registry and remain to be covered.
 - [x] Add versioned `keymaps.json` overrides with compact modal and full-file
       editors; validate command ids, leader syntax, and duplicate sequences.
 
