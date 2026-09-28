@@ -13,8 +13,9 @@ sources for current support claims.
       attachment, indexes, and dependency order; partition children with local
       indexes, constraints, and triggers now round-trip and are fenced from
       structural migrations. Single-parent inheritance with local columns and
-      indexes also round-trips; multiple inheritance and full dependency order
-      remain open.
+      indexes also round-trips. Parent tables are fenced and fingerprint direct
+      descendants even when those children are outside the requested schema;
+      multiple inheritance and full dependency order remain open.
 - [ ] Export foreign-table server/options metadata with permission-aware reads.
 - [~] Represent row-level security policies and rules in native DDL, with
       explicit ownership and grant boundaries. Table export now includes policies,

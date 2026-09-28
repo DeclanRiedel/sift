@@ -204,6 +204,7 @@ CREATE TRIGGER child_changed BEFORE UPDATE ON {src}.child FOR EACH ROW EXECUTE F
 CREATE TABLE {src}.inherited_parent (base_id int NOT NULL);
 CREATE TABLE {src}.inherited_child (local_note text) INHERITS ({src}.inherited_parent);
 CREATE INDEX inherited_note_idx ON {src}.inherited_child (local_note);
+CREATE TABLE {dst}.external_inherited_child (external_note text) INHERITS ({src}.inherited_parent);
 CREATE TABLE {src}.policy_only (id integer);
 CREATE POLICY positive_id ON {src}.policy_only FOR SELECT TO PUBLIC USING (id > 0);
 ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
@@ -309,6 +310,24 @@ ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
     assert!(inherited_node
         .extra
         .contains_key("native_inheritance_shape"));
+    let inherited_parent = before_graph
+        .nodes
+        .iter()
+        .find(|node| node.name == "inherited_parent")
+        .unwrap();
+    assert_eq!(
+        inherited_parent.extra.get("migration_unsupported"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    let descendant_shape = inherited_parent
+        .extra
+        .get("native_descendant_shape")
+        .cloned()
+        .unwrap();
+    assert!(before_graph
+        .nodes
+        .iter()
+        .all(|node| node.name != "external_inherited_child"));
     execute(
         &driver,
         &conn,
@@ -352,7 +371,7 @@ ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
     .await;
     let after_rule = rule_shape(
         &driver
-            .schema(conn.clone(), scope)
+            .schema(conn.clone(), scope.clone())
             .await
             .unwrap()
             .graph
@@ -418,6 +437,27 @@ ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
             .unwrap(),
     );
     assert_ne!(before_partition, after_partition);
+    execute(
+        &driver,
+        &conn,
+        &format!("ALTER TABLE {dst}.external_inherited_child RENAME TO renamed_external_child;"),
+    )
+    .await;
+    let renamed_graph = driver
+        .schema(conn.clone(), scope.clone())
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    let renamed_parent = renamed_graph
+        .nodes
+        .iter()
+        .find(|node| node.name == "inherited_parent")
+        .unwrap();
+    assert_ne!(
+        renamed_parent.extra.get("native_descendant_shape"),
+        Some(&descendant_shape)
+    );
     let trigger = generate_ddl(
         &driver,
         conn.clone(),

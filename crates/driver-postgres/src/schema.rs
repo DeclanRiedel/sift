@@ -618,6 +618,39 @@ async fn enrich_graph_identity_and_foreign_keys(
         }
     }
 
+    // Children may live outside the requested schema set. Fence their parent
+    // too: a portable ALTER TABLE against it can cascade into those children.
+    let descendant_rows = conn
+        .query(
+            "SELECT pn.nspname, parent.relname,
+                md5(string_agg(concat_ws('|',cn.nspname,child.relname,
+                    inh.inhseqno::text,child.relispartition::text,
+                    COALESCE(pg_get_expr(child.relpartbound,child.oid),'')),
+                    E'\\n' ORDER BY cn.nspname,child.relname,inh.inhseqno))
+             FROM pg_inherits inh
+             JOIN pg_class parent ON parent.oid=inh.inhparent
+             JOIN pg_namespace pn ON pn.oid=parent.relnamespace
+             JOIN pg_class child ON child.oid=inh.inhrelid
+             JOIN pg_namespace cn ON cn.oid=child.relnamespace
+             WHERE pn.nspname=ANY($1::text[])
+             GROUP BY pn.nspname,parent.relname",
+            &[&schemas],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in descendant_rows {
+        let key = (row.get::<_, String>(0), row.get::<_, String>(1));
+        if let Some(index) = object_nodes.get(&key).and_then(|id| node_indexes.get(id)) {
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+            graph.nodes[*index].extra.insert(
+                "native_descendant_shape".into(),
+                row.get::<_, String>(2).into(),
+            );
+        }
+    }
+
     let foreign_keys = conn
         .query(
             "SELECT sn.nspname, sc.relname, con.conname,

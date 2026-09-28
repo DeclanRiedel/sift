@@ -42,3 +42,13 @@ for executed evidence and [graduation](postgres-sqlserver-graduation.md) for gat
   Rich index comparison and migration metadata remain future work.
 - Optional AST-equivalence checks remain deferred; current fixtures compare
   regenerated native definitions and assert non-default properties.
+
+## Migration safety for inherited parents
+
+An ordinary PostgreSQL table may be the parent of an inheritance child that is
+outside the requested schema scope. The portable catalog projection cannot
+represent that dependency. Fingerprint direct descendants on the parent and
+fence structural migration of the parent, even when the child is absent from the
+snapshot. Verify this with a parent-only live catalog request and a migration
+preview refusal. This is a safety boundary; authoring a lossless inheritance
+migration remains separate work.
