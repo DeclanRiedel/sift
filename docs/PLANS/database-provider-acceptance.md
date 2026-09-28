@@ -28,10 +28,12 @@ export because ObjectKind does not yet expose index addressing.
 PostgreSQL exports partition children/inheritance, foreign-table options, RLS,
 and rules through native DDL with explicit shape and permission boundaries.
 Custom table storage/options and unsupported index state remain excluded.
-SQL Server excludes temporal/memory/replication/policy tables, advanced storage,
-nonordinary/disabled indexes, disabled/untrusted constraints, CLR/table types and
+SQL Server exports basic system-versioned tables, nullable sparse columns, and
+uniform ROW/PAGE compression on ordinary rowstore tables and indexes. Other
+temporal, memory, replication, and policy tables, advanced storage,
+nonordinary/disabled indexes, disabled/untrusted constraints, CLR/table types,
 bound defaults/rules, non-default heap filegroups and non-default/ALTER-only
-trigger modules. These boundaries must return explicit errors. Type/trigger
+trigger modules remain excluded. These boundaries must return explicit errors. Type/trigger
 names that cannot be resolved uniquely or definitions hidden by permissions do
 not produce fabricated SQL. Extension/synonym DDL stays deferred.
 
