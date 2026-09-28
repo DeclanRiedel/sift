@@ -207,7 +207,7 @@ impl SessionStore {
     ) -> ApiResult<BenchmarkReport> {
         let entry = self.conn_entry(session, connection)?;
         let mut warnings = vec![
-            "Timing is server-observed execution plus full result consumption; excludes desktop network and rendering".into(),
+            "Client elapsed, first row and full consumption are server-observed; native database execution time is unavailable; desktop network and rendering are excluded".into(),
             "Dedicated reused connection; driver-default preparation; cache state and concurrent database load are unknown".into(),
             "Uses connection-profile defaults, not the editor's session overrides or temporary tables; setup and cleanup can outlast the sampling budget".into(),
             "Read-only checks are not a sandbox for external function side effects".into(),
@@ -305,7 +305,9 @@ impl SessionStore {
                             count = count.saturating_add(rows.len() as u64);
                         }
                         sift_protocol::Page::Error { error } => return Err(error),
-                        sift_protocol::Page::Done { .. } => return Ok((count, first)),
+                        sift_protocol::Page::Done { .. } => {
+                            return Ok((count, first, nanos(started.elapsed())))
+                        }
                         sift_protocol::Page::NextResult { .. } => {}
                     }
                 }
@@ -316,21 +318,25 @@ impl SessionStore {
             });
             let iteration_deadline = deadline
                 .min(tokio::time::Instant::now() + Duration::from_millis(request.query_timeout_ms));
-            let (outcome, rows, first_row_ns) = tokio::select! {
+            let (outcome, rows, first_row_ns, full_consumption_ns) = tokio::select! {
                 biased;
-                _ = token.cancelled() => (BenchmarkOutcome::Cancelled, 0, None),
-                _ = tokio::time::sleep_until(iteration_deadline) => (BenchmarkOutcome::TimedOut, 0, None),
+                _ = token.cancelled() => (BenchmarkOutcome::Cancelled, 0, None, None),
+                _ = tokio::time::sleep_until(iteration_deadline) => (BenchmarkOutcome::TimedOut, 0, None, None),
                 result = &mut task => match result {
-                    Ok(Ok((rows, first))) => (BenchmarkOutcome::Success, rows, first),
-                    _ => (BenchmarkOutcome::Failed, 0, None),
+                    Ok(Ok((rows, first, consumed))) => (BenchmarkOutcome::Success, rows, first, Some(consumed)),
+                    _ => (BenchmarkOutcome::Failed, 0, None, None),
                 }
             };
+            let client_elapsed_ns = nanos(started.elapsed());
             samples.push(BenchmarkSample {
                 ordinal,
                 warmup: ordinal < request.warmups,
                 outcome,
-                elapsed_ns: nanos(started.elapsed()),
+                elapsed_ns: client_elapsed_ns,
+                database_execution_ns: None,
+                client_elapsed_ns: Some(client_elapsed_ns),
                 first_row_ns,
+                full_consumption_ns,
                 rows: (outcome == BenchmarkOutcome::Success).then_some(rows),
             });
             if outcome != BenchmarkOutcome::Success {
@@ -444,7 +450,7 @@ fn report(
         .collect();
     let distribution = summarize(&timings).distribution;
     BenchmarkReport {
-        version: 1,
+        version: 2,
         run_id: request.run_id,
         engine,
         sql: request.sql.clone(),

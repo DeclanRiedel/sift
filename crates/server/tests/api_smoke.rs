@@ -1153,7 +1153,10 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
                     warmup: true,
                     outcome: sift_protocol::BenchmarkOutcome::Success,
                     elapsed_ns: 1000,
+                    database_execution_ns: None,
+                    client_elapsed_ns: None,
                     first_row_ns: Some(10),
+                    full_consumption_ns: None,
                     rows: Some(1),
                 },
                 sift_protocol::BenchmarkSample {
@@ -1161,7 +1164,10 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
                     warmup: false,
                     outcome: sift_protocol::BenchmarkOutcome::Success,
                     elapsed_ns: 100,
+                    database_execution_ns: None,
+                    client_elapsed_ns: None,
                     first_row_ns: Some(10),
+                    full_consumption_ns: None,
                     rows: Some(1),
                 },
                 sift_protocol::BenchmarkSample {
@@ -1169,7 +1175,10 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
                     warmup: false,
                     outcome: sift_protocol::BenchmarkOutcome::Success,
                     elapsed_ns: 200,
+                    database_execution_ns: None,
+                    client_elapsed_ns: None,
                     first_row_ns: Some(10),
+                    full_consumption_ns: None,
                     rows: Some(1),
                 },
             ],
@@ -1191,6 +1200,10 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
     assert_eq!(saved.report.median_ns, Some(150.));
     assert_eq!(saved.report.p95_ns, None);
     assert!(saved.report.completed);
+    let legacy = serde_json::to_value(&saved.report).unwrap();
+    assert!(legacy["samples"][0].get("client_elapsed_ns").is_none());
+    let decoded: sift_protocol::BenchmarkReport = serde_json::from_value(legacy).unwrap();
+    assert!(decoded.samples[0].client_elapsed_ns.is_none());
     assert!(client
         .save_benchmark_run(ApiTenantId(1), &request)
         .await
@@ -1237,6 +1250,36 @@ async fn benchmark_library_sdk_roundtrip_recomputes_samples_and_rejects_invalid_
         .unwrap()
         .items
         .is_empty());
+    request.report.version = 2;
+    request.report.run_id = uuid::Uuid::new_v4();
+    for sample in &mut request.report.samples {
+        sample.client_elapsed_ns = Some(sample.elapsed_ns);
+        sample.full_consumption_ns = Some(sample.elapsed_ns - 1);
+    }
+    request.report.samples[0].full_consumption_ns = Some(1001);
+    assert!(client
+        .save_benchmark_run(ApiTenantId(1), &request)
+        .await
+        .is_err());
+    request.report.samples[0].full_consumption_ns = None;
+    request.report.samples[0].client_elapsed_ns = Some(999);
+    assert!(client
+        .save_benchmark_run(ApiTenantId(1), &request)
+        .await
+        .is_err());
+    request.report.samples[0].client_elapsed_ns = None;
+    let saved_v2 = client
+        .save_benchmark_run(ApiTenantId(1), &request)
+        .await
+        .unwrap();
+    assert_eq!(saved_v2.report.version, 2);
+    assert_eq!(saved_v2.report.samples[0].full_consumption_ns, None);
+    assert_eq!(saved_v2.report.samples[0].client_elapsed_ns, None);
+    assert_eq!(saved_v2.report.samples[1].full_consumption_ns, Some(99));
+    client
+        .delete_benchmark_run(ApiTenantId(1), saved_v2.id)
+        .await
+        .unwrap();
     server.abort();
 }
 

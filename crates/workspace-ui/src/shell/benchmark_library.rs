@@ -360,7 +360,7 @@ impl WorkspaceShell {
             .child(div().id("saved-benchmark-list").max_h(px(200.)).overflow_y_scroll().track_scroll(&state.scroll).flex().flex_col().children(state.items.iter().enumerate().map(|(index,item)| {
                 div().id(("saved-benchmark",index)).p_2().cursor(CursorStyle::PointingHand).when(index==state.selected,|row| row.bg(colors.active_surface))
                     .on_click(cx.listener(move |shell,_,window,cx| { shell.focus_handle.focus(window,cx); shell.benchmark_library.selected=index; shell.benchmark_library.delete_confirmation=None; shell.load_selected_benchmark(cx); }))
-                    .child(format!("{} · {} · {} · median {} · {}",item.name,item.engine.map_or_else(|| "engine unavailable".into(), |engine| format!("{engine:?}")),if !item.payload_available {"payload unavailable"} else if item.completed {"complete"} else {"partial"},saved_ms(item.median_ns),item.saved_at.format("%Y-%m-%d %H:%M:%S")))
+                    .child(format!("{} · {} · {} · client median {} · {}",item.name,item.engine.map_or_else(|| "engine unavailable".into(), |engine| format!("{engine:?}")),if !item.payload_available {"payload unavailable"} else if item.completed {"complete"} else {"partial"},saved_ms(item.median_ns),item.saved_at.format("%Y-%m-%d %H:%M:%S")))
             })))
             .children((state.items.is_empty() && !pending).then(|| div().text_sm().child("No saved runs on this page.")))
             .children(state.detail.as_ref().map(|saved| {
@@ -368,12 +368,17 @@ impl WorkspaceShell {
                 div().flex().flex_col().gap_2()
                     .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Opened: {}",saved.name)))
                     .child(div().flex().gap_2().child(Button::new("benchmark-library-baseline","[b] Use as baseline").on_click(cx.listener(|shell,_,_,cx| shell.reuse_benchmark_baseline(cx)))).child(Button::new("benchmark-library-copy","[y] Copy JSON (includes SQL)").on_click(cx.listener(|shell,_,_,cx| shell.copy_saved_benchmark(cx)))))
-                    .child(div().text_sm().child(format!("Median {} · mean {} · deviation {} · p95 {} · p99 {} · {} warm-ups / {} requested runs · {} ms timeout / {} ms budget / {} ms delay",saved_ms(report.median_ns),saved_ms(report.mean_ns),saved_ms(report.standard_deviation_ns),saved_ms(report.p95_ns.map(|v|v as f64)),saved_ms(report.p99_ns.map(|v|v as f64)),report.warmups,report.requested_iterations,report.query_timeout_ms,report.total_budget_ms,report.delay_ms)))
+                    .child(div().text_sm().child(format!("Client elapsed median {} · mean {} · deviation {} · p95 {} · p99 {} · {} warm-ups / {} requested runs · {} ms timeout / {} ms budget / {} ms delay",saved_ms(report.median_ns),saved_ms(report.mean_ns),saved_ms(report.standard_deviation_ns),saved_ms(report.p95_ns.map(|v|v as f64)),saved_ms(report.p99_ns.map(|v|v as f64)),report.warmups,report.requested_iterations,report.query_timeout_ms,report.total_budget_ms,report.delay_ms)))
                     .child(div().id("saved-benchmark-sql").max_h(px(80.)).overflow_y_scroll().text_sm().child(bounded_preview(&report.sql,4096)))
                     .child(div().text_xs().text_color(colors.muted_text).child(bounded_preview(&report.warnings.join(" · "),2048)))
-                    .child(div().text_xs().child("Run · phase · outcome · full drain · first row · rows"))
+                    .child(div().text_xs().child("Run · phase · outcome · client elapsed · first row · full consumption · database execution · rows"))
                     .child(gpui::uniform_list("saved-benchmark-samples",report.samples.len(),cx.processor(|shell,range: std::ops::Range<usize>,_,_| {
-                        range.filter_map(|index| shell.benchmark_library.detail.as_ref()?.report.samples.get(index)).map(|sample| div().h(px(24.)).text_xs().child(format!("{} · {} · {:?} · {} · {} · {}",sample.ordinal+1,if sample.warmup {"warm-up"} else {"measured"},sample.outcome,saved_ms(Some(sample.elapsed_ns as f64)),saved_ms(sample.first_row_ns.map(|v|v as f64)),sample.rows.map_or_else(||"unavailable".into(),|rows|rows.to_string())))).collect::<Vec<_>>()
+                        range.filter_map(|index| {
+                            let report = &shell.benchmark_library.detail.as_ref()?.report;
+                            let sample = report.samples.get(index)?;
+                            let client = sample.client_elapsed_ns.unwrap_or(sample.elapsed_ns);
+                            Some(div().h(px(24.)).text_xs().child(format!("{} · {} · {:?} · {} · {} · {} · {} · {}",sample.ordinal+1,if sample.warmup {"warm-up"} else {"measured"},sample.outcome,saved_ms(Some(client as f64)),saved_ms(sample.first_row_ns.map(|v|v as f64)),saved_ms(sample.full_consumption_ns.map(|v|v as f64)),saved_ms(sample.database_execution_ns.map(|v|v as f64)),sample.rows.map_or_else(||"unavailable".into(),|rows|rows.to_string()))))
+                        }).collect::<Vec<_>>()
                     })).h(px(180.)))
             })).into_any_element()
     }

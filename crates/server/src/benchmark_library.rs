@@ -149,7 +149,7 @@ fn normalize_report(report: &mut BenchmarkReport) -> ApiResult<()> {
     limits
         .validate()
         .map_err(|error| ApiError::BadRequest(error.into()))?;
-    if report.version != 1
+    if !matches!(report.version, 1 | 2)
         || report.sql.len() > 1024 * 1024
         || report.warnings.len() > 128
         || report.warnings.iter().any(|warning| warning.len() > 4096)
@@ -161,11 +161,30 @@ fn normalize_report(report: &mut BenchmarkReport) -> ApiResult<()> {
     }
     let mut samples = Vec::with_capacity(report.samples.len());
     for (index, sample) in report.samples.iter().enumerate() {
+        let timing_inconsistent = if report.version == 1 {
+            sample.database_execution_ns.is_some()
+                || sample.client_elapsed_ns.is_some()
+                || sample.full_consumption_ns.is_some()
+        } else {
+            sample
+                .client_elapsed_ns
+                .is_some_and(|ns| ns != sample.elapsed_ns)
+                || sample
+                    .full_consumption_ns
+                    .is_some_and(|ns| ns > sample.elapsed_ns)
+                || sample
+                    .first_row_ns
+                    .zip(sample.full_consumption_ns)
+                    .is_some_and(|(first, consumed)| first > consumed)
+                || (sample.outcome != BenchmarkOutcome::Success
+                    && sample.full_consumption_ns.is_some())
+        };
         if sample.ordinal as usize != index
             || sample.warmup != (index < limits.warmups as usize)
             || sample.first_row_ns.is_some_and(|ns| ns > sample.elapsed_ns)
             || (sample.outcome != BenchmarkOutcome::Success
                 && (sample.rows.is_some() || sample.first_row_ns.is_some()))
+            || timing_inconsistent
         {
             return Err(ApiError::BadRequest("inconsistent benchmark sample".into()));
         }

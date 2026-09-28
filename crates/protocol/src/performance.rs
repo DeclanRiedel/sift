@@ -1,5 +1,5 @@
-//! Explicit, bounded query benchmarking. Timings are server-observed full drain,
-//! not database CPU time, network-to-desktop time or UI rendering time.
+//! Explicit, bounded query benchmarking. Timings are server-observed and exclude
+//! network-to-desktop time and UI rendering. Native database time is optional.
 use serde::{Deserialize, Serialize};
 
 /// User-saved snapshot, not a server attestation or a rerunnable definition.
@@ -116,8 +116,22 @@ pub struct BenchmarkSample {
     pub ordinal: u32,
     pub warmup: bool,
     pub outcome: BenchmarkOutcome,
+    /// Legacy server-side client elapsed clock. Version 2 summaries still use
+    /// this dimension so saved version 1 reports remain comparable.
     pub elapsed_ns: u64,
+    /// Native database execution measurement, only when independently observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_execution_ns: Option<u64>,
+    /// From server dispatch to completion of the driver task. When absent,
+    /// elapsed_ns remains the same legacy clock for display and summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_elapsed_ns: Option<u64>,
+    /// From server dispatch until the first nonempty row page is received.
+    /// Currently retained only for successful iterations.
     pub first_row_ns: Option<u64>,
+    /// From server dispatch until the completed stream's Done page is received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_consumption_ns: Option<u64>,
     /// Complete row count is unavailable when an iteration does not finish.
     pub rows: Option<u64>,
 }
@@ -139,6 +153,7 @@ pub struct BenchmarkReport {
     pub samples: Vec<BenchmarkSample>,
     pub completed: bool,
     pub warnings: Vec<String>,
+    /// Summary fields cover elapsed_ns (server-side client elapsed) only.
     pub median_ns: Option<f64>,
     pub mean_ns: Option<f64>,
     pub min_ns: Option<u64>,

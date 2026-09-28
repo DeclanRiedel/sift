@@ -150,6 +150,7 @@ async fn benchmark_drains_beyond_grid_limit_and_closes_only_its_connection() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let report: sift_protocol::BenchmarkReport = body_json(response.into_body()).await;
+    assert_eq!(report.version, 2);
     assert!(report.completed);
     assert_eq!(report.samples.len(), 3);
     assert!(report.samples[0].warmup);
@@ -158,6 +159,13 @@ async fn benchmark_drains_beyond_grid_limit_and_closes_only_its_connection() {
         .samples
         .iter()
         .all(|s| s.rows == Some(6000) && s.first_row_ns.is_some()));
+    assert!(report.samples.iter().all(|s| {
+        s.database_execution_ns.is_none()
+            && s.client_elapsed_ns == Some(s.elapsed_ns)
+            && s.full_consumption_ns.is_some_and(|done| {
+                done <= s.elapsed_ns && s.first_row_ns.is_some_and(|first| first <= done)
+            })
+    }));
     assert!(report.median_ns.is_some());
     assert!(report.p95_ns.is_none());
     let response = router
@@ -201,6 +209,12 @@ async fn benchmark_timeout_keeps_partial_outcome_and_rejects_unconfirmed_work() 
         report.samples[0].outcome,
         sift_protocol::BenchmarkOutcome::TimedOut
     );
+    assert_eq!(
+        report.samples[0].client_elapsed_ns,
+        Some(report.samples[0].elapsed_ns)
+    );
+    assert!(report.samples[0].full_consumption_ns.is_none());
+    assert!(report.samples[0].database_execution_ns.is_none());
     assert!(report.median_ns.is_none());
 }
 
