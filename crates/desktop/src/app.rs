@@ -2794,6 +2794,49 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadPostgresReplication { epoch } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .read_postgres_replication(opened.session, opened.metadata_connection)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before inspecting PostgreSQL replication".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresReplicationLoaded { epoch, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadPostgresStatistics { epoch, offset } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .read_postgres_statistics(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::PostgresStatisticsQuery {
+                                offset,
+                                limit: Some(100),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before inspecting PostgreSQL statistics".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresStatisticsLoaded {
+                        epoch,
+                        offset,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadPostgresRoles { offset } => {
                 let result = match context.as_ref() {
                     Some(opened) => opened
@@ -2936,6 +2979,53 @@ async fn run_query_executor(
                 };
                 if events
                     .send(ExecutorEvent::SqlServerSettingsLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SqlServerRecovery {
+                generation,
+                apply,
+                request,
+            } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .sql_server_recovery(opened.session, opened.metadata_connection, request)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before running SQL Server recovery".into()),
+                };
+                if events
+                    .send(ExecutorEvent::SqlServerRecoveryFinished {
+                        generation,
+                        apply,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::SqlServerIntegrity {
+                generation,
+                physical_only,
+            } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .check_integrity(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::IntegrityCheckRequest::SqlServer { physical_only },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before checking SQL Server integrity".into()),
+                };
+                if events
+                    .send(ExecutorEvent::SqlServerIntegrityFinished { generation, result })
                     .is_err()
                 {
                     return;

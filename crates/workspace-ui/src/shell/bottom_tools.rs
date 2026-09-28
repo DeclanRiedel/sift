@@ -10,10 +10,6 @@ pub(super) fn render_bottom_panel(
     debug_assert_eq!(dock.id, DockId::Bottom);
     let theme = cx.theme();
     let colors = theme.colors;
-    let query_store_available =
-        matches!(shell.connection_status, ConnectionStatus::Connected { .. })
-            && shell.active_connection_provider_id()
-                == Some(&sift_protocol::Engine::SqlServer.provider_id());
     let body = match shell.active_bottom_tool {
         BottomTool::Console => Some("Press <leader> q n to open a query tab.".to_owned()),
         BottomTool::Monitor => None,
@@ -45,6 +41,12 @@ pub(super) fn render_bottom_panel(
         )
         .when(
             shell.active_bottom_tool == BottomTool::Monitor
+                && matches!(shell.database_monitor.view(), DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics),
+            |dock| dock.key_context("SiftPostgresDiagnostics")
+                .on_key_down(cx.listener(WorkspaceShell::handle_postgres_diagnostics_key)),
+        )
+        .when(
+            shell.active_bottom_tool == BottomTool::Monitor
                 && shell.database_monitor.view() == DatabaseMonitorView::AgentJobs,
             |dock| {
                 dock.key_context("SiftAgentJobs")
@@ -58,6 +60,12 @@ pub(super) fn render_bottom_panel(
                 dock.key_context("SiftSqlServerSettings")
                     .on_key_down(cx.listener(WorkspaceShell::handle_sqlserver_settings_key))
             },
+        )
+        .when(
+            shell.active_bottom_tool == BottomTool::Monitor
+                && shell.database_monitor.view() == DatabaseMonitorView::Maintenance,
+            |dock| dock.key_context("SiftSqlServerMaintenance")
+                .on_key_down(cx.listener(WorkspaceShell::handle_sqlserver_maintenance_key)),
         )
         .relative()
         .h(px(dock.presentation.size))
@@ -141,195 +149,26 @@ pub(super) fn render_bottom_panel(
                     }),
                 )
                 .children((shell.active_bottom_tool == BottomTool::Monitor).then(|| {
-                    let view = shell.database_monitor.view();
+                    let selected = shell.database_monitor.view();
+                    let provider = shell.active_connection_provider_id().map(|id| id.as_str());
+                    let connected =
+                        matches!(shell.connection_status, ConnectionStatus::Connected { .. });
                     div()
                         .flex()
                         .items_center()
                         .gap_1()
-                        .child(
-                            Button::new("monitor-view-overview", "Overview")
-                                .tone(if view == DatabaseMonitorView::Overview {
+                        .children(DatabaseMonitorView::ALL.into_iter().map(|view| {
+                            Button::new(view.button_id(), view.label(&shell.database_monitor))
+                                .tone(if selected == view {
                                     ButtonTone::Neutral
                                 } else {
                                     ButtonTone::Ghost
                                 })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(DatabaseMonitorView::Overview, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("monitor-view-activity", "Activity")
-                                .tone(if view == DatabaseMonitorView::Activity {
-                                    ButtonTone::Neutral
-                                } else {
-                                    ButtonTone::Ghost
-                                })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(
-                                        DatabaseMonitorView::Activity,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            Button::new(
-                                "monitor-view-locks",
-                                format!("Locks {}", shell.database_monitor.lock_process_count()),
-                            )
-                            .tone(if view == DatabaseMonitorView::Locks {
-                                ButtonTone::Neutral
-                            } else {
-                                ButtonTone::Ghost
-                            })
-                            .on_click(cx.listener(
-                                |shell, _, _, cx| {
-                                    shell.set_database_monitor_view(DatabaseMonitorView::Locks, cx)
-                                },
-                            )),
-                        )
-                        .child(
-                            Button::new(
-                                "monitor-view-deadlocks",
-                                format!(
-                                    "Cycles {}",
-                                    shell.database_monitor.deadlock_process_count()
-                                ),
-                            )
-                            .tone(if view == DatabaseMonitorView::Deadlocks {
-                                ButtonTone::Neutral
-                            } else {
-                                ButtonTone::Ghost
-                            })
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.set_database_monitor_view(DatabaseMonitorView::Deadlocks, cx)
-                            })),
-                        )
-                        .child(
-                            Button::new(
-                                "monitor-view-deadlock-history",
-                                format!("History {}", shell.database_monitor.deadlocks().len()),
-                            )
-                            .tone(if view == DatabaseMonitorView::History {
-                                ButtonTone::Neutral
-                            } else {
-                                ButtonTone::Ghost
-                            })
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.set_database_monitor_view(DatabaseMonitorView::History, cx)
-                            })),
-                        )
-                        .child(
-                            Button::new(
-                                "monitor-view-alerts",
-                                format!("Alerts {}", shell.database_monitor.alert_count()),
-                            )
-                            .tone(if view == DatabaseMonitorView::Alerts {
-                                ButtonTone::Neutral
-                            } else {
-                                ButtonTone::Ghost
-                            })
-                            .on_click(cx.listener(
-                                |shell, _, _, cx| {
-                                    shell.set_database_monitor_view(DatabaseMonitorView::Alerts, cx)
-                                },
-                            )),
-                        )
-                        .child(
-                            Button::new("monitor-view-query-store", "Query Store")
-                                .disabled(!query_store_available)
-                                .tone(if view == DatabaseMonitorView::QueryStore {
-                                    ButtonTone::Neutral
-                                } else {
-                                    ButtonTone::Ghost
-                                })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(
-                                        DatabaseMonitorView::QueryStore,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            Button::new("monitor-view-agent-jobs", "Agent jobs")
-                                .disabled(!query_store_available)
-                                .tone(if view == DatabaseMonitorView::AgentJobs {
-                                    ButtonTone::Neutral
-                                } else {
-                                    ButtonTone::Ghost
-                                })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(
-                                        DatabaseMonitorView::AgentJobs,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            Button::new("monitor-view-sqlserver-settings", "Server settings")
-                                .disabled(!query_store_available)
-                                .tone(if view == DatabaseMonitorView::SqlServerSettings {
-                                    ButtonTone::Neutral
-                                } else {
-                                    ButtonTone::Ghost
-                                })
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(
-                                        DatabaseMonitorView::SqlServerSettings,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            Button::new("monitor-view-settings", "Settings")
-                                .tone(if view == DatabaseMonitorView::Settings {
-                                    ButtonTone::Neutral
-                                } else {
-                                    ButtonTone::Ghost
-                                })
-                                .disabled(
-                                    shell
-                                        .active_connection_provider_id()
-                                        .is_none_or(|provider| {
-                                            provider.as_str() != "sift/postgres"
-                                        }),
-                                )
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.set_database_monitor_view(
-                                        DatabaseMonitorView::Settings,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .child(
-                            Button::new("monitor-view-extensions", "Extensions")
-                                .tone(if view == DatabaseMonitorView::Extensions { ButtonTone::Neutral } else { ButtonTone::Ghost })
-                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
-                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Extensions, cx))),
-                        )
-                        .child(
-                            Button::new("monitor-view-partitions", "Partitions")
-                                .tone(if view == DatabaseMonitorView::Partitions { ButtonTone::Neutral } else { ButtonTone::Ghost })
-                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
-                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Partitions, cx))),
-                        )
-                        .child(
-                            Button::new("monitor-view-roles", "Roles")
-                                .tone(if view == DatabaseMonitorView::Roles { ButtonTone::Neutral } else { ButtonTone::Ghost })
-                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
-                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Roles, cx))),
-                        )
-                        .child(
-                            Button::new("monitor-view-owners", "Ownership")
-                                .tone(if view == DatabaseMonitorView::Ownership { ButtonTone::Neutral } else { ButtonTone::Ghost })
-                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
-                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Ownership, cx))),
-                        )
-                        .child(
-                            Button::new("monitor-view-schema-grants", "Schema grants")
-                                .tone(if view == DatabaseMonitorView::SchemaGrants { ButtonTone::Neutral } else { ButtonTone::Ghost })
-                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
-                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::SchemaGrants, cx))),
-                        )
+                                .disabled(!view.available_for(provider, connected))
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    shell.set_database_monitor_view(view, cx)
+                                }))
+                        }))
                 })),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {
@@ -341,12 +180,18 @@ pub(super) fn render_bottom_panel(
                 render_postgres_settings(shell, cx).into_any_element()
             } else if matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants) {
                 render_postgres_objects(shell, cx).into_any_element()
+            } else if shell.database_monitor.view() == DatabaseMonitorView::Replication {
+                render_postgres_replication(shell, cx).into_any_element()
+            } else if shell.database_monitor.view() == DatabaseMonitorView::Statistics {
+                render_postgres_statistics(shell, cx).into_any_element()
             } else if shell.database_monitor.view() == DatabaseMonitorView::QueryStore {
                 render_query_store(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::AgentJobs {
                 render_agent_jobs(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::SqlServerSettings {
                 render_sqlserver_settings(shell, cx)
+            } else if shell.database_monitor.view() == DatabaseMonitorView::Maintenance {
+                render_sqlserver_maintenance(shell, cx)
             } else {
                 let transaction =
                     shell.transaction_state.transaction().map(|transaction| {
@@ -518,9 +363,11 @@ pub(super) fn render_bottom_panel(
                                     DatabaseMonitorView::Overview => unreachable!(),
                                     DatabaseMonitorView::Settings => unreachable!(),
                                     DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants => unreachable!(),
+                                    DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics => unreachable!(),
                                     DatabaseMonitorView::QueryStore => unreachable!(),
                                     DatabaseMonitorView::AgentJobs => unreachable!(),
                                     DatabaseMonitorView::SqlServerSettings => unreachable!(),
+                                    DatabaseMonitorView::Maintenance => unreachable!(),
                                 },
                             ))
                         },
@@ -1403,6 +1250,161 @@ fn render_agent_jobs(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -
         .into_any_element()
 }
 
+fn render_sqlserver_maintenance(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let state = &shell.maintenance;
+    let colors = cx.theme().colors;
+    let mode = state.mode;
+    let busy = state.pending.is_some();
+    let mut panel = div()
+        .debug_selector(|| "sqlserver-maintenance".into())
+        .id("sqlserver-maintenance-scroll")
+        .flex().flex_1().min_h_0().flex_col().overflow_y_scroll().p_3().gap_2()
+        .child(SectionLabel::new("SQL SERVER MAINTENANCE"))
+        .child(div().text_xs().child("Recovery requires a master connection with VIEW ANY DATABASE. Paths are on the SQL Server host. b backup · n restore · i integrity · p preview · a apply · r run check"))
+        .child(div().flex().gap_2()
+            .child(Button::new("maintenance-backup-mode", "Backup")
+                .disabled(busy)
+                .tone(if mode == MaintenanceMode::Backup { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                .on_click(cx.listener(|shell, _, _, cx| { shell.maintenance.mode = MaintenanceMode::Backup; shell.maintenance.invalidate(); cx.notify(); })))
+            .child(Button::new("maintenance-restore-mode", "Restore to new name")
+                .disabled(busy)
+                .tone(if mode == MaintenanceMode::Restore { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                .on_click(cx.listener(|shell, _, _, cx| { shell.maintenance.mode = MaintenanceMode::Restore; shell.maintenance.invalidate(); cx.notify(); })))
+            .child(Button::new("maintenance-integrity-mode", "Integrity check")
+                .disabled(busy)
+                .tone(if mode == MaintenanceMode::Integrity { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                .on_click(cx.listener(|shell, _, _, cx| { shell.maintenance.mode = MaintenanceMode::Integrity; shell.maintenance.invalidate(); cx.notify(); }))));
+    if mode == MaintenanceMode::Integrity {
+        panel = panel
+            .child("Runs DBCC CHECKDB on the connected database. No repair mode is available.")
+            .child(
+                Button::new(
+                    "maintenance-physical-only",
+                    if state.physical_only {
+                        "Physical only: on"
+                    } else {
+                        "Physical only: off"
+                    },
+                )
+                .disabled(busy)
+                .tone(ButtonTone::Ghost)
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.maintenance.physical_only = !shell.maintenance.physical_only;
+                    shell.maintenance.invalidate();
+                    cx.notify();
+                })),
+            )
+            .child(
+                Button::new(
+                    "maintenance-run-integrity",
+                    if busy {
+                        "Checking…"
+                    } else {
+                        "Run integrity check"
+                    },
+                )
+                .disabled(busy)
+                .on_click(cx.listener(|shell, _, _, cx| shell.run_sqlserver_integrity(cx))),
+            );
+        if let Some(report) = &state.integrity {
+            panel = panel.child(format!("Outcome: {:?}", report.outcome));
+            for finding in &report.findings {
+                panel = panel.child(div().child(finding.clone()));
+            }
+            for warning in &report.warnings {
+                panel = panel.child(
+                    div()
+                        .text_color(colors.warning)
+                        .child(format!("{warning:?}")),
+                );
+            }
+        }
+    } else {
+        panel = panel
+            .child(
+                div()
+                    .child(if mode == MaintenanceMode::Backup {
+                        "Existing source database"
+                    } else {
+                        "New destination database name"
+                    })
+                    .child(state.database.clone()),
+            )
+            .child(
+                div()
+                    .child("Absolute archive path on SQL Server host")
+                    .child(state.archive.clone()),
+            );
+        if mode == MaintenanceMode::Restore {
+            panel = panel
+                .child(div().child("Backup set number").child(state.backup_set.clone()))
+                .child(div().child("MOVE mappings JSON: [{\"logical_name\":\"data\",\"destination\":\"/data/new.mdf\"}]").child(state.moves.clone()));
+        }
+        panel = panel.child(
+            Button::new(
+                "maintenance-preview",
+                if busy { "Working…" } else { "Preview" },
+            )
+            .disabled(busy)
+            .on_click(cx.listener(|shell, _, _, cx| shell.preview_sqlserver_recovery(cx))),
+        );
+        if let Some((_, report)) = &state.preview {
+            panel = panel
+                .child(SectionLabel::new("PREVIEW"))
+                .child(div().font_family("monospace").child(report.sql.clone()));
+            if let Some(source) = &report.source_database {
+                panel = panel.child(format!("Source database: {source}"));
+            }
+            for warning in &report.warnings {
+                panel = panel.child(
+                    div()
+                        .text_color(colors.warning)
+                        .child(format!("{warning:?}")),
+                );
+            }
+            panel = panel
+                .child(
+                    div()
+                        .child(format!(
+                            "Type {} {} to apply",
+                            if mode == MaintenanceMode::Backup {
+                                "BACKUP"
+                            } else {
+                                "RESTORE"
+                            },
+                            state.database.read(cx).text()
+                        ))
+                        .child(state.confirmation.clone()),
+                )
+                .child(
+                    Button::new("maintenance-apply", "Apply confirmed recovery")
+                        .disabled(busy)
+                        .tone(ButtonTone::Danger)
+                        .on_click(
+                            cx.listener(|shell, _, _, cx| shell.apply_sqlserver_recovery(cx)),
+                        ),
+                );
+        }
+    }
+    if let Some(message) = &state.message {
+        panel = panel.child(div().text_color(colors.warning).child(message.clone()));
+    }
+    if let Some(report) = &state.last_recovery {
+        panel = panel.child(div().font_family("monospace").child(report.sql.clone()));
+        for warning in &report.warnings {
+            panel = panel.child(
+                div()
+                    .text_color(colors.warning)
+                    .child(format!("{warning:?}")),
+            );
+        }
+    }
+    panel.into_any_element()
+}
+
 fn render_sqlserver_settings(
     shell: &WorkspaceShell,
     cx: &mut Context<WorkspaceShell>,
@@ -1919,6 +1921,207 @@ fn render_postgres_objects(
                         .on_click(cx.listener(|shell, _, _, cx| shell.apply_postgres_object(cx))),
                 )
         }))
+}
+
+fn render_postgres_replication(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> impl IntoElement {
+    let colors = cx.theme().colors;
+    let state = &shell.database_monitor;
+    let report = state.replication();
+    let selected = state.replication_selected();
+    let mut index = 0;
+    let mut rows = Vec::new();
+    if let Some(report) = report {
+        for sender in &report.senders {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "Sender {} · {} · {} · sync {} · write/flush/replay lag {} / {} / {} ms",
+                        sender.pid,
+                        sender.application_name,
+                        sender.state,
+                        sender.sync_state,
+                        sender
+                            .write_lag_ms
+                            .map_or_else(|| "unknown".into(), |v| v.to_string()),
+                        sender
+                            .flush_lag_ms
+                            .map_or_else(|| "unknown".into(), |v| v.to_string()),
+                        sender
+                            .replay_lag_ms
+                            .map_or_else(|| "unknown".into(), |v| v.to_string())
+                    ))
+                    .into_any_element(),
+            );
+            index += 1;
+        }
+        if let Some(receiver) = &report.receiver {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "WAL receiver · {} · received {} · latest {}",
+                        receiver.status,
+                        receiver.received_lsn.as_deref().unwrap_or("unknown"),
+                        receiver.latest_end_lsn.as_deref().unwrap_or("unknown")
+                    ))
+                    .into_any_element(),
+            );
+            index += 1;
+        }
+        for slot in &report.slots {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "Slot {} · {} · database {} · {} · restart {} · confirmed {}",
+                        slot.name,
+                        slot.slot_type,
+                        slot.database.as_deref().unwrap_or("none"),
+                        if slot.active { "active" } else { "inactive" },
+                        slot.restart_lsn.as_deref().unwrap_or("unknown"),
+                        slot.confirmed_flush_lsn.as_deref().unwrap_or("unknown")
+                    ))
+                    .into_any_element(),
+            );
+            index += 1;
+        }
+    }
+    div()
+        .debug_selector(|| "postgres-replication-browser".into())
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .flex_col()
+        .child(
+            div()
+                .h(px(30.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(SectionLabel::new("POSTGRESQL REPLICATION"))
+                .child(div().text_xs().child(
+                    "Snapshot · lag is not catch-up ETA · j/k select · r refresh · Esc exit",
+                ))
+                .child(div().flex_1())
+                .child(
+                    Button::new("pg-replication-refresh", "Refresh")
+                        .tone(ButtonTone::Ghost)
+                        .disabled(state.replication_request().loading())
+                        .on_click(
+                            cx.listener(|shell, _, _, cx| shell.load_postgres_replication(cx)),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .id("postgres-replication-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .children(rows),
+        )
+        .children(
+            report
+                .filter(|report| report.senders_truncated || report.slots_truncated)
+                .map(|_| {
+                    div()
+                        .px_3()
+                        .text_color(colors.warning)
+                        .child("Snapshot truncated at 200 senders or slots")
+                }),
+        )
+        .children((report.is_some() && index == 0).then(|| {
+            div()
+                .p_4()
+                .text_center()
+                .child("No replication senders, receiver, or slots reported.")
+        }))
+        .children(state.replication_request().error().map(|message| {
+            div()
+                .px_3()
+                .text_color(colors.danger)
+                .child(message.to_string())
+        }))
+}
+
+fn render_postgres_statistics(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> impl IntoElement {
+    let colors = cx.theme().colors;
+    let state = &shell.database_monitor;
+    let report = state.statistics();
+    let offset = state.statistics_offset();
+    let next = report.and_then(|report| report.next_offset);
+    let selected = state.statistics_selected();
+    div().debug_selector(|| "postgres-statistics-browser".into()).flex().flex_1().min_h_0().flex_col()
+        .child(div().h(px(30.)).px_3().flex().items_center().gap_2()
+            .child(SectionLabel::new("POSTGRESQL STATISTICS"))
+            .child(div().text_xs().child("Cumulative snapshot · j/k select · n/p pages · r refresh"))
+            .child(div().flex_1())
+            .child(Button::new("pg-statistics-prev", "Previous").tone(ButtonTone::Ghost)
+                .disabled(offset == 0 || state.statistics_request().loading())
+                .on_click(cx.listener(move |shell, _, _, cx| shell.load_postgres_statistics(offset.saturating_sub(100), cx))))
+            .child(Button::new("pg-statistics-next", "Next").tone(ButtonTone::Ghost)
+                .disabled(next.is_none() || state.statistics_request().loading())
+                .on_click(cx.listener(move |shell, _, _, cx| { if let Some(next) = next { shell.load_postgres_statistics(next, cx); } })))
+            .child(Button::new("pg-statistics-refresh", "Refresh").tone(ButtonTone::Ghost)
+                .disabled(state.statistics_request().loading())
+                .on_click(cx.listener(move |shell, _, _, cx| shell.load_postgres_statistics(offset, cx)))))
+        .children(report.map(|report| {
+            let db = &report.database;
+            div().px_3().py_2().border_b_1().border_color(colors.subtle_border)
+                .child(format!("Database {} · {} backends · {} commits · {} rollbacks · {} blocks read / {} hit · reset {}",
+                    db.database, db.backends, db.commits, db.rollbacks, db.blocks_read, db.blocks_hit,
+                    db.stats_reset.as_deref().unwrap_or("unknown")))
+                .child(div().text_xs().child(format!("Tuples returned {} · fetched {} · inserted {} · updated {} · deleted {}",
+                    db.tuples_returned, db.tuples_fetched, db.tuples_inserted, db.tuples_updated, db.tuples_deleted)))
+        }))
+        .child(div().id("postgres-statistics-list").flex_1().min_h_0().overflow_y_scroll()
+            .children(report.into_iter().flat_map(|report| report.tables.iter().enumerate()).map(|(index, table)| {
+                div().px_3().py_2().border_b_1().border_color(colors.subtle_border)
+                    .bg(if index == selected { colors.accent_muted } else { colors.panel })
+                    .child(format!("{}.{} · seq scans {} · index scans {} · live/dead estimate {} / {}",
+                        table.schema, table.table, table.sequential_scans,
+                        table.index_scans.map_or_else(|| "unavailable".into(), |v| v.to_string()),
+                        table.live_tuples_estimate, table.dead_tuples_estimate))
+                    .child(div().text_xs().child(format!("Vacuum {} · auto {} · analyze {} · auto {}",
+                        table.last_vacuum.as_deref().unwrap_or("never"),
+                        table.last_autovacuum.as_deref().unwrap_or("never"),
+                        table.last_analyze.as_deref().unwrap_or("never"),
+                        table.last_autoanalyze.as_deref().unwrap_or("never"))))
+            })))
+        .children(report.filter(|report| report.tables.is_empty()).map(|_| div().p_4().text_center().child("No accessible user-table statistics on this page.")))
+        .children(state.statistics_request().error().map(|message| div().px_3().text_color(colors.danger).child(message.to_string())))
 }
 
 #[derive(Clone)]

@@ -35,6 +35,25 @@ sources for current support claims.
 
 ## Workbench and administration
 
+### Replication and statistics inspection design
+
+This slice is read-only. The server returns bounded snapshots from
+`pg_stat_replication`, `pg_stat_wal_receiver`, and `pg_replication_slots`, plus
+current-database and accessible user-table statistics. It omits connection
+strings, host addresses, SQL text, and other credential-bearing fields.
+Replication reads require effective `pg_read_all_stats` usage or superuser rights;
+PostgreSQL permission errors are surfaced explicitly. Database statistics are
+limited to `current_database()`, and table statistics require SELECT privilege
+on each relation. Managed schema-restricted profiles cannot use these
+cross-schema views. Each endpoint has its own audited Operation and
+PostgreSQL-only capability. Queries use the existing supervised driver path,
+with a fixed server-owned SQL statement, hard row limits, and paged table rows.
+
+The desktop Monitor adds Replication and Statistics views with Vim navigation,
+refresh, and table-statistics paging. Values are snapshots, not live rates;
+statistics reset time and unavailable counters remain explicit. No
+replication control, slot mutation, setting changes, or polling loop is added.
+
 ### Extension and partition workbench design
 
 This slice separates database extensions from Sift's own extension packages.
@@ -73,10 +92,13 @@ An inspection view alone does not complete the management checklist.
       Bounded catalogs and typed guarded preview/apply APIs cover `CREATE ROLE
       NOLOGIN`, explicit schema `USAGE`/`CREATE` grants, and owner changes.
       Vim desktop inspection is available. Desktop editing, role attributes,
-      memberships, object/default privileges,
-      and effective privilege matrices remain open.
-- [ ] Add replication and statistics inspection UI with bounded reads and
-      explicit permission errors.
+      memberships, object/default privileges, and effective privilege matrices
+      remain open.
+- [x] Add replication and statistics inspection UI with bounded reads and
+      explicit permission errors. Primary senders, standby WAL receiver,
+      replication slots, current-database counters, and SELECT-visible table
+      counters have audited snapshots and Vim Monitor views. No replication
+      control, slot mutation, or inferred rates are included.
 - [x] Add a read-only server-settings browser with bounded, role-visible reads,
       sensitive-value redaction, audit, and a Vim desktop view. Settings writes
       remain a separate design requiring scope, policy, confirmation, and audit.
@@ -86,6 +108,27 @@ An inspection view alone does not complete the management checklist.
       to complete Linux desktop workflows where operator policy permits.
 
 ## Acceptance
+
+### Replication and statistics inspection implementation
+
+The replication API requires effective PostgreSQL `pg_read_all_stats` usage or
+superuser and returns explicit Forbidden otherwise. It caps senders and slots
+at 200 rows each with truncation flags and reads at most one WAL receiver.
+Connection strings, client addresses, SQL text, and credential-bearing fields
+are omitted. The statistics API reads only `current_database()` counters and
+pages SELECT-visible user tables (100 in the desktop, API maximum 200, offset
+ceiling 10,000). All values are read-only snapshots; lag may be unavailable,
+table row counts are estimates, and rates are not inferred. Managed profiles
+restricted to selected schemas are denied these cross-schema endpoints.
+The desktop Monitor provides Replication and Statistics tabs with Vim `j/k`
+selection, `r` refresh, `n/p` statistics paging, and Esc to return to the
+active pane. Both actions use supervised query execution and audited Operations.
+Verification: backend/SDK and desktop/UI checks passed, and three focused
+server integration tests cover privilege denial, safe typed fields, and
+statistics pagination. A UI state regression test protects against stale
+responses after connection changes. Strict workspace Clippy and full tests
+remain for the post-merge integration gate; no live PostgreSQL role fixture was
+run in this isolated worktree.
 
 ### Extension and partition workbench implementation
 

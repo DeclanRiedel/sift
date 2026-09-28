@@ -4,7 +4,7 @@ use sift_protocol::{
 
 use super::RequestState;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(super) enum DatabaseMonitorView {
     Overview,
     #[default]
@@ -19,9 +19,128 @@ pub(super) enum DatabaseMonitorView {
     Roles,
     Ownership,
     SchemaGrants,
+    Replication,
+    Statistics,
     QueryStore,
     AgentJobs,
     SqlServerSettings,
+    Maintenance,
+}
+
+impl DatabaseMonitorView {
+    pub(super) const ALL: [Self; 18] = [
+        Self::Overview,
+        Self::Activity,
+        Self::Locks,
+        Self::Deadlocks,
+        Self::History,
+        Self::Alerts,
+        Self::QueryStore,
+        Self::AgentJobs,
+        Self::SqlServerSettings,
+        Self::Maintenance,
+        Self::Settings,
+        Self::Extensions,
+        Self::Partitions,
+        Self::Roles,
+        Self::Ownership,
+        Self::SchemaGrants,
+        Self::Replication,
+        Self::Statistics,
+    ];
+
+    pub(super) const fn button_id(self) -> &'static str {
+        match self {
+            Self::Overview => "monitor-view-overview",
+            Self::Activity => "monitor-view-activity",
+            Self::Locks => "monitor-view-locks",
+            Self::Deadlocks => "monitor-view-deadlocks",
+            Self::History => "monitor-view-deadlock-history",
+            Self::Alerts => "monitor-view-alerts",
+            Self::QueryStore => "monitor-view-query-store",
+            Self::AgentJobs => "monitor-view-agent-jobs",
+            Self::SqlServerSettings => "monitor-view-sqlserver-settings",
+            Self::Maintenance => "monitor-view-sqlserver-maintenance",
+            Self::Settings => "monitor-view-settings",
+            Self::Extensions => "monitor-view-extensions",
+            Self::Partitions => "monitor-view-partitions",
+            Self::Roles => "monitor-view-roles",
+            Self::Ownership => "monitor-view-owners",
+            Self::SchemaGrants => "monitor-view-schema-grants",
+            Self::Replication => "monitor-view-replication",
+            Self::Statistics => "monitor-view-statistics",
+        }
+    }
+
+    pub(super) fn label(self, state: &DatabaseMonitorState) -> String {
+        match self {
+            Self::Overview => "Overview".into(),
+            Self::Activity => "Activity".into(),
+            Self::Locks => format!("Locks {}", state.lock_process_count()),
+            Self::Deadlocks => format!("Cycles {}", state.deadlock_process_count()),
+            Self::History => format!("History {}", state.deadlocks().len()),
+            Self::Alerts => format!("Alerts {}", state.alert_count()),
+            Self::QueryStore => "Query Store".into(),
+            Self::AgentJobs => "Agent jobs".into(),
+            Self::SqlServerSettings => "Server settings".into(),
+            Self::Maintenance => "Maintenance".into(),
+            Self::Settings => "Settings".into(),
+            Self::Extensions => "Extensions".into(),
+            Self::Partitions => "Partitions".into(),
+            Self::Roles => "Roles".into(),
+            Self::Ownership => "Ownership".into(),
+            Self::SchemaGrants => "Schema grants".into(),
+            Self::Replication => "Replication".into(),
+            Self::Statistics => "Statistics".into(),
+        }
+    }
+
+    pub(super) fn available_for(self, provider: Option<&str>, connected: bool) -> bool {
+        match self {
+            Self::QueryStore | Self::AgentJobs | Self::SqlServerSettings | Self::Maintenance => {
+                connected && provider == Some("sift/sql-server")
+            }
+            Self::Settings
+            | Self::Extensions
+            | Self::Partitions
+            | Self::Roles
+            | Self::Ownership
+            | Self::SchemaGrants
+            | Self::Replication
+            | Self::Statistics => provider == Some("sift/postgres"),
+            Self::Overview
+            | Self::Activity
+            | Self::Locks
+            | Self::Deadlocks
+            | Self::History
+            | Self::Alerts => true,
+        }
+    }
+
+    pub(super) fn adjacent_available(
+        self,
+        forward: bool,
+        provider: Option<&str>,
+        connected: bool,
+    ) -> Self {
+        let len = Self::ALL.len();
+        let mut index = Self::ALL
+            .iter()
+            .position(|view| *view == self)
+            .expect("every Monitor view has a tab");
+        for _ in 0..len {
+            index = if forward {
+                (index + 1) % len
+            } else {
+                (index + len - 1) % len
+            };
+            let candidate = Self::ALL[index];
+            if candidate.available_for(provider, connected) {
+                return candidate;
+            }
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +186,15 @@ pub(super) struct DatabaseMonitorState {
     objects_selected: usize,
     object_preview: Option<sift_protocol::PostgresObjectPreview>,
     object_action_request: RequestState,
+    replication: Option<sift_protocol::PostgresReplicationReport>,
+    replication_request: RequestState,
+    replication_epoch: u64,
+    replication_selected: usize,
+    statistics: Option<sift_protocol::PostgresStatisticsReport>,
+    statistics_request: RequestState,
+    statistics_epoch: u64,
+    statistics_offset: u32,
+    statistics_selected: usize,
     query_store: Option<sift_protocol::QueryStoreReport>,
     query_store_request: RequestState,
     agent_jobs: Option<sift_protocol::AgentJobsReport>,
@@ -78,6 +206,128 @@ pub(super) struct DatabaseMonitorState {
 }
 
 impl DatabaseMonitorState {
+    pub(super) fn replication(&self) -> Option<&sift_protocol::PostgresReplicationReport> {
+        self.replication.as_ref()
+    }
+    pub(super) fn replication_request(&self) -> &RequestState {
+        &self.replication_request
+    }
+    pub(super) fn replication_selected(&self) -> usize {
+        self.replication_selected
+    }
+    pub(super) fn start_replication(&mut self) -> u64 {
+        self.replication_epoch = self.replication_epoch.wrapping_add(1);
+        self.replication_request.start();
+        self.replication_epoch
+    }
+    pub(super) fn fail_replication(&mut self, message: impl Into<String>) {
+        self.replication_request.fail(message);
+    }
+    pub(super) fn finish_replication(
+        &mut self,
+        epoch: u64,
+        result: Result<sift_protocol::PostgresReplicationReport, String>,
+    ) {
+        if self.view != DatabaseMonitorView::Replication
+            || !self.replication_request.loading()
+            || epoch != self.replication_epoch
+        {
+            return;
+        }
+        match result {
+            Ok(report) => {
+                let count = report.senders.len()
+                    + report.slots.len()
+                    + usize::from(report.receiver.is_some());
+                self.replication_selected = self.replication_selected.min(count.saturating_sub(1));
+                self.replication = Some(report);
+                self.replication_request.succeed();
+            }
+            Err(message) => self.replication_request.fail(message),
+        }
+    }
+    pub(super) fn move_replication_selection(&mut self, delta: isize) {
+        let count = self.replication.as_ref().map_or(0, |report| {
+            report.senders.len() + report.slots.len() + usize::from(report.receiver.is_some())
+        });
+        if count > 0 {
+            self.replication_selected = self
+                .replication_selected
+                .saturating_add_signed(delta)
+                .min(count - 1);
+        }
+    }
+    pub(super) fn statistics(&self) -> Option<&sift_protocol::PostgresStatisticsReport> {
+        self.statistics.as_ref()
+    }
+    pub(super) fn statistics_request(&self) -> &RequestState {
+        &self.statistics_request
+    }
+    pub(super) fn statistics_offset(&self) -> u32 {
+        self.statistics_offset
+    }
+    pub(super) fn statistics_selected(&self) -> usize {
+        self.statistics_selected
+    }
+    pub(super) fn start_statistics(&mut self) -> u64 {
+        self.statistics_epoch = self.statistics_epoch.wrapping_add(1);
+        self.statistics_request.start();
+        self.statistics_epoch
+    }
+    pub(super) fn fail_statistics(&mut self, message: impl Into<String>) {
+        self.statistics_request.fail(message);
+    }
+    pub(super) fn finish_statistics(
+        &mut self,
+        epoch: u64,
+        offset: u32,
+        result: Result<sift_protocol::PostgresStatisticsReport, String>,
+    ) {
+        if self.view != DatabaseMonitorView::Statistics
+            || !self.statistics_request.loading()
+            || epoch != self.statistics_epoch
+        {
+            return;
+        }
+        match result {
+            Ok(report) => {
+                self.statistics_selected = 0;
+                self.statistics_offset = offset;
+                self.statistics = Some(report);
+                self.statistics_request.succeed();
+            }
+            Err(message) => self.statistics_request.fail(message),
+        }
+    }
+    pub(super) fn move_statistics_selection(&mut self, delta: isize) {
+        let count = self
+            .statistics
+            .as_ref()
+            .map_or(0, |report| report.tables.len());
+        if count > 0 {
+            self.statistics_selected = self
+                .statistics_selected
+                .saturating_add_signed(delta)
+                .min(count - 1);
+        }
+    }
+    pub(super) fn clear_postgres_diagnostics(&mut self) {
+        self.replication_epoch = self.replication_epoch.wrapping_add(1);
+        self.statistics_epoch = self.statistics_epoch.wrapping_add(1);
+        self.replication = None;
+        self.replication_request = RequestState::default();
+        self.replication_selected = 0;
+        self.statistics = None;
+        self.statistics_request = RequestState::default();
+        self.statistics_offset = 0;
+        self.statistics_selected = 0;
+        if matches!(
+            self.view,
+            DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics
+        ) {
+            self.view = DatabaseMonitorView::Activity;
+        }
+    }
     pub(super) fn dashboard(&self) -> Option<&sift_protocol::ServerDashboard> {
         self.dashboard.as_ref()
     }
@@ -318,6 +568,15 @@ impl DatabaseMonitorState {
             self.objects_selected = 0;
             self.clear_object_preview();
         }
+        if self.view != view && view == DatabaseMonitorView::Replication {
+            self.replication_request = RequestState::default();
+            self.replication_selected = 0;
+        }
+        if self.view != view && view == DatabaseMonitorView::Statistics {
+            self.statistics_request = RequestState::default();
+            self.statistics_offset = 0;
+            self.statistics_selected = 0;
+        }
         self.view = view;
         if self.selected.is_some_and(|selected| match view {
             DatabaseMonitorView::Overview => true,
@@ -332,9 +591,11 @@ impl DatabaseMonitorState {
             | DatabaseMonitorView::Roles
             | DatabaseMonitorView::Ownership
             | DatabaseMonitorView::SchemaGrants => true,
+            DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics => true,
             DatabaseMonitorView::QueryStore => true,
             DatabaseMonitorView::AgentJobs => true,
             DatabaseMonitorView::SqlServerSettings => true,
+            DatabaseMonitorView::Maintenance => true,
         }) {
             self.selected = None;
         }
@@ -354,9 +615,13 @@ impl DatabaseMonitorState {
             | DatabaseMonitorView::Roles
             | DatabaseMonitorView::Ownership
             | DatabaseMonitorView::SchemaGrants => return Vec::new(),
+            DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics => {
+                return Vec::new()
+            }
             DatabaseMonitorView::QueryStore => return Vec::new(),
             DatabaseMonitorView::AgentJobs => return Vec::new(),
             DatabaseMonitorView::SqlServerSettings => return Vec::new(),
+            DatabaseMonitorView::Maintenance => return Vec::new(),
         };
         self.processes
             .iter()
@@ -794,7 +1059,91 @@ fn classify_alerts(
 
 #[cfg(test)]
 mod tests {
+    use super::super::commands::{CommandId, CommandLanguageMatch, CommandRegistry};
     use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn every_rendered_monitor_tab_is_reachable_with_vim_commands() {
+        assert_eq!(
+            CommandRegistry::resolve_language(&["d".into(), "s".into()]),
+            CommandLanguageMatch::Command(CommandId::OpenServerDashboard)
+        );
+        assert_eq!(
+            CommandRegistry::resolve_language(&["d".into(), "h".into()]),
+            CommandLanguageMatch::Command(CommandId::PreviousMonitorTab)
+        );
+        assert_eq!(
+            CommandRegistry::resolve_language(&["d".into(), "l".into()]),
+            CommandLanguageMatch::Command(CommandId::NextMonitorTab)
+        );
+
+        let mut button_ids = HashSet::new();
+        let state = DatabaseMonitorState::default();
+        for view in DatabaseMonitorView::ALL {
+            assert!(button_ids.insert(view.button_id()));
+            assert!(!view.label(&state).is_empty());
+            assert!(
+                ["sift/postgres", "sift/sql-server", "sift/sqlite"]
+                    .into_iter()
+                    .any(|provider| view.available_for(Some(provider), true)),
+                "{} has no supported keyboard route",
+                view.button_id()
+            );
+        }
+
+        for provider in ["sift/postgres", "sift/sql-server", "sift/sqlite"] {
+            let expected = DatabaseMonitorView::ALL
+                .into_iter()
+                .filter(|view| view.available_for(Some(provider), true))
+                .collect::<HashSet<_>>();
+            let mut seen = HashSet::new();
+            let mut view = DatabaseMonitorView::Overview;
+            for _ in 0..expected.len() {
+                view = view.adjacent_available(true, Some(provider), true);
+                assert!(seen.insert(view), "Monitor navigation repeated a tab early");
+                assert!(view.available_for(Some(provider), true));
+                assert_eq!(
+                    view.adjacent_available(false, Some(provider), true)
+                        .adjacent_available(true, Some(provider), true),
+                    view
+                );
+            }
+            assert_eq!(seen, expected);
+            assert_eq!(view, DatabaseMonitorView::Overview);
+        }
+        assert!(!DatabaseMonitorView::QueryStore.available_for(Some("sift/sql-server"), false));
+    }
+
+    #[test]
+    fn postgres_diagnostics_ignore_stale_results_after_connection_change() {
+        let mut monitor = DatabaseMonitorState::default();
+        monitor.set_view(DatabaseMonitorView::Replication);
+        let old_replication = monitor.start_replication();
+        monitor.clear_postgres_diagnostics();
+        monitor.set_view(DatabaseMonitorView::Replication);
+        let current_replication = monitor.start_replication();
+        monitor.finish_replication(old_replication, Err("previous connection".into()));
+        assert!(monitor.replication_request().loading());
+        monitor.finish_replication(current_replication, Err("current connection".into()));
+        assert_eq!(
+            monitor.replication_request().error(),
+            Some("current connection")
+        );
+
+        monitor.set_view(DatabaseMonitorView::Statistics);
+        let old_statistics = monitor.start_statistics();
+        monitor.clear_postgres_diagnostics();
+        monitor.set_view(DatabaseMonitorView::Statistics);
+        let current_statistics = monitor.start_statistics();
+        monitor.finish_statistics(old_statistics, 0, Err("previous connection".into()));
+        assert!(monitor.statistics_request().loading());
+        monitor.finish_statistics(current_statistics, 0, Err("current connection".into()));
+        assert_eq!(
+            monitor.statistics_request().error(),
+            Some("current connection")
+        );
+    }
 
     fn process(process_id: i64, blocked_by: Vec<i64>) -> DatabaseProcess {
         DatabaseProcess {

@@ -31,8 +31,9 @@ The canonical feature inventory remains the source of product feature status.
 - [x] Add transfer dry-run preview.
 - [x] Complete quarantine report retrieval, durable resume, and type-mapping workflows.
 - [~] Add operational metrics/traces and monitoring workflows; Prometheus,
-      OpenTelemetry, alerts, and process inspection exist, while the server
-      dashboard and broader engine statistics views remain open.
+      OpenTelemetry, alerts, process inspection, the bounded server dashboard,
+      and PostgreSQL replication/statistics inspection exist. Broader engine
+      statistics views remain open.
 - [ ] Complete Vim/accessibility/platform and signed-update validation.
 
 ## Design: metadata admission

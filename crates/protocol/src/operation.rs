@@ -615,6 +615,16 @@ pub enum Operation {
         offset: u32,
         limit: u32,
     },
+    ReadPostgresReplication {
+        session: SessionId,
+        connection: ConnectionId,
+    },
+    ReadPostgresStatistics {
+        session: SessionId,
+        connection: ConnectionId,
+        offset: u32,
+        limit: u32,
+    },
     PreviewPostgresObject {
         session: SessionId,
         connection: ConnectionId,
@@ -877,6 +887,8 @@ impl Operation {
             Self::ListDeadlocks { .. } => OperationKind::ListDeadlocks,
             Self::ListPostgresSettings { .. } => OperationKind::ListPostgresSettings,
             Self::ListPostgresObjects { .. } => OperationKind::ListPostgresObjects,
+            Self::ReadPostgresReplication { .. } => OperationKind::ReadPostgresReplication,
+            Self::ReadPostgresStatistics { .. } => OperationKind::ReadPostgresStatistics,
             Self::PreviewPostgresObject { .. } => OperationKind::PreviewPostgresObject,
             Self::ApplyPostgresObject { .. } => OperationKind::ApplyPostgresObject,
             Self::ReadQueryStore { .. } => OperationKind::ReadQueryStore,
@@ -1326,6 +1338,12 @@ impl Operation {
             }
             Operation::ListPostgresObjects { connection, .. } => {
                 summary("list", "postgres_object", Some(connection.0 as i64))
+            }
+            Operation::ReadPostgresReplication { connection, .. } => {
+                summary("read", "postgres_replication", Some(connection.0 as i64))
+            }
+            Operation::ReadPostgresStatistics { connection, .. } => {
+                summary("read", "postgres_statistics", Some(connection.0 as i64))
             }
             Operation::PreviewPostgresObject { connection, .. } => {
                 summary("preview", "postgres_object", Some(connection.0 as i64))

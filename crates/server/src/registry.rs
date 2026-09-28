@@ -583,6 +583,8 @@ impl RuntimeDriver {
             OperationKind::ListPostgresObjects
                 | OperationKind::PreviewPostgresObject
                 | OperationKind::ApplyPostgresObject
+                | OperationKind::ReadPostgresReplication
+                | OperationKind::ReadPostgresStatistics
         ) {
             return self.semantic_engine() == Some(Engine::Postgres)
                 && self.supports("driver.core@1");
