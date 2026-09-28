@@ -123,7 +123,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 113] = [
+    pub const ALL: [Self; 115] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
