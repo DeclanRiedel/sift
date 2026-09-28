@@ -30,7 +30,7 @@ pub(super) enum DatabaseMonitorView {
 }
 
 impl DatabaseMonitorView {
-    pub(super) const ALL: [Self; 19] = [
+    pub(super) const ALL: [Self; 20] = [
         Self::Overview,
         Self::Activity,
         Self::Locks,
