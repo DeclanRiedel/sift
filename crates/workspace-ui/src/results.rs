@@ -983,6 +983,8 @@ actions!(
         MoveLastResultColumn,
         DeleteSelectedValues,
         DeleteSelectedRow,
+        ReviewStagedEdits,
+        UndoAllStagedEdits,
         YankSelectedWithHeaders,
         PreviousResultTab,
         NextResultTab,
@@ -4253,6 +4255,28 @@ impl ResultsView {
     ) {
         if self.selected_cell_edit().is_some() {
             cx.emit(ResultsEvent::DeleteSelectedRowRequested);
+        }
+    }
+
+    fn review_staged_edits(
+        &mut self,
+        _: &ReviewStagedEdits,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.has_staged_changes() {
+            cx.emit(ResultsEvent::ReviewStagedEditsRequested);
+        }
+    }
+
+    fn undo_all_staged_edits(
+        &mut self,
+        _: &UndoAllStagedEdits,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.has_staged_changes() {
+            cx.emit(ResultsEvent::UndoAllStagedEditsRequested);
         }
     }
 
@@ -7822,6 +7846,8 @@ impl gpui::Render for ResultsView {
             .on_action(cx.listener(Self::paste_selected_cell))
             .on_action(cx.listener(Self::delete_selected_values))
             .on_action(cx.listener(Self::delete_selected_row))
+            .on_action(cx.listener(Self::review_staged_edits))
+            .on_action(cx.listener(Self::undo_all_staged_edits))
             .on_action(cx.listener(Self::revert_selected_cell))
             .on_action(cx.listener(Self::undo_staged_edit))
             .on_action(cx.listener(Self::redo_staged_edit))

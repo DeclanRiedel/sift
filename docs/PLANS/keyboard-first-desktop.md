@@ -90,7 +90,11 @@ prefixes display a compact which-key strip generated from the same vocabulary.
       `yy` copies the focused row, `yh` copies selected headers, and `p`
       stages pasted values through the existing edit path. Visual `y` keeps
       the existing headers-and-values yank.
-- [ ] Add editable-result `i`, `dd`, `o`, undo/redo, Preview, Apply, Revert.
+- [x] Add editable-result `i`, `dd`, `o`, undo/redo, Preview, Apply, Revert.
+      In the focused grid, `dd` stages a row delete; `x` clears selected
+      values, and visual `d` clears the range. `u`/Ctrl+R undo and redo cell
+      staging; `g p` opens the staged-edit review with an audited preview and
+      Apply, while `g u` discards all staged edits. Shift+U reverts one cell.
 - [ ] Add generated keyboard-equivalence tests proving every visible action has
       a command path.
 - [x] Add versioned `keymaps.json` overrides with compact modal and full-file
