@@ -69,6 +69,12 @@ An inspection view alone does not complete the management checklist.
       partition detach have typed preview/apply and Vim desktop controls;
       partition attach, extension update, dependency graph previews, and broader
       object management remain open.
+- [~] Add database role, schema grant, and database/schema ownership editing.
+      Bounded catalogs and typed guarded preview/apply APIs cover `CREATE ROLE
+      NOLOGIN`, explicit schema `USAGE`/`CREATE` grants, and owner changes.
+      Vim desktop inspection is available. Desktop editing, role attributes,
+      memberships, object/default privileges,
+      and effective privilege matrices remain open.
 - [ ] Add replication and statistics inspection UI with bounded reads and
       explicit permission errors.
 - [x] Add a read-only server-settings browser with bounded, role-visible reads,

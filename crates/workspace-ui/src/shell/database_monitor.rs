@@ -16,6 +16,9 @@ pub(super) enum DatabaseMonitorView {
     Settings,
     Extensions,
     Partitions,
+    Roles,
+    Ownership,
+    SchemaGrants,
     QueryStore,
     AgentJobs,
     SqlServerSettings,
@@ -55,6 +58,9 @@ pub(super) struct DatabaseMonitorState {
     settings_next_offset: Option<u32>,
     extensions: Vec<sift_protocol::PostgresExtension>,
     partitions: Vec<sift_protocol::PostgresPartition>,
+    roles: Vec<sift_protocol::PostgresRole>,
+    owners: Vec<sift_protocol::PostgresOwnedObject>,
+    schema_grants: Vec<sift_protocol::PostgresSchemaGrant>,
     objects_request: RequestState,
     objects_offset: u32,
     objects_next_offset: Option<u32>,
@@ -299,7 +305,11 @@ impl DatabaseMonitorState {
         if self.view != view
             && matches!(
                 view,
-                DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions
+                DatabaseMonitorView::Extensions
+                    | DatabaseMonitorView::Partitions
+                    | DatabaseMonitorView::Roles
+                    | DatabaseMonitorView::Ownership
+                    | DatabaseMonitorView::SchemaGrants
             )
         {
             self.objects_request = RequestState::default();
@@ -317,7 +327,11 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::History => true,
             DatabaseMonitorView::Alerts => !self.alerts.contains_key(&selected),
             DatabaseMonitorView::Settings => true,
-            DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions => true,
+            DatabaseMonitorView::Extensions
+            | DatabaseMonitorView::Partitions
+            | DatabaseMonitorView::Roles
+            | DatabaseMonitorView::Ownership
+            | DatabaseMonitorView::SchemaGrants => true,
             DatabaseMonitorView::QueryStore => true,
             DatabaseMonitorView::AgentJobs => true,
             DatabaseMonitorView::SqlServerSettings => true,
@@ -335,7 +349,11 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::History => return Vec::new(),
             DatabaseMonitorView::Alerts => self.alerts.keys().copied().collect(),
             DatabaseMonitorView::Settings => return Vec::new(),
-            DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions => return Vec::new(),
+            DatabaseMonitorView::Extensions
+            | DatabaseMonitorView::Partitions
+            | DatabaseMonitorView::Roles
+            | DatabaseMonitorView::Ownership
+            | DatabaseMonitorView::SchemaGrants => return Vec::new(),
             DatabaseMonitorView::QueryStore => return Vec::new(),
             DatabaseMonitorView::AgentJobs => return Vec::new(),
             DatabaseMonitorView::SqlServerSettings => return Vec::new(),
@@ -356,6 +374,15 @@ impl DatabaseMonitorState {
     }
     pub(super) fn partitions(&self) -> &[sift_protocol::PostgresPartition] {
         &self.partitions
+    }
+    pub(super) fn roles(&self) -> &[sift_protocol::PostgresRole] {
+        &self.roles
+    }
+    pub(super) fn owners(&self) -> &[sift_protocol::PostgresOwnedObject] {
+        &self.owners
+    }
+    pub(super) fn schema_grants(&self) -> &[sift_protocol::PostgresSchemaGrant] {
+        &self.schema_grants
     }
     pub(super) fn objects_request(&self) -> &RequestState {
         &self.objects_request
@@ -383,6 +410,9 @@ impl DatabaseMonitorState {
         let len = match self.view {
             DatabaseMonitorView::Extensions => self.extensions.len(),
             DatabaseMonitorView::Partitions => self.partitions.len(),
+            DatabaseMonitorView::Roles => self.roles.len(),
+            DatabaseMonitorView::Ownership => self.owners.len(),
+            DatabaseMonitorView::SchemaGrants => self.schema_grants.len(),
             _ => 0,
         };
         if len > 0 {
@@ -395,6 +425,9 @@ impl DatabaseMonitorState {
     pub(super) fn clear_objects(&mut self) {
         self.extensions.clear();
         self.partitions.clear();
+        self.roles.clear();
+        self.owners.clear();
+        self.schema_grants.clear();
         self.objects_request = RequestState::default();
         self.objects_offset = 0;
         self.objects_next_offset = None;
@@ -402,7 +435,11 @@ impl DatabaseMonitorState {
         self.clear_object_preview();
         if matches!(
             self.view,
-            DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions
+            DatabaseMonitorView::Extensions
+                | DatabaseMonitorView::Partitions
+                | DatabaseMonitorView::Roles
+                | DatabaseMonitorView::Ownership
+                | DatabaseMonitorView::SchemaGrants
         ) {
             self.view = DatabaseMonitorView::Activity;
         }
@@ -444,6 +481,69 @@ impl DatabaseMonitorState {
         match result {
             Ok(page) => {
                 self.partitions = page.items;
+                self.objects_offset = offset;
+                self.objects_next_offset = page.next_offset;
+                self.objects_selected = 0;
+                self.objects_request.succeed();
+            }
+            Err(message) => self.objects_request.fail(message),
+        }
+    }
+    pub(super) fn finish_roles(
+        &mut self,
+        offset: u32,
+        result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresRole>, String>,
+    ) {
+        if self.view != DatabaseMonitorView::Roles {
+            return;
+        }
+        match result {
+            Ok(page) => {
+                self.roles = page.items;
+                self.objects_offset = offset;
+                self.objects_next_offset = page.next_offset;
+                self.objects_selected = 0;
+                self.objects_request.succeed();
+            }
+            Err(message) => self.objects_request.fail(message),
+        }
+    }
+    pub(super) fn finish_owners(
+        &mut self,
+        offset: u32,
+        result: Result<
+            sift_protocol::PostgresObjectPage<sift_protocol::PostgresOwnedObject>,
+            String,
+        >,
+    ) {
+        if self.view != DatabaseMonitorView::Ownership {
+            return;
+        }
+        match result {
+            Ok(page) => {
+                self.owners = page.items;
+                self.objects_offset = offset;
+                self.objects_next_offset = page.next_offset;
+                self.objects_selected = 0;
+                self.objects_request.succeed();
+            }
+            Err(message) => self.objects_request.fail(message),
+        }
+    }
+    pub(super) fn finish_schema_grants(
+        &mut self,
+        offset: u32,
+        result: Result<
+            sift_protocol::PostgresObjectPage<sift_protocol::PostgresSchemaGrant>,
+            String,
+        >,
+    ) {
+        if self.view != DatabaseMonitorView::SchemaGrants {
+            return;
+        }
+        match result {
+            Ok(page) => {
+                self.schema_grants = page.items;
                 self.objects_offset = offset;
                 self.objects_next_offset = page.next_offset;
                 self.objects_selected = 0;

@@ -3731,6 +3731,15 @@ pub enum ExecutorCommand {
     LoadPostgresPartitions {
         offset: u32,
     },
+    LoadPostgresRoles {
+        offset: u32,
+    },
+    LoadPostgresOwners {
+        offset: u32,
+    },
+    LoadPostgresSchemaGrants {
+        offset: u32,
+    },
     PreviewPostgresObject {
         action: sift_protocol::PostgresObjectAction,
     },
@@ -4597,6 +4606,20 @@ pub enum ExecutorEvent {
     PostgresPartitionsLoaded {
         offset: u32,
         result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPartition>, String>,
+    },
+    PostgresRolesLoaded {
+        offset: u32,
+        result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresRole>, String>,
+    },
+    PostgresOwnersLoaded {
+        offset: u32,
+        result:
+            Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresOwnedObject>, String>,
+    },
+    PostgresSchemaGrantsLoaded {
+        offset: u32,
+        result:
+            Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresSchemaGrant>, String>,
     },
     PostgresObjectPreviewed(Result<sift_protocol::PostgresObjectPreview, String>),
     PostgresObjectApplied(Result<(), String>),
@@ -16698,6 +16721,18 @@ impl WorkspaceShell {
                 self.database_monitor.finish_partitions(offset, result);
                 cx.notify();
             }
+            ExecutorEvent::PostgresRolesLoaded { offset, result } => {
+                self.database_monitor.finish_roles(offset, result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresOwnersLoaded { offset, result } => {
+                self.database_monitor.finish_owners(offset, result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresSchemaGrantsLoaded { offset, result } => {
+                self.database_monitor.finish_schema_grants(offset, result);
+                cx.notify();
+            }
             ExecutorEvent::PostgresObjectPreviewed(result) => {
                 self.database_monitor.finish_object_preview(result);
                 cx.notify();
@@ -27172,7 +27207,11 @@ impl WorkspaceShell {
         }
         if matches!(
             view,
-            DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions
+            DatabaseMonitorView::Extensions
+                | DatabaseMonitorView::Partitions
+                | DatabaseMonitorView::Roles
+                | DatabaseMonitorView::Ownership
+                | DatabaseMonitorView::SchemaGrants
         ) {
             self.load_postgres_objects(0, cx);
         }
@@ -27333,6 +27372,11 @@ impl WorkspaceShell {
         let command = match self.database_monitor.view() {
             DatabaseMonitorView::Extensions => ExecutorCommand::LoadPostgresExtensions { offset },
             DatabaseMonitorView::Partitions => ExecutorCommand::LoadPostgresPartitions { offset },
+            DatabaseMonitorView::Roles => ExecutorCommand::LoadPostgresRoles { offset },
+            DatabaseMonitorView::Ownership => ExecutorCommand::LoadPostgresOwners { offset },
+            DatabaseMonitorView::SchemaGrants => {
+                ExecutorCommand::LoadPostgresSchemaGrants { offset }
+            }
             _ => return,
         };
         if self
@@ -27380,6 +27424,7 @@ impl WorkspaceShell {
             action: preview.action,
             precondition: preview.precondition,
             confirmed: true,
+            production_confirmed: false,
         };
         if self.executor_sender.as_ref().is_some_and(|sender| {
             sender
@@ -36846,6 +36891,12 @@ impl WorkspaceShell {
                 self.active_bottom_tool = BottomTool::Monitor;
                 self.bottom_dock.presentation.open = true;
                 self.set_database_monitor_view(DatabaseMonitorView::Overview, cx);
+                self.focus_handle.focus(window, cx);
+            }
+            CommandId::OpenPostgresRoles => {
+                self.active_bottom_tool = BottomTool::Monitor;
+                self.bottom_dock.presentation.open = true;
+                self.set_database_monitor_view(DatabaseMonitorView::Roles, cx);
                 self.focus_handle.focus(window, cx);
             }
             CommandId::ShowBenchmarkLibrary => {
