@@ -3719,6 +3719,7 @@ pub enum ExecutorCommand {
         tenant_id: i64,
         profile_id: i64,
     },
+    LoadServerDashboard,
     LoadDatabaseProcesses,
     LoadDatabaseDeadlocks,
     LoadPostgresSettings {
@@ -4589,6 +4590,7 @@ pub enum ExecutorEvent {
         profile_id: i64,
     },
     ProfileDeletionFailed(String),
+    ServerDashboardLoaded(Result<sift_protocol::ServerDashboard, String>),
     DatabaseProcessesLoaded(Result<Vec<sift_protocol::DatabaseProcess>, String>),
     DatabaseDeadlocksLoaded(Result<Vec<sift_protocol::DatabaseDeadlockEvent>, String>),
     PostgresSettingsLoaded {
@@ -13606,6 +13608,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::Connection(status) => {
+                self.database_monitor.clear_dashboard();
                 self.database_monitor.clear_query_store();
                 self.database_monitor.clear_objects();
                 self.database_monitor.clear_postgres_diagnostics();
@@ -16687,6 +16690,10 @@ impl WorkspaceShell {
             }
             ExecutorEvent::ProfileDeletionFailed(message) => {
                 self.show_error_toast(message, cx);
+            }
+            ExecutorEvent::ServerDashboardLoaded(result) => {
+                self.database_monitor.finish_dashboard(result);
+                cx.notify();
             }
             ExecutorEvent::DatabaseProcessesLoaded(result) => {
                 self.database_monitor.finish_loading(result);
@@ -26811,7 +26818,9 @@ impl WorkspaceShell {
             self.bottom_dock.presentation.open = true;
         }
         if tool == BottomTool::Monitor && self.bottom_dock.presentation.open {
-            if self.database_monitor.view() == DatabaseMonitorView::SqlServerSettings {
+            if self.database_monitor.view() == DatabaseMonitorView::Overview {
+                self.load_server_dashboard(cx);
+            } else if self.database_monitor.view() == DatabaseMonitorView::SqlServerSettings {
                 self.load_sqlserver_settings(cx);
             } else if self.database_monitor.view() == DatabaseMonitorView::AgentJobs {
                 self.load_agent_jobs(cx);
@@ -27161,8 +27170,30 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn load_server_dashboard(&mut self, cx: &mut Context<Self>) {
+        if self.database_monitor.dashboard_request().loading() {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.database_monitor
+                .finish_dashboard(Err("Database executor is unavailable".into()));
+            cx.notify();
+            return;
+        };
+        if sender.send(ExecutorCommand::LoadServerDashboard).is_ok() {
+            self.database_monitor.start_dashboard();
+        } else {
+            self.database_monitor
+                .finish_dashboard(Err("Database executor is unavailable".into()));
+        }
+        cx.notify();
+    }
+
     fn set_database_monitor_view(&mut self, view: DatabaseMonitorView, cx: &mut Context<Self>) {
         self.database_monitor.set_view(view);
+        if view == DatabaseMonitorView::Overview {
+            self.load_server_dashboard(cx);
+        }
         if view == DatabaseMonitorView::History {
             self.load_database_deadlocks(cx);
         }
@@ -36931,6 +36962,12 @@ impl WorkspaceShell {
             }
             CommandId::PickForeignKeyValue => self.open_foreign_key_picker(window, cx),
             CommandId::FocusResults => self.focus_results(window, cx),
+            CommandId::OpenServerDashboard => {
+                self.active_bottom_tool = BottomTool::Monitor;
+                self.bottom_dock.presentation.open = true;
+                self.set_database_monitor_view(DatabaseMonitorView::Overview, cx);
+                self.focus_handle.focus(window, cx);
+            }
             CommandId::ShowBenchmarkLibrary => {
                 self.open_benchmark_library(None, cx);
                 self.focus_handle.focus(window, cx);

@@ -8,7 +8,8 @@
 //!
 //! ANALYZE safety: for a statement that is not a plain read, `analyze=true`
 //! runs inside a transaction that always rolls back, so DML side effects are
-//! discarded. SQL Server ANALYZE (STATISTICS XML) is not wired in v1.
+//! discarded. SQL Server measured plans use the separate supervised Profile
+//! path so the editor's connection and transaction are never instrumented.
 
 use sift_protocol::{
     BeginTransactionRequest, Code, ConnectionId, DriverError, EndTransactionRequest, Engine,
@@ -555,7 +556,7 @@ fn nearest_relop(d: roxmltree::Node) -> Option<roxmltree::NodeId> {
         .map(|a| a.id())
 }
 
-fn parse_mssql_plan(xml: &str) -> Result<PlanNode, DriverError> {
+pub(crate) fn parse_mssql_plan(xml: &str) -> Result<PlanNode, DriverError> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| {
         DriverError::new(
             Code::DriverInternal,
@@ -571,6 +572,15 @@ fn parse_mssql_plan(xml: &str) -> Result<PlanNode, DriverError> {
                 .with_engine(Engine::SqlServer)
         })?;
     Ok(mssql_node(relop))
+}
+
+pub(crate) fn mssql_query_elapsed_ms(xml: &str) -> Option<f64> {
+    let doc = roxmltree::Document::parse(xml).ok()?;
+    doc.descendants()
+        .find(|node| is_tag(*node, "QueryTimeStats"))?
+        .attribute("ElapsedTime")?
+        .parse::<f64>()
+        .ok()
 }
 
 fn mssql_node(node: roxmltree::Node) -> PlanNode {
@@ -591,15 +601,16 @@ fn mssql_node(node: roxmltree::Node) -> PlanNode {
         .filter(|d| is_tag(*d, "RunTimeCountersPerThread") && nearest_relop(*d) == Some(node.id()))
         .collect();
     if !counters.is_empty() {
-        p.actual_rows = Some(
-            counters
-                .iter()
-                .filter_map(|c| {
-                    c.attribute("ActualRows")
-                        .and_then(|s| s.parse::<f64>().ok())
-                })
-                .sum(),
-        );
+        let rows: Vec<f64> = counters
+            .iter()
+            .filter_map(|c| {
+                c.attribute("ActualRows")
+                    .and_then(|s| s.parse::<f64>().ok())
+            })
+            .collect();
+        if !rows.is_empty() {
+            p.actual_rows = Some(rows.into_iter().sum());
+        }
         p.actual_ms = counters
             .iter()
             .filter_map(|c| {
@@ -607,6 +618,24 @@ fn mssql_node(node: roxmltree::Node) -> PlanNode {
                     .and_then(|s| s.parse::<f64>().ok())
             })
             .fold(None, |acc, v| Some(acc.map_or(v, |a: f64| a.max(v))));
+        for name in [
+            "ActualLogicalReads",
+            "ActualPhysicalReads",
+            "ActualReadAheads",
+            "ActualLobLogicalReads",
+            "ActualLobPhysicalReads",
+        ] {
+            let values: Vec<u64> = counters
+                .iter()
+                .filter_map(|counter| counter.attribute(name)?.parse::<u64>().ok())
+                .collect();
+            if !values.is_empty() {
+                p.extra.insert(
+                    name.into(),
+                    serde_json::Value::from(values.into_iter().fold(0u64, u64::saturating_add)),
+                );
+            }
+        }
     }
 
     for a in node.attributes() {
@@ -812,6 +841,15 @@ mod tests {
         assert_eq!(root.children[0].relation.as_deref(), Some("users"));
         assert_eq!(root.children[1].op, "Index Seek");
         assert_eq!(root.children[1].relation.as_deref(), Some("orders"));
+    }
+
+    #[test]
+    fn sqlserver_runtime_counters_keep_missing_values_unavailable() {
+        let xml = r#"<ShowPlanXML><BatchSequence><Batch><Statements><StmtSimple><QueryPlan><QueryTimeStats ElapsedTime="7"/><RelOp PhysicalOp="Compute Scalar"><RunTimeInformation><RunTimeCountersPerThread ActualLogicalReads="3"/></RunTimeInformation></RelOp></QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>"#;
+        let root = parse_mssql_plan(xml).unwrap();
+        assert_eq!(root.actual_rows, None);
+        assert_eq!(root.extra["ActualLogicalReads"], 3);
+        assert_eq!(mssql_query_elapsed_ms(xml), Some(7.0));
     }
 
     fn capture(engine: Engine, root: PlanNode) -> sift_protocol::PlanCapture {

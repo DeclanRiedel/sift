@@ -9,7 +9,7 @@ use sift_protocol::{
 use crate::error::{ApiError, ApiResult};
 use crate::session::SessionStore;
 
-const REPLICATION_PERMISSION_SQL: &str = "SELECT (current_setting('is_superuser') = 'on' OR pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'member'))";
+const REPLICATION_PERMISSION_SQL: &str = "SELECT (current_setting('is_superuser') = 'on' OR pg_catalog.pg_has_role(current_user, 'pg_read_all_stats', 'USAGE'))";
 const SENDERS_SQL: &str = "SELECT pid::bigint, application_name::text, state::text, sync_state::text, (EXTRACT(EPOCH FROM write_lag) * 1000)::bigint, (EXTRACT(EPOCH FROM flush_lag) * 1000)::bigint, (EXTRACT(EPOCH FROM replay_lag) * 1000)::bigint FROM pg_catalog.pg_stat_replication ORDER BY pid LIMIT 201";
 const RECEIVER_SQL: &str = "SELECT status::text, received_lsn::text, latest_end_lsn::text FROM pg_catalog.pg_stat_wal_receiver LIMIT 2";
 const SLOTS_SQL: &str = "SELECT slot_name::text, slot_type::text, database::text, active, restart_lsn::text, confirmed_flush_lsn::text FROM pg_catalog.pg_replication_slots ORDER BY slot_name LIMIT 201";

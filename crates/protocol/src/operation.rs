@@ -590,6 +590,10 @@ pub enum Operation {
         connection: ConnectionId,
         run_id: uuid::Uuid,
     },
+    ReadServerDashboard {
+        session: SessionId,
+        connection: ConnectionId,
+    },
     ListProcesses {
         session: SessionId,
         connection: ConnectionId,
@@ -878,6 +882,7 @@ impl Operation {
             Self::CancelProfile { .. } => OperationKind::CancelProfile,
             Self::BenchmarkQuery { .. } => OperationKind::BenchmarkQuery,
             Self::CancelBenchmark { .. } => OperationKind::CancelBenchmark,
+            Self::ReadServerDashboard { .. } => OperationKind::ReadServerDashboard,
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
             Self::ListDeadlocks { .. } => OperationKind::ListDeadlocks,
             Self::ListPostgresSettings { .. } => OperationKind::ListPostgresSettings,
@@ -1318,6 +1323,9 @@ impl Operation {
             }
             Operation::CancelBenchmark { connection, .. } => {
                 summary("cancel_benchmark", "query", Some(connection.0 as i64))
+            }
+            Operation::ReadServerDashboard { connection, .. } => {
+                summary("read", "server_dashboard", Some(connection.0 as i64))
             }
             Operation::ListProcesses { connection, .. } => {
                 summary("list", "process", Some(connection.0 as i64))

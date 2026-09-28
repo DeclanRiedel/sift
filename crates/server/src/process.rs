@@ -1,8 +1,44 @@
 use sift_protocol::{
-    Code, ConnectionId, DatabaseDeadlockEvent, DatabaseDeadlockParticipant, DatabaseHeldLock,
-    DatabaseLockWait, DatabaseProcess, DriverError, Engine, ExecuteRequestHttp,
-    KillProcessResponse, SessionId, Value,
+    Code, ConnectionId, DashboardProcessSummary, DatabaseDeadlockEvent,
+    DatabaseDeadlockParticipant, DatabaseHeldLock, DatabaseLockWait, DatabaseProcess, DriverError,
+    Engine, ExecuteRequestHttp, KillProcessResponse, SessionId, Value,
 };
+
+pub fn dashboard_summary(processes: &[DatabaseProcess]) -> DashboardProcessSummary {
+    let sample = &processes[..processes.len().min(500)];
+    DashboardProcessSummary {
+        observed: sample.len() as u32,
+        active: sample
+            .iter()
+            .filter(|process| {
+                process.state.as_deref().is_some_and(|state| {
+                    matches!(
+                        state.to_ascii_lowercase().as_str(),
+                        "active" | "running" | "runnable"
+                    )
+                })
+            })
+            .count() as u32,
+        waiting: sample
+            .iter()
+            .filter(|process| process.wait.as_ref().is_some_and(|wait| !wait.is_empty()))
+            .count() as u32,
+        blocked: sample
+            .iter()
+            .filter(|process| !process.blocked_by.is_empty())
+            .count() as u32,
+        idle_in_transaction: sample
+            .iter()
+            .filter(|process| {
+                process
+                    .state
+                    .as_deref()
+                    .is_some_and(|state| state.eq_ignore_ascii_case("idle in transaction"))
+            })
+            .count() as u32,
+        incomplete: processes.len() >= 500,
+    }
+}
 
 use crate::error::{ApiError, ApiResult};
 use crate::session::SessionStore;

@@ -2480,3 +2480,44 @@ denied this cross-schema workbench, and read-only profiles cannot apply. Each
 read, preview, and apply has its own audited Operation. Partition attach,
 extension update, dependency graph previews, and atomic cross-object plans
 require separate designs.
+
+## ADR-064 — A Connection Dashboard Is A Bounded Read-Only Snapshot
+
+Status: accepted. Date: 2026-09-29.
+
+The database server dashboard is a per-connection inspection surface. Its
+server-owned response contains a sample time, engine, a bounded process-count
+summary, and the effective capability states for its drill-down views. It
+never returns SQL text, connection secrets, or a raw process list. The process
+summary reuses the existing 500-row PostgreSQL and SQL Server monitor query;
+at the cap it reports that the counts may be incomplete. SQLite reports the
+process section as unsupported while still returning its connection and
+capability state.
+
+`ReadServerDashboard` is a distinct audited read operation. The handler checks
+connection ownership and effective authorization before sampling. Database
+monitoring permission failures produce a section-level permission state, so
+the rest of the dashboard remains usable. Driver calls retain the existing
+execution timeout and cancellation boundary. No `Driver` trait method is
+added. The desktop opens the Overview tab through a Vim-accessible command
+and refreshes on demand; it does not poll in the background.
+
+## ADR-065 — PostgreSQL diagnostics are bounded permission-aware snapshots
+
+Status: accepted. Date: 2026-09-29.
+
+Replication and statistics inspection are separate audited read Operations,
+available only on PostgreSQL connections. Server-owned fixed SQL runs through
+the existing supervised execution path. Replication inspection first checks
+effective PostgreSQL monitoring access and returns an explicit denial without
+querying replication catalogs when the role lacks it. Its result includes only
+sender, WAL receiver, and slot fields needed for diagnosis, omitting connection
+strings, addresses, and SQL text. Sender and slot lists have hard row caps and
+truncation flags.
+
+Statistics inspection returns current-database cumulative counters and a
+bounded page of user-table counters for relations with SELECT privilege.
+Unavailable values remain nullable, and a single snapshot does not imply a
+rate or predict replication catch-up time. Managed schema-restricted profiles
+cannot access these cross-schema catalog views. The desktop Monitor has
+explicit refresh and Vim navigation, with no automatic polling or mutation.

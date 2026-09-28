@@ -41,7 +41,7 @@ This slice is read-only. The server returns bounded snapshots from
 `pg_stat_replication`, `pg_stat_wal_receiver`, and `pg_replication_slots`, plus
 current-database and accessible user-table statistics. It omits connection
 strings, host addresses, SQL text, and other credential-bearing fields.
-Replication reads require `pg_read_all_stats` membership or superuser rights;
+Replication reads require effective `pg_read_all_stats` usage or superuser rights;
 PostgreSQL permission errors are surfaced explicitly. Database statistics are
 limited to `current_database()`, and table statistics require SELECT privilege
 on each relation. Managed schema-restricted profiles cannot use these
@@ -105,7 +105,7 @@ An inspection view alone does not complete the management checklist.
 
 ### Replication and statistics inspection implementation
 
-The replication API requires PostgreSQL `pg_read_all_stats` membership or
+The replication API requires effective PostgreSQL `pg_read_all_stats` usage or
 superuser and returns explicit Forbidden otherwise. It caps senders and slots
 at 200 rows each with truncation flags and reads at most one WAL receiver.
 Connection strings, client addresses, SQL text, and credential-bearing fields

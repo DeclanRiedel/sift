@@ -1215,11 +1215,11 @@ pub fn app(state: AppState) -> Router {
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/profile",
-            post_with(post_profile, doc("profileQuery", "Capture a bounded PostgreSQL read-only actual plan")),
+            post_with(post_profile, doc("profileQuery", "Capture a bounded PostgreSQL or SQL Server actual plan")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/profile/:run_id/cancel",
-            post_with(post_cancel_profile, doc("cancelProfile", "Cancel an active PostgreSQL Profile run")),
+            post_with(post_cancel_profile, doc("cancelProfile", "Cancel an active Profile run")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/benchmark",
@@ -1228,6 +1228,10 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/benchmark/:run_id/cancel",
             post_with(post_cancel_benchmark, doc("cancelBenchmark", "Cancel a benchmark and retain partial samples")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/dashboard",
+            get_with(read_server_dashboard, doc("readServerDashboard", "Read a bounded database server overview")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/processes",

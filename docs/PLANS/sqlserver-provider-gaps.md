@@ -15,8 +15,11 @@ current public support boundary.
       `Value::Decimal`; revisit the patch on upstream upgrades.
 - [ ] Decide a lossless representation and bind contract for supported
       `sql_variant`/UDT families; retain explicit unsupported errors for others.
-- [ ] Add actual execution plans with scoped permissions, supervised execution,
-      cancellation, result/plan bounds, and a separate measured-plan UI.
+- [x] Add actual execution plans with scoped permissions, supervised execution,
+      cancellation, result/plan bounds, and a separate measured-plan UI. The
+      API and desktop path use `STATISTICS XML`; live parameterized capture,
+      oversized-result refusal, and disposable restricted-login `SHOWPLAN`
+      grant/revoke acceptance pass.
 - [~] Export supported temporal, memory, replication, and policy table shapes,
       or keep each explicit rejection until its round trip is proven. Basic
       system-versioned tables now round-trip; other shapes remain excluded.

@@ -6,6 +6,7 @@ use super::RequestState;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum DatabaseMonitorView {
+    Overview,
     #[default]
     Activity,
     Locks,
@@ -41,6 +42,8 @@ impl DatabaseAlertKind {
 
 #[derive(Debug, Default)]
 pub(super) struct DatabaseMonitorState {
+    dashboard: Option<sift_protocol::ServerDashboard>,
+    dashboard_request: RequestState,
     processes: Vec<DatabaseProcess>,
     deadlocks: Vec<DatabaseDeadlockEvent>,
     request: RequestState,
@@ -202,6 +205,37 @@ impl DatabaseMonitorState {
             self.view = DatabaseMonitorView::Activity;
         }
     }
+    pub(super) fn dashboard(&self) -> Option<&sift_protocol::ServerDashboard> {
+        self.dashboard.as_ref()
+    }
+
+    pub(super) fn dashboard_request(&self) -> &RequestState {
+        &self.dashboard_request
+    }
+
+    pub(super) fn start_dashboard(&mut self) {
+        self.dashboard = None;
+        self.dashboard_request.start();
+    }
+
+    pub(super) fn clear_dashboard(&mut self) {
+        self.dashboard = None;
+        self.dashboard_request = RequestState::Idle;
+    }
+
+    pub(super) fn finish_dashboard(
+        &mut self,
+        result: Result<sift_protocol::ServerDashboard, String>,
+    ) {
+        match result {
+            Ok(report) => {
+                self.dashboard = Some(report);
+                self.dashboard_request.succeed();
+            }
+            Err(message) => self.dashboard_request.fail(message),
+        }
+    }
+
     pub(super) fn request(&self) -> &RequestState {
         &self.request
     }
@@ -418,6 +452,7 @@ impl DatabaseMonitorState {
         }
         self.view = view;
         if self.selected.is_some_and(|selected| match view {
+            DatabaseMonitorView::Overview => true,
             DatabaseMonitorView::Activity => false,
             DatabaseMonitorView::Locks => !self.lock_process_ids().contains(&selected),
             DatabaseMonitorView::Deadlocks => !self.deadlock_process_ids().contains(&selected),
@@ -436,6 +471,7 @@ impl DatabaseMonitorState {
 
     pub(super) fn visible_processes(&self) -> Vec<DatabaseProcess> {
         let included = match self.view {
+            DatabaseMonitorView::Overview => return Vec::new(),
             DatabaseMonitorView::Activity => return self.processes.clone(),
             DatabaseMonitorView::Locks => self.lock_process_ids(),
             DatabaseMonitorView::Deadlocks => self.deadlock_process_ids(),
