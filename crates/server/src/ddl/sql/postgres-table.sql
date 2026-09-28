@@ -57,14 +57,13 @@ SELECT CASE WHEN t.relispartition THEN
             WHERE inh.inhrelid=t.oid)
     END
     WHEN t.relkind NOT IN ('r','p')
-    OR (SELECT count(*) FROM pg_catalog.pg_inherits WHERE inhrelid=t.oid)>1
     OR t.reloptions IS NOT NULL
     OR t.reltablespace <> 0 OR (t.relam <> 0 AND t.relam <> (SELECT oid FROM pg_catalog.pg_am WHERE amname='heap'))
     OR EXISTS (SELECT 1 FROM pg_catalog.pg_index WHERE indrelid=t.oid AND (NOT indisvalid OR NOT indisready OR indisclustered OR indisreplident))
     OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type ty ON ty.oid=a.atttypid
         WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped AND
         (a.attstorage<>ty.typstorage OR a.attcompression<>'' OR a.attoptions IS NOT NULL OR a.attfdwoptions IS NOT NULL))
-    THEN 'sift:unsupported:multiple inheritance, custom storage or table options'
+    THEN 'sift:unsupported:custom storage or table options'
     ELSE COALESCE((SELECT string_agg(format(
         'CREATE SEQUENCE %I.%I AS %s START WITH %s INCREMENT BY %s MINVALUE %s MAXVALUE %s CACHE %s %s;',
         sn.nspname,sc.relname,format_type(s.seqtypid,NULL),s.seqstart,s.seqincrement,s.seqmin,s.seqmax,s.seqcache,
@@ -77,10 +76,11 @@ SELECT CASE WHEN t.relispartition THEN
         COALESCE((SELECT string_agg(definition,E',\n    ' ORDER BY attnum) FROM columns),'') ||
         COALESCE((SELECT E',\n    ' || string_agg(definition,E',\n    ' ORDER BY oid) FROM constraints),'') || E'\n)' ||
         CASE WHEN t.relkind='p' THEN ' PARTITION BY ' || pg_get_partkeydef(t.oid) ELSE '' END ||
-        COALESCE((SELECT format(' INHERITS (%I.%I)',pn.nspname,parent.relname)
+        COALESCE((SELECT format(' INHERITS (%s)',
+            string_agg(format('%I.%I',pn.nspname,parent.relname),', ' ORDER BY inh.inhseqno))
             FROM pg_catalog.pg_inherits inh JOIN pg_catalog.pg_class parent ON parent.oid=inh.inhparent
             JOIN pg_catalog.pg_namespace pn ON pn.oid=parent.relnamespace
-            WHERE inh.inhrelid=t.oid),'') || ';' ||
+            WHERE inh.inhrelid=t.oid HAVING count(*)>0),'') || ';' ||
         COALESCE((SELECT E'\n' || string_agg(format('ALTER SEQUENCE %I.%I OWNED BY %I.%I.%I;',sn.nspname,sc.relname,n.nspname,t.relname,a.attname),E'\n' ORDER BY a.attnum)
         FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_sequence s ON s.seqrelid=pg_get_serial_sequence(t.oid::regclass::text,a.attname)::regclass
         JOIN pg_catalog.pg_class sc ON sc.oid=s.seqrelid JOIN pg_catalog.pg_namespace sn ON sn.oid=sc.relnamespace

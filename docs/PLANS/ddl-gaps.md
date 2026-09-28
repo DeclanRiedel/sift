@@ -23,10 +23,10 @@ for executed evidence and [graduation](postgres-sqlserver-graduation.md) for gat
 
 - Standalone index addressing: indexes are exported with tables; adding an
   ObjectKind requires a public protocol change.
-- PostgreSQL foreign tables, multiple inheritance, custom
+- PostgreSQL foreign tables, custom
   storage/options and unsupported index state return explicit errors. Simple
   partition children (including local indexes, constraints, and triggers),
-  single-parent inheritance, table RLS policies, and rewrite rules export
+  single and multiple inheritance, table RLS policies, and rewrite rules export
   natively. Structural migrations fence these shapes.
 - SQL Server advanced temporal variants, memory/replication/policy tables,
   most advanced storage, nonordinary indexes, untrusted/disabled constraints,
@@ -52,3 +52,8 @@ fence structural migration of the parent, even when the child is absent from the
 snapshot. Verify this with a parent-only live catalog request and a migration
 preview refusal. This is a safety boundary; authoring a lossless inheritance
 migration remains separate work.
+
+For native export of multiple inheritance, emit every parent in `inhseqno`
+order while keeping only local child columns and constraints in the table body.
+Round-trip a child with two distinct parents before claiming support; its
+structural migration remains fenced.

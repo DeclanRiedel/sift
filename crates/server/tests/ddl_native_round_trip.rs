@@ -204,6 +204,9 @@ CREATE TRIGGER child_changed BEFORE UPDATE ON {src}.child FOR EACH ROW EXECUTE F
 CREATE TABLE {src}.inherited_parent (base_id int NOT NULL);
 CREATE TABLE {src}.inherited_child (local_note text) INHERITS ({src}.inherited_parent);
 CREATE INDEX inherited_note_idx ON {src}.inherited_child (local_note);
+CREATE TABLE {src}.inherited_parent_two (extra_id int NOT NULL);
+CREATE TABLE {src}.multi_child (local_note text) INHERITS ({src}.inherited_parent, {src}.inherited_parent_two);
+CREATE INDEX multi_note_idx ON {src}.multi_child (local_note);
 CREATE TABLE {dst}.external_inherited_child (external_note text) INHERITS ({src}.inherited_parent);
 CREATE TABLE {src}.policy_only (id integer);
 CREATE POLICY positive_id ON {src}.policy_only FOR SELECT TO PUBLIC USING (id > 0);
@@ -256,6 +259,15 @@ ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
         ObjectKind::Table,
     )
     .await;
+    round_trip(
+        &driver,
+        &conn,
+        &src,
+        &dst,
+        "inherited_parent_two",
+        ObjectKind::Table,
+    )
+    .await;
     let inherited = round_trip(
         &driver,
         &conn,
@@ -268,6 +280,11 @@ ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
     assert!(inherited.contains("INHERITS"));
     assert!(inherited.contains("local_note"));
     assert!(inherited.contains("inherited_note_idx"));
+    let multi = round_trip(&driver, &conn, &src, &dst, "multi_child", ObjectKind::Table).await;
+    assert!(multi.contains("multi_note_idx"));
+    assert!(multi.contains(&format!(
+        "INHERITS ({src}.inherited_parent, {src}.inherited_parent_two)"
+    )));
     round_trip(&driver, &conn, &src, &dst, "policy_only", ObjectKind::Table).await;
     let security_shape = |graph: &sift_protocol::CatalogGraphData| {
         let table = graph

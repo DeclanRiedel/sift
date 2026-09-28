@@ -15,7 +15,8 @@ sources for current support claims.
       structural migrations. Single-parent inheritance with local columns and
       indexes also round-trips. Parent tables are fenced and fingerprint direct
       descendants even when those children are outside the requested schema;
-      multiple inheritance and full dependency order remain open.
+      multiple inheritance also round-trips in catalog parent order. Full
+      dependency order remains open.
 - [ ] Export foreign-table server/options metadata with permission-aware reads.
 - [~] Represent row-level security policies and rules in native DDL, with
       explicit ownership and grant boundaries. Table export now includes policies,
