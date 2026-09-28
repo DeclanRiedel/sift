@@ -83,6 +83,97 @@ async fn sqlite_managed_profile_transactions_catalog_plans_and_atomic_import() {
         .execute(session, connection, "INSERT INTO items VALUES(1,'kept')")
         .await
         .unwrap();
+    let measured = client
+        .profile(
+            session,
+            connection,
+            ProfileRequest {
+                connection,
+                run_id: uuid::Uuid::new_v4(),
+                sql: "SELECT label FROM items WHERE id = ?".into(),
+                params: vec![Value::Int64(1)],
+                timeout_ms: 10_000,
+                workload_confirmed: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(measured.plan.engine, Engine::Sqlite);
+    assert!(!measured.plan.analyzed);
+    assert_eq!(measured.rows_returned, Some(1));
+    assert!(measured.server_elapsed_ns > 0);
+    assert_eq!(measured.planning_ms, None);
+    assert_eq!(measured.execution_ms, None);
+    fn no_invented_metrics(node: &PlanNode) -> bool {
+        node.est_cost.is_none()
+            && node.actual_rows.is_none()
+            && node.actual_ms.is_none()
+            && node.children.iter().all(no_invented_metrics)
+    }
+    assert!(no_invented_metrics(&measured.plan.root));
+    let benchmark = client
+        .benchmark(
+            session,
+            connection,
+            BenchmarkRequest {
+                run_id: uuid::Uuid::new_v4(),
+                sql: "SELECT label FROM items WHERE id = ?".into(),
+                params: vec![Value::Int64(1)],
+                warmups: 0,
+                iterations: 1,
+                query_timeout_ms: 10_000,
+                total_budget_ms: 10_000,
+                delay_ms: 0,
+                workload_confirmed: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(benchmark.samples.len(), 1);
+    assert_eq!(benchmark.samples[0].outcome, BenchmarkOutcome::Success);
+    assert_eq!(benchmark.samples[0].rows, Some(1));
+    let refused_write = client
+        .profile(
+            session,
+            connection,
+            ProfileRequest {
+                connection,
+                run_id: uuid::Uuid::new_v4(),
+                sql: "UPDATE items SET label = 'changed' WHERE id = 1".into(),
+                params: Vec::new(),
+                timeout_ms: 10_000,
+                workload_confirmed: true,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(refused_write.to_string().contains("read query"));
+    let refused_result = client
+        .profile(
+            session,
+            connection,
+            ProfileRequest {
+                connection,
+                run_id: uuid::Uuid::new_v4(),
+                sql: "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 10001) SELECT x FROM c".into(),
+                params: Vec::new(),
+                timeout_ms: 10_000,
+                workload_confirmed: true,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(refused_result
+        .to_string()
+        .contains("SQLite profile result exceeds row or byte limit"));
+    assert_eq!(
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT label FROM items WHERE id=1", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "kept"
+    );
     // Parquet stays typed through the real SQLite driver and atomic importer.
     for quick in [false, true] {
         let report = client
