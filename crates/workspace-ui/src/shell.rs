@@ -10577,6 +10577,7 @@ pub struct WorkspaceShell {
     ddl_source_inputs: Vec<Entity<TextInput>>,
     room_admin_inputs: Vec<Entity<TextInput>>,
     connection_url_input: Entity<TextInput>,
+    connection_url_name_input: Entity<TextInput>,
     tailnet: tailnet::TailnetUi,
     database_name_input: Entity<TextInput>,
     database_host_input: Entity<TextInput>,
@@ -11475,7 +11476,11 @@ impl WorkspaceShell {
         let connection_url_input = cx.new(|cx| {
             TextInput::new("", "postgresql://user:password@localhost:5432/database", cx)
                 .aria_label("PostgreSQL connection URL")
-                .masked()
+                .mask_url_password()
+        });
+        let connection_url_name_input = cx.new(|cx| {
+            TextInput::new("", "Optional name, e.g. Fire and Flame PROD", cx)
+                .aria_label("Connection profile name")
         });
         cx.subscribe(
             &connection_url_input,
@@ -11883,6 +11888,7 @@ impl WorkspaceShell {
             ddl_source_inputs,
             room_admin_inputs,
             connection_url_input,
+            connection_url_name_input,
             tailnet: tailnet::TailnetUi::new(cx),
             database_name_input,
             database_host_input,
@@ -15053,6 +15059,8 @@ impl WorkspaceShell {
                 self.database_password_input
                     .update(cx, |input, cx| input.set_text("", cx));
                 self.connection_url_input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                self.connection_url_name_input
                     .update(cx, |input, cx| input.set_text("", cx));
                 match connection_error {
                     Some(error) => {
@@ -22289,6 +22297,10 @@ impl WorkspaceShell {
                 return;
             }
         };
+        let requested_name = self.connection_url_name_input.read(cx).text().trim();
+        if !requested_name.is_empty() {
+            parsed.name = requested_name.to_owned();
+        }
         if let Some(settings) = self.tailnet.settings(cx) {
             parsed.configuration["sift_network"] = serde_json::to_value(settings).unwrap();
         }
@@ -22325,6 +22337,74 @@ impl WorkspaceShell {
 
     fn open_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_legacy_database_connection(window, cx);
+    }
+
+    fn edit_connection_url_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut parsed = parse_connection_url(self.connection_url_input.read(cx).text()).ok();
+        let requested_name = self.connection_url_name_input.read(cx).text().trim();
+        if let Some(parsed) = parsed.as_mut().filter(|_| !requested_name.is_empty()) {
+            parsed.name = requested_name.to_owned();
+        }
+        let tenant = self.selected_database_tenant;
+        self.open_legacy_database_connection(window, cx);
+        let Some(parsed) = parsed else {
+            return;
+        };
+        self.selected_database_tenant = tenant.or(self.selected_database_tenant);
+        self.selected_database_provider = Some(parsed.provider_id.as_str().to_owned());
+        self.database_wizard_step = DatabaseWizardStep::Details;
+        for (input, value) in [
+            (&self.database_name_input, Some(parsed.name.as_str())),
+            (
+                &self.database_host_input,
+                parsed.configuration["host"].as_str(),
+            ),
+            (
+                &self.database_user_input,
+                parsed.configuration["user"].as_str(),
+            ),
+            (
+                &self.database_catalog_input,
+                parsed.configuration["database"].as_str(),
+            ),
+        ] {
+            if let Some(value) = value {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+        }
+        self.database_port_input.update(cx, |input, cx| {
+            input.set_text(
+                parsed.configuration["port"]
+                    .as_u64()
+                    .unwrap_or(5432)
+                    .to_string(),
+                cx,
+            )
+        });
+        if let Some(password) = parsed
+            .credentials
+            .as_ref()
+            .and_then(|value| value["password"].as_str())
+        {
+            self.database_password_input
+                .update(cx, |input, cx| input.set_text(password, cx));
+        }
+        self.selected_database_ssl_mode =
+            parsed.configuration["ssl_mode"].as_str().map(str::to_owned);
+        if let Some(application_name) =
+            parsed.configuration["engine_specific"]["application_name"].as_str()
+        {
+            self.database_application_name_input
+                .update(cx, |input, cx| input.set_text(application_name, cx));
+        }
+        if let Some(timeout) =
+            parsed.configuration["engine_specific"]["connect_timeout_secs"].as_u64()
+        {
+            self.database_timeout_input
+                .update(cx, |input, cx| input.set_text(timeout.to_string(), cx));
+        }
+        self.database_user_input.focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 
     fn open_legacy_database_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -51265,6 +51345,50 @@ mod tests {
                 .connection_url_input
                 .focus_handle(cx)
                 .is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn valid_url_opens_editable_connection_fields_with_tunnel(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.modal = Some(Modal::ConnectionUrl);
+            shell.selected_database_tenant = Some(7);
+            shell.tailnet.load(
+                &serde_json::json!({
+                    "sift_network": { "mode": "tunnel", "ssh_user": "root", "ssh_port": 22 }
+                }),
+                cx,
+            );
+            shell.connection_url_input.update(cx, |input, cx| {
+                input.set_text(
+                    "postgresql://fireandflame:secret@db.example.ts.net:5432/fireandflame",
+                    cx,
+                )
+            });
+            shell
+                .connection_url_name_input
+                .update(cx, |input, cx| input.set_text("Fire and Flame PROD", cx));
+            shell.edit_connection_url_fields(window, cx);
+            assert_eq!(shell.modal, Some(Modal::DatabaseConnection));
+            assert_eq!(shell.database_wizard_step, DatabaseWizardStep::Details);
+            assert_eq!(shell.selected_database_tenant, Some(7));
+            assert_eq!(
+                shell.database_name_input.read(cx).text(),
+                "Fire and Flame PROD"
+            );
+            assert_eq!(shell.database_user_input.read(cx).text(), "fireandflame");
+            assert_eq!(
+                shell.database_host_input.read(cx).text(),
+                "db.example.ts.net"
+            );
+            assert_eq!(shell.database_password_input.read(cx).text(), "secret");
+            assert_eq!(
+                shell.tailnet.settings(cx).unwrap().mode,
+                sift_api_types::TailnetMode::Tunnel
+            );
         });
     }
 

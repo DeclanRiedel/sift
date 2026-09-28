@@ -86,7 +86,7 @@ pub(super) fn content_width(modal: &Modal, wizard: DatabaseWizardStep) -> f32 {
         },
         Modal::CatalogDiagram | Modal::WorkspaceReconcile => 1040.0,
         Modal::ChangeLedger => 980.0,
-        Modal::DataSearch | Modal::TransferRecipes => 900.0,
+        Modal::DataSearch | Modal::TransferRecipes | Modal::ConnectionUrl => 900.0,
         Modal::CsvImport | Modal::RepositoryConflict | Modal::SemanticRename => 860.0,
         Modal::Snippets => 820.0,
         Modal::RepositoryHistory => 780.0,
@@ -121,7 +121,6 @@ pub(super) fn content_width(modal: &Modal, wizard: DatabaseWizardStep) -> f32 {
         | Modal::ConfirmProductionExecution
         | Modal::ConfirmOutcomeUnknownRerun(_, _)
         | Modal::ServerConnection
-        | Modal::ConnectionUrl
         | Modal::ConfirmDeleteConnection(_)
         | Modal::ConfirmTerminateProcess(_)
         | Modal::ConfirmRepositoryUncommit

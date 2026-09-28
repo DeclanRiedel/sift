@@ -20,9 +20,10 @@ impl WorkspaceShell {
                     | Modal::CommandPalette
             );
             let database_connection = matches!(modal, Modal::DatabaseConnection);
+            let connection_url = matches!(modal, Modal::ConnectionUrl);
             let command_palette = matches!(modal, Modal::CommandPalette);
             let data_results = matches!(modal, Modal::DataResults(_) | Modal::RelationshipViewer(_));
-            let padded = !database_connection && !command_palette && !data_results && !account && !server_picker;
+            let padded = !database_connection && !connection_url && !command_palette && !data_results && !account && !server_picker;
             let card_width = modal_layout::content_width(modal, self.database_wizard_step)
                 + if padded { 24.0 } else { 0.0 };
             let toolbar_height = cx.theme().metrics.toolbar_height;
@@ -3798,12 +3799,25 @@ impl WorkspaceShell {
                         })
                         .map(|tenant| tenant.name.as_str())
                         .unwrap_or("current workspace");
+                    let parsed_url = parse_connection_url(self.connection_url_input.read(cx).text()).ok();
+                    let tailnet_hint = parsed_url.as_ref().is_some_and(|parsed| {
+                        parsed.configuration["host"]
+                            .as_str()
+                            .is_some_and(|host| host.ends_with(".ts.net"))
+                            && self.tailnet.settings(cx).is_none()
+                    });
                     div()
+                        .w_full()
+                        .min_h_0()
+                        .max_h(max_card_height)
                         .flex()
                         .flex_col()
-                        .gap_3()
                         .child(
                             div()
+                                .px_4()
+                                .py_3()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
                                 .flex()
                                 .flex_col()
                                 .gap_1()
@@ -3817,41 +3831,66 @@ impl WorkspaceShell {
                                         .text_xs()
                                         .text_color(colors.muted_text)
                                         .child(format!(
-                                            "Paste a URL and press Enter · saves to {workspace_name}"
+                                            "PostgreSQL URL and transport · saves to {workspace_name}"
                                         )),
                                 ),
                         )
                         .child(
                             div()
-                                .id("connection-url-input")
-                                .w_full()
-                                .child(self.connection_url_input.clone()),
+                                .id("connection-url-body")
+                                .min_h_0()
+                                .flex_1()
+                                .overflow_y_scroll()
+                                .p_4()
+                                .child(div().flex().flex_wrap().items_start().gap_4()
+                                    .child(div().flex_1().min_w(px(320.)).flex().flex_col().gap_3()
+                                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Database"))
+                                        .child(div().flex().flex_col().gap_1()
+                                            .child(div().text_xs().text_color(colors.muted_text).child("POSTGRESQL URL"))
+                                            .child(div().id("connection-url-input").debug_selector(|| "connection-url-input".into()).w_full().child(self.connection_url_input.clone())))
+                                        .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Paste a URL. Only its password is masked. Database user and host come from the URL; SSH user is separate."))
+                                        .child(div().flex().flex_col().gap_1()
+                                            .child(div().text_xs().text_color(colors.muted_text).child("CONNECTION NAME"))
+                                            .child(self.connection_url_name_input.clone()))
+                                        .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Include PROD in the name for production SQL confirmations. Leave blank to use the URL-derived name."))
+                                        .when(tailnet_hint, |column| column.child(div().rounded_sm().border_1().border_color(colors.accent).p_2().text_sm().whitespace_normal().child("Tailnet host detected. Standard connects directly to port 5432; choose SSH tunnel in Network if PostgreSQL listens only on the appliance.")))
+                                        .child(div().rounded_sm().border_1().border_color(colors.subtle_border).bg(colors.surface).p_3().flex().flex_col().gap_2()
+                                            .children(parsed_url.as_ref().map(|parsed| {
+                                                let host = parsed.configuration["host"].as_str().unwrap_or("—");
+                                                let database = parsed.configuration["database"].as_str().unwrap_or("Provider default");
+                                                let user = parsed.configuration["user"].as_str().unwrap_or("—");
+                                                let detail = |label: &'static str, value: String| {
+                                                    div().flex().items_center().gap_3()
+                                                        .child(div().w(px(104.)).flex_none().text_xs().text_color(colors.muted_text).child(label))
+                                                        .child(div().min_w_0().flex_1().truncate().child(value))
+                                                };
+                                                div().flex().flex_col().gap_2()
+                                                    .child(div().text_xs().text_color(colors.muted_text).child("CONNECTION DETAILS"))
+                                                    .child(detail("Host", host.to_owned()))
+                                                    .child(detail("Database", database.to_owned()))
+                                                    .child(detail("Database user", user.to_owned()))
+                                                    .child(detail("Password", if parsed.credentials.is_some() { "Provided; stored on save" } else { "Not provided" }.into()))
+                                            }))
+                                            .when(parsed_url.is_none(), |summary| summary.child(div().text_sm().text_color(colors.muted_text).whitespace_normal().child("Paste a valid URL to review its host, database, and database user."))))
+                                        .children(self.database_connection_error.as_ref().map(|message| ErrorBanner::new(message.clone()))))
+                                    .child(div().flex_1().min_w(px(300.)).rounded_sm().border_1().border_color(colors.subtle_border).bg(colors.surface).p_3().child(self.render_tailnet_controls(cx)))),
                         )
-                        .child(self.render_tailnet_controls(cx))
                         .child(
                             div()
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .whitespace_normal()
-                                .child("Credentials are masked here, removed from the saved connection settings, and stored through the server's secure secret store."),
-                        )
-                        .children(
-                            self.database_connection_error
-                                .as_ref()
-                                .map(|message| ErrorBanner::new(message.clone())),
-                        )
-                        .child(
-                            div()
+                                .px_4()
+                                .py_3()
+                                .border_t_1()
+                                .border_color(colors.subtle_border)
                                 .flex()
                                 .items_center()
                                 .justify_between()
                                 .gap_2()
                                 .child(
-                                    Button::new("connection-url-manual", "Manual setup")
+                                    Button::new("connection-url-manual", if parsed_url.is_some() { "Edit fields" } else { "Manual setup" })
                                         .tone(ButtonTone::Ghost)
                                         .disabled(pending)
                                         .on_click(cx.listener(|shell, _, window, cx| {
-                                            shell.open_database_connection(window, cx)
+                                            shell.edit_connection_url_fields(window, cx)
                                         })),
                                 )
                                 .child(

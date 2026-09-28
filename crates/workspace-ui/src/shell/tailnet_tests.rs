@@ -2,6 +2,30 @@ use super::*;
 use gpui::{TestAppContext, VisualTestContext};
 
 #[gpui::test]
+fn url_dialog_shows_separate_ssh_user_in_tunnel_mode(cx: &mut TestAppContext) {
+    let window = super::super::tests::shell(cx);
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    let workspace = window.root(&mut cx).unwrap();
+    workspace.update(&mut cx, |shell, cx| {
+        shell.modal = Some(Modal::ConnectionUrl);
+        shell.tailnet.mode = Some(TailnetMode::Tunnel);
+        shell.connection_url_input.update(cx, |input, cx| {
+            input.set_text("postgresql://owner:secret@db.example.ts.net:5432/app", cx)
+        });
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let url = cx.debug_bounds("connection-url-input").expect("URL field");
+    let ssh_user = cx.debug_bounds("tailnet-ssh-user").expect("SSH user field");
+    assert!(
+        url.right() < ssh_user.left(),
+        "URL and SSH settings should have separate columns"
+    );
+    assert!(cx.debug_bounds("tailnet-ssh-port").is_some());
+}
+
+#[gpui::test]
 fn tailnet_settings_save_without_password_in_configuration(cx: &mut TestAppContext) {
     let window = super::super::tests::shell(cx);
     let mut cx = VisualTestContext::from_window(window.into(), cx);

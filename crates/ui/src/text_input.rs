@@ -30,6 +30,7 @@ pub struct TextInput {
     tab_next: Option<FocusHandle>,
     tab_previous: Option<FocusHandle>,
     masked: bool,
+    mask_url_password: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -65,6 +66,7 @@ impl TextInput {
             tab_next: None,
             tab_previous: None,
             masked: false,
+            mask_url_password: false,
             selected_range: cursor..cursor,
             selection_reversed: false,
             marked_range: None,
@@ -81,6 +83,13 @@ impl TextInput {
 
     pub fn masked(mut self) -> Self {
         self.masked = true;
+        self
+    }
+
+    /// Keep URL host/user visible while hiding its password with byte-stable
+    /// placeholders so the caret and selection still map to the input text.
+    pub fn mask_url_password(mut self) -> Self {
+        self.mask_url_password = true;
         self
     }
 
@@ -590,6 +599,8 @@ impl Element for TextElement {
             (input.placeholder.clone(), placeholder_color)
         } else if input.masked {
             ("*".repeat(content.len()).into(), style.color)
+        } else if input.mask_url_password {
+            (mask_connection_url_password(&content).into(), style.color)
         } else {
             (content, style.color)
         };
@@ -709,10 +720,102 @@ impl Element for TextElement {
     }
 }
 
+fn mask_connection_url_password(content: &str) -> String {
+    let Some(scheme_end) = content.find("://") else {
+        return content.to_owned();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = content[authority_start..]
+        .find(|c| matches!(c, '/' | '?' | '#'))
+        .map_or(content.len(), |end| authority_start + end);
+    let authority = &content[authority_start..authority_end];
+    let authority_at = authority.rfind('@').map(|at| authority_start + at);
+    // A malformed pasted URL may contain an unescaped delimiter in its
+    // password. Keep masking through a later '@' rather than exposing it.
+    let userinfo_end = authority_at.or_else(|| {
+        let candidate = authority.split(':').next()?;
+        // Without an '@', a colon may be the host/port separator. Only
+        // treat it as unfinished userinfo when it cannot be a host.
+        if candidate.contains('.')
+            || candidate.contains('[')
+            || candidate == "localhost"
+            || authority.split_once(':').is_some_and(|(_, suffix)| {
+                !suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_digit())
+            })
+        {
+            return None;
+        }
+        let before_query = content[authority_end..]
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default();
+        before_query
+            .rfind('@')
+            .map(|at| authority_end + at)
+            .or((authority_end == content.len()).then_some(content.len()))
+    });
+    let Some(userinfo_end) = userinfo_end else {
+        return content.to_owned();
+    };
+    let colon_search_end = authority_at.unwrap_or(authority_end);
+    let Some(colon) = content[authority_start..colon_search_end].find(':') else {
+        return content.to_owned();
+    };
+    let password_start = authority_start + colon + 1;
+    let password_end = userinfo_end;
+    format!(
+        "{}{}{}",
+        &content[..password_start],
+        "*".repeat(password_end - password_start),
+        &content[password_end..]
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
+
+    #[test]
+    fn connection_url_masks_only_the_password() {
+        let url = "postgresql://owner:sëcret@db.example.ts.net:5432/app";
+        let masked = mask_connection_url_password(url);
+        assert_eq!(
+            masked,
+            "postgresql://owner:*******@db.example.ts.net:5432/app"
+        );
+        assert_eq!(masked.len(), url.len());
+        assert_eq!(
+            mask_connection_url_password("postgresql://owner:secret"),
+            "postgresql://owner:******"
+        );
+        assert_eq!(
+            mask_connection_url_password("postgresql://owner@db.example/app"),
+            "postgresql://owner@db.example/app"
+        );
+        assert_eq!(
+            mask_connection_url_password(
+                "postgresql://owner@db.example:5432/app?application_name=a@b"
+            ),
+            "postgresql://owner@db.example:5432/app?application_name=a@b"
+        );
+        assert_eq!(
+            mask_connection_url_password("postgresql://db.example:5432/app"),
+            "postgresql://db.example:5432/app"
+        );
+        assert_eq!(
+            mask_connection_url_password("postgresql://localhost:5432/app"),
+            "postgresql://localhost:5432/app"
+        );
+        assert_eq!(
+            mask_connection_url_password("postgresql://dbhost:5432/app?note=a@b"),
+            "postgresql://dbhost:5432/app?note=a@b"
+        );
+        assert_eq!(
+            mask_connection_url_password("postgresql://owner:secret/part@db.example/app"),
+            "postgresql://owner:***********@db.example/app"
+        );
+    }
 
     #[gpui::test]
     fn utf16_round_trip_handles_non_bmp_input(cx: &mut TestAppContext) {

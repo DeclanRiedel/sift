@@ -14,6 +14,7 @@ pub(super) struct TailnetUi {
     pub preview: Option<(TailnetServeRequest, TailnetServeReport)>,
     pub scanned_key: Option<sift_api_types::TailnetHostKey>,
     trusted_key: Option<sift_api_types::TailnetHostKey>,
+    show_serve_tools: bool,
 }
 
 impl TailnetUi {
@@ -49,6 +50,7 @@ impl TailnetUi {
         self.preview = None;
         self.scanned_key = None;
         self.message = None;
+        self.show_serve_tools = false;
     }
     pub fn new(cx: &mut Context<WorkspaceShell>) -> Self {
         Self {
@@ -63,6 +65,7 @@ impl TailnetUi {
             preview: None,
             scanned_key: None,
             trusted_key: None,
+            show_serve_tools: false,
         }
     }
     pub fn settings(&self, cx: &Context<WorkspaceShell>) -> Option<TailnetSettings> {
@@ -109,9 +112,15 @@ impl WorkspaceShell {
                 }
             }
             "v" => self.trust_tailnet_key(cx),
-            "p" => self.request_tailnet_serve(TailnetServeAction::Preview, cx),
-            "a" => self.request_tailnet_serve(TailnetServeAction::Apply, cx),
-            "x" => self.request_tailnet_serve(TailnetServeAction::Remove, cx),
+            "p" if self.tailnet.show_serve_tools => {
+                self.request_tailnet_serve(TailnetServeAction::Preview, cx)
+            }
+            "a" if self.tailnet.show_serve_tools => {
+                self.request_tailnet_serve(TailnetServeAction::Apply, cx)
+            }
+            "x" if self.tailnet.show_serve_tools => {
+                self.request_tailnet_serve(TailnetServeAction::Remove, cx)
+            }
             "j" | "k" => {
                 let peers: Vec<_> = self.tailnet.peers.iter().filter(|p| p.online).collect();
                 if peers.is_empty() {
@@ -290,7 +299,7 @@ impl WorkspaceShell {
             .child(div().flex().items_center().justify_between().gap_2()
                 .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Network"))
                 .child(div().text_xs().text_color(colors.muted_text).child("Alt-M mode")))
-            .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Runs on the Sift backend · instance administrator required"))
+            .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Transport runs on the Sift backend · instance administrator required"))
             .child(div().grid().grid_cols(2).gap_2().children([
                 ("network-off", "Standard", None),
                 ("network-direct", "Tailnet direct", Some(TailnetMode::Direct)),
@@ -301,9 +310,25 @@ impl WorkspaceShell {
                     .tone(if mode == selected { ButtonTone::Accent } else { ButtonTone::Neutral })
                     .on_click(cx.listener(move |shell, _, _, cx| { shell.tailnet.mode = selected; shell.tailnet.preview = None; cx.notify(); }))
             })))
+            .when(matches!(mode, Some(TailnetMode::Tunnel | TailnetMode::Automatic)), |container| container
+                .child(div().flex().gap_2()
+                    .child(div().id("tailnet-ssh-user").debug_selector(|| "tailnet-ssh-user".into()).flex_1().min_w_0().flex().flex_col().gap_1()
+                        .child(div().text_xs().text_color(colors.muted_text).child("SSH USER"))
+                        .child(self.tailnet.user.clone()))
+                    .child(div().id("tailnet-ssh-port").debug_selector(|| "tailnet-ssh-port".into()).w(px(88.)).flex_none().flex().flex_col().gap_1()
+                        .child(div().text_xs().text_color(colors.muted_text).child("SSH PORT"))
+                        .child(self.tailnet.port.clone())))
+                .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Separate from the PostgreSQL username in the URL. The tunnel targets remote 127.0.0.1.")))
             .when(mode.is_some(), |container| container
-                .child(self.tailnet.user.clone())
-                .child(self.tailnet.port.clone())
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(Button::new("tailnet-discover", "Refresh devices").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.send_tailnet(ExecutorCommand::TailnetStatus, cx))))
+                    .child(Button::new("tailnet-probe", "Diagnose network").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.request_tailnet_probe(cx))))
+                    .when(mode != Some(TailnetMode::Direct), |row| row.child(Button::new("tailnet-host-key", "Read SSH fingerprint").disabled(pending).on_click(cx.listener(|shell, _, _, cx| {
+                        match shell.tailnet_request(cx) {
+                            Ok(request) => shell.send_tailnet(ExecutorCommand::TailnetHostKey(request), cx),
+                            Err(message) => { shell.tailnet.message = Some(message); cx.notify(); }
+                        }
+                    }))))
                 .when(!self.tailnet.peers.is_empty(), |container| container.child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("DEVICES")))
                 .child(div().id("tailnet-peers").max_h(px(180.)).overflow_y_scroll().flex().flex_col().gap_2().children(self.tailnet.peers.iter().enumerate().map(|(index, peer)| {
                     let address = peer.address.clone();
@@ -342,31 +367,31 @@ impl WorkspaceShell {
                             cx.notify();
                         }))
                 }))))
-                .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("SSH uses backend keys and strict known_hosts. Tunnel target: remote 127.0.0.1."))
-                .child(div().flex().flex_wrap().gap_2()
-                    .child(Button::new("tailnet-discover", "Refresh devices").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.send_tailnet(ExecutorCommand::TailnetStatus, cx))))
-                    .child(Button::new("tailnet-probe", "Diagnose network").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.request_tailnet_probe(cx))))
-                    .child(Button::new("tailnet-host-key", "Read SSH fingerprint").disabled(pending).on_click(cx.listener(|shell, _, _, cx| {
-                        match shell.tailnet_request(cx) {
-                            Ok(request) => shell.send_tailnet(ExecutorCommand::TailnetHostKey(request), cx),
-                            Err(message) => { shell.tailnet.message = Some(message); cx.notify(); }
-                        }
+                .when(mode != Some(TailnetMode::Direct), |container| container
+                    .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("SSH verifies the host against a pin or backend known_hosts; interactive prompts are disabled.")))
+                .child(Button::new("tailnet-serve-toggle", if self.tailnet.show_serve_tools { "Hide Serve options" } else { "Tailscale Serve options" })
+                    .tone(ButtonTone::Ghost)
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.tailnet.show_serve_tools = !shell.tailnet.show_serve_tools;
+                        cx.notify();
                     })))
-                    .child(Button::new("tailnet-serve-preview", "Preview / inspect Serve").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.request_tailnet_serve(TailnetServeAction::Preview, cx)))))
-                .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Alt-R refresh · Alt-J/K device · Alt-D diagnose · Alt-F fingerprint · Alt-V verify · Alt-P preview · Alt-A enable · Alt-X remove"))
+                .when(self.tailnet.show_serve_tools, |container| container
+                    .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Advanced: expose a loopback database to permitted tailnet clients. Not needed for an SSH tunnel."))
+                    .child(Button::new("tailnet-serve-preview", "Preview / inspect Serve").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.request_tailnet_serve(TailnetServeAction::Preview, cx))))
+                    .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Alt-R refresh · Alt-J/K device · Alt-D diagnose · Alt-F fingerprint · Alt-V verify · Alt-P preview · Alt-A enable · Alt-X remove"))))
             .children(self.tailnet.message.as_ref().map(|message| div().text_xs().whitespace_normal().child(message.clone())))
             .children(self.tailnet.scanned_key.as_ref().map(|key| {
                 div().flex().flex_col().gap_2()
-                    .child(div().text_xs().whitespace_normal().child(format!("Verify {} independently on the server (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). Scanning alone does not authenticate a host.", key.fingerprint)))
+                    .child(div().text_xs().whitespace_normal().child(format!("Verify {} independently. For Tailscale SSH, use its tailnet SSH key—not /etc/ssh/ssh_host_ed25519_key.pub. Scanning alone does not authenticate a host.", key.fingerprint)))
                     .child(Button::new("tailnet-trust-key", "Fingerprint matches — trust this host").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.trust_tailnet_key(cx))))
             }))
-            .children(self.tailnet.preview.as_ref().map(|(_, report)| {
+            .when(self.tailnet.show_serve_tools, |container| container.children(self.tailnet.preview.as_ref().map(|(_, report)| {
                 div().flex().flex_col().gap_2()
                     .child(div().text_xs().whitespace_normal().child("Warning: Serve exposes this database to tailnet clients allowed by your policy. Review PostgreSQL localhost authentication first. Requires Python 3 and tailscale operator rights on the remote server. No public Funnel is enabled."))
                     .child(div().flex().gap_2()
                         .child(Button::new("tailnet-serve-apply", "I reviewed access — enable Serve").disabled(pending || report.configured).on_click(cx.listener(|shell, _, _, cx| shell.request_tailnet_serve(TailnetServeAction::Apply, cx))))
                         .child(Button::new("tailnet-serve-remove", "Confirm remove Sift-owned Serve").disabled(pending || !report.owned).on_click(cx.listener(|shell, _, _, cx| shell.request_tailnet_serve(TailnetServeAction::Remove, cx)))))
-            }))
+            })))
             .into_any_element()
     }
 }
