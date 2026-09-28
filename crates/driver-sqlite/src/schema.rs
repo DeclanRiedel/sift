@@ -1,7 +1,7 @@
 use super::{db_error, error, values};
 use rusqlite::{Connection, OptionalExtension};
 use sift_protocol::*;
-use sqlparser::ast::{ObjectName, Query, Visit, Visitor};
+use sqlparser::ast::{Expr, ObjectName, Query, TableFactor, Visit, Visitor};
 use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
@@ -230,7 +230,7 @@ fn load_once(
         coverage.failures.push(CatalogCoverageFailure {
             stage: "dependencies".into(),
             schema: None,
-            code: "sqlite_expression_dependencies_unavailable".into(),
+            code: "sqlite_generated_and_index_expression_dependencies_unavailable".into(),
         });
         // Counts describe current data, not schema identity. Keep them in the
         // navigation trees without invalidating catalog revisions after DML.
@@ -244,6 +244,7 @@ fn load_once(
         }
         let mut graph = sift_core::catalog::graph_from_trees(&schema_trees, coverage, identity);
         enrich_dependencies(&mut graph, &dependency_sources);
+        enrich_expression_dependencies(&mut graph);
         if let Some(kinds) = &options.kinds {
             graph.nodes.retain(|node| kinds.contains(&node.kind));
         }
@@ -431,10 +432,22 @@ fn enrich_dependencies(graph: &mut CatalogGraphData, sources: &[DependencySource
                     mark_dependency_gap(graph, from, code);
                     continue;
                 };
-                let Some(references) = view_references(sql) else {
-                    coverage_failure(graph, &source.schema, "sqlite_view_sql_unparsed");
-                    mark_dependency_gap(graph, from, "view_sql_unparsed");
-                    continue;
+                let references = match view_references(sql) {
+                    Ok(references) => references,
+                    Err(ReferenceParseError::TableFunction) => {
+                        coverage_failure(
+                            graph,
+                            &source.schema,
+                            "sqlite_view_table_function_unavailable",
+                        );
+                        mark_dependency_gap(graph, from, "view_table_function_unavailable");
+                        continue;
+                    }
+                    Err(ReferenceParseError::Unparsed) => {
+                        coverage_failure(graph, &source.schema, "sqlite_view_sql_unparsed");
+                        mark_dependency_gap(graph, from, "view_sql_unparsed");
+                        continue;
+                    }
                 };
                 let mut seen = HashSet::new();
                 for reference in references {
@@ -525,6 +538,13 @@ fn enrich_dependencies(graph: &mut CatalogGraphData, sources: &[DependencySource
                             "sqlite_virtual_table_dependencies_unavailable",
                         );
                         mark_dependency_gap(graph, from, "virtual_table_dependencies_unavailable");
+                        if let Some(module) = virtual_module_name(sql) {
+                            if let Some(node) = graph.nodes.iter_mut().find(|node| &node.id == from)
+                            {
+                                node.extra
+                                    .insert("sqlite_virtual_module".into(), module.into());
+                            }
+                        }
                     }
                 }
             }
@@ -532,6 +552,142 @@ fn enrich_dependencies(graph: &mut CatalogGraphData, sources: &[DependencySource
         }
     }
     sift_core::catalog::normalize_graph(graph);
+}
+
+fn enrich_expression_dependencies(graph: &mut CatalogGraphData) {
+    let schema_names = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == CatalogNodeKind::Schema)
+        .map(|node| (node.id.clone(), node.name.clone()))
+        .collect::<HashMap<_, _>>();
+    let relation_schemas = graph
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            node.parent_id
+                .as_ref()
+                .and_then(|parent| schema_names.get(parent))
+                .map(|schema| (node.id.clone(), schema.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    let columns = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == CatalogNodeKind::Column)
+        .filter_map(|node| {
+            node.parent_id.as_ref().map(|parent| {
+                (
+                    (parent.clone(), node.name.to_ascii_lowercase()),
+                    node.id.clone(),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let expressions = graph
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let expression = match &node.details {
+                CatalogNodeDetails::Constraint { constraint }
+                    if constraint.kind == ConstraintKind::Check =>
+                {
+                    constraint.definition.as_ref()
+                }
+                CatalogNodeDetails::Index { index } => index.partial_predicate.as_ref(),
+                _ => None,
+            }?;
+            let parent = node.parent_id.clone()?;
+            let schema = relation_schemas.get(&parent)?.clone();
+            Some((node.id.clone(), parent, schema, expression.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut sql_budget = MAX_DEPENDENCY_SQL_BYTES;
+    let mut edge_budget = MAX_DEPENDENCY_EDGES;
+    let mut known = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == CatalogEdgeKind::DependsOn)
+        .filter_map(|edge| edge.to.as_ref().map(|to| (edge.from.clone(), to.clone())))
+        .collect::<HashSet<_>>();
+    for (from, parent, schema, expression) in expressions {
+        if expression.len() > MAX_VIEW_SQL || expression.len() > sql_budget {
+            mark_dependency_gap(graph, &from, "expression_sql_limit");
+            coverage_failure(graph, &schema, "sqlite_expression_sql_limit");
+            continue;
+        }
+        sql_budget -= expression.len();
+        let Some(names) = expression_columns(&expression) else {
+            mark_dependency_gap(graph, &from, "expression_unparsed");
+            coverage_failure(graph, &schema, "sqlite_expression_unparsed");
+            continue;
+        };
+        for name in names {
+            if edge_budget == 0 {
+                mark_dependency_gap(graph, &from, "expression_edge_limit");
+                coverage_failure(graph, &schema, "sqlite_expression_edge_limit");
+                break;
+            }
+            let target = columns
+                .get(&(parent.clone(), name.to_ascii_lowercase()))
+                .cloned();
+            if target
+                .as_ref()
+                .is_some_and(|to| !known.insert((from.clone(), to.clone())))
+            {
+                continue;
+            }
+            push_dependency(
+                graph,
+                from.clone(),
+                target,
+                CatalogEdgeKind::DependsOn,
+                CatalogEdgeCertainty::Parsed,
+                &name,
+            );
+            edge_budget -= 1;
+        }
+    }
+    sift_core::catalog::normalize_graph(graph);
+}
+
+#[derive(Default)]
+struct ExpressionColumns {
+    names: HashSet<String>,
+}
+
+impl Visitor for ExpressionColumns {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        let name = match expr {
+            Expr::Identifier(name) => Some(name.value.as_str()),
+            Expr::CompoundIdentifier(parts) => parts.last().map(|name| name.value.as_str()),
+            _ => None,
+        };
+        if let Some(name) = name {
+            if self.names.len() >= MAX_VIEW_REFERENCES {
+                return ControlFlow::Break(());
+            }
+            self.names.insert(name.to_string());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+fn expression_columns(sql: &str) -> Option<Vec<String>> {
+    let mut parser = Parser::new(&SQLiteDialect {}).try_with_sql(sql).ok()?;
+    let expression = parser.parse_expr().ok()?;
+    if parser.peek_token().token != Token::EOF {
+        return None;
+    }
+    let mut collector = ExpressionColumns::default();
+    if expression.visit(&mut collector).is_break() {
+        return None;
+    }
+    let mut names = collector.names.into_iter().collect::<Vec<_>>();
+    names.sort_unstable();
+    Some(names)
 }
 
 fn resolve_relation(
@@ -616,10 +772,26 @@ fn mark_dependency_gap(graph: &mut CatalogGraphData, id: &CatalogObjectId, reaso
 struct ViewRelations {
     cte_scopes: Vec<HashSet<String>>,
     references: Vec<ObjectName>,
+    unsupported_table_function: bool,
 }
 
 impl Visitor for ViewRelations {
     type Break = ();
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+        if matches!(
+            factor,
+            TableFactor::Table { args: Some(_), .. }
+                | TableFactor::TableFunction { .. }
+                | TableFactor::Function { .. }
+                | TableFactor::UNNEST { .. }
+                | TableFactor::JsonTable { .. }
+        ) {
+            self.unsupported_table_function = true;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
         self.cte_scopes
@@ -656,19 +828,29 @@ impl Visitor for ViewRelations {
     }
 }
 
-fn view_references(sql: &str) -> Option<Vec<ObjectName>> {
+enum ReferenceParseError {
+    Unparsed,
+    TableFunction,
+}
+
+fn view_references(sql: &str) -> Result<Vec<ObjectName>, ReferenceParseError> {
     if sql.len() > MAX_VIEW_SQL {
-        return None;
+        return Err(ReferenceParseError::Unparsed);
     }
-    let mut statements = Parser::parse_sql(&SQLiteDialect {}, sql).ok()?;
+    let mut statements =
+        Parser::parse_sql(&SQLiteDialect {}, sql).map_err(|_| ReferenceParseError::Unparsed)?;
     let [sqlparser::ast::Statement::CreateView { query, .. }] = statements.as_mut_slice() else {
-        return None;
+        return Err(ReferenceParseError::Unparsed);
     };
     let mut collector = ViewRelations::default();
     if query.visit(&mut collector).is_break() {
-        return None;
+        return Err(if collector.unsupported_table_function {
+            ReferenceParseError::TableFunction
+        } else {
+            ReferenceParseError::Unparsed
+        });
     }
-    Some(collector.references)
+    Ok(collector.references)
 }
 
 // sqlparser's CREATE TRIGGER grammar is PostgreSQL-only. SQLite stores the
@@ -741,6 +923,23 @@ fn fts5_external_content(sql: &str) -> Option<Option<String>> {
         };
     }
     Some(None)
+}
+
+fn virtual_module_name(sql: &str) -> Option<String> {
+    let tokens = Tokenizer::new(&SQLiteDialect {}, sql)
+        .tokenize()
+        .ok()?
+        .into_iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect::<Vec<_>>();
+    let using = tokens.iter().position(|token| {
+        matches!(token, Token::Word(word)
+        if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("USING"))
+    })?;
+    match tokens.get(using + 1) {
+        Some(Token::Word(word)) if word.value.len() <= 128 => Some(word.value.clone()),
+        _ => None,
+    }
 }
 
 // Prefer persistent statistics. Count small, unanalyzed tables within a shared
