@@ -66,6 +66,10 @@ pub struct ContributionDescriptor {
     pub operation: Option<ExtensionActionDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<ClientContributionDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<ClientContributionDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_contribution_id: Option<ContributionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

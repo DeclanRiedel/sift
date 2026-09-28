@@ -2423,6 +2423,7 @@ impl WorkspaceShell {
                         )
                         .into_any_element()
                 }
+                Modal::ExtensionContributions => self.render_extension_contributions(cx),
                 Modal::ConnectionPolicy => {
                     let policy = self.connection_policy.clone();
                     let read_only = policy.as_ref().is_some_and(|policy| policy.read_only);
@@ -2836,6 +2837,11 @@ impl WorkspaceShell {
                             div().pt_3().border_t_1().border_color(colors.subtle_border).flex().items_center().justify_between().gap_3()
                                 .child(div().flex().flex_col().gap_1().child("API tokens").child(div().text_xs().text_color(colors.muted_text).child("Create and revoke tokens for API clients.")))
                                 .child(Button::new("manage-api-tokens", "Manage…").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_api_tokens(cx)))),
+                        )
+                        .child(
+                            div().flex().items_center().justify_between().gap_3()
+                                .child(div().flex().flex_col().gap_1().child("Extensions").child(div().text_xs().text_color(colors.muted_text).child("Browse governed actions and their results.")))
+                                .child(Button::new("open-extension-contributions", "Open…").tone(ButtonTone::Neutral).on_click(cx.listener(|shell, _, _, cx| shell.open_extension_contributions(cx)))),
                         )
                         .child(
                             div().flex().items_center().justify_between().gap_3()

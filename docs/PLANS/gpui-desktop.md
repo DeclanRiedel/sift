@@ -131,8 +131,8 @@ single-distribution launcher later requires it.
 
 ## Host-owned UI extensibility
 
-Desktop extensibility supports first-party evolution, not extension-rendered
-UI. Three typed registries define compile-time surfaces:
+Desktop extensibility keeps fixed host-owned surfaces. Three typed registries
+define compile-time surfaces:
 
 - `CommandRegistry` owns stable command ids, labels, shortcuts, palette
   visibility, and contextual availability shared by menus and the palette;
@@ -144,13 +144,13 @@ dispatch, while focused modules render status and output chrome and dedicated
 entities own editors, results, and panes. New built-in surfaces enter through
 these typed registries and exhaustive dispatch.
 
-Extensions cannot register GPUI entities, commands, panels, item factories,
-styles, or layout slots. They continue to contribute server-side providers and
-governed operations through typed, audited extension contracts. Public
-declarative client-contribution descriptors remain compatible for independent
-thin clients; the first-party desktop does not consume them as UI mutation.
-This boundary keeps theme, accessibility, focus, restoration, and crash
-behavior under client ownership.
+Extensions cannot register GPUI entities, command ids, item factories,
+styles, or layout slots. The first-party desktop consumes supported
+declarative contribution descriptors inside one fixed Extensions dialog. Host
+code renders commands, scalar forms, and bounded read-only action results;
+all calls use the governed, audited operation contract. Unsupported schemas
+remain unavailable in that dialog. This keeps theme, accessibility, focus,
+restoration, and crash behavior under client ownership.
 
 ## Entity and ownership model
 
@@ -363,8 +363,8 @@ tolerance fail the relevant performance gate.
   server state. It does not reconstruct authoritative state from a client
   snapshot.
 - Public extension client descriptors remain wire-compatible for independent
-  thin clients. The first-party GPUI desktop declines them and does not allow
-  extensions to add commands, panels, views, styles, or layout.
+  thin clients. The GPUI desktop renders supported descriptors in a fixed host
+  dialog and does not allow extensions to add code, styles, or layout slots.
 - Values, credentials, SQL bodies, and result cells are excluded from logs,
   action labels, analytics, crash context, and persisted presentation state.
 
@@ -517,8 +517,12 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       and bounded previews.
 - [x] Implement transfer-recipe creation, validation, execution, progress, and
       cancellation in the desktop client.
-- [ ] Render extension declarative contributions through trusted actions, forms,
-      tables, and read-only panels.
+- [x] Render extension declarative contributions through trusted actions, forms,
+      tables, and read-only panels. The fixed host dialog renders instance-scoped
+      commands, scalar forms, bounded typed output views, and source-bound read
+      panels through audited operations.
+- [ ] Bind context-target extension actions to authorized tenant, room, profile,
+      connection, and document scopes before rendering their context actions.
 
 ### M6 — hardening and validation
 
