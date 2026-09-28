@@ -3,12 +3,19 @@
 use sift_protocol::ObjectKind;
 use std::fmt::Write as _;
 
+#[derive(Clone, Copy)]
+pub(super) enum FilterMode {
+    Qualified,
+    Unqualified { scope_matches: bool },
+}
+
 pub(super) fn matches_object(
     catalog: &str,
     schema: &str,
     object: &str,
     kind: ObjectKind,
     query: &str,
+    mode: FilterMode,
     buffer: &mut String,
 ) -> bool {
     if query.is_empty() {
@@ -16,19 +23,35 @@ pub(super) fn matches_object(
     }
     // Without a separator, a match cannot span path components. Common
     // lowercase identifiers use str's substring search without formatting.
-    if !query.contains(['.', ' ']) {
-        if [catalog, schema, object]
-            .into_iter()
-            .any(|part| contains_folded(part, query))
-        {
-            return true;
+    match mode {
+        FilterMode::Unqualified { scope_matches } => {
+            scope_matches || contains_folded(object, query) || kind_name(kind).contains(query)
         }
-        return kind_name(kind).contains(query);
-    } else {
-        buffer.clear();
-        write!(buffer, "{catalog}.{schema}.{object} {kind:?}").expect("writing to a String");
+        FilterMode::Qualified => {
+            buffer.clear();
+            write!(buffer, "{catalog}.{schema}.{object} {kind:?}").expect("writing to a String");
+            contains_folded(buffer, query)
+        }
     }
-    contains_folded(buffer, query)
+}
+
+pub(super) fn is_unqualified_query(query: &str) -> bool {
+    !query.contains(['.', ' '])
+}
+
+pub(super) fn filter_mode(
+    catalog: &str,
+    schema: &str,
+    query: &str,
+    unqualified_query: bool,
+) -> FilterMode {
+    if unqualified_query {
+        FilterMode::Unqualified {
+            scope_matches: contains_folded(catalog, query) || contains_folded(schema, query),
+        }
+    } else {
+        FilterMode::Qualified
+    }
 }
 
 const fn kind_name(kind: ObjectKind) -> &'static str {
@@ -71,39 +94,27 @@ mod tests {
     #[test]
     fn matching_preserves_qualified_paths_kinds_and_unicode() {
         let mut buffer = String::new();
-        for query in ["", "warehouse.public.orders", "orders table", "public.or"] {
-            assert!(matches_object(
+        let mut matches = |object: &str, kind: ObjectKind, query: &str| {
+            matches_object(
                 "Warehouse",
                 "Public",
-                "Orders",
-                ObjectKind::Table,
+                object,
+                kind,
                 query,
-                &mut buffer
-            ));
+                filter_mode("Warehouse", "Public", query, is_unqualified_query(query)),
+                &mut buffer,
+            )
+        };
+        for query in ["", "warehouse.public.orders", "orders table", "public.or"] {
+            assert!(matches("Orders", ObjectKind::Table, query));
         }
-        assert!(!matches_object(
-            "Warehouse",
-            "Public",
-            "Orders",
-            ObjectKind::Table,
-            "missing",
-            &mut buffer
-        ));
-        assert!(matches_object(
-            "Warehouse",
-            "Public",
-            "Événements",
-            ObjectKind::Table,
-            "événements",
-            &mut buffer
-        ));
-        assert!(matches_object(
-            "Warehouse",
-            "Public",
+        assert!(!matches("Orders", ObjectKind::Table, "missing"));
+        assert!(matches("Événements", ObjectKind::Table, "événements"));
+        assert!(matches(
             "Orders",
             ObjectKind::MaterializedView,
-            "materializedview",
-            &mut buffer
+            "materializedview"
         ));
+        assert!(matches("Other", ObjectKind::Table, "warehouse"));
     }
 }

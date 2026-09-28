@@ -1,5 +1,48 @@
 # Desktop performance measurements
 
+## M6 Linux measurement (2026-09-28)
+
+Repeated the existing `release-dev` benchmark binary on Linux x86_64 (Intel
+Core i7-13620H, binary built with Rust 1.98.1) after concurrent builds stopped.
+Criterion used 30 samples, two seconds of warmup, and five seconds of
+measurement. GPUI's dirty-to-draw report includes warmup and calibration
+frames. The first-page fixture starts with a result page already available, so
+database and network execution are excluded.
+
+| Fixture | Observed frames | Dirty-to-draw p50 | p95 | Frames over 8.33 ms |
+|---|---:|---:|---:|---:|
+| `schema_tree_filter` (100,000 objects) | 52 | 11.166 ms | 11.821 ms | 52 |
+| `first_result_page` (500 rows) | 1,906 | 5.177 ms | 5.419 ms | 0 |
+
+Criterion mean iterations were 6.928 ms and 5.188 ms respectively. The schema
+filter still misses the 120 Hz CPU-frame target despite its mean iteration
+time, so the M6 responsiveness gate stays open. An earlier run while other
+builds were active produced only two observed schema frames and is excluded
+from acceptance. A separate direct executable run of the schema fixture with
+`/usr/bin/time -v` peaked at 193,200 KiB (about 188.7 MiB) resident memory and
+exited successfully. That is the benchmark process peak for one fixture, not
+steady desktop memory or a per-window ceiling.
+
+The commands used the already built `target/release-dev/deps/frame_budget-*`
+binary with `--bench`, fixture name, `--sample-size`, `--warm-up-time`, and
+`--measurement-time` arguments inside the Nix dev environment. These are
+headless CPU-renderer observations; physical display latency and platform
+memory acceptance remain unmeasured.
+
+### Schema filter follow-up
+
+The filter now tests each catalog/schema scope and enabled object group once
+per projection, and computes whether the query is qualified once before
+visiting objects. Borrowed object names still use the existing Unicode-aware
+matching path. Full workspace tests and strict Clippy passed. On a fresh Rust
+1.96.1 `release-dev` build of the same 100,000-object fixture (30 Criterion
+samples, two-second warmup, five-second measurement), the final run recorded
+98 dirty-to-draw frames: p50 7.668 ms, p95 8.385 ms, and eight frames over
+8.33 ms. Criterion's mean iteration was 3.599 ms. The earlier binary used a
+different Rust version, so these absolute runs are not a controlled speedup
+comparison. Schema-filter acceptance remains open by 0.055 ms at p95, and
+physical display latency remains unmeasured.
+
 Correction (2026-09-09): the historical `vim_typing_large_document` runs below
 did not install the desktop Backspace binding in the standalone GPUI fixture.
 They measured insertion with a non-editing Backspace event, not a stable-length

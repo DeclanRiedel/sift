@@ -7836,29 +7836,60 @@ async fn run_room_document(
 async fn wait_for_server_loss(
     client: &sift_client_sdk::Client,
 ) -> Result<(), sift_workspace_ui::DegradedReason> {
-    let established_generation = client
-        .connect()
+    wait_for_server_loss_with_intervals(
+        client,
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(15),
+    )
+    .await
+}
+
+async fn wait_for_server_loss_with_intervals(
+    client: &sift_client_sdk::Client,
+    health_interval: std::time::Duration,
+    generation_interval: std::time::Duration,
+) -> Result<(), sift_workspace_ui::DegradedReason> {
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let established_generation = tokio::time::timeout(PROBE_TIMEOUT, client.connect())
         .await
         .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?
+        .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?
         .daemon_generation;
-    let mut health = tokio::time::interval(std::time::Duration::from_secs(2));
+    let mut health = tokio::time::interval(health_interval);
     health.tick().await;
-    let mut generation = tokio::time::interval(std::time::Duration::from_secs(15));
+    let mut generation = tokio::time::interval(generation_interval);
     generation.tick().await;
     loop {
         tokio::select! {
             _ = health.tick() => {
-                if client.health().await.is_err() {
+                if !matches!(tokio::time::timeout(PROBE_TIMEOUT, client.health()).await, Ok(Ok(_))) {
                     return Err(sift_workspace_ui::DegradedReason::Offline);
                 }
             }
             _ = generation.tick() => {
-                let observed = client
-                    .probe_handshake()
+                let observed = tokio::time::timeout(PROBE_TIMEOUT, client.probe_handshake())
                     .await
+                    .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?
                     .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?;
                 if daemon_generation_changed(&established_generation, &observed.daemon_generation) {
                     return Err(sift_workspace_ui::DegradedReason::Offline);
+                }
+                // Health and handshake can succeed after the session loses
+                // authority. Probe through the authenticated SDK path so token
+                // refresh runs before presenting a sign-in or revocation state.
+                let identity = tokio::time::timeout(PROBE_TIMEOUT, client.whoami())
+                    .await
+                    .map_err(|_| sift_workspace_ui::DegradedReason::Offline)?;
+                if let Err(error) = identity {
+                    return Err(match error {
+                        ClientError::Server { status, .. } if status.as_u16() == 401 => {
+                            sift_workspace_ui::DegradedReason::AuthenticationExpired
+                        }
+                        ClientError::Server { status, .. } if status.as_u16() == 403 => {
+                            sift_workspace_ui::DegradedReason::AccessRevoked
+                        }
+                        _ => sift_workspace_ui::DegradedReason::Offline,
+                    });
                 }
             }
         }
@@ -7991,6 +8022,267 @@ mod tests {
         let (_, isolated_hops) =
             relationship_component(&graph, &CatalogObjectId("isolated".into()));
         assert_eq!(isolated_hops, 0);
+    }
+
+    fn fixture_handshake(generation: &str) -> sift_protocol::HandshakeResponse {
+        use sift_protocol::{
+            HandshakeDeployment, HandshakeResponse, HandshakeRuntimeMode, HandshakeTransport,
+            ProtocolRange, PROTOCOL_VERSION_NUMBER,
+        };
+        HandshakeResponse {
+            server_version: "test".into(),
+            protocol: ProtocolRange::exact(PROTOCOL_VERSION_NUMBER),
+            selected_protocol: PROTOCOL_VERSION_NUMBER,
+            instance_id: "fixture".into(),
+            daemon_generation: generation.into(),
+            deployment: HandshakeDeployment::Personal,
+            transport: HandshakeTransport::Loopback,
+            runtime_mode: HandshakeRuntimeMode::Daemon,
+            capabilities: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_session_detects_expired_or_revoked_auth_while_server_stays_healthy() {
+        use axum::{
+            http::StatusCode,
+            routing::{get, post},
+            Json, Router,
+        };
+        use sift_protocol::PROTOCOL_VERSION_NUMBER;
+
+        for (status, expected) in [
+            (
+                StatusCode::UNAUTHORIZED,
+                sift_workspace_ui::DegradedReason::AuthenticationExpired,
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                sift_workspace_ui::DegradedReason::AccessRevoked,
+            ),
+        ] {
+            let app = Router::new()
+                .route(
+                    "/v1/health",
+                    get(|| async {
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(sift_protocol::Health {
+                                status: "ok".into(),
+                                version: "test".into(),
+                                providers: vec![],
+                            }),
+                        )
+                    }),
+                )
+                .route(
+                    "/v1/handshake",
+                    post(|| async {
+                        let mut headers = axum::http::HeaderMap::new();
+                        headers.insert(
+                            "X-Sift-Protocol-Version",
+                            axum::http::HeaderValue::from_str(&PROTOCOL_VERSION_NUMBER.to_string())
+                                .unwrap(),
+                        );
+                        (headers, Json(fixture_handshake("generation-1")))
+                    }),
+                )
+                .route(
+                    "/v1/auth/whoami",
+                    get(move || async move {
+                        (
+                            status,
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(serde_json::json!({
+                                "kind": "authentication_expired", "message": "sign in again"
+                            })),
+                        )
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let client = Client::new(format!("http://{addr}"));
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                wait_for_server_loss_with_intervals(
+                    &client,
+                    std::time::Duration::from_millis(20),
+                    std::time::Duration::from_millis(50),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result, Err(expected));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_probe_reports_offline_start_and_server_loss() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        use sift_protocol::PROTOCOL_VERSION_NUMBER;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let client = Client::new(format!("http://{addr}"));
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                wait_for_server_loss_with_intervals(
+                    &client,
+                    std::time::Duration::from_millis(20),
+                    std::time::Duration::from_secs(1),
+                ),
+            )
+            .await
+            .unwrap(),
+            Err(sift_workspace_ui::DegradedReason::Offline),
+        );
+
+        let app = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async {
+                    (
+                        [(
+                            "X-Sift-Protocol-Version",
+                            PROTOCOL_VERSION_NUMBER.to_string(),
+                        )],
+                        Json(sift_protocol::Health {
+                            status: "ok".into(),
+                            version: "test".into(),
+                            providers: vec![],
+                        }),
+                    )
+                }),
+            )
+            .route(
+                "/v1/handshake",
+                post(|| async {
+                    (
+                        [(
+                            "X-Sift-Protocol-Version",
+                            PROTOCOL_VERSION_NUMBER.to_string(),
+                        )],
+                        Json(fixture_handshake("generation-1")),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::new(format!("http://{addr}"));
+        client.connect().await.unwrap();
+        let probe = tokio::spawn(async move {
+            wait_for_server_loss_with_intervals(
+                &client,
+                std::time::Duration::from_millis(20),
+                std::time::Duration::from_secs(1),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        server.abort();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), probe)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(sift_workspace_ui::DegradedReason::Offline),
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_probe_detects_restart_on_healthy_endpoint() {
+        use axum::{
+            extract::State,
+            routing::{get, post},
+            Json, Router,
+        };
+        use sift_protocol::PROTOCOL_VERSION_NUMBER;
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let restart_state = Arc::new((AtomicBool::new(false), AtomicUsize::new(0)));
+        let app = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async {
+                    (
+                        [(
+                            "X-Sift-Protocol-Version",
+                            PROTOCOL_VERSION_NUMBER.to_string(),
+                        )],
+                        Json(sift_protocol::Health {
+                            status: "ok".into(),
+                            version: "test".into(),
+                            providers: vec![],
+                        }),
+                    )
+                }),
+            )
+            .route(
+                "/v1/handshake",
+                post(
+                    |State(state): State<Arc<(AtomicBool, AtomicUsize)>>| async move {
+                        let generation = if state.0.load(Ordering::SeqCst) {
+                            "generation-2"
+                        } else {
+                            "generation-1"
+                        };
+                        state.1.fetch_add(1, Ordering::SeqCst);
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(fixture_handshake(generation)),
+                        )
+                    },
+                ),
+            )
+            .with_state(restart_state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::new(format!("http://{addr}"));
+        let probe = tokio::spawn(async move {
+            wait_for_server_loss_with_intervals(
+                &client,
+                std::time::Duration::from_millis(20),
+                std::time::Duration::from_millis(200),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while restart_state.1.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        restart_state.0.store(true, Ordering::SeqCst);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), probe)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(sift_workspace_ui::DegradedReason::Offline),
+        );
+        server.abort();
     }
 
     #[tokio::test]

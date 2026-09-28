@@ -56,6 +56,20 @@ passed; the HTTP error regression checks the typed `metadata_busy` 503.
 Generated incremental build artifacts were cleared to recover disk capacity;
 source files and dependency caches were retained.
 
+Recovery validation: the desktop lifecycle probe now has focused coverage for
+startup while the server is offline, loss of a previously healthy server,
+generation change on a healthy endpoint, and idle-session bearer rejection while
+health stays available. Native packaging, signed updates, and cross-platform
+measurements remain open.
+
+Linux performance validation (2026-09-28): the existing `release-dev` fixtures
+were rerun without concurrent builds. First-result-page p95 met the 8.33 ms
+CPU-frame target; 100,000-object schema filtering did not. A direct benchmark
+process memory measurement was recorded, while steady desktop and cross-platform
+memory acceptance remain open. Reusing scope and group matches reduced work in
+the filter path; its follow-up p95 was 8.385 ms over 98 frames, still above the
+8.33 ms target. See [performance measurements](performance-measurements.md).
+
 ## Design: domain extraction
 
 Keep HTTP routing/middleware in `http.rs`, moving domain handlers together while
