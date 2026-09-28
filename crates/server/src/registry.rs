@@ -601,7 +601,9 @@ impl RuntimeDriver {
             OperationKind::BulkInsert | OperationKind::ImportCsv => "driver.bulk@1",
             OperationKind::Listen => "driver.notifications@1",
             OperationKind::Explain => "driver.explain@1",
-            OperationKind::ListProcesses | OperationKind::KillProcess => "driver.process-control@1",
+            OperationKind::ListProcesses
+            | OperationKind::ListDeadlocks
+            | OperationKind::KillProcess => "driver.process-control@1",
             OperationKind::GenerateDdl
             | OperationKind::Complete
             | OperationKind::OpenSemanticDocument

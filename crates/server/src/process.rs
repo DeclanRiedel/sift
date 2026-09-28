@@ -1,6 +1,7 @@
 use sift_protocol::{
-    Code, ConnectionId, DatabaseHeldLock, DatabaseLockWait, DatabaseProcess, DriverError, Engine,
-    ExecuteRequestHttp, KillProcessResponse, SessionId, Value,
+    Code, ConnectionId, DatabaseDeadlockEvent, DatabaseDeadlockParticipant, DatabaseHeldLock,
+    DatabaseLockWait, DatabaseProcess, DriverError, Engine, ExecuteRequestHttp,
+    KillProcessResponse, SessionId, Value,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -72,6 +73,21 @@ WHERE s.session_id <> @@SPID AND s.is_user_process = 1
 ORDER BY CASE WHEN r.session_id IS NOT NULL THEN 0 ELSE 1 END,
     COALESCE(r.start_time, tx.started_at)"#;
 
+// system_health is server-owned. The ring buffer is bounded and may evict old
+// events; it is a recent-history source, not a durable archive. Keep XML inside
+// the server and return only the fields required for inspection.
+const MSSQL_DEADLOCKS: &str = r#"SELECT TOP (50)
+    CONVERT(nvarchar(max), event_node.query('.'))
+FROM sys.dm_xe_sessions session_row
+JOIN sys.dm_xe_session_targets target_row
+    ON target_row.event_session_address = session_row.address
+CROSS APPLY (SELECT CAST(target_row.target_data AS xml) AS target_xml) target_data
+CROSS APPLY target_data.target_xml.nodes(
+    '/RingBufferTarget/event[@name="xml_deadlock_report"]') events(event_node)
+WHERE session_row.name = N'system_health' AND target_row.target_name = N'ring_buffer'
+  AND DATALENGTH(CONVERT(nvarchar(max), event_node.query('.'))) <= 262144
+ORDER BY event_node.value('(@timestamp)[1]', 'nvarchar(64)') DESC"#;
+
 pub async fn list(
     store: &SessionStore,
     session: SessionId,
@@ -110,6 +126,107 @@ pub async fn list(
         .iter()
         .map(|row| parse_row(engine, &row.values))
         .collect()
+}
+
+pub async fn list_deadlocks(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+) -> ApiResult<Vec<DatabaseDeadlockEvent>> {
+    if store.conn_entry(session, connection)?.driver.engine() != Engine::SqlServer {
+        return Err(DriverError::new(
+            Code::UnsupportedForEngine,
+            "historical deadlock events require SQL Server system_health",
+        )
+        .into());
+    }
+    let response = store
+        .execute_http_as(
+            session,
+            ExecuteRequestHttp {
+                connection,
+                sql: MSSQL_DEADLOCKS.into(),
+                params: Vec::new(),
+                tx: None,
+                room_id: None,
+                connection_profile_id: None,
+                transform: None,
+                source: None,
+            },
+            sift_protocol::OperationKind::ListDeadlocks,
+        )
+        .await?;
+    response
+        .rows
+        .iter()
+        .map(|row| {
+            let xml = row
+                .values
+                .first()
+                .and_then(value_string)
+                .ok_or_else(|| deadlock_shape_error("deadlock event XML was missing"))?;
+            parse_deadlock_event(&xml)
+        })
+        .collect()
+}
+
+fn deadlock_shape_error(message: &str) -> ApiError {
+    ApiError::Driver(DriverError::new(Code::UnsupportedResultShape, message))
+}
+
+fn parse_deadlock_event(xml: &str) -> ApiResult<DatabaseDeadlockEvent> {
+    let document = roxmltree::Document::parse(xml)
+        .map_err(|_| deadlock_shape_error("deadlock event XML was invalid"))?;
+    let event = document.root_element();
+    let occurred_at = event
+        .attribute("timestamp")
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .ok_or_else(|| deadlock_shape_error("deadlock event timestamp was invalid"))?;
+    let graph = event
+        .descendants()
+        .find(|node| node.has_tag_name("deadlock"))
+        .ok_or_else(|| deadlock_shape_error("deadlock graph was missing"))?;
+    let victim_id = graph
+        .descendants()
+        .find(|node| node.has_tag_name("victimProcess"))
+        .and_then(|node| node.attribute("id"));
+    let process_list = graph
+        .children()
+        .find(|node| node.has_tag_name("process-list"))
+        .ok_or_else(|| deadlock_shape_error("deadlock process list was missing"))?;
+    let mut participants = Vec::new();
+    let mut participants_truncated = false;
+    for process in process_list
+        .children()
+        .filter(|node| node.has_tag_name("process"))
+    {
+        let Some(process_id) = process.attribute("spid").and_then(|id| id.parse().ok()) else {
+            continue;
+        };
+        if participants.len() == 16 {
+            participants_truncated = true;
+            break;
+        }
+        let bounded = |value: Option<&str>| value.map(|value| value.chars().take(256).collect());
+        participants.push(DatabaseDeadlockParticipant {
+            process_id,
+            victim: victim_id.is_some_and(|id| process.attribute("id") == Some(id)),
+            wait_resource: bounded(process.attribute("waitresource")),
+            lock_mode: bounded(process.attribute("lockMode")),
+            wait_ms: process
+                .attribute("waittime")
+                .and_then(|value| value.parse().ok()),
+        });
+    }
+    if participants.is_empty() {
+        return Err(deadlock_shape_error("deadlock had no session IDs"));
+    }
+    Ok(DatabaseDeadlockEvent {
+        occurred_at,
+        participants,
+        participants_truncated,
+    })
 }
 
 pub async fn kill(
@@ -286,6 +403,30 @@ mod tests {
         assert!(process.held_locks_truncated);
     }
 
+    #[test]
+    fn projects_bounded_deadlock_summary_without_sql_text() {
+        let xml = r#"<event name="xml_deadlock_report" timestamp="2026-09-28T10:00:00.123Z"><data name="xml_report"><value><deadlock><victim-list><victimProcess id="one"/></victim-list><process-list><process id="one" spid="42" waitresource="KEY: 7:1" waittime="192" lockMode="X"><inputbuf>SECRET SQL</inputbuf></process><process id="two" spid="43" waitresource="KEY: 7:2" waittime="200" lockMode="S"/></process-list></deadlock></value></data></event>"#;
+        let event = parse_deadlock_event(xml).unwrap();
+        assert_eq!(event.participants.len(), 2);
+        assert_eq!(event.participants[0].process_id, 42);
+        assert!(event.participants[0].victim);
+        assert_eq!(event.participants[0].wait_ms, Some(192));
+        assert!(!event.participants[1].victim);
+        assert!(!serde_json::to_string(&event)
+            .unwrap()
+            .contains("SECRET SQL"));
+
+        let processes = (0..17)
+            .map(|id| format!("<process id=\"{id}\" spid=\"{id}\"/>"))
+            .collect::<String>();
+        let xml = format!(
+            "<event timestamp=\"2026-09-28T10:00:00Z\"><deadlock><process-list>{processes}</process-list></deadlock></event>"
+        );
+        let bounded = parse_deadlock_event(&xml).unwrap();
+        assert_eq!(bounded.participants.len(), 16);
+        assert!(bounded.participants_truncated);
+    }
+
     #[cfg(any(feature = "live-pg", feature = "live-mssql"))]
     async fn live_snapshot(engine: Engine) {
         use sift_driver_api::Driver;
@@ -348,6 +489,26 @@ mod tests {
             }
         }
         assert!(done, "process snapshot stream ended without completion");
+        if engine == Engine::SqlServer {
+            let mut stream = driver
+                .execute(connection.clone(), ExecuteRequest::new(MSSQL_DEADLOCKS))
+                .await
+                .unwrap();
+            let mut done = false;
+            while let Some(page) = stream.rows.recv().await {
+                match page {
+                    Page::Rows { rows } => {
+                        for row in rows {
+                            parse_deadlock_event(&value_string(&row.values[0]).unwrap()).unwrap();
+                        }
+                    }
+                    Page::Error { error } => panic!("deadlock history query failed: {error}"),
+                    Page::Done { .. } => done = true,
+                    _ => {}
+                }
+            }
+            assert!(done, "deadlock history stream ended without completion");
+        }
         driver.close(connection).await.unwrap();
     }
 

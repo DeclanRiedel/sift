@@ -1,4 +1,4 @@
-use sift_protocol::DatabaseProcess;
+use sift_protocol::{DatabaseDeadlockEvent, DatabaseProcess};
 
 use super::RequestState;
 
@@ -8,6 +8,7 @@ pub(super) enum DatabaseMonitorView {
     Activity,
     Locks,
     Deadlocks,
+    History,
     Alerts,
 }
 
@@ -31,7 +32,9 @@ impl DatabaseAlertKind {
 #[derive(Debug, Default)]
 pub(super) struct DatabaseMonitorState {
     processes: Vec<DatabaseProcess>,
+    deadlocks: Vec<DatabaseDeadlockEvent>,
     request: RequestState,
+    deadlock_request: RequestState,
     selected: Option<i64>,
     view: DatabaseMonitorView,
     alerts: std::collections::HashMap<i64, DatabaseAlertKind>,
@@ -40,6 +43,34 @@ pub(super) struct DatabaseMonitorState {
 impl DatabaseMonitorState {
     pub(super) fn request(&self) -> &RequestState {
         &self.request
+    }
+
+    pub(super) fn deadlock_request(&self) -> &RequestState {
+        &self.deadlock_request
+    }
+
+    pub(super) fn deadlocks(&self) -> &[DatabaseDeadlockEvent] {
+        &self.deadlocks
+    }
+
+    pub(super) fn start_deadlocks(&mut self) {
+        self.deadlocks.clear();
+        self.deadlock_request.start();
+    }
+
+    pub(super) fn fail_deadlocks(&mut self, message: impl Into<String>) {
+        self.deadlocks.clear();
+        self.deadlock_request.fail(message);
+    }
+
+    pub(super) fn finish_deadlocks(&mut self, result: Result<Vec<DatabaseDeadlockEvent>, String>) {
+        match result {
+            Ok(events) => {
+                self.deadlocks = events;
+                self.deadlock_request.succeed();
+            }
+            Err(message) => self.deadlock_request.fail(message),
+        }
     }
 
     pub(super) fn selected(&self) -> Option<i64> {
@@ -56,6 +87,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Activity => false,
             DatabaseMonitorView::Locks => !self.lock_process_ids().contains(&selected),
             DatabaseMonitorView::Deadlocks => !self.deadlock_process_ids().contains(&selected),
+            DatabaseMonitorView::History => true,
             DatabaseMonitorView::Alerts => !self.alerts.contains_key(&selected),
         }) {
             self.selected = None;
@@ -67,6 +99,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Activity => return self.processes.clone(),
             DatabaseMonitorView::Locks => self.lock_process_ids(),
             DatabaseMonitorView::Deadlocks => self.deadlock_process_ids(),
+            DatabaseMonitorView::History => return Vec::new(),
             DatabaseMonitorView::Alerts => self.alerts.keys().copied().collect(),
         };
         self.processes

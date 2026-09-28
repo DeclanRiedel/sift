@@ -43,6 +43,24 @@ pub struct DatabaseHeldLock {
     pub mode: String,
 }
 
+/// A retained SQL Server system_health deadlock event. The server projects a
+/// bounded summary and never sends the raw graph or statement text.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseDeadlockEvent {
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+    pub participants: Vec<DatabaseDeadlockParticipant>,
+    pub participants_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseDeadlockParticipant {
+    pub process_id: i64,
+    pub victim: bool,
+    pub wait_resource: Option<String>,
+    pub lock_mode: Option<String>,
+    pub wait_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct KillProcessRequest {
     pub process_id: i64,

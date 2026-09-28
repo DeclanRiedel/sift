@@ -271,12 +271,16 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | BenchmarkQuery
         | CancelBenchmark
         | ListProcesses
+        | ListDeadlocks
         | KillProcess
         | ImportCsv
         | BulkInsert
             if !has_connection =>
         {
             Some("connection context required")
+        }
+        ListDeadlocks if engine != Some(Engine::SqlServer) => {
+            Some("retained deadlock history is only available for SQL Server")
         }
         ExecuteRun if !has_connection => Some("connection context required"),
         ExecuteQuery if has_active_transaction && !selected_transaction => {
@@ -317,6 +321,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | BenchmarkQuery
         | CancelBenchmark
         | ListProcesses
+        | ListDeadlocks
         | KillProcess
         | ImportCsv
         | BulkInsert

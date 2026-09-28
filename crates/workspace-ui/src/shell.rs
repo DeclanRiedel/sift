@@ -3685,6 +3685,7 @@ pub enum ExecutorCommand {
         profile_id: i64,
     },
     LoadDatabaseProcesses,
+    LoadDatabaseDeadlocks,
     LoadRoomMembers {
         room_id: i64,
     },
@@ -4507,6 +4508,7 @@ pub enum ExecutorEvent {
     },
     ProfileDeletionFailed(String),
     DatabaseProcessesLoaded(Result<Vec<sift_protocol::DatabaseProcess>, String>),
+    DatabaseDeadlocksLoaded(Result<Vec<sift_protocol::DatabaseDeadlockEvent>, String>),
     RoomMembersLoaded {
         room_id: i64,
         result: Result<Vec<sift_api_types::RoomMember>, String>,
@@ -16460,6 +16462,10 @@ impl WorkspaceShell {
                 self.database_monitor.finish_loading(result);
                 cx.notify();
             }
+            ExecutorEvent::DatabaseDeadlocksLoaded(result) => {
+                self.database_monitor.finish_deadlocks(result);
+                cx.notify();
+            }
             ExecutorEvent::CatalogDiagramLoaded(result) => {
                 self.catalog_diagram.finish_loading(result);
                 cx.notify();
@@ -26427,6 +26433,9 @@ impl WorkspaceShell {
         }
         if tool == BottomTool::Monitor && self.bottom_dock.presentation.open {
             self.load_database_processes(cx);
+            if self.database_monitor.view() == DatabaseMonitorView::History {
+                self.load_database_deadlocks(cx);
+            }
         }
         if tool == BottomTool::Automations && self.bottom_dock.presentation.open {
             self.request_automations(cx);
@@ -26767,6 +26776,27 @@ impl WorkspaceShell {
 
     fn set_database_monitor_view(&mut self, view: DatabaseMonitorView, cx: &mut Context<Self>) {
         self.database_monitor.set_view(view);
+        if view == DatabaseMonitorView::History {
+            self.load_database_deadlocks(cx);
+        }
+        cx.notify();
+    }
+
+    fn load_database_deadlocks(&mut self, cx: &mut Context<Self>) {
+        if self.database_monitor.deadlock_request().loading() {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.database_monitor
+                .fail_deadlocks("Database executor is unavailable");
+            return;
+        };
+        if sender.send(ExecutorCommand::LoadDatabaseDeadlocks).is_ok() {
+            self.database_monitor.start_deadlocks();
+        } else {
+            self.database_monitor
+                .fail_deadlocks("Database executor is unavailable");
+        }
         cx.notify();
     }
 
@@ -54536,6 +54566,47 @@ mod tests {
             commands.try_recv(),
             Ok(ExecutorCommand::TerminateDatabaseProcess { process_id: 42 })
         ));
+    }
+
+    #[gpui::test]
+    fn monitor_shows_retained_deadlock_history(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(128);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.select_bottom_tool(BottomTool::Monitor, cx);
+            shell.set_database_monitor_view(DatabaseMonitorView::History, cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadDatabaseProcesses)
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::LoadDatabaseDeadlocks)
+        ));
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::DatabaseDeadlocksLoaded(Ok(vec![
+                    sift_protocol::DatabaseDeadlockEvent {
+                        occurred_at: chrono::Utc::now(),
+                        participants: vec![sift_protocol::DatabaseDeadlockParticipant {
+                            process_id: 42,
+                            victim: true,
+                            wait_resource: Some("KEY: 7:1".into()),
+                            lock_mode: Some("X".into()),
+                            wait_ms: Some(192),
+                        }],
+                        participants_truncated: false,
+                    },
+                ])),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("database-deadlock-event-0").is_some());
     }
 
     #[gpui::test]

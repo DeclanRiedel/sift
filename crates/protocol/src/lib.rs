@@ -123,8 +123,9 @@ pub use policy::{
     TenantUsageSnapshot, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest,
 };
 pub use process::{
-    DatabaseHeldLock, DatabaseLockWait, DatabaseProcess, KillProcessRequest, KillProcessResponse,
-    ProcessAlert, ProcessAlertKind, ProcessAlertSample,
+    DatabaseDeadlockEvent, DatabaseDeadlockParticipant, DatabaseHeldLock, DatabaseLockWait,
+    DatabaseProcess, KillProcessRequest, KillProcessResponse, ProcessAlert, ProcessAlertKind,
+    ProcessAlertSample,
 };
 pub use provider::*;
 pub use remote::{

@@ -161,6 +161,20 @@ pub(super) fn render_bottom_panel(
                         )
                         .child(
                             Button::new(
+                                "monitor-view-deadlock-history",
+                                format!("History {}", shell.database_monitor.deadlocks().len()),
+                            )
+                            .tone(if view == DatabaseMonitorView::History {
+                                ButtonTone::Neutral
+                            } else {
+                                ButtonTone::Ghost
+                            })
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.set_database_monitor_view(DatabaseMonitorView::History, cx)
+                            })),
+                        )
+                        .child(
+                            Button::new(
                                 "monitor-view-alerts",
                                 format!("Alerts {}", shell.database_monitor.alert_count()),
                             )
@@ -178,6 +192,9 @@ pub(super) fn render_bottom_panel(
                 })),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {
+            if shell.database_monitor.view() == DatabaseMonitorView::History {
+                render_database_deadlock_history(shell, cx)
+            } else {
             let transaction = shell.transaction_state.transaction().map(|transaction| {
                 let savepoints =
                     shell
@@ -338,6 +355,7 @@ pub(super) fn render_bottom_panel(
                             match shell.database_monitor.view() {
                                 DatabaseMonitorView::Locks => "No waiting or blocking sessions.",
                                 DatabaseMonitorView::Deadlocks => "No live blocking cycles observed. Resolved deadlocks require server logs.",
+                                DatabaseMonitorView::History => "No retained deadlock events.",
                                 DatabaseMonitorView::Alerts => "No database health alerts.",
                                 DatabaseMonitorView::Activity => "No database activity reported.",
                             },
@@ -345,6 +363,7 @@ pub(super) fn render_bottom_panel(
                     },
                 )
                 .into_any_element()
+            }
         } else if shell.active_bottom_tool == BottomTool::Automations {
             let rows =
                 shell
@@ -986,6 +1005,125 @@ fn database_process_rows(processes: &[sift_protocol::DatabaseProcess]) -> Vec<Da
             }
         })
         .collect()
+}
+
+fn render_database_deadlock_history(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let colors = cx.theme().colors;
+    let request = shell.database_monitor.deadlock_request();
+    let rows = shell
+        .database_monitor
+        .deadlocks()
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let participants = event
+                .participants
+                .iter()
+                .map(|participant| {
+                    let role = if participant.victim {
+                        "victim"
+                    } else {
+                        "session"
+                    };
+                    format!(
+                        "{role} #{} · {} · {} · {} ms",
+                        participant.process_id,
+                        participant.lock_mode.as_deref().unwrap_or("unknown mode"),
+                        participant
+                            .wait_resource
+                            .as_deref()
+                            .unwrap_or("unknown resource"),
+                        participant.wait_ms.unwrap_or(0),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            div()
+                .id(("database-deadlock-event", index))
+                .debug_selector(move || format!("database-deadlock-event-{index}"))
+                .p_2()
+                .border_b_1()
+                .border_color(colors.subtle_border)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(SectionLabel::new(format!(
+                    "{} · {} session{}{}",
+                    event.occurred_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                    event.participants.len(),
+                    if event.participants.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    if event.participants_truncated {
+                        "+"
+                    } else {
+                        ""
+                    },
+                )))
+                .child(div().text_xs().font_family("monospace").child(participants))
+        })
+        .collect::<Vec<_>>();
+    div()
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .flex_col()
+        .child(
+            div()
+                .h(px(30.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(SectionLabel::new("RETAINED DEADLOCKS · SQL SERVER"))
+                .child(div().flex_1())
+                .child(
+                    Button::new(
+                        "refresh-database-deadlocks",
+                        if request.loading() {
+                            "Loading…"
+                        } else {
+                            "Refresh"
+                        },
+                    )
+                    .tone(ButtonTone::Ghost)
+                    .disabled(request.loading())
+                    .on_click(cx.listener(|shell, _, _, cx| shell.load_database_deadlocks(cx))),
+                ),
+        )
+        .child(
+            div()
+                .id("database-deadlock-history-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .children(rows),
+        )
+        .children(request.error().map(|message| {
+            div()
+                .p_2()
+                .text_color(colors.danger)
+                .child(message.to_string())
+        }))
+        .when(
+            shell.database_monitor.deadlocks().is_empty()
+                && !request.loading()
+                && request.error().is_none(),
+            |panel| {
+                panel.child(
+                    div()
+                        .p_4()
+                        .text_center()
+                        .child("No retained deadlock events."),
+                )
+            },
+        )
+        .into_any_element()
 }
 
 fn render_database_process_row(

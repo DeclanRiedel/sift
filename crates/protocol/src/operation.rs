@@ -583,6 +583,10 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
     },
+    ListDeadlocks {
+        session: SessionId,
+        connection: ConnectionId,
+    },
     KillProcess {
         session: SessionId,
         connection: ConnectionId,
@@ -817,6 +821,7 @@ impl Operation {
             Self::BenchmarkQuery { .. } => OperationKind::BenchmarkQuery,
             Self::CancelBenchmark { .. } => OperationKind::CancelBenchmark,
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
+            Self::ListDeadlocks { .. } => OperationKind::ListDeadlocks,
             Self::KillProcess { .. } => OperationKind::KillProcess,
             Self::ImportCsv { .. } => OperationKind::ImportCsv,
             Self::BulkInsert { .. } => OperationKind::BulkInsert,
@@ -1243,6 +1248,9 @@ impl Operation {
             }
             Operation::ListProcesses { connection, .. } => {
                 summary("list", "process", Some(connection.0 as i64))
+            }
+            Operation::ListDeadlocks { connection, .. } => {
+                summary("list", "deadlock", Some(connection.0 as i64))
             }
             Operation::KillProcess { request, .. } => {
                 summary("kill", "process", Some(request.process_id))
