@@ -56,6 +56,7 @@ pub async fn generate_ddl(
             sequence::generate_sequence_ddl(driver, handle, &object, engine).await?
         }
         ObjectKind::ForeignTable => native::foreign_table(driver, handle, &object, engine).await?,
+        ObjectKind::Synonym => native::synonym(driver, handle, &object, engine).await?,
         ObjectKind::View | ObjectKind::MaterializedView => {
             generate_view_ddl(driver, handle, &object, engine, kind).await?
         }

@@ -622,6 +622,7 @@ CREATE TABLE {src}.temporal_items (
  valid_to datetime2 GENERATED ALWAYS AS ROW END NOT NULL,
  PERIOD FOR SYSTEM_TIME (valid_from, valid_to)
 ) WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = {src}.temporal_items_history));
+CREATE SYNONYM {src}.items_alias FOR {src}.items;
 GO
 CREATE TRIGGER {src}.changed ON {src}.items AFTER UPDATE AS BEGIN SET NOCOUNT ON; END;
 GO
@@ -630,6 +631,17 @@ DISABLE TRIGGER {src}.changed ON {src}.items;
     round_trip(&driver, &conn, &src, &dst, "label", ObjectKind::Type).await;
     round_trip(&driver, &conn, &src, &dst, "counter", ObjectKind::Sequence).await;
     let ddl = round_trip(&driver, &conn, &src, &dst, "items", ObjectKind::Table).await;
+    let synonym = round_trip(
+        &driver,
+        &conn,
+        &src,
+        &dst,
+        "items_alias",
+        ObjectKind::Synonym,
+    )
+    .await;
+    assert!(synonym.contains("CREATE SYNONYM"));
+    assert!(synonym.contains("FOR"));
     let sparse = round_trip(
         &driver,
         &conn,
@@ -719,6 +731,20 @@ DISABLE TRIGGER {src}.changed ON {src}.items;
             Some(&serde_json::Value::Bool(true))
         );
     }
+    let synonym_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.name == "items_alias")
+        .unwrap();
+    assert!(graph.edges.iter().any(|edge| {
+        edge.from == synonym_node.id
+            && edge.kind == sift_protocol::CatalogEdgeKind::DependsOn
+            && (edge.to.is_some()
+                || edge
+                    .referenced_path
+                    .as_deref()
+                    .is_some_and(|path| path.contains("items")))
+    }));
     let compressed_shape = |graph: &sift_protocol::CatalogGraphData| {
         graph
             .nodes
@@ -774,6 +800,6 @@ DISABLE TRIGGER {src}.changed ON {src}.items;
     .await
     .is_err());
     execute(&driver, &conn, &format!("REVERT; DROP USER {src};")).await;
-    execute(&driver,&conn,&format!("ALTER TABLE {dst}.temporal_items SET (SYSTEM_VERSIONING = OFF); ALTER TABLE {src}.temporal_items SET (SYSTEM_VERSIONING = OFF); DROP TABLE {dst}.temporal_items; DROP TABLE {dst}.temporal_items_history; DROP TABLE {src}.temporal_items; DROP TABLE {src}.temporal_items_history; DROP TABLE {dst}.compressed_items; DROP TABLE {src}.compressed_items; DROP TABLE {dst}.sparse_items; DROP TABLE {src}.sparse_items; DROP TABLE {dst}.items; DROP TABLE {src}.items; DROP SEQUENCE {dst}.counter; DROP SEQUENCE {src}.counter; DROP TYPE {dst}.label; DROP TYPE {src}.label; DROP SCHEMA {dst}; DROP SCHEMA {src};")).await;
+    execute(&driver,&conn,&format!("ALTER TABLE {dst}.temporal_items SET (SYSTEM_VERSIONING = OFF); ALTER TABLE {src}.temporal_items SET (SYSTEM_VERSIONING = OFF); DROP SYNONYM {dst}.items_alias; DROP SYNONYM {src}.items_alias; DROP TABLE {dst}.temporal_items; DROP TABLE {dst}.temporal_items_history; DROP TABLE {src}.temporal_items; DROP TABLE {src}.temporal_items_history; DROP TABLE {dst}.compressed_items; DROP TABLE {src}.compressed_items; DROP TABLE {dst}.sparse_items; DROP TABLE {src}.sparse_items; DROP TABLE {dst}.items; DROP TABLE {src}.items; DROP SEQUENCE {dst}.counter; DROP SEQUENCE {src}.counter; DROP TYPE {dst}.label; DROP TYPE {src}.label; DROP SCHEMA {dst}; DROP SCHEMA {src};")).await;
     driver.close(conn).await.unwrap();
 }
