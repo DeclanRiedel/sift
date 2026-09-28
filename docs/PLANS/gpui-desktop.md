@@ -538,8 +538,9 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
       dialogs, window chrome, packaging, and updates on Linux/macOS/Windows.
 - [ ] Design, build, and validate signed desktop artifacts through the existing
       update lifecycle without weakening server verification. Native Windows
-      and macOS signing identities and test hosts are unavailable in this
-      environment; those platform results remain open.
+      packaging design is still open. A Windows 11 test host is available for
+      later validation; macOS access and signing identities are unavailable,
+      so signed platform results remain open.
 - [ ] Publish the desktop validation matrix and update product status docs.
 
 ### Next feature order
