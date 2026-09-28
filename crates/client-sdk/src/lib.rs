@@ -190,6 +190,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listPlanCaptures",
     "listPrincipalKeys",
     "listProcesses",
+    "readServerDashboard",
     "listDeadlocks",
     "watchProcessAlerts",
     "listProviders",
@@ -413,11 +414,11 @@ use sift_protocol::{
     RepositoryBindingId, RoomQueryResult, RoomResultId, RoomResultPages, RoomSelection, Run,
     RunConfiguration, RunConfigurationId, RunId, RunLogEntry, RunManifest, RunSchedule,
     RunStepResult, SavepointRequest, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
-    SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
-    SshProxyAccessGrant, SshProxyCapabilityExchangeRequest, TenantResourceLimits,
-    TenantUsageSnapshot, ToolContext, TransactionEndAction, TransactionInfo, TransactionPreview,
-    TransactionPreviewRequest, TransactionState, TransferExecutionResult, TransferRecipe,
-    TransferRecipeId, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
+    SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerDashboard, ServerInfo,
+    SessionId, SessionInfo, SshProxyAccessGrant, SshProxyCapabilityExchangeRequest,
+    TenantResourceLimits, TenantUsageSnapshot, ToolContext, TransactionEndAction, TransactionInfo,
+    TransactionPreview, TransactionPreviewRequest, TransactionState, TransferExecutionResult,
+    TransferRecipe, TransferRecipeId, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
     UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value, VcsAdapterDiagnostics, VcsBranch,
     VcsCommitDetail, VcsCommitResult, VcsConflictFile, VcsDiff, VcsDiffSide, VcsHeadMutationResult,
     VcsHistoricalFile, VcsHistoryPage, VcsRemote, VcsRemoteResult, VcsStatus,
@@ -1608,6 +1609,17 @@ impl Client {
     ) -> Result<Vec<DatabaseProcess>> {
         self.get(&format!(
             "/v1/sessions/{session}/connections/{connection}/processes"
+        ))
+        .await
+    }
+
+    pub async fn server_dashboard(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<ServerDashboard> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/dashboard"
         ))
         .await
     }

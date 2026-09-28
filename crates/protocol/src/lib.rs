@@ -135,9 +135,10 @@ pub use postgres_workbench::{
     PostgresObjectPageQuery, PostgresObjectPreview, PostgresPartition,
 };
 pub use process::{
-    DatabaseDeadlockEvent, DatabaseDeadlockParticipant, DatabaseHeldLock, DatabaseLockWait,
-    DatabaseProcess, KillProcessRequest, KillProcessResponse, ProcessAlert, ProcessAlertKind,
-    ProcessAlertSample,
+    DashboardProcessSummary, DashboardProcesses, DashboardSectionState, DatabaseDeadlockEvent,
+    DatabaseDeadlockParticipant, DatabaseHeldLock, DatabaseLockWait, DatabaseProcess,
+    KillProcessRequest, KillProcessResponse, ProcessAlert, ProcessAlertKind, ProcessAlertSample,
+    ServerDashboard,
 };
 pub use provider::*;
 pub use remote::{

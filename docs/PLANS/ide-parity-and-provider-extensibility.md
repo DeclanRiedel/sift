@@ -246,7 +246,9 @@ and open the live collaborative document, reusing existing tabs.
       `system_health` history; PostgreSQL historical events remain)
 - [x] Long-running-query alerts (bounded API subscriptions)
 - [x] Idle-in-transaction alerts (bounded API subscriptions)
-- [ ] Server dashboard
+- [x] Server dashboard (audited per-connection Overview with bounded process
+      counts, sampled-at and truncation state, capability/permission states,
+      and a Vim command path through `<leader> d s`)
 - [x] Query-performance history (scoped hourly API summaries)
 - [~] Query performance workbench: profiling, repeatable benchmarks, saved runs
   and comparisons — [implementation checklist](query-performance.md)

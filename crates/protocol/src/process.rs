@@ -1,6 +1,42 @@
 use serde::{Deserialize, Serialize};
 
-use crate::Engine;
+use crate::{Engine, OperationCapability};
+
+/// One bounded, read-only snapshot of the selected database connection.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ServerDashboard {
+    pub sampled_at: chrono::DateTime<chrono::Utc>,
+    pub engine: Engine,
+    pub processes: DashboardProcesses,
+    pub capabilities: Vec<OperationCapability>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardSectionState {
+    Ready,
+    Unsupported,
+    PermissionDenied,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DashboardProcesses {
+    pub state: DashboardSectionState,
+    pub summary: Option<DashboardProcessSummary>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DashboardProcessSummary {
+    pub observed: u32,
+    pub active: u32,
+    pub waiting: u32,
+    pub blocked: u32,
+    pub idle_in_transaction: u32,
+    /// The process source stops at 500 rows, so counts may be incomplete.
+    pub incomplete: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DatabaseProcess {
