@@ -1246,6 +1246,14 @@ pub fn app(state: AppState) -> Router {
             get_with(read_query_store, doc("readQueryStore", "Inspect the current SQL Server database's Query Store")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/agent/jobs",
+            get_with(read_agent_jobs, doc("readAgentJobs", "Inspect SQL Server Agent jobs visible to the login")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/settings/sqlserver",
+            get_with(read_sqlserver_settings, doc("readSqlServerSettings", "Inspect SQL Server instance settings")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/processes/kill",
             post_with(kill_process, doc("killProcess", "Terminate a database process")),
         )

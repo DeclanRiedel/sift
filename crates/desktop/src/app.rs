@@ -2748,6 +2748,35 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadAgentJobs => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .read_agent_jobs(opened.session, opened.metadata_connection)
+                        .await
+                        .map_err(|error| format!("loading Agent jobs failed: {error}")),
+                    None => Err("Connect before loading Agent jobs".into()),
+                };
+                if events.send(ExecutorEvent::AgentJobsLoaded(result)).is_err() {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadSqlServerSettings => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .read_sqlserver_settings(opened.session, opened.metadata_connection)
+                        .await
+                        .map_err(|error| format!("loading SQL Server settings failed: {error}")),
+                    None => Err("Connect before loading SQL Server settings".into()),
+                };
+                if events
+                    .send(ExecutorEvent::SqlServerSettingsLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadRoomMembers { room_id } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
