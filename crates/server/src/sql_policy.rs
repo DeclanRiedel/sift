@@ -19,6 +19,19 @@ pub fn enforce(
     sql: Option<&str>,
     objects: &[&ObjectPath],
 ) -> ApiResult<()> {
+    // Query Store contains SQL text and runtime data from the entire database.
+    // A schema-scoped profile must not use it to inspect activity outside its
+    // allowed schemas.
+    if operation == OperationKind::ReadQueryStore {
+        if policy.allowed_schemas.is_some() {
+            return Err(ApiError::Forbidden(
+                "Query Store is unavailable for schema-restricted connection profiles".into(),
+            ));
+        }
+        // This operation executes only fixed server-owned SELECTs. Parsing
+        // them as caller SQL would needlessly reject read-only profiles.
+        return Ok(());
+    }
     if policy.read_only && is_structured_write(operation) {
         return Err(ApiError::Forbidden(
             "connection profile is read-only".into(),
@@ -519,6 +532,33 @@ mod tests {
             "WITH u AS (SELECT * FROM public.users) SELECT * FROM u; SELECT * FROM u"
         )
         .is_err());
+    }
+
+    #[test]
+    fn query_store_cannot_bypass_schema_scope() {
+        let policy = restricted();
+        assert!(matches!(
+            enforce(
+                &policy,
+                Some(Engine::SqlServer),
+                OperationKind::ReadQueryStore,
+                Some("SELECT 1"),
+                &[],
+            ),
+            Err(ApiError::Forbidden(_))
+        ));
+        let read_only = ConnectionPolicy {
+            read_only: true,
+            ..ConnectionPolicy::default()
+        };
+        assert!(enforce(
+            &read_only,
+            Some(Engine::SqlServer),
+            OperationKind::ReadQueryStore,
+            Some("server-owned catalog query"),
+            &[],
+        )
+        .is_ok());
     }
 
     #[test]
