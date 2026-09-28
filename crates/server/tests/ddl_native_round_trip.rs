@@ -592,6 +592,127 @@ ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
 
 #[cfg(feature = "live-mssql")]
 #[tokio::test]
+async fn sqlserver_native_ddl_preserves_disabled_and_untrusted_constraints() {
+    let driver = sift_driver_sqlserver::MssqlDriver::new();
+    let conn = driver.open(&spec(Engine::SqlServer)).await.unwrap();
+    let (src, dst) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            r#"
+CREATE SCHEMA {src};
+GO
+CREATE SCHEMA {dst};
+GO
+CREATE TABLE {src}.parent (id int NOT NULL CONSTRAINT parent_pk PRIMARY KEY);
+CREATE TABLE {dst}.parent (id int NOT NULL CONSTRAINT parent_pk PRIMARY KEY);
+CREATE TABLE {src}.child (
+    id int NOT NULL,
+    parent_id int NULL,
+    amount int NOT NULL,
+    CONSTRAINT child_check_untrusted CHECK (amount > 0),
+    CONSTRAINT child_check_disabled CHECK (amount < 100)
+);
+ALTER TABLE {src}.child ADD CONSTRAINT child_fk_untrusted FOREIGN KEY (parent_id) REFERENCES {src}.parent(id);
+ALTER TABLE {src}.child ADD CONSTRAINT child_fk_disabled FOREIGN KEY (parent_id) REFERENCES {src}.parent(id);
+ALTER TABLE {src}.child NOCHECK CONSTRAINT child_check_untrusted;
+ALTER TABLE {src}.child CHECK CONSTRAINT child_check_untrusted;
+ALTER TABLE {src}.child NOCHECK CONSTRAINT child_fk_untrusted;
+ALTER TABLE {src}.child CHECK CONSTRAINT child_fk_untrusted;
+ALTER TABLE {src}.child NOCHECK CONSTRAINT child_check_disabled;
+ALTER TABLE {src}.child NOCHECK CONSTRAINT child_fk_disabled;
+"#
+        ),
+    )
+    .await;
+
+    let ddl = round_trip(&driver, &conn, &src, &dst, "child", ObjectKind::Table).await;
+    for name in ["child_check_untrusted", "child_fk_untrusted"] {
+        assert!(ddl.contains(&format!("NOCHECK CONSTRAINT [{name}]")));
+        assert!(ddl.contains(&format!("CHECK CONSTRAINT [{name}]")));
+    }
+    for name in ["child_check_disabled", "child_fk_disabled"] {
+        assert!(ddl.contains(&format!("NOCHECK CONSTRAINT [{name}]")));
+        assert!(!ddl.contains(&format!(" CHECK CONSTRAINT [{name}]")));
+    }
+
+    let graph = driver
+        .schema(
+            conn.clone(),
+            sift_protocol::SchemaScope {
+                depth: sift_protocol::SchemaDepth::Graph {
+                    options: sift_protocol::CatalogGraphOptions {
+                        schemas: Some(vec![src.clone()]),
+                        include_definitions: true,
+                        ..Default::default()
+                    },
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    let child = graph
+        .nodes
+        .iter()
+        .find(|node| node.name == "child")
+        .unwrap();
+    assert_eq!(
+        child.extra.get("migration_unsupported"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    let before = child.extra.get("native_column_shape").cloned().unwrap();
+    execute(
+        &driver,
+        &conn,
+        &format!("ALTER TABLE {src}.child WITH CHECK CHECK CONSTRAINT child_check_untrusted;"),
+    )
+    .await;
+    let graph = driver
+        .schema(
+            conn.clone(),
+            sift_protocol::SchemaScope {
+                depth: sift_protocol::SchemaDepth::Graph {
+                    options: sift_protocol::CatalogGraphOptions {
+                        schemas: Some(vec![src.clone()]),
+                        include_definitions: true,
+                        ..Default::default()
+                    },
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    let after = graph
+        .nodes
+        .iter()
+        .find(|node| node.name == "child")
+        .unwrap()
+        .extra
+        .get("native_column_shape")
+        .cloned()
+        .unwrap();
+    assert_ne!(before, after);
+
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "DROP TABLE {dst}.child; DROP TABLE {src}.child; DROP TABLE {dst}.parent; DROP TABLE {src}.parent; DROP SCHEMA {dst}; DROP SCHEMA {src};"
+        ),
+    )
+    .await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-mssql")]
+#[tokio::test]
 async fn sqlserver_native_ddl_preserves_advanced_columns_types_indexes_and_triggers() {
     let driver = sift_driver_sqlserver::MssqlDriver::new();
     let conn = driver.open(&spec(Engine::SqlServer)).await.unwrap();
