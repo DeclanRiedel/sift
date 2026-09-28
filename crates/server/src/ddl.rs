@@ -55,13 +55,7 @@ pub async fn generate_ddl(
         ObjectKind::Sequence => {
             sequence::generate_sequence_ddl(driver, handle, &object, engine).await?
         }
-        ObjectKind::ForeignTable => {
-            return Err(DriverError::new(
-                Code::UnsupportedForEngine,
-                "foreign-table DDL requires server and options metadata and is not supported",
-            )
-            .with_engine(engine));
-        }
+        ObjectKind::ForeignTable => native::foreign_table(driver, handle, &object, engine).await?,
         ObjectKind::View | ObjectKind::MaterializedView => {
             generate_view_ddl(driver, handle, &object, engine, kind).await?
         }

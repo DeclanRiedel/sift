@@ -25,8 +25,9 @@ exporting one object does not recursively export its dependencies. Partition roo
 DDL does not include child partitions. Standalone indexes remain attached to table
 export because ObjectKind does not yet expose index addressing.
 
-PostgreSQL excludes partition children/inheritance, foreign-table options, RLS,
-rules, custom table storage/options and unsupported index state from table export.
+PostgreSQL exports partition children/inheritance, foreign-table options, RLS,
+and rules through native DDL with explicit shape and permission boundaries.
+Custom table storage/options and unsupported index state remain excluded.
 SQL Server excludes temporal/memory/replication/policy tables, advanced storage,
 nonordinary/disabled indexes, disabled/untrusted constraints, CLR/table types and
 bound defaults/rules, non-default heap filegroups and non-default/ALTER-only

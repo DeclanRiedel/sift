@@ -23,11 +23,20 @@ for executed evidence and [graduation](postgres-sqlserver-graduation.md) for gat
 
 - Standalone index addressing: indexes are exported with tables; adding an
   ObjectKind requires a public protocol change.
-- PostgreSQL foreign tables, partition children/inheritance, RLS, rules, custom
-  storage/options and unsupported index state return explicit errors.
-- SQL Server advanced storage, temporal/memory/replication/policy tables,
-  nonordinary indexes, untrusted/disabled constraints, CLR/table types and bound
-  defaults/rules require separate support.
+- PostgreSQL foreign tables export their server reference, table and column
+  options, defaults, collations, checks, and triggers when the reader owns the
+  table and has server USAGE. The referenced server must already exist. Foreign
+  partitions, inheritance, custom storage, rules, and unsupported index state
+  return explicit errors. Simple
+  partition children (including local indexes, constraints, and triggers),
+  single and multiple inheritance, table RLS policies, and rewrite rules export
+  natively. Structural migrations fence these shapes.
+- SQL Server advanced temporal variants, memory/replication/policy tables,
+  most advanced storage, nonordinary indexes, untrusted/disabled constraints,
+  CLR/table types and bound defaults/rules require separate support. Basic
+  system-versioned tables, nullable sparse columns, and uniform ROW/PAGE
+  compression on ordinary rowstore tables and indexes round-trip; structural
+  migrations fence these shapes.
 - SQL Server synonyms and PostgreSQL extensions remain unimplemented.
 - Object grants/owners, live sequence counters, statistics, dependency-recursive
   export and full database dumps are outside object DDL. Standalone PostgreSQL
@@ -36,3 +45,18 @@ for executed evidence and [graduation](postgres-sqlserver-graduation.md) for gat
   Rich index comparison and migration metadata remain future work.
 - Optional AST-equivalence checks remain deferred; current fixtures compare
   regenerated native definitions and assert non-default properties.
+
+## Migration safety for inherited parents
+
+An ordinary PostgreSQL table may be the parent of an inheritance child that is
+outside the requested schema scope. The portable catalog projection cannot
+represent that dependency. Fingerprint direct descendants on the parent and
+fence structural migration of the parent, even when the child is absent from the
+snapshot. Verify this with a parent-only live catalog request and a migration
+preview refusal. This is a safety boundary; authoring a lossless inheritance
+migration remains separate work.
+
+For native export of multiple inheritance, emit every parent in `inhseqno`
+order while keeping only local child columns and constraints in the table body.
+Round-trip a child with two distinct parents before claiming support; its
+structural migration remains fenced.

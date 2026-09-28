@@ -1514,16 +1514,22 @@ WHERE t.is_user_defined = 1 AND t.is_table_type = 0
     }
 
     let fidelity_rows = conn.query(r#"
-SELECT s.name,t.name,CONVERT(varchar(64),HASHBYTES('SHA2_256',
-    (SELECT c.name,c.is_identity,c.is_computed,c.collation_name,c.max_length,c.precision,c.scale,
+SELECT s.name,t.name,CONVERT(varchar(64),HASHBYTES('SHA2_256',CONCAT(
+    t.temporal_type,N'|',OBJECT_SCHEMA_NAME(t.history_table_id),N'|',OBJECT_NAME(t.history_table_id),N'|',
+    (SELECT c.name,c.is_identity,c.is_computed,c.is_sparse,c.generated_always_type,c.is_hidden,
+        c.collation_name,c.max_length,c.precision,c.scale,
         cc.definition,cc.is_persisted,CONVERT(nvarchar(100),ic.seed_value) seed_value,
         CONVERT(nvarchar(100),ic.increment_value) increment_value
      FROM sys.columns c LEFT JOIN sys.computed_columns cc ON cc.object_id=c.object_id AND cc.column_id=c.column_id
      LEFT JOIN sys.identity_columns ic ON ic.object_id=c.object_id AND ic.column_id=c.column_id
-     WHERE c.object_id=t.object_id ORDER BY c.column_id FOR JSON PATH)),2)
+     WHERE c.object_id=t.object_id ORDER BY c.column_id FOR JSON PATH),N'|',
+    (SELECT p.index_id,p.partition_number,p.data_compression FROM sys.partitions p
+     WHERE p.object_id=t.object_id ORDER BY p.index_id,p.partition_number FOR JSON PATH))),2)
 FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id
-WHERE EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id=t.object_id AND
-    (c.is_identity=1 OR c.is_computed=1 OR c.collation_name<>CONVERT(nvarchar(128),DATABASEPROPERTYEX(DB_NAME(),'Collation'))))
+WHERE t.temporal_type<>0 OR EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id=t.object_id AND
+    (c.is_identity=1 OR c.is_computed=1 OR c.is_sparse=1 OR c.generated_always_type<>0
+     OR c.collation_name<>CONVERT(nvarchar(128),DATABASEPROPERTYEX(DB_NAME(),'Collation'))))
+    OR EXISTS (SELECT 1 FROM sys.partitions p WHERE p.object_id=t.object_id AND p.data_compression<>0)
 "#, &[]).await.map_err(ms_err)?.into_first_result().await.map_err(ms_err)?;
     for row in fidelity_rows {
         let key = (mssql_string(&row, 0)?, mssql_string(&row, 1)?);
