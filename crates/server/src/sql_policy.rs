@@ -19,13 +19,18 @@ pub fn enforce(
     sql: Option<&str>,
     objects: &[&ObjectPath],
 ) -> ApiResult<()> {
-    // Query Store contains SQL text and runtime data from the entire database.
-    // A schema-scoped profile must not use it to inspect activity outside its
-    // allowed schemas.
-    if operation == OperationKind::ReadQueryStore {
+    // These catalog reads can reveal state outside a profile's allowed schemas.
+    // They use fixed server-owned SELECTs and are allowed on read-only profiles.
+    if matches!(
+        operation,
+        OperationKind::ReadQueryStore
+            | OperationKind::ReadAgentJobs
+            | OperationKind::ReadSqlServerSettings
+    ) {
         if policy.allowed_schemas.is_some() {
             return Err(ApiError::Forbidden(
-                "Query Store is unavailable for schema-restricted connection profiles".into(),
+                "server-wide inspection is unavailable for schema-restricted connection profiles"
+                    .into(),
             ));
         }
         // This operation executes only fixed server-owned SELECTs. Parsing
@@ -559,6 +564,16 @@ mod tests {
             &[],
         )
         .is_ok());
+        assert!(matches!(
+            enforce(
+                &policy,
+                Some(Engine::SqlServer),
+                OperationKind::ReadAgentJobs,
+                Some("SELECT 1"),
+                &[],
+            ),
+            Err(ApiError::Forbidden(_))
+        ));
     }
 
     #[test]

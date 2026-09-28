@@ -9,6 +9,7 @@ pub const PROTOCOL_VERSION_NUMBER: u32 = 2;
 /// Header representation of [`PROTOCOL_VERSION_NUMBER`].
 pub const PROTOCOL_VERSION: &str = "2";
 
+pub mod agent_jobs;
 pub mod auth;
 pub mod automation;
 pub mod capability;
@@ -27,6 +28,7 @@ pub mod execution;
 pub mod extension;
 pub mod handshake;
 pub mod integrity;
+pub mod server_settings;
 pub mod sql_server_recovery;
 pub use sql_server_recovery::{RestoreFileMove, SqlServerRecoveryReport, SqlServerRecoveryRequest};
 pub mod maintenance;
@@ -65,6 +67,7 @@ pub mod vault;
 pub mod vcs;
 pub mod workspace;
 
+pub use agent_jobs::{AgentJob, AgentJobOutcome, AgentJobsReport, AgentJobsState};
 pub use auth::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
     AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, AuthClientKind,
@@ -157,6 +160,7 @@ pub use search::{
     SchemaSearchRequest, SchemaSearchResponse, SearchHit, SearchTarget,
 };
 pub use semantic::*;
+pub use server_settings::{SqlServerSetting, SqlServerSettingsReport, SqlServerSettingsState};
 pub use session::{
     Ack, AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest,
     BulkInsertResponse, CancelRequest, ConnectionId, ConnectionInfo, EndTransactionRequest,
