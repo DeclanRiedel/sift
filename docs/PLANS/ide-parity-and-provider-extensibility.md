@@ -235,9 +235,10 @@ and open the live collaborative document, reusing existing tabs.
 - [x] Query duration and state
 - [x] PostgreSQL activity metadata
 - [x] SQL Server request metadata
-- [ ] Lock manager UI
+- [~] Lock manager UI (waiting resource, mode, and wait age in the process monitor;
+      held-lock inventory remains)
 - [x] Blocking-chain visualization
-- [ ] Deadlock inspection
+- [~] Deadlock inspection (dedicated live Cycles view; historical events remain)
 - [x] Long-running-query alerts (bounded API subscriptions)
 - [x] Idle-in-transaction alerts (bounded API subscriptions)
 - [ ] Server dashboard

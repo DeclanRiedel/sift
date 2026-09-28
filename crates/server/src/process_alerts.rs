@@ -152,6 +152,7 @@ mod tests {
             state_changed_at: Some(now - chrono::Duration::seconds(10)),
             wait: None,
             blocked_by: vec![],
+            lock_wait: None,
         };
         let options = AlertOptions::default();
         let mut tracker = AlertTracker::default();

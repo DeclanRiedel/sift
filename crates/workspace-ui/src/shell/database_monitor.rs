@@ -7,6 +7,7 @@ pub(super) enum DatabaseMonitorView {
     #[default]
     Activity,
     Locks,
+    Deadlocks,
     Alerts,
 }
 
@@ -54,6 +55,7 @@ impl DatabaseMonitorState {
         if self.selected.is_some_and(|selected| match view {
             DatabaseMonitorView::Activity => false,
             DatabaseMonitorView::Locks => !self.lock_process_ids().contains(&selected),
+            DatabaseMonitorView::Deadlocks => !self.deadlock_process_ids().contains(&selected),
             DatabaseMonitorView::Alerts => !self.alerts.contains_key(&selected),
         }) {
             self.selected = None;
@@ -64,6 +66,7 @@ impl DatabaseMonitorState {
         let included = match self.view {
             DatabaseMonitorView::Activity => return self.processes.clone(),
             DatabaseMonitorView::Locks => self.lock_process_ids(),
+            DatabaseMonitorView::Deadlocks => self.deadlock_process_ids(),
             DatabaseMonitorView::Alerts => self.alerts.keys().copied().collect(),
         };
         self.processes
@@ -81,6 +84,10 @@ impl DatabaseMonitorState {
         self.alerts.len()
     }
 
+    pub(super) fn deadlock_process_count(&self) -> usize {
+        self.deadlock_process_ids().len()
+    }
+
     pub(super) fn alert(&self, process_id: i64) -> Option<DatabaseAlertKind> {
         self.alerts.get(&process_id).copied()
     }
@@ -92,6 +99,13 @@ impl DatabaseMonitorState {
             .flat_map(|process| {
                 std::iter::once(process.process_id).chain(process.blocked_by.iter().copied())
             })
+            .collect()
+    }
+
+    fn deadlock_process_ids(&self) -> std::collections::HashSet<i64> {
+        self.alerts
+            .iter()
+            .filter_map(|(id, kind)| (*kind == DatabaseAlertKind::DeadlockRisk).then_some(*id))
             .collect()
     }
 
@@ -115,6 +129,7 @@ impl DatabaseMonitorState {
                 }
                 self.alerts = classify_alerts(&processes, chrono::Utc::now());
                 self.processes = processes;
+                self.set_view(self.view);
                 self.request.succeed();
             }
             Err(message) => self.request.fail(message),
@@ -216,6 +231,7 @@ mod tests {
             state_changed_at: None,
             wait: None,
             blocked_by,
+            lock_wait: None,
         }
     }
 
@@ -237,6 +253,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
+        monitor.toggle(1);
+        monitor.finish_loading(Ok(vec![process(1, vec![]), process(2, vec![])]));
+        assert_eq!(monitor.selected(), None);
     }
 
     #[test]
@@ -257,5 +276,25 @@ mod tests {
         assert_eq!(alerts.get(&11), Some(&DatabaseAlertKind::IdleInTransaction));
         assert_eq!(alerts.get(&12), Some(&DatabaseAlertKind::DeadlockRisk));
         assert_eq!(alerts.get(&13), Some(&DatabaseAlertKind::DeadlockRisk));
+    }
+
+    #[test]
+    fn deadlock_view_contains_only_cycle_participants() {
+        let mut monitor = DatabaseMonitorState::default();
+        monitor.finish_loading(Ok(vec![
+            process(1, vec![2]),
+            process(2, vec![1]),
+            process(3, vec![2]),
+        ]));
+        monitor.set_view(DatabaseMonitorView::Deadlocks);
+        assert_eq!(monitor.deadlock_process_count(), 2);
+        assert_eq!(
+            monitor
+                .visible_processes()
+                .iter()
+                .map(|process| process.process_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 }

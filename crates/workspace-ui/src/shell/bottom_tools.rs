@@ -144,6 +144,23 @@ pub(super) fn render_bottom_panel(
                         )
                         .child(
                             Button::new(
+                                "monitor-view-deadlocks",
+                                format!(
+                                    "Cycles {}",
+                                    shell.database_monitor.deadlock_process_count()
+                                ),
+                            )
+                            .tone(if view == DatabaseMonitorView::Deadlocks {
+                                ButtonTone::Neutral
+                            } else {
+                                ButtonTone::Ghost
+                            })
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.set_database_monitor_view(DatabaseMonitorView::Deadlocks, cx)
+                            })),
+                        )
+                        .child(
+                            Button::new(
                                 "monitor-view-alerts",
                                 format!("Alerts {}", shell.database_monitor.alert_count()),
                             )
@@ -320,6 +337,7 @@ pub(super) fn render_bottom_panel(
                         panel.child(div().p_4().text_center().child(
                             match shell.database_monitor.view() {
                                 DatabaseMonitorView::Locks => "No waiting or blocking sessions.",
+                                DatabaseMonitorView::Deadlocks => "No live blocking cycles observed. Resolved deadlocks require server logs.",
                                 DatabaseMonitorView::Alerts => "No database health alerts.",
                                 DatabaseMonitorView::Activity => "No database activity reported.",
                             },
@@ -1109,8 +1127,21 @@ fn render_database_process_details(
             .join(", ")
     };
     let statement = process.statement.unwrap_or_else(|| "Idle".into());
+    let lock = process.lock_wait.map_or_else(
+        || "none".to_string(),
+        |lock| {
+            let age = lock.started_at.map_or_else(String::new, |started| {
+                let seconds = chrono::Utc::now()
+                    .signed_duration_since(started)
+                    .num_seconds()
+                    .max(0);
+                format!(" · waiting {seconds}s")
+            });
+            format!("{} on {}{}", lock.mode, lock.resource, age)
+        },
+    );
     let metadata = format!(
-        "{:?} · {} @ {} · {} · wait: {} · blocked by: {} · started: {}{}",
+        "{:?} · {} @ {} · {} · wait: {} · lock: {} · blocked by: {} · started: {}{}",
         process.engine,
         process.user.unwrap_or_else(|| "unknown user".into()),
         process
@@ -1118,6 +1149,7 @@ fn render_database_process_details(
             .unwrap_or_else(|| "unknown database".into()),
         process.state.unwrap_or_else(|| "unknown state".into()),
         process.wait.unwrap_or_else(|| "none".into()),
+        lock,
         blockers,
         started,
         elapsed.map_or_else(String::new, |elapsed| format!(" · elapsed: {elapsed}")),
@@ -1193,6 +1225,7 @@ mod tests {
             state_changed_at: None,
             wait: None,
             blocked_by,
+            lock_wait: None,
         }
     }
 

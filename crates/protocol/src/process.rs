@@ -18,6 +18,17 @@ pub struct DatabaseProcess {
     pub wait: Option<String>,
     #[serde(default)]
     pub blocked_by: Vec<i64>,
+    /// Waiting lock, when the provider exposes one in its process snapshot.
+    #[serde(default)]
+    pub lock_wait: Option<DatabaseLockWait>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseLockWait {
+    pub resource: String,
+    pub mode: String,
+    #[serde(default)]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

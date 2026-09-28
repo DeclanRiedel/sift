@@ -54492,6 +54492,7 @@ mod tests {
                     state_changed_at: None,
                     wait: Some("Lock".into()),
                     blocked_by: vec![7],
+                    lock_wait: None,
                 }])),
                 cx,
             );
