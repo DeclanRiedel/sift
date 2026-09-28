@@ -227,6 +227,8 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | ListDeadlocks
             | ListPostgresSettings
             | ListPostgresObjects
+            | ReadPostgresReplication
+            | ReadPostgresStatistics
             | PreviewPostgresObject
             | ApplyPostgresObject
             | ReadQueryStore

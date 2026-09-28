@@ -26,6 +26,8 @@ pub fn enforce(
         OperationKind::ReadQueryStore
             | OperationKind::ReadAgentJobs
             | OperationKind::ReadSqlServerSettings
+            | OperationKind::ReadPostgresReplication
+            | OperationKind::ReadPostgresStatistics
     ) {
         if policy.allowed_schemas.is_some() {
             return Err(ApiError::Forbidden(
@@ -616,6 +618,32 @@ mod tests {
             ),
             Err(ApiError::Forbidden(_))
         ));
+    }
+
+    #[test]
+    fn postgres_diagnostics_cannot_bypass_schema_scope() {
+        let policy = restricted();
+        for operation in [
+            OperationKind::ReadPostgresReplication,
+            OperationKind::ReadPostgresStatistics,
+        ] {
+            assert!(matches!(
+                enforce(&policy, Some(Engine::Postgres), operation, None, &[]),
+                Err(ApiError::Forbidden(_))
+            ));
+        }
+        let read_only = ConnectionPolicy {
+            read_only: true,
+            ..ConnectionPolicy::default()
+        };
+        assert!(enforce(
+            &read_only,
+            Some(Engine::Postgres),
+            OperationKind::ReadPostgresStatistics,
+            None,
+            &[]
+        )
+        .is_ok());
     }
 
     #[test]

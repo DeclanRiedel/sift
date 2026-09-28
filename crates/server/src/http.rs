@@ -1254,6 +1254,14 @@ pub fn app(state: AppState) -> Router {
             get_with(list_postgres_partitions, doc("listPostgresPartitions", "Browse PostgreSQL partitions")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/replication",
+            get_with(read_postgres_replication, doc("readPostgresReplication", "Inspect bounded PostgreSQL replication state")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/statistics",
+            get_with(read_postgres_statistics, doc("readPostgresStatistics", "Inspect bounded PostgreSQL statistics")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/postgres/objects/preview",
             post_with(preview_postgres_object, doc("previewPostgresObject", "Preview a guarded PostgreSQL object change")),
         )

@@ -2501,3 +2501,23 @@ the rest of the dashboard remains usable. Driver calls retain the existing
 execution timeout and cancellation boundary. No `Driver` trait method is
 added. The desktop opens the Overview tab through a Vim-accessible command
 and refreshes on demand; it does not poll in the background.
+
+## ADR-065 — PostgreSQL diagnostics are bounded permission-aware snapshots
+
+Status: accepted. Date: 2026-09-29.
+
+Replication and statistics inspection are separate audited read Operations,
+available only on PostgreSQL connections. Server-owned fixed SQL runs through
+the existing supervised execution path. Replication inspection first checks
+effective PostgreSQL monitoring access and returns an explicit denial without
+querying replication catalogs when the role lacks it. Its result includes only
+sender, WAL receiver, and slot fields needed for diagnosis, omitting connection
+strings, addresses, and SQL text. Sender and slot lists have hard row caps and
+truncation flags.
+
+Statistics inspection returns current-database cumulative counters and a
+bounded page of user-table counters for relations with SELECT privilege.
+Unavailable values remain nullable, and a single snapshot does not imply a
+rate or predict replication catch-up time. Managed schema-restricted profiles
+cannot access these cross-schema catalog views. The desktop Monitor has
+explicit refresh and Vim navigation, with no automatic polling or mutation.

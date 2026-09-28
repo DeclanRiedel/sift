@@ -3731,6 +3731,13 @@ pub enum ExecutorCommand {
     LoadPostgresPartitions {
         offset: u32,
     },
+    LoadPostgresReplication {
+        epoch: u64,
+    },
+    LoadPostgresStatistics {
+        epoch: u64,
+        offset: u32,
+    },
     PreviewPostgresObject {
         action: sift_protocol::PostgresObjectAction,
     },
@@ -4597,6 +4604,15 @@ pub enum ExecutorEvent {
     PostgresPartitionsLoaded {
         offset: u32,
         result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPartition>, String>,
+    },
+    PostgresReplicationLoaded {
+        epoch: u64,
+        result: Result<sift_protocol::PostgresReplicationReport, String>,
+    },
+    PostgresStatisticsLoaded {
+        epoch: u64,
+        offset: u32,
+        result: Result<sift_protocol::PostgresStatisticsReport, String>,
     },
     PostgresObjectPreviewed(Result<sift_protocol::PostgresObjectPreview, String>),
     PostgresObjectApplied(Result<(), String>),
@@ -13595,6 +13611,7 @@ impl WorkspaceShell {
                 self.database_monitor.clear_dashboard();
                 self.database_monitor.clear_query_store();
                 self.database_monitor.clear_objects();
+                self.database_monitor.clear_postgres_diagnostics();
                 self.database_monitor.clear_agent_jobs();
                 self.database_monitor.clear_sqlserver_settings();
                 if self.pg_notifications.profile_id.is_some() {
@@ -16696,6 +16713,19 @@ impl WorkspaceShell {
             }
             ExecutorEvent::PostgresPartitionsLoaded { offset, result } => {
                 self.database_monitor.finish_partitions(offset, result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresReplicationLoaded { epoch, result } => {
+                self.database_monitor.finish_replication(epoch, result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresStatisticsLoaded {
+                epoch,
+                offset,
+                result,
+            } => {
+                self.database_monitor
+                    .finish_statistics(epoch, offset, result);
                 cx.notify();
             }
             ExecutorEvent::PostgresObjectPreviewed(result) => {
@@ -27176,6 +27206,12 @@ impl WorkspaceShell {
         ) {
             self.load_postgres_objects(0, cx);
         }
+        if view == DatabaseMonitorView::Replication {
+            self.load_postgres_replication(cx);
+        }
+        if view == DatabaseMonitorView::Statistics {
+            self.load_postgres_statistics(0, cx);
+        }
         if view == DatabaseMonitorView::QueryStore {
             self.load_query_store(cx);
         }
@@ -27346,6 +27382,90 @@ impl WorkspaceShell {
                 .fail_objects_load("Database executor is unavailable");
         }
         cx.notify();
+    }
+
+    fn load_postgres_replication(&mut self, cx: &mut Context<Self>) {
+        if self.database_monitor.replication_request().loading() {
+            return;
+        }
+        let epoch = self.database_monitor.start_replication();
+        if !self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::LoadPostgresReplication { epoch })
+                .is_ok()
+        }) {
+            self.database_monitor
+                .fail_replication("Database executor is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn load_postgres_statistics(&mut self, offset: u32, cx: &mut Context<Self>) {
+        if self.database_monitor.statistics_request().loading() {
+            return;
+        }
+        let epoch = self.database_monitor.start_statistics();
+        if !self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::LoadPostgresStatistics { epoch, offset })
+                .is_ok()
+        }) {
+            self.database_monitor
+                .fail_statistics("Database executor is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn handle_postgres_diagnostics_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        match (self.database_monitor.view(), key) {
+            (DatabaseMonitorView::Replication, "r") => self.load_postgres_replication(cx),
+            (DatabaseMonitorView::Replication, "j") => {
+                self.database_monitor.move_replication_selection(1);
+                cx.notify();
+            }
+            (DatabaseMonitorView::Replication, "k") => {
+                self.database_monitor.move_replication_selection(-1);
+                cx.notify();
+            }
+            (DatabaseMonitorView::Statistics, "r") => {
+                self.load_postgres_statistics(self.database_monitor.statistics_offset(), cx)
+            }
+            (DatabaseMonitorView::Statistics, "j") => {
+                self.database_monitor.move_statistics_selection(1);
+                cx.notify();
+            }
+            (DatabaseMonitorView::Statistics, "k") => {
+                self.database_monitor.move_statistics_selection(-1);
+                cx.notify();
+            }
+            (DatabaseMonitorView::Statistics, "n") => {
+                if let Some(next) = self
+                    .database_monitor
+                    .statistics()
+                    .and_then(|report| report.next_offset)
+                {
+                    self.load_postgres_statistics(next, cx);
+                }
+            }
+            (DatabaseMonitorView::Statistics, "p") => {
+                let offset = self.database_monitor.statistics_offset();
+                if offset > 0 {
+                    self.load_postgres_statistics(offset.saturating_sub(100), cx);
+                }
+            }
+            (_, "escape") => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
     }
 
     fn preview_postgres_object(
