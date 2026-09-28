@@ -58,6 +58,26 @@ current public support boundary.
 - [ ] Connect existing copy-only backup/new-name restore and integrity-check
       APIs to complete Linux desktop workflows.
 
+### SQL Server desktop maintenance design
+
+Expose a SQL Server-only Maintenance view in the Vim monitor. Backup takes an
+existing user database and an absolute **server-side** archive path. Restore
+takes a new database name, archive path, backup-set number and explicit logical
+file to destination mappings; the backend rejects replacement and runs header,
+file-list and VERIFYONLY checks. Each recovery action first sends the existing
+audited API request with `apply=false` and shows the generated SQL and warnings.
+The desktop holds that exact preview request, rejects changed form inputs, and
+requires a typed `BACKUP <database>` or `RESTORE <database>` confirmation before
+sending the same request with `apply=true`. A connection change invalidates the
+preview. No client-side SQL or path rewriting is allowed.
+
+Integrity checks target the connected database only, with a physical-only
+option and no repair mode. Show the native outcome, bounded findings and
+warnings. Run/check buttons and Vim shortcuts use the existing audited SDK
+calls. A per-request ID prevents a response from a previous connection or
+form revision from replacing the current view. Validation uses mocked API
+responses; no desktop test invokes a real backup or restore.
+
 ## Acceptance
 
 - [ ] Live SQL Server round trips for every added type, DDL shape, plan, and
