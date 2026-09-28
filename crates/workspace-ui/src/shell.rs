@@ -3703,6 +3703,9 @@ pub enum ExecutorCommand {
     },
     LoadDatabaseProcesses,
     LoadDatabaseDeadlocks,
+    LoadPostgresSettings {
+        offset: u32,
+    },
     LoadRoomMembers {
         room_id: i64,
     },
@@ -4539,6 +4542,10 @@ pub enum ExecutorEvent {
     ProfileDeletionFailed(String),
     DatabaseProcessesLoaded(Result<Vec<sift_protocol::DatabaseProcess>, String>),
     DatabaseDeadlocksLoaded(Result<Vec<sift_protocol::DatabaseDeadlockEvent>, String>),
+    PostgresSettingsLoaded {
+        offset: u32,
+        result: Result<sift_protocol::PostgresSettingsPage, String>,
+    },
     RoomMembersLoaded {
         room_id: i64,
         result: Result<Vec<sift_api_types::RoomMember>, String>,
@@ -13522,6 +13529,7 @@ impl WorkspaceShell {
                     | ConnectionStatus::Failed { profile_id, .. } => Some(profile_id),
                     ConnectionStatus::Disconnected => None,
                 };
+                self.database_monitor.clear_settings();
                 self.connection_health = None;
                 self.connection_health_history.clear();
                 self.connection_health_expanded = false;
@@ -16565,6 +16573,10 @@ impl WorkspaceShell {
             }
             ExecutorEvent::DatabaseDeadlocksLoaded(result) => {
                 self.database_monitor.finish_deadlocks(result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresSettingsLoaded { offset, result } => {
+                self.database_monitor.finish_settings_load(offset, result);
                 cx.notify();
             }
             ExecutorEvent::CatalogDiagramLoaded(result) => {
@@ -26962,6 +26974,9 @@ impl WorkspaceShell {
         if view == DatabaseMonitorView::History {
             self.load_database_deadlocks(cx);
         }
+        if view == DatabaseMonitorView::Settings && self.database_monitor.settings().is_empty() {
+            self.load_postgres_settings(0, cx);
+        }
         cx.notify();
     }
 
@@ -26981,6 +26996,51 @@ impl WorkspaceShell {
                 .fail_deadlocks("Database executor is unavailable");
         }
         cx.notify();
+    }
+
+    fn load_postgres_settings(&mut self, offset: u32, cx: &mut Context<Self>) {
+        if self.database_monitor.settings_request().loading() {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.database_monitor
+                .fail_settings_load("Database executor is unavailable");
+            return;
+        };
+        if sender
+            .send(ExecutorCommand::LoadPostgresSettings { offset })
+            .is_ok()
+        {
+            self.database_monitor.start_settings_load();
+        } else {
+            self.database_monitor
+                .fail_settings_load("Database executor is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn handle_postgres_settings_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        let offset = self.database_monitor.settings_offset();
+        match event.keystroke.key.as_str() {
+            "n" => {
+                if let Some(next) = self.database_monitor.settings_next_offset() {
+                    self.load_postgres_settings(next, cx);
+                }
+            }
+            "p" if offset > 0 => self.load_postgres_settings(offset.saturating_sub(100), cx),
+            "r" => self.load_postgres_settings(offset, cx),
+            "escape" => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
     }
 
     fn request_automations(&mut self, cx: &mut Context<Self>) {

@@ -587,6 +587,12 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
     },
+    ListPostgresSettings {
+        session: SessionId,
+        connection: ConnectionId,
+        offset: u32,
+        limit: u32,
+    },
     KillProcess {
         session: SessionId,
         connection: ConnectionId,
@@ -822,6 +828,7 @@ impl Operation {
             Self::CancelBenchmark { .. } => OperationKind::CancelBenchmark,
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
             Self::ListDeadlocks { .. } => OperationKind::ListDeadlocks,
+            Self::ListPostgresSettings { .. } => OperationKind::ListPostgresSettings,
             Self::KillProcess { .. } => OperationKind::KillProcess,
             Self::ImportCsv { .. } => OperationKind::ImportCsv,
             Self::BulkInsert { .. } => OperationKind::BulkInsert,
@@ -1251,6 +1258,9 @@ impl Operation {
             }
             Operation::ListDeadlocks { connection, .. } => {
                 summary("list", "deadlock", Some(connection.0 as i64))
+            }
+            Operation::ListPostgresSettings { connection, .. } => {
+                summary("list", "postgres_setting", Some(connection.0 as i64))
             }
             Operation::KillProcess { request, .. } => {
                 summary("kill", "process", Some(request.process_id))

@@ -272,6 +272,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | CancelBenchmark
         | ListProcesses
         | ListDeadlocks
+        | ListPostgresSettings
         | KillProcess
         | ImportCsv
         | BulkInsert
@@ -322,6 +323,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | CancelBenchmark
         | ListProcesses
         | ListDeadlocks
+        | ListPostgresSettings
         | KillProcess
         | ImportCsv
         | BulkInsert

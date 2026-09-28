@@ -17,6 +17,7 @@ pub use room_replica::{FollowEvent, FollowMode, Ingest, RoomReplica};
 pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "saveBenchmarkRun",
     "listBenchmarkRuns",
+    "listPostgresSettings",
     "getBenchmarkRun",
     "deleteBenchmarkRun",
     "clearMetadataVaultItemSecret",
@@ -1609,6 +1610,21 @@ impl Client {
     ) -> Result<Vec<DatabaseDeadlockEvent>> {
         self.get(&format!(
             "/v1/sessions/{session}/connections/{connection}/deadlocks"
+        ))
+        .await
+    }
+
+    pub async fn list_postgres_settings(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        query: sift_protocol::PostgresSettingsQuery,
+    ) -> Result<sift_protocol::PostgresSettingsPage> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/settings/postgres?filter={}&offset={}&limit={}",
+            urlencoding_replace(&query.filter),
+            query.offset,
+            query.limit.unwrap_or(100)
         ))
         .await
     }

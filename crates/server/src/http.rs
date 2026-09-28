@@ -1230,6 +1230,10 @@ pub fn app(state: AppState) -> Router {
             get_with(list_deadlocks, doc("listDeadlocks", "List retained SQL Server deadlock events")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/settings/postgres",
+            get_with(list_postgres_settings, doc("listPostgresSettings", "Browse PostgreSQL server settings")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/processes/kill",
             post_with(kill_process, doc("killProcess", "Terminate a database process")),
         )

@@ -38,6 +38,7 @@ pub mod performance;
 pub mod plan;
 pub use performance::*;
 pub mod policy;
+pub mod postgres_settings;
 pub mod process;
 pub mod provider;
 pub use maintenance::{
@@ -122,6 +123,7 @@ pub use policy::{
     SchemaSelector, TenantResource, TenantResourceLimits, TenantResourceUsage, TenantRole,
     TenantUsageSnapshot, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest,
 };
+pub use postgres_settings::{PostgresSetting, PostgresSettingsPage, PostgresSettingsQuery};
 pub use process::{
     DatabaseDeadlockEvent, DatabaseDeadlockParticipant, DatabaseHeldLock, DatabaseLockWait,
     DatabaseProcess, KillProcessRequest, KillProcessResponse, ProcessAlert, ProcessAlertKind,
