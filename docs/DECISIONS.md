@@ -2563,7 +2563,7 @@ snapshots therefore fingerprint advanced constraint state and fence structural
 migrations for affected tables, including unsupported replication flags. A
 live fixture replays generated DDL into a second schema and compares the
 regenerated native definition before this support is claimed.
-## ADR-068 — PostgreSQL policy renames use a guarded workbench action
+## ADR-069 — PostgreSQL policy renames use a guarded workbench action
 
 **Status:** Accepted (2026-09-29)
 

@@ -416,6 +416,27 @@ pub(super) async fn list_postgres_partitions(
     Ok(Json(page))
 }
 
+pub(super) async fn list_postgres_policies(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Query(query): Query<sift_protocol::PostgresObjectPageQuery>,
+) -> ApiResult<Json<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPolicy>>> {
+    let operation = Operation::ListPostgresObjects {
+        session,
+        connection,
+        object: "policy".into(),
+        offset: query.offset,
+        limit: query.limit.unwrap_or(100),
+    };
+    let page = finish_operation(
+        &state.sessions,
+        operation,
+        crate::postgres_workbench::policies(&state.sessions, session, connection, query).await,
+        |page| Some(page.items.len() as i64),
+    )?;
+    Ok(Json(page))
+}
+
 pub(super) async fn read_postgres_replication(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

@@ -102,8 +102,10 @@ An inspection view alone does not complete the management checklist.
 - [x] Add a read-only server-settings browser with bounded, role-visible reads,
       sensitive-value redaction, audit, and a Vim desktop view. Settings writes
       remain a separate design requiring scope, policy, confirmation, and audit.
-- [ ] Add database users/roles, grants, ownership, and RLS editors with
-      capability checks and reviewable changes.
+- [~] Add database users/roles, grants, ownership, and RLS editors with
+      capability checks and reviewable changes. Bounded policy inspection and
+      owner-checked, typed rename preview/apply now cover one RLS edit; policy
+      roles, expressions, creation, deletion, and table RLS toggles remain.
 - [ ] Connect existing dump/restore, maintenance, and integrity-check backends
       to complete Linux desktop workflows where operator policy permits.
 

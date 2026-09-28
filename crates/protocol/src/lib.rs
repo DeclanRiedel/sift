@@ -139,7 +139,7 @@ pub use postgres_settings::{PostgresSetting, PostgresSettingsPage, PostgresSetti
 pub use postgres_workbench::{
     ApplyPostgresObjectRequest, PostgresExtension, PostgresObjectAction, PostgresObjectPage,
     PostgresObjectPageQuery, PostgresObjectPreview, PostgresOwnedObject, PostgresOwnedObjectKind,
-    PostgresPartition, PostgresRole, PostgresSchemaGrant, PostgresSchemaPrivilege,
+    PostgresPartition, PostgresPolicy, PostgresRole, PostgresSchemaGrant, PostgresSchemaPrivilege,
 };
 pub use process::{
     DashboardProcessSummary, DashboardProcesses, DashboardSectionState, DatabaseDeadlockEvent,

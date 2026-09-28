@@ -35,7 +35,7 @@ pub(super) fn render_bottom_panel(
         )
         .when(
             shell.active_bottom_tool == BottomTool::Monitor
-                && matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants),
+                && matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Policies | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants),
             |dock| dock.key_context("SiftPostgresObjects")
                 .on_key_down(cx.listener(WorkspaceShell::handle_postgres_objects_key)),
         )
@@ -178,7 +178,7 @@ pub(super) fn render_bottom_panel(
                 render_database_deadlock_history(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::Settings {
                 render_postgres_settings(shell, cx).into_any_element()
-            } else if matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants) {
+            } else if matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Policies | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants) {
                 render_postgres_objects(shell, cx).into_any_element()
             } else if shell.database_monitor.view() == DatabaseMonitorView::Replication {
                 render_postgres_replication(shell, cx).into_any_element()
@@ -362,7 +362,7 @@ pub(super) fn render_bottom_panel(
                                     }
                                     DatabaseMonitorView::Overview => unreachable!(),
                                     DatabaseMonitorView::Settings => unreachable!(),
-                                    DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants => unreachable!(),
+                                    DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Policies | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants => unreachable!(),
                                     DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics => unreachable!(),
                                     DatabaseMonitorView::QueryStore => unreachable!(),
                                     DatabaseMonitorView::AgentJobs => unreachable!(),
@@ -1730,6 +1730,53 @@ fn render_postgres_objects(
                     .into_any_element()
             })
             .collect::<Vec<_>>()
+    } else if state.view() == DatabaseMonitorView::Policies {
+        state
+            .policies()
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "{}.{} · {} · {} · {} · {}{}{}",
+                        item.schema,
+                        item.table,
+                        item.name,
+                        item.command,
+                        if item.permissive {
+                            "permissive"
+                        } else {
+                            "restrictive"
+                        },
+                        item.roles,
+                        if item.row_security_enabled {
+                            " · RLS enabled"
+                        } else {
+                            " · RLS disabled"
+                        },
+                        if item.row_security_forced {
+                            " · forced"
+                        } else {
+                            ""
+                        }
+                    ))
+                    .child(format!(
+                        "USING {} · CHECK {}",
+                        item.using_expression.as_deref().unwrap_or("—"),
+                        item.check_expression.as_deref().unwrap_or("—")
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>()
     } else if state.view() == DatabaseMonitorView::Roles {
         state
             .roles()
@@ -1826,6 +1873,7 @@ fn render_postgres_objects(
                 .child(SectionLabel::new(match state.view() {
                     DatabaseMonitorView::Extensions => "POSTGRESQL EXTENSIONS",
                     DatabaseMonitorView::Partitions => "POSTGRESQL PARTITIONS",
+                    DatabaseMonitorView::Policies => "POSTGRESQL POLICIES",
                     DatabaseMonitorView::Roles => "POSTGRESQL ROLES",
                     DatabaseMonitorView::Ownership => "POSTGRESQL OWNERSHIP",
                     DatabaseMonitorView::SchemaGrants => "EXPLICIT SCHEMA GRANTS",
@@ -1838,9 +1886,21 @@ fn render_postgres_objects(
                     DatabaseMonitorView::Partitions => {
                         "j/k select · d detach · n/p pages · r refresh"
                     }
+                    DatabaseMonitorView::Policies => {
+                        "j/k select · m rename · n/p pages · r refresh"
+                    }
                     _ => "j/k select · n/p pages · r refresh",
                 }))
                 .child(div().flex_1())
+                .when(state.view() == DatabaseMonitorView::Policies, |header| {
+                    header.child(
+                        Button::new("pg-policy-rename", "Rename selected")
+                            .disabled(state.policies().is_empty())
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.begin_policy_rename(window, cx)
+                            })),
+                    )
+                })
                 .child(
                     Button::new("pg-objects-prev", "Previous")
                         .tone(ButtonTone::Ghost)
@@ -1888,6 +1948,33 @@ fn render_postgres_objects(
                 .text_color(colors.danger)
                 .child(message.to_string())
         }))
+        .when(shell.policy_rename_active, |panel| {
+            panel.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child("New policy name")
+                    .child(shell.policy_rename_input.clone())
+                    .child(
+                        Button::new("pg-policy-rename-preview", "Preview rename").on_click(
+                            cx.listener(|shell, _, window, cx| {
+                                shell.preview_policy_rename(window, cx)
+                            }),
+                        ),
+                    )
+                    .child(
+                        Button::new("pg-policy-rename-cancel", "Cancel").on_click(cx.listener(
+                            |shell, _, _, cx| {
+                                shell.policy_rename_active = false;
+                                cx.notify();
+                            },
+                        )),
+                    ),
+            )
+        })
         .children(state.object_preview().map(|preview| {
             div()
                 .px_3()
@@ -1910,15 +1997,30 @@ fn render_postgres_objects(
                         .text_color(colors.warning)
                         .child(preview.warning.clone()),
                 )
+                .child(div().text_xs().child(
+                    if matches!(
+                        preview.action,
+                        sift_protocol::PostgresObjectAction::RenamePolicy { .. }
+                    ) {
+                        "x confirms production policy rename · Esc cancels"
+                    } else {
+                        "Enter applies exactly this preview · Esc cancels"
+                    },
+                ))
                 .child(
-                    div()
-                        .text_xs()
-                        .child("Enter applies exactly this preview · Esc cancels"),
-                )
-                .child(
-                    Button::new("pg-objects-apply", "Apply reviewed change")
-                        .disabled(state.object_action_request().loading())
-                        .on_click(cx.listener(|shell, _, _, cx| shell.apply_postgres_object(cx))),
+                    Button::new(
+                        "pg-objects-apply",
+                        if matches!(
+                            preview.action,
+                            sift_protocol::PostgresObjectAction::RenamePolicy { .. }
+                        ) {
+                            "Confirm production policy rename"
+                        } else {
+                            "Apply reviewed change"
+                        },
+                    )
+                    .disabled(state.object_action_request().loading())
+                    .on_click(cx.listener(|shell, _, _, cx| shell.apply_postgres_object(true, cx))),
                 )
         }))
 }

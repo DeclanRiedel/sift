@@ -19,6 +19,21 @@ pub struct PostgresPartition {
     pub bound: Option<String>,
 }
 
+/// A bounded rendering of one policy; expressions are display-only.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PostgresPolicy {
+    pub schema: String,
+    pub table: String,
+    pub name: String,
+    pub command: String,
+    pub permissive: bool,
+    pub roles: String,
+    pub using_expression: Option<String>,
+    pub check_expression: Option<String>,
+    pub row_security_enabled: bool,
+    pub row_security_forced: bool,
+}
+
 /// Public role attributes only; PostgreSQL password hashes are never selected.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PostgresRole {
@@ -105,6 +120,12 @@ pub enum PostgresObjectAction {
         parent: String,
         child_schema: String,
         child: String,
+    },
+    RenamePolicy {
+        schema: String,
+        table: String,
+        name: String,
+        new_name: String,
     },
 }
 
