@@ -25,6 +25,14 @@ pub(super) fn render_bottom_panel(
                     .on_key_down(cx.listener(WorkspaceShell::handle_automation_key))
             },
         )
+        .when(
+            shell.active_bottom_tool == BottomTool::Monitor
+                && shell.database_monitor.view() == DatabaseMonitorView::Settings,
+            |dock| {
+                dock.key_context("SiftPostgresSettings")
+                    .on_key_down(cx.listener(WorkspaceShell::handle_postgres_settings_key))
+            },
+        )
         .relative()
         .h(px(dock.presentation.size))
         .flex_none()
@@ -158,175 +166,205 @@ pub(super) fn render_bottom_panel(
                                 },
                             )),
                         )
+                        .child(
+                            Button::new("monitor-view-settings", "Settings")
+                                .tone(if view == DatabaseMonitorView::Settings {
+                                    ButtonTone::Neutral
+                                } else {
+                                    ButtonTone::Ghost
+                                })
+                                .disabled(
+                                    shell
+                                        .active_connection_provider_id()
+                                        .is_none_or(|provider| {
+                                            provider.as_str() != "sift/postgres"
+                                        }),
+                                )
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.set_database_monitor_view(
+                                        DatabaseMonitorView::Settings,
+                                        cx,
+                                    )
+                                })),
+                        )
                 })),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {
-            let transaction = shell.transaction_state.transaction().map(|transaction| {
-                let savepoints =
-                    shell
-                        .savepoints
-                        .iter()
-                        .rev()
-                        .cloned()
-                        .enumerate()
-                        .map(|(index, name)| {
-                            let selector_name = name.clone();
-                            let rollback_name = name.clone();
-                            let release_name = name.clone();
-                            div()
-                                .debug_selector(move || {
-                                    format!("transaction-savepoint-{selector_name}")
-                                })
-                                .h(px(28.))
-                                .flex_none()
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(div().flex_1().font_family("monospace").child(name))
-                                .child(
-                                    Button::new(("rollback-savepoint", index), "Rollback to")
-                                        .debug_selector(format!(
-                                            "rollback-savepoint-{rollback_name}"
-                                        ))
-                                        .tone(ButtonTone::Neutral)
-                                        .disabled(shell.transaction_state.is_pending())
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.rollback_to_savepoint(rollback_name.clone(), cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new(("release-savepoint", index), "Release")
-                                        .debug_selector(format!("release-savepoint-{release_name}"))
-                                        .tone(ButtonTone::Ghost)
-                                        .disabled(shell.transaction_state.is_pending())
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            shell.release_savepoint(release_name.clone(), cx)
-                                        })),
-                                )
-                        });
-                let mode = format!(
-                    "{:?} · {:?}",
-                    transaction.mode.isolation, transaction.mode.access
-                );
+            if shell.database_monitor.view() == DatabaseMonitorView::Settings {
+                render_postgres_settings(shell, cx).into_any_element()
+            } else {
+                let transaction =
+                    shell.transaction_state.transaction().map(|transaction| {
+                        let savepoints = shell.savepoints.iter().rev().cloned().enumerate().map(
+                            |(index, name)| {
+                                let selector_name = name.clone();
+                                let rollback_name = name.clone();
+                                let release_name = name.clone();
+                                div()
+                                    .debug_selector(move || {
+                                        format!("transaction-savepoint-{selector_name}")
+                                    })
+                                    .h(px(28.))
+                                    .flex_none()
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().flex_1().font_family("monospace").child(name))
+                                    .child(
+                                        Button::new(("rollback-savepoint", index), "Rollback to")
+                                            .debug_selector(format!(
+                                                "rollback-savepoint-{rollback_name}"
+                                            ))
+                                            .tone(ButtonTone::Neutral)
+                                            .disabled(shell.transaction_state.is_pending())
+                                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                                shell.rollback_to_savepoint(
+                                                    rollback_name.clone(),
+                                                    cx,
+                                                )
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(("release-savepoint", index), "Release")
+                                            .debug_selector(format!(
+                                                "release-savepoint-{release_name}"
+                                            ))
+                                            .tone(ButtonTone::Ghost)
+                                            .disabled(shell.transaction_state.is_pending())
+                                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                                shell.release_savepoint(release_name.clone(), cx)
+                                            })),
+                                    )
+                            },
+                        );
+                        let mode = format!(
+                            "{:?} · {:?}",
+                            transaction.mode.isolation, transaction.mode.access
+                        );
+                        div()
+                            .debug_selector(|| "transaction-monitor".into())
+                            .flex_none()
+                            .border_b_1()
+                            .border_color(colors.subtle_border)
+                            .child(
+                                div()
+                                    .h(px(30.))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(SectionLabel::new(format!(
+                                        "TRANSACTION {}",
+                                        transaction.tx_id
+                                    )))
+                                    .child(div().text_xs().child(mode))
+                                    .child(div().flex_1())
+                                    .child(
+                                        Button::new("monitor-create-savepoint", "New savepoint")
+                                            .tone(ButtonTone::Neutral)
+                                            .disabled(
+                                                shell.transaction_state.is_pending()
+                                                    || shell.transaction_state.is_aborted(),
+                                            )
+                                            .on_click(cx.listener(|shell, _, _, cx| {
+                                                shell.create_savepoint(cx)
+                                            })),
+                                    ),
+                            )
+                            .when(shell.savepoints.is_empty(), |panel| {
+                                panel.child(div().px_3().pb_2().text_xs().child("No savepoints"))
+                            })
+                            .children(savepoints)
+                    });
+                let visible_processes = shell.database_monitor.visible_processes();
+                let processes = database_process_rows(&visible_processes);
+                let selected_process = shell.database_monitor.selected();
                 div()
-                    .debug_selector(|| "transaction-monitor".into())
-                    .flex_none()
-                    .border_b_1()
-                    .border_color(colors.subtle_border)
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .flex_col()
+                    .children(transaction)
                     .child(
                         div()
+                            .flex_none()
                             .h(px(30.))
                             .px_3()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .child(SectionLabel::new(format!(
-                                "TRANSACTION {}",
-                                transaction.tx_id
-                            )))
-                            .child(div().text_xs().child(mode))
-                            .child(div().flex_1())
+                            .gap_3()
+                            .text_xs()
+                            .text_color(colors.disabled_text)
+                            .child(div().w(px(72.)).child("PROCESS"))
+                            .child(div().flex_1().min_w_0().child("USER / DATABASE"))
+                            .child(div().flex_1().min_w_0().child("STATE / WAIT"))
                             .child(
-                                Button::new("monitor-create-savepoint", "New savepoint")
-                                    .tone(ButtonTone::Neutral)
-                                    .disabled(
-                                        shell.transaction_state.is_pending()
-                                            || shell.transaction_state.is_aborted(),
+                                div()
+                                    .debug_selector(|| "database-process-statement-header".into())
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_right()
+                                    .child("STATEMENT"),
+                            )
+                            .child(
+                                div().w(px(84.)).flex().justify_end().child(
+                                    Button::new(
+                                        "refresh-database-processes",
+                                        if shell.database_monitor.request().loading() {
+                                            "Loading…"
+                                        } else {
+                                            "Refresh"
+                                        },
                                     )
-                                    .on_click(
-                                        cx.listener(|shell, _, _, cx| shell.create_savepoint(cx)),
-                                    ),
-                            ),
-                    )
-                    .when(shell.savepoints.is_empty(), |panel| {
-                        panel.child(div().px_3().pb_2().text_xs().child("No savepoints"))
-                    })
-                    .children(savepoints)
-            });
-            let visible_processes = shell.database_monitor.visible_processes();
-            let processes = database_process_rows(&visible_processes);
-            let selected_process = shell.database_monitor.selected();
-            div()
-                .flex()
-                .flex_1()
-                .min_h_0()
-                .flex_col()
-                .children(transaction)
-                .child(
-                    div()
-                        .flex_none()
-                        .h(px(30.))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .text_xs()
-                        .text_color(colors.disabled_text)
-                        .child(div().w(px(72.)).child("PROCESS"))
-                        .child(div().flex_1().min_w_0().child("USER / DATABASE"))
-                        .child(div().flex_1().min_w_0().child("STATE / WAIT"))
-                        .child(
-                            div()
-                                .debug_selector(|| "database-process-statement-header".into())
-                                .flex_1()
-                                .min_w_0()
-                                .text_right()
-                                .child("STATEMENT"),
-                        )
-                        .child(
-                            div().w(px(84.)).flex().justify_end().child(
-                                Button::new(
-                                    "refresh-database-processes",
-                                    if shell.database_monitor.request().loading() {
-                                        "Loading…"
-                                    } else {
-                                        "Refresh"
-                                    },
-                                )
-                                .tone(ButtonTone::Ghost)
-                                .disabled(shell.database_monitor.request().loading())
-                                .on_click(
-                                    cx.listener(|shell, _, _, cx| {
-                                        shell.load_database_processes(cx)
-                                    }),
+                                    .tone(ButtonTone::Ghost)
+                                    .disabled(shell.database_monitor.request().loading())
+                                    .on_click(cx.listener(
+                                        |shell, _, _, cx| shell.load_database_processes(cx),
+                                    )),
                                 ),
                             ),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("database-process-list")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .children(processes.iter().cloned().map(|process| {
-                            let expanded = selected_process == Some(process.process.process_id);
-                            let alert = shell.database_monitor.alert(process.process.process_id);
-                            render_database_process_row(process, expanded, alert, cx)
-                        })),
-                )
-                .children(shell.database_monitor.request().error().map(|message| {
-                    div()
-                        .p_2()
-                        .text_color(colors.danger)
-                        .child(message.to_string())
-                }))
-                .when(
-                    visible_processes.is_empty()
-                        && !shell.database_monitor.request().loading()
-                        && shell.database_monitor.request().error().is_none(),
-                    |panel| {
-                        panel.child(div().p_4().text_center().child(
-                            match shell.database_monitor.view() {
-                                DatabaseMonitorView::Locks => "No waiting or blocking sessions.",
-                                DatabaseMonitorView::Alerts => "No database health alerts.",
-                                DatabaseMonitorView::Activity => "No database activity reported.",
-                            },
-                        ))
-                    },
-                )
-                .into_any_element()
+                    )
+                    .child(
+                        div()
+                            .id("database-process-list")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .children(processes.iter().cloned().map(|process| {
+                                let expanded = selected_process == Some(process.process.process_id);
+                                let alert =
+                                    shell.database_monitor.alert(process.process.process_id);
+                                render_database_process_row(process, expanded, alert, cx)
+                            })),
+                    )
+                    .children(shell.database_monitor.request().error().map(|message| {
+                        div()
+                            .p_2()
+                            .text_color(colors.danger)
+                            .child(message.to_string())
+                    }))
+                    .when(
+                        visible_processes.is_empty()
+                            && !shell.database_monitor.request().loading()
+                            && shell.database_monitor.request().error().is_none(),
+                        |panel| {
+                            panel.child(div().p_4().text_center().child(
+                                match shell.database_monitor.view() {
+                                    DatabaseMonitorView::Locks => {
+                                        "No waiting or blocking sessions."
+                                    }
+                                    DatabaseMonitorView::Alerts => "No database health alerts.",
+                                    DatabaseMonitorView::Activity => {
+                                        "No database activity reported."
+                                    }
+                                    DatabaseMonitorView::Settings => unreachable!(),
+                                },
+                            ))
+                        },
+                    )
+                    .into_any_element()
+            }
         } else if shell.active_bottom_tool == BottomTool::Automations {
             let rows =
                 shell
@@ -909,6 +947,139 @@ pub(super) fn render_bottom_panel(
                 .into_any_element()
         })
         .into_any_element()
+}
+
+fn render_postgres_settings(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> impl IntoElement {
+    let colors = cx.theme().colors;
+    let state = &shell.database_monitor;
+    let offset = state.settings_offset();
+    let next_offset = state.settings_next_offset();
+    let loading = state.settings_request().loading();
+    div()
+        .debug_selector(|| "postgres-settings-browser".into())
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .flex_col()
+        .child(
+            div()
+                .flex_none()
+                .h(px(30.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(SectionLabel::new("POSTGRESQL SETTINGS"))
+                .child(div().text_xs().child("n next · p previous · r refresh"))
+                .child(div().flex_1())
+                .child(
+                    Button::new("settings-previous", "Previous")
+                        .tone(ButtonTone::Ghost)
+                        .disabled(offset == 0 || loading)
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.load_postgres_settings(offset.saturating_sub(100), cx)
+                        })),
+                )
+                .child(
+                    Button::new("settings-next", "Next")
+                        .tone(ButtonTone::Ghost)
+                        .disabled(next_offset.is_none() || loading)
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            if let Some(next) = next_offset {
+                                shell.load_postgres_settings(next, cx);
+                            }
+                        })),
+                )
+                .child(
+                    Button::new(
+                        "settings-refresh",
+                        if loading { "Loading…" } else { "Refresh" },
+                    )
+                    .tone(ButtonTone::Ghost)
+                    .disabled(loading)
+                    .on_click(
+                        cx.listener(move |shell, _, _, cx| {
+                            shell.load_postgres_settings(offset, cx)
+                        }),
+                    ),
+                ),
+        )
+        .child(
+            div()
+                .id("postgres-settings-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .children(state.settings().iter().map(|setting| {
+                    div()
+                        .px_3()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(colors.subtle_border)
+                        .child(
+                            div()
+                                .flex()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .font_family("monospace")
+                                        .child(setting.name.clone()),
+                                )
+                                .child(div().flex_1().font_family("monospace").child(
+                                    if setting.redacted {
+                                        "[redacted]".to_string()
+                                    } else {
+                                        setting
+                                            .value
+                                            .clone()
+                                            .unwrap_or_else(|| "[restricted]".into())
+                                    },
+                                ))
+                                .child(div().w(px(115.)).child(setting.source.clone())),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.disabled_text)
+                                .child(format!(
+                                    "{} · {}{}{}",
+                                    setting.category,
+                                    setting.context,
+                                    if setting.pending_restart {
+                                        " · restart pending"
+                                    } else {
+                                        ""
+                                    },
+                                    setting
+                                        .description
+                                        .as_deref()
+                                        .map(|text| format!(" · {text}"))
+                                        .unwrap_or_default(),
+                                )),
+                        )
+                })),
+        )
+        .children(state.settings_request().error().map(|message| {
+            div()
+                .p_2()
+                .text_color(colors.danger)
+                .child(message.to_string())
+        }))
+        .when(
+            state.settings().is_empty() && !loading && state.settings_request().error().is_none(),
+            |panel| {
+                panel.child(
+                    div()
+                        .p_4()
+                        .text_center()
+                        .child("No PostgreSQL settings reported."),
+                )
+            },
+        )
 }
 
 #[derive(Clone)]

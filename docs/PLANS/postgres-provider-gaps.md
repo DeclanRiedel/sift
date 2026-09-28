@@ -48,8 +48,9 @@ sources for current support claims.
       previewable operations.
 - [ ] Add replication and statistics inspection UI with bounded reads and
       explicit permission errors.
-- [ ] Add a read-only server-settings browser; design writes separately with
-      scope, policy, confirmation, and audit.
+- [x] Add a read-only server-settings browser with bounded, role-visible reads,
+      sensitive-value redaction, audit, and a Vim desktop view. Settings writes
+      remain a separate design requiring scope, policy, confirmation, and audit.
 - [ ] Add database users/roles, grants, ownership, and RLS editors with
       capability checks and reviewable changes.
 - [ ] Connect existing dump/restore, maintenance, and integrity-check backends

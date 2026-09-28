@@ -235,6 +235,26 @@ pub(super) async fn list_processes(
     Ok(Json(processes))
 }
 
+pub(super) async fn list_postgres_settings(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Query(query): Query<sift_protocol::PostgresSettingsQuery>,
+) -> ApiResult<Json<sift_protocol::PostgresSettingsPage>> {
+    let operation = Operation::ListPostgresSettings {
+        session,
+        connection,
+        offset: query.offset,
+        limit: query.limit.unwrap_or(100),
+    };
+    let page = finish_operation(
+        &state.sessions,
+        operation,
+        crate::postgres_settings::list(&state.sessions, session, connection, query).await,
+        |page| Some(page.settings.len() as i64),
+    )?;
+    Ok(Json(page))
+}
+
 pub(super) async fn postgres_maintenance(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

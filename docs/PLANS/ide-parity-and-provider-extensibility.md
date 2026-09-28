@@ -338,7 +338,8 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [~] SQL Server bulk import
 - [ ] PostgreSQL extensions and partition management UI
 - [ ] PostgreSQL replication and statistics UI
-- [ ] PostgreSQL settings browser
+- [x] PostgreSQL settings browser (read-only, bounded paging, role-visible
+      `pg_settings`, sensitive-value redaction, audited API and Vim desktop view)
 - [ ] SQL Server Query Store
 - [ ] SQL Server Agent
 - [ ] SQL Server server-settings browser

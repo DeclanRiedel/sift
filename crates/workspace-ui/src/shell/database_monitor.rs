@@ -1,4 +1,4 @@
-use sift_protocol::DatabaseProcess;
+use sift_protocol::{DatabaseProcess, PostgresSetting, PostgresSettingsPage};
 
 use super::RequestState;
 
@@ -8,6 +8,7 @@ pub(super) enum DatabaseMonitorView {
     Activity,
     Locks,
     Alerts,
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,10 @@ pub(super) struct DatabaseMonitorState {
     selected: Option<i64>,
     view: DatabaseMonitorView,
     alerts: std::collections::HashMap<i64, DatabaseAlertKind>,
+    settings: Vec<PostgresSetting>,
+    settings_request: RequestState,
+    settings_offset: u32,
+    settings_next_offset: Option<u32>,
 }
 
 impl DatabaseMonitorState {
@@ -55,6 +60,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Activity => false,
             DatabaseMonitorView::Locks => !self.lock_process_ids().contains(&selected),
             DatabaseMonitorView::Alerts => !self.alerts.contains_key(&selected),
+            DatabaseMonitorView::Settings => true,
         }) {
             self.selected = None;
         }
@@ -65,12 +71,63 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Activity => return self.processes.clone(),
             DatabaseMonitorView::Locks => self.lock_process_ids(),
             DatabaseMonitorView::Alerts => self.alerts.keys().copied().collect(),
+            DatabaseMonitorView::Settings => return Vec::new(),
         };
         self.processes
             .iter()
             .filter(|process| included.contains(&process.process_id))
             .cloned()
             .collect()
+    }
+
+    pub(super) fn settings(&self) -> &[PostgresSetting] {
+        &self.settings
+    }
+
+    pub(super) fn clear_settings(&mut self) {
+        self.settings.clear();
+        self.settings_request = RequestState::default();
+        self.settings_offset = 0;
+        self.settings_next_offset = None;
+        if self.view == DatabaseMonitorView::Settings {
+            self.view = DatabaseMonitorView::Activity;
+        }
+    }
+
+    pub(super) fn settings_request(&self) -> &RequestState {
+        &self.settings_request
+    }
+
+    pub(super) fn settings_offset(&self) -> u32 {
+        self.settings_offset
+    }
+
+    pub(super) fn settings_next_offset(&self) -> Option<u32> {
+        self.settings_next_offset
+    }
+
+    pub(super) fn start_settings_load(&mut self) {
+        self.settings_request.start();
+    }
+
+    pub(super) fn fail_settings_load(&mut self, message: impl Into<String>) {
+        self.settings_request.fail(message);
+    }
+
+    pub(super) fn finish_settings_load(
+        &mut self,
+        offset: u32,
+        result: Result<PostgresSettingsPage, String>,
+    ) {
+        match result {
+            Ok(page) => {
+                self.settings = page.settings;
+                self.settings_offset = offset;
+                self.settings_next_offset = page.next_offset;
+                self.settings_request.succeed();
+            }
+            Err(message) => self.settings_request.fail(message),
+        }
     }
 
     pub(super) fn lock_process_count(&self) -> usize {

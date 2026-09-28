@@ -2591,6 +2591,30 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadPostgresSettings { offset } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .list_postgres_settings(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::PostgresSettingsQuery {
+                                filter: String::new(),
+                                offset,
+                                limit: Some(100),
+                            },
+                        )
+                        .await
+                        .map_err(|error| format!("loading PostgreSQL settings failed: {error}")),
+                    None => Err("Connect before loading PostgreSQL settings".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresSettingsLoaded { offset, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadRoomMembers { room_id } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
