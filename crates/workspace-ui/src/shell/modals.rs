@@ -3882,6 +3882,9 @@ impl WorkspaceShell {
                     let step = self.database_wizard_step;
                     let selected_tenant = self.selected_database_tenant;
                     let selected_provider = self.selected_database_provider.clone();
+                    let details_tailnet = (step == DatabaseWizardStep::Details
+                        && selected_provider.as_deref() != Some("sift/sqlite"))
+                    .then(|| self.render_tailnet_controls(cx));
                     let selected_ssl_mode = self.selected_database_ssl_mode.clone();
                     let pending = self.database_connection_pending;
                     let tenant_rows = self.lifecycle.tenants.iter().map(|tenant| {
@@ -3908,7 +3911,7 @@ impl WorkspaceShell {
                                 cx.notify();
                             }))
                             .child(tenant.name.clone())
-                    });
+                    }).collect::<Vec<_>>();
                     let provider_rows = [
                         (
                             "sift/postgres",
@@ -4071,7 +4074,7 @@ impl WorkspaceShell {
                                 }))
                                 .child(label)
                         },
-                    );
+                    ).collect::<Vec<_>>();
                     let field = |label: &'static str, input: Entity<TextInput>| {
                         Field::new(
                             label,
@@ -4191,9 +4194,9 @@ impl WorkspaceShell {
                         .child(
                             div()
                                 .flex()
-                                .flex_col()
-                                .items_stretch()
-                                .gap_2()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
                                 .px_3()
                                 .pt_2()
                                 .pb_2()
@@ -4202,28 +4205,25 @@ impl WorkspaceShell {
                                 .bg(colors.toolbar)
                                 .child(
                                     div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
+                                        .debug_selector(|| "database-wizard-title".into())
+                                        .flex_1()
+                                        .min_w_0()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(if editing {
-                                                    "Edit Database Connection"
-                                                } else {
-                                                    "Add Database Connection"
-                                                }),
-                                        ),
+                                        .truncate()
+                                        .child(if editing {
+                                            "Edit Database Connection"
+                                        } else {
+                                            "Add Database Connection"
+                                        }),
                                 )
                                 .child(
                                     div()
-                                        .flex()
-                                        .min_w_0()
+                                    .debug_selector(|| "database-wizard-steps".into())
+                                    .flex()
+                                        .flex_none()
                                         .overflow_x_hidden()
                                         .items_center()
-                                        .gap_4()
+                                        .gap_3()
                                         .children(step_rows),
                                 ),
                         )
@@ -4239,6 +4239,9 @@ impl WorkspaceShell {
                                 .max_h(px(540.))
                                 .overflow_y_scroll()
                                 .p_3()
+                                .when(step == DatabaseWizardStep::Details && !sqlite, |form| {
+                                    form.p_0().overflow_hidden()
+                                })
                                 .when(step == DatabaseWizardStep::Provider, |form| {
                                     form.child(
                                         Button::new("database-connection-via-url", "Add via URL")
@@ -4261,7 +4264,10 @@ impl WorkspaceShell {
                                     )
                                 })
                                 .when(step == DatabaseWizardStep::Details, |form| {
-                                    form
+                                    let details = div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_3()
                                         .child(
                                             div()
                                                 .flex_col()
@@ -4378,9 +4384,29 @@ impl WorkspaceShell {
                                             .child(div().flex().gap_2().children([("read_only","Read-only"),("read_write","Read-write")].into_iter().map(|(mode,label)| div().id(mode).px_2().py_1().border_1().border_color(colors.subtle_border).when(selected_ssl_mode.as_deref()==Some(mode),|row|row.bg(colors.accent_muted)).on_click(cx.listener(move |shell,_,_,cx|{shell.selected_database_ssl_mode=Some(mode.into());cx.notify();})).child(label))))
                                             .child(field("FOLDER",self.database_folder_input.clone()))
                                             .child(field("TAGS",self.database_tags_input.clone()))
-                                        )
+                                        );
+                                    if sqlite {
+                                        form.child(details)
+                                    } else {
+                                        form.flex_row()
+                                            .gap_0()
+                                            .child(details.id("database-connection-details").debug_selector(|| "database-connection-details".into()).flex_1().min_w_0().min_h_0().overflow_y_scroll().p_3())
+                                            .child(
+                                                div()
+                                                    .id("database-connection-network")
+                                                    .debug_selector(|| "database-connection-network".into())
+                                                    .w(px(320.))
+                                                    .flex_none()
+                                                    .min_h_0()
+                                                    .overflow_y_scroll()
+                                                    .border_l_1()
+                                                    .border_color(colors.subtle_border)
+                                                    .bg(colors.panel)
+                                                    .p_3()
+                                                    .children(details_tailnet),
+                                            )
+                                    }
                                 })
-                                .when(step == DatabaseWizardStep::Details && !sqlite, |form| form.child(self.render_tailnet_controls(cx)))
                                 .when(step == DatabaseWizardStep::Review && sqlite, |form| form
                                     .child(review_row("Database type","SQLite".into()))
                                     .child(review_row("Connection name",self.database_name_input.read(cx).text().to_string()))

@@ -285,38 +285,44 @@ impl WorkspaceShell {
     pub(super) fn render_tailnet_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         let pending = self.tailnet.pending || self.database_connection_pending;
         let mode = self.tailnet.mode;
-        div().flex().flex_col().gap_2()
-            .child(div().text_xs().child("Network · runs on Sift backend · instance administrator required"))
-            .child(div().text_xs().whitespace_normal().child("Alt-M mode · Alt-R refresh · Alt-J/K device · Alt-D diagnose · Alt-F fingerprint · Alt-V verify · Alt-P Serve preview · Alt-A confirm enable · Alt-X confirm removal"))
-            .child(div().flex().flex_wrap().gap_2().children([
+        let colors = cx.theme().colors;
+        div().w_full().min_w_0().flex().flex_col().gap_3()
+            .child(div().flex().items_center().justify_between().gap_2()
+                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Network"))
+                .child(div().text_xs().text_color(colors.muted_text).child("Alt-M mode")))
+            .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Runs on the Sift backend · instance administrator required"))
+            .child(div().grid().grid_cols(2).gap_2().children([
                 ("network-off", "Standard", None),
                 ("network-direct", "Tailnet direct", Some(TailnetMode::Direct)),
                 ("network-auto", "Auto + SSH fallback", Some(TailnetMode::Automatic)),
                 ("network-tunnel", "SSH tunnel", Some(TailnetMode::Tunnel)),
             ].into_iter().map(|(id, label, selected)| {
-                Button::new(id, label).disabled(pending)
+                Button::new(id, label).debug_selector(id).full_width().disabled(pending)
                     .tone(if mode == selected { ButtonTone::Accent } else { ButtonTone::Neutral })
                     .on_click(cx.listener(move |shell, _, _, cx| { shell.tailnet.mode = selected; shell.tailnet.preview = None; cx.notify(); }))
             })))
             .when(mode.is_some(), |container| container
                 .child(self.tailnet.user.clone())
                 .child(self.tailnet.port.clone())
-                .child(div().text_xs().whitespace_normal().child("SSH uses backend agent/default keys and strict known_hosts. Tunnel database target is remote 127.0.0.1; no password prompts. Tab moves between controls."))
-                .child(div().flex().flex_wrap().gap_2()
-                    .child(Button::new("tailnet-discover", "Refresh devices").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.send_tailnet(ExecutorCommand::TailnetStatus, cx))))
-                    .child(Button::new("tailnet-probe", "Diagnose network").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.request_tailnet_probe(cx))))
-                    .child(Button::new("tailnet-host-key", "Read SSH fingerprint").disabled(pending).on_click(cx.listener(|shell, _, _, cx| {
-                        match shell.tailnet_request(cx) {
-                            Ok(request) => shell.send_tailnet(ExecutorCommand::TailnetHostKey(request), cx),
-                            Err(message) => { shell.tailnet.message = Some(message); cx.notify(); }
-                        }
-                    })))
-                    .child(Button::new("tailnet-serve-preview", "Preview / inspect Serve").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.request_tailnet_serve(TailnetServeAction::Preview, cx)))))
-                .child(div().id("tailnet-peers").max_h(px(120.)).overflow_y_scroll().flex().flex_col().gap_1().children(self.tailnet.peers.iter().enumerate().map(|(index, peer)| {
+                .when(!self.tailnet.peers.is_empty(), |container| container.child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).child("DEVICES")))
+                .child(div().id("tailnet-peers").max_h(px(180.)).overflow_y_scroll().flex().flex_col().gap_2().children(self.tailnet.peers.iter().enumerate().map(|(index, peer)| {
                     let address = peer.address.clone();
-                    Button::new(("tailnet-peer", index), format!("{} · {} · {}", peer.name, peer.address, if peer.online { "online" } else { "offline" }))
-                        .disabled(pending || !peer.online)
+                    let selectable = !pending && peer.online;
+                    div().id(("tailnet-peer", index)).role(Role::Button)
+                        .debug_selector(move || format!("tailnet-peer-{index}"))
+                        .aria_label(format!("Use {} at {}", peer.name, peer.address))
+                        .w_full().min_w_0().px_2().py_2().rounded_sm().border_1()
+                        .border_color(colors.subtle_border)
+                        .bg(colors.surface)
+                        .when(selectable, |row| row.cursor_pointer().hover(|row| row.bg(colors.hovered_surface)))
+                        .child(div().flex().items_center().justify_between().gap_2()
+                            .child(div().min_w_0().flex_1().flex().flex_col().gap_1()
+                                .child(div().debug_selector(move || format!("tailnet-peer-name-{index}")).truncate().font_weight(gpui::FontWeight::SEMIBOLD).child(peer.name.clone()))
+                                .child(div().debug_selector(move || format!("tailnet-peer-address-{index}")).truncate().text_xs().text_color(colors.muted_text).child(peer.address.clone())))
+                            .child(div().flex_none().text_xs().text_color(if peer.online { colors.success } else { colors.muted_text })
+                                .child(if peer.online { "Online" } else { "Offline" })))
                         .on_click(cx.listener(move |shell, _, _, cx| {
+                            if !selectable { return; }
                             if shell.modal == Some(Modal::DatabaseConnection) {
                                 shell.database_host_input.update(cx, |input, cx| input.set_text(&address, cx));
                                 shell.tailnet.preview = None;
@@ -336,6 +342,18 @@ impl WorkspaceShell {
                             cx.notify();
                         }))
                 }))))
+                .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("SSH uses backend keys and strict known_hosts. Tunnel target: remote 127.0.0.1."))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(Button::new("tailnet-discover", "Refresh devices").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.send_tailnet(ExecutorCommand::TailnetStatus, cx))))
+                    .child(Button::new("tailnet-probe", "Diagnose network").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.request_tailnet_probe(cx))))
+                    .child(Button::new("tailnet-host-key", "Read SSH fingerprint").disabled(pending).on_click(cx.listener(|shell, _, _, cx| {
+                        match shell.tailnet_request(cx) {
+                            Ok(request) => shell.send_tailnet(ExecutorCommand::TailnetHostKey(request), cx),
+                            Err(message) => { shell.tailnet.message = Some(message); cx.notify(); }
+                        }
+                    })))
+                    .child(Button::new("tailnet-serve-preview", "Preview / inspect Serve").disabled(pending).on_click(cx.listener(|shell, _, _, cx| shell.request_tailnet_serve(TailnetServeAction::Preview, cx)))))
+                .child(div().text_xs().text_color(colors.muted_text).whitespace_normal().child("Alt-R refresh · Alt-J/K device · Alt-D diagnose · Alt-F fingerprint · Alt-V verify · Alt-P preview · Alt-A enable · Alt-X remove"))
             .children(self.tailnet.message.as_ref().map(|message| div().text_xs().whitespace_normal().child(message.clone())))
             .children(self.tailnet.scanned_key.as_ref().map(|key| {
                 div().flex().flex_col().gap_2()

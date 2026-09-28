@@ -51843,9 +51843,43 @@ mod tests {
             shell.modal = Some(Modal::DatabaseConnection);
             shell.database_wizard_step = DatabaseWizardStep::Details;
             shell.select_database_provider("sift/postgres".into(), cx);
+            shell.tailnet.peers.push(sift_api_types::TailnetPeer {
+                name: "Warehouse database".into(),
+                address: "100.83.175.73".into(),
+                online: true,
+            });
             cx.notify();
         });
         cx.run_until_parked();
+        let direct_mode = cx.debug_bounds("network-direct").unwrap();
+        cx.simulate_click(direct_mode.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        let title = cx.debug_bounds("database-wizard-title").unwrap();
+        let steps = cx.debug_bounds("database-wizard-steps").unwrap();
+        assert!(title.right() <= steps.left());
+        assert!((title.center().y - steps.center().y).abs() <= px(4.));
+        let details = cx.debug_bounds("database-connection-details").unwrap();
+        let network = cx.debug_bounds("database-connection-network").unwrap();
+        assert!(details.right() <= network.left());
+        let peer = cx.debug_bounds("tailnet-peer-0").unwrap();
+        let peer_name = cx.debug_bounds("tailnet-peer-name-0").unwrap();
+        let peer_address = cx.debug_bounds("tailnet-peer-address-0").unwrap();
+        assert!(peer.left() >= network.left() && peer.right() <= network.right());
+        assert!(peer_name.top() < peer_address.top());
+        assert!(
+            peer.bottom() <= network.bottom(),
+            "peer {peer:?} outside network {network:?}"
+        );
+        cx.simulate_click(peer.center(), Modifiers::default());
+        assert_eq!(
+            workspace.read_with(&cx, |shell, cx| shell
+                .database_host_input
+                .read(cx)
+                .text()
+                .to_owned()),
+            "100.83.175.73"
+        );
 
         let name_bounds = cx
             .debug_bounds("CONNECTION NAME")
