@@ -722,15 +722,17 @@ fn relationship_card_surface(
                 }
             } else {
                 let kind_label = kind.to_owned();
-                for (value, text_style, x, y, width, size) in [
-                    (&title, &name_style, 32.0, 7.0, 184.0, 17.0),
-                    (&kind_label, &type_style, 222.0, 13.0, 54.0, 10.0),
-                    (&footer, &type_style, 10.0, 185.0, 264.0, 10.0),
+                for (value, text_style, x, y, width, size, right_align) in [
+                    (&title, &name_style, 32.0, 7.0, 184.0, 17.0, false),
+                    (&kind_label, &type_style, 222.0, 7.0, 54.0, 10.5, true),
+                    (&footer, &type_style, 10.0, 185.0, 264.0, 10.0, false),
                 ] {
                     let mut text_style = text_style.clone();
                     text_style.font_size = px(size * zoom).into();
                     if size == 17.0 {
                         text_style.font_weight = gpui::FontWeight::BOLD;
+                    } else if right_align {
+                        text_style.font_weight = gpui::FontWeight::SEMIBOLD;
                     }
                     let line = window.text_system().shape_line(
                         value.clone().into(),
@@ -738,9 +740,14 @@ fn relationship_card_surface(
                         &[text_style.to_run(value.len())],
                         None,
                     );
+                    let right_shift = if right_align {
+                        (width * zoom - f32::from(line.width())).max(0.0)
+                    } else {
+                        0.0
+                    };
                     lines.push((
                         line,
-                        gpui::point(px(x * zoom), px(y * zoom)),
+                        gpui::point(px(x * zoom + right_shift), px(y * zoom)),
                         px(width * zoom),
                     ));
                 }
