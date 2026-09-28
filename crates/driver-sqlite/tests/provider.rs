@@ -243,6 +243,181 @@ async fn sql_authority_and_readonly_are_enforced_by_sqlite() {
     .unwrap();
     f.driver.close(c).await.unwrap();
 }
+
+#[tokio::test]
+async fn catalog_graph_keeps_sqlite_dependencies_schema_correct_and_partial() {
+    let f = Fixture::new(2);
+    rusqlite::Connection::open(f.root.path().join("data.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE parent(id INTEGER PRIMARY KEY);
+             CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id));
+             CREATE TABLE orphan(id INTEGER, missing_id INTEGER REFERENCES temp_only(id));
+             CREATE TABLE external_content(body TEXT);
+             CREATE VIRTUAL TABLE docs USING fts5(body, content='external_content');
+             CREATE VIRTUAL TABLE orphan_docs USING fts5(body, content='missing_content');
+             CREATE VIEW joined AS SELECT c.parent_id FROM child AS c JOIN parent AS p ON p.id=c.parent_id;
+             CREATE VIEW with_cte AS WITH x AS (SELECT id FROM child) SELECT id FROM x;
+             CREATE TRIGGER child_ai AFTER INSERT ON child BEGIN UPDATE parent SET id=NEW.parent_id WHERE id=NEW.parent_id; END;",
+        )
+        .unwrap();
+    let c = f.open(SqliteOpenMode::ReadWrite).await;
+    execute(
+        &f.driver,
+        &c,
+        "CREATE TEMP TABLE temp_only(id INTEGER PRIMARY KEY)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let snapshot = f
+        .driver
+        .schema(
+            c.clone(),
+            SchemaScope {
+                depth: SchemaDepth::Graph {
+                    options: CatalogGraphOptions::default(),
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap();
+    let graph = snapshot.graph.unwrap();
+    sift_core::catalog::validate_graph(&graph, 10_000, 100_000).unwrap();
+
+    let node = |schema: &str, name: &str, kind: CatalogNodeKind| {
+        let schema_node = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == CatalogNodeKind::Schema && node.name == schema)
+            .unwrap();
+        graph
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == kind
+                    && node.name == name
+                    && node.parent_id.as_ref() == Some(&schema_node.id)
+            })
+            .unwrap()
+            .id
+            .clone()
+    };
+    let parent = node("main", "parent", CatalogNodeKind::Table);
+    let external_content = node("main", "external_content", CatalogNodeKind::Table);
+    let docs = node("main", "docs", CatalogNodeKind::Table);
+    let orphan_docs = node("main", "orphan_docs", CatalogNodeKind::Table);
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == docs)
+            .unwrap()
+            .extra
+            .get("sqlite_metadata_gap"),
+        Some(&serde_json::json!("virtual_table_columns_unavailable"))
+    );
+    let child = node("main", "child", CatalogNodeKind::Table);
+    let joined = node("main", "joined", CatalogNodeKind::View);
+    let with_cte = node("main", "with_cte", CatalogNodeKind::View);
+    let trigger = node("main", "child_ai", CatalogNodeKind::Trigger);
+    let orphan = node("main", "orphan", CatalogNodeKind::Table);
+    let fk = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == CatalogNodeKind::Constraint
+                && node.name == "foreign_key_0"
+                && node.parent_id.as_ref() == Some(&child)
+        })
+        .unwrap();
+    let orphan_fk = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == CatalogNodeKind::Constraint
+                && node.name == "foreign_key_0"
+                && node.parent_id.as_ref() == Some(&orphan)
+        })
+        .unwrap();
+    assert!(graph.edges.iter().any(|edge| edge.from == fk.id
+        && edge.kind == CatalogEdgeKind::ForeignKey
+        && edge.to.as_ref() == Some(&parent)
+        && edge.certainty == CatalogEdgeCertainty::CatalogProven));
+    assert!(graph.edges.iter().any(|edge| edge.from == orphan_fk.id
+        && edge.kind == CatalogEdgeKind::ForeignKey
+        && edge.to.is_none()
+        && edge.certainty == CatalogEdgeCertainty::Unresolved
+        && edge.referenced_path.as_deref() == Some("main.temp_only")));
+    assert!(graph.edges.iter().any(|edge| edge.from == trigger
+        && edge.kind == CatalogEdgeKind::TriggerOn
+        && edge.to.as_ref() == Some(&child)
+        && edge.certainty == CatalogEdgeCertainty::CatalogProven));
+    for target in [&parent, &child] {
+        assert!(graph.edges.iter().any(|edge| edge.from == joined
+            && edge.kind == CatalogEdgeKind::ReadsFrom
+            && edge.to.as_ref() == Some(target)
+            && edge.certainty == CatalogEdgeCertainty::Parsed));
+    }
+    assert_eq!(
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from == with_cte && edge.kind == CatalogEdgeKind::ReadsFrom)
+            .count(),
+        1
+    );
+    assert_eq!(graph.coverage.state, CatalogCoverageState::Partial);
+    assert!(graph.edges.iter().any(|edge| edge.from == trigger
+        && edge.kind == CatalogEdgeKind::DependsOn
+        && edge.to.as_ref() == Some(&parent)
+        && edge.certainty == CatalogEdgeCertainty::Parsed));
+    assert!(graph.edges.iter().any(|edge| edge.from == docs
+        && edge.kind == CatalogEdgeKind::DependsOn
+        && edge.to.as_ref() == Some(&external_content)
+        && edge.certainty == CatalogEdgeCertainty::Parsed));
+    assert!(graph.edges.iter().any(|edge| edge.from == orphan_docs
+        && edge.kind == CatalogEdgeKind::DependsOn
+        && edge.certainty == CatalogEdgeCertainty::Unresolved
+        && edge.referenced_path.as_deref() == Some("missing_content")));
+    execute(
+        &f.driver,
+        &c,
+        "CREATE TEMP VIEW temp_parent AS SELECT id FROM parent",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let filtered = f
+        .driver
+        .schema(
+            c.clone(),
+            SchemaScope {
+                depth: SchemaDepth::Graph {
+                    options: CatalogGraphOptions {
+                        schemas: Some(vec!["temp".into()]),
+                        ..CatalogGraphOptions::default()
+                    },
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap();
+    let filtered = filtered.graph.unwrap();
+    sift_core::catalog::validate_graph(&filtered, 10_000, 100_000).unwrap();
+    let temp_view = filtered
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::View && node.name == "temp_parent")
+        .unwrap();
+    assert!(filtered.edges.iter().any(|edge| edge.from == temp_view.id
+        && edge.kind == CatalogEdgeKind::ReadsFrom
+        && edge.certainty == CatalogEdgeCertainty::Unresolved
+        && edge.referenced_path.as_deref() == Some("parent")));
+    f.driver.close(c).await.unwrap();
+}
 #[tokio::test]
 async fn file_admission_never_creates_or_escapes_roots() {
     let f = Fixture::new(1);

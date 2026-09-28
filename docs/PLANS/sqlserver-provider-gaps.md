@@ -24,7 +24,10 @@ current public support boundary.
       constraints, CLR/table types, and bound defaults/rules where supported.
       Sparse nullable columns and uniform ROW/PAGE compression on ordinary
       rowstore tables and indexes now round-trip; other listed shapes remain.
-- [ ] Export synonym DDL and dependency references.
+- [x] Export synonym DDL and dependency references. Native `CREATE SYNONYM`
+      round-trips in the live SQL Server fixture, and graph nodes retain the
+      catalog base-object path as an unresolved dependency when no target edge
+      is proven. Definition export requires `VIEW DEFINITION`.
 - [ ] Extend schema diff/migration to represent new native shapes without
       silently reducing them to ordinary tables or indexes.
 

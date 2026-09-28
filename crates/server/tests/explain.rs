@@ -269,6 +269,107 @@ async fn pg_explain_estimate_returns_typed_plan() {
 }
 
 #[tokio::test]
+async fn pg_profile_returns_separate_measured_plan_and_rejects_writes() {
+    let actual = serde_json::json!([{
+        "Plan": {"Node Type": "Seq Scan", "Relation Name": "users", "Plan Rows": 100,
+                 "Actual Rows": 3, "Actual Total Time": 1.5,
+                 "Shared Hit Blocks": 2},
+        "Planning Time": 0.4,
+        "Execution Time": 1.8
+    }]);
+    let pages = vec![
+        Page::Rows {
+            rows: vec![Row::new(vec![Value::Json(actual)])],
+        },
+        Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        },
+    ];
+    let driver = base_builder(Engine::Postgres)
+        .execute_ok(vec![Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        }])
+        .execute_ok(pages)
+        .build();
+    let (router, sid, cid) = setup(driver, "sift/postgres", 5432).await;
+    let run_id = uuid::Uuid::new_v4();
+    let response = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/connections/{cid}/profile"),
+            serde_json::json!({"connection": cid, "run_id": run_id, "sql": "SELECT * FROM users",
+            "timeout_ms": 5000, "workload_confirmed": true}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let profile: sift_protocol::ProfileResponse = body_json(response.into_body()).await;
+    assert_eq!(profile.run_id, run_id);
+    assert!(profile.plan.analyzed);
+    assert_eq!(profile.plan.root.actual_rows, Some(3.0));
+    assert_eq!(profile.plan.root.extra["Shared Hit Blocks"], 2);
+    assert_eq!(profile.planning_ms, Some(0.4));
+    assert_eq!(profile.execution_ms, Some(1.8));
+
+    let response = router
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/connections/{cid}/profile"),
+            serde_json::json!({"connection": cid, "run_id": uuid::Uuid::new_v4(),
+            "sql": "DELETE FROM users", "timeout_ms": 5000, "workload_confirmed": true}),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn pg_profile_can_be_cancelled_without_closing_its_source() {
+    let driver = base_builder(Engine::Postgres)
+        .execute_ok(vec![Page::Done {
+            affected_rows: None,
+            warnings: vec![],
+        }])
+        .execute_delay(std::time::Duration::ZERO)
+        .execute_ok(pg_plan_pages())
+        .execute_delay(std::time::Duration::from_millis(500))
+        .build();
+    let (router, sid, cid) = setup(driver, "sift/postgres", 5432).await;
+    let run_id = uuid::Uuid::new_v4();
+    let request = post_json(
+        format!("/v1/sessions/{sid}/connections/{cid}/profile"),
+        serde_json::json!({"connection": cid, "run_id": run_id,
+            "sql": "SELECT * FROM users", "timeout_ms": 5000, "workload_confirmed": true}),
+    );
+    let running = tokio::spawn(router.clone().oneshot(request));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let cancelled = router
+        .clone()
+        .oneshot(post_json(
+            format!("/v1/sessions/{sid}/connections/{cid}/profile/{run_id}/cancel"),
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status(), StatusCode::OK);
+    let response = running.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    let connections = router
+        .oneshot(
+            Request::get(format!("/v1/sessions/{sid}/connections"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(connections.status(), StatusCode::OK);
+    let remaining: Vec<sift_protocol::ConnectionInfo> = body_json(connections.into_body()).await;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, cid);
+}
+
+#[tokio::test]
 async fn pg_explain_analyze_write_is_wrapped_and_rolled_back() {
     // begin + execute (plan) + rollback are all default-permissive on the mock;
     // only the one plan-producing execute needs canned pages.

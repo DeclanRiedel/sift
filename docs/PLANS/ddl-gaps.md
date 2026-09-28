@@ -37,7 +37,9 @@ for executed evidence and [graduation](postgres-sqlserver-graduation.md) for gat
   system-versioned tables, nullable sparse columns, and uniform ROW/PAGE
   compression on ordinary rowstore tables and indexes round-trip; structural
   migrations fence these shapes.
-- SQL Server synonyms and PostgreSQL extensions remain unimplemented.
+- SQL Server synonyms export native `CREATE SYNONYM` definitions; base-object
+  paths remain visible as unresolved catalog dependencies when a target cannot
+  be proven. PostgreSQL extension definitions remain unimplemented.
 - Object grants/owners, live sequence counters, statistics, dependency-recursive
   export and full database dumps are outside object DDL. Standalone PostgreSQL
   sequence export does not reconstruct ownership.
