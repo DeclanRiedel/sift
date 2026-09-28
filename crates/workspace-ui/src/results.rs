@@ -962,6 +962,8 @@ actions!(
     sift_results,
     [
         CopySelectedCell,
+        CopyCurrentRow,
+        CopySelectedHeaders,
         CopySelectedWithHeaders,
         EditSelectedCell,
         ToggleVisualSelection,
@@ -4338,6 +4340,44 @@ impl ResultsView {
         }
     }
 
+    fn copy_current_row(&mut self, _: &CopyCurrentRow, _: &mut Window, cx: &mut Context<Self>) {
+        let row = match self.selected {
+            Some(GridSelection::Cell { row, .. } | GridSelection::Row(row)) => row,
+            Some(GridSelection::Range { focus_row, .. }) => focus_row,
+            Some(GridSelection::Column(_) | GridSelection::All) | None => return,
+        };
+        let columns = self.visible_column_indices();
+        if columns.is_empty() {
+            return;
+        }
+        let Some(cells) = self.rendered_rows.get(row) else {
+            return;
+        };
+        let text = columns
+            .iter()
+            .filter_map(|column| cells.get(*column))
+            .map(|cell| cell.text.to_string())
+            .collect::<Vec<_>>()
+            .join("\t");
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.visual_selection = false;
+        cx.notify();
+    }
+
+    fn copy_selected_headers(
+        &mut self,
+        _: &CopySelectedHeaders,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(headers) = self.selected_headers() else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(headers));
+        self.visual_selection = false;
+        cx.notify();
+    }
+
     fn copy_selected_with_headers(
         &mut self,
         _: &CopySelectedWithHeaders,
@@ -4504,6 +4544,12 @@ impl ResultsView {
     }
 
     fn selected_text_with_headers(&self) -> Option<String> {
+        let headers = self.selected_headers()?;
+        self.selected_text()
+            .map(|values| format!("{headers}\n{values}"))
+    }
+
+    fn selected_headers(&self) -> Option<String> {
         let columns = match self.selected? {
             GridSelection::Cell { column, .. } | GridSelection::Column(column) => vec![column],
             GridSelection::Range {
@@ -4520,14 +4566,14 @@ impl ResultsView {
         if columns.is_empty() {
             return None;
         }
-        let headers = columns
-            .iter()
-            .filter_map(|column| self.rendered_columns.get(*column))
-            .map(|column| column.name.to_string())
-            .collect::<Vec<_>>()
-            .join("\t");
-        self.selected_text()
-            .map(|values| format!("{headers}\n{values}"))
+        Some(
+            columns
+                .iter()
+                .filter_map(|column| self.rendered_columns.get(*column))
+                .map(|column| column.name.to_string())
+                .collect::<Vec<_>>()
+                .join("\t"),
+        )
     }
 
     fn selected_text_as(&self, format: ResultCopyFormat) -> Option<String> {
@@ -7737,6 +7783,8 @@ impl gpui::Render for ResultsView {
             .id("sift-results")
             .key_context(if self.tab == ResultTab::Performance {
                 "SiftResults SiftPerformance"
+            } else if self.visual_selection {
+                "SiftResults SiftResultsVisual"
             } else {
                 "SiftResults"
             })
@@ -7765,6 +7813,8 @@ impl gpui::Render for ResultsView {
                 cx.listener(|view, _, _, _| view.finish_cell_drag()),
             )
             .on_action(cx.listener(Self::copy_selected_cell))
+            .on_action(cx.listener(Self::copy_current_row))
+            .on_action(cx.listener(Self::copy_selected_headers))
             .on_action(cx.listener(Self::copy_selected_with_headers))
             .on_action(cx.listener(Self::edit_selected_cell))
             .on_action(cx.listener(Self::toggle_visual_selection))
@@ -9757,6 +9807,22 @@ mod tests {
                 view.selected,
                 Some(GridSelection::Cell { row: 0, column: 1 }),
                 "yank exits visual selection at its focus"
+            );
+
+            view.set_selection(GridSelection::Cell { row: 1, column: 1 }, cx);
+            view.copy_current_row(&CopyCurrentRow, window, cx);
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some("trinity\t2")
+            );
+            view.copy_selected_headers(&CopySelectedHeaders, window, cx);
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some("rank")
             );
 
             view.set_selection(GridSelection::Cell { row: 0, column: 0 }, cx);
