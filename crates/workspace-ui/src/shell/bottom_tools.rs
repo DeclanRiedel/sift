@@ -1942,7 +1942,7 @@ fn render_postgres_objects(
                         colors.panel
                     })
                     .child(format!(
-                        "{}.{} · {} · {} · {} · {}{}{}",
+                        "{}.{} · {} · {} · {} · {}{}{}{}",
                         item.schema,
                         item.table,
                         item.name,
@@ -1953,6 +1953,11 @@ fn render_postgres_objects(
                             "restrictive"
                         },
                         item.roles,
+                        if item.roles_truncated {
+                            " [truncated]"
+                        } else {
+                            ""
+                        },
                         if item.row_security_enabled {
                             " · RLS enabled"
                         } else {
@@ -1965,9 +1970,19 @@ fn render_postgres_objects(
                         }
                     ))
                     .child(format!(
-                        "USING {} · CHECK {}",
+                        "USING {}{} · CHECK {}{}",
                         item.using_expression.as_deref().unwrap_or("—"),
-                        item.check_expression.as_deref().unwrap_or("—")
+                        if item.using_truncated {
+                            " [truncated]"
+                        } else {
+                            ""
+                        },
+                        item.check_expression.as_deref().unwrap_or("—"),
+                        if item.check_truncated {
+                            " [truncated]"
+                        } else {
+                            ""
+                        }
                     ))
                     .into_any_element()
             })

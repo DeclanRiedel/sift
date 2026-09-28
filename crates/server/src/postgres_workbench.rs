@@ -16,7 +16,7 @@ const PARTITIONS_SQL: &str = "SELECT pn.nspname::text, p.relname::text, cn.nspna
 const ROLES_SQL: &str = "SELECT rolname::text, rolcanlogin::text, rolcreaterole::text, rolsuper::text FROM pg_catalog.pg_roles ORDER BY rolname LIMIT $1::bigint OFFSET $2::bigint";
 const OWNERS_SQL: &str = "SELECT kind, name, owner FROM (SELECT 'database'::text AS kind, datname::text AS name, pg_catalog.pg_get_userbyid(datdba)::text AS owner FROM pg_catalog.pg_database WHERE datname = current_database() UNION ALL SELECT 'schema'::text, nspname::text, pg_catalog.pg_get_userbyid(nspowner)::text FROM pg_catalog.pg_namespace WHERE nspname <> 'information_schema' AND nspname NOT LIKE 'pg\\_%' ESCAPE '\\') owned ORDER BY kind, name LIMIT $1::bigint OFFSET $2::bigint";
 const SCHEMA_GRANTS_SQL: &str = "SELECT n.nspname::text, CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(acl.grantee) END::text, acl.privilege_type::text, acl.is_grantable::text FROM pg_catalog.pg_namespace n CROSS JOIN LATERAL pg_catalog.aclexplode(n.nspacl) acl WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' AND (pg_catalog.has_schema_privilege(n.oid, 'USAGE') OR n.nspowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user)) ORDER BY n.nspname, grantee, acl.privilege_type LIMIT $1::bigint OFFSET $2::bigint";
-const POLICIES_SQL: &str = "SELECT n.nspname::text, c.relname::text, p.polname::text, p.polcmd::text, p.polpermissive::text, left((SELECT string_agg(CASE WHEN role_oid = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(role_oid) END, ', ' ORDER BY role_oid) FROM unnest(p.polroles) role_oid), 1024)::text, left(pg_catalog.pg_get_expr(p.polqual,p.polrelid),2048)::text, left(pg_catalog.pg_get_expr(p.polwithcheck,p.polrelid),2048)::text, c.relrowsecurity::text, c.relforcerowsecurity::text FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid=p.polrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind IN ('r','p') AND (pg_catalog.has_table_privilege(c.oid,'SELECT') OR pg_catalog.pg_has_role(current_user,c.relowner,'USAGE')) ORDER BY n.nspname,c.relname,p.polname LIMIT $1::bigint OFFSET $2::bigint";
+const POLICIES_SQL: &str = "SELECT n.nspname::text, c.relname::text, p.polname::text, p.polcmd::text, p.polpermissive::text, left((SELECT string_agg(CASE WHEN role_oid = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(role_oid) END, ', ' ORDER BY role_oid) FROM unnest(p.polroles) role_oid), 1024)::text, (coalesce(length((SELECT string_agg(CASE WHEN role_oid = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(role_oid) END, ', ' ORDER BY role_oid) FROM unnest(p.polroles) role_oid)),0)>1024)::text, left(pg_catalog.pg_get_expr(p.polqual,p.polrelid),2048)::text, (coalesce(length(pg_catalog.pg_get_expr(p.polqual,p.polrelid)),0)>2048)::text, left(pg_catalog.pg_get_expr(p.polwithcheck,p.polrelid),2048)::text, (coalesce(length(pg_catalog.pg_get_expr(p.polwithcheck,p.polrelid)),0)>2048)::text, c.relrowsecurity::text, c.relforcerowsecurity::text FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid=p.polrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind IN ('r','p') AND (pg_catalog.has_table_privilege(c.oid,'SELECT') OR pg_catalog.pg_has_role(current_user,c.relowner,'USAGE')) ORDER BY n.nspname,c.relname,p.polname LIMIT $1::bigint OFFSET $2::bigint";
 
 pub async fn roles(
     store: &SessionStore,
@@ -139,7 +139,7 @@ pub async fn policies(
 ) -> ApiResult<PostgresObjectPage<PostgresPolicy>> {
     let (rows, limit) = read(store, session, connection, query.clone(), POLICIES_SQL).await?;
     page(rows, query.offset, limit, |values| {
-        if values.len() != 10 {
+        if values.len() != 13 {
             return Err(invalid_shape());
         }
         Ok(PostgresPolicy {
@@ -149,10 +149,13 @@ pub async fn policies(
             command: required(&values[3])?,
             permissive: boolean(&values[4])?,
             roles: required(&values[5])?,
-            using_expression: optional(&values[6])?,
-            check_expression: optional(&values[7])?,
-            row_security_enabled: boolean(&values[8])?,
-            row_security_forced: boolean(&values[9])?,
+            roles_truncated: boolean(&values[6])?,
+            using_expression: optional(&values[7])?,
+            using_truncated: boolean(&values[8])?,
+            check_expression: optional(&values[9])?,
+            check_truncated: boolean(&values[10])?,
+            row_security_enabled: boolean(&values[11])?,
+            row_security_forced: boolean(&values[12])?,
         })
     })
 }

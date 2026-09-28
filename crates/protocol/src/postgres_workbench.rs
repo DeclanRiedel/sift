@@ -28,8 +28,11 @@ pub struct PostgresPolicy {
     pub command: String,
     pub permissive: bool,
     pub roles: String,
+    pub roles_truncated: bool,
     pub using_expression: Option<String>,
+    pub using_truncated: bool,
     pub check_expression: Option<String>,
+    pub check_truncated: bool,
     pub row_security_enabled: bool,
     pub row_security_forced: bool,
 }

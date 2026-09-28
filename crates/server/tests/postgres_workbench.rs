@@ -374,8 +374,11 @@ async fn policy_list_is_bounded_and_expressions_are_display_only() {
             Value::Text("*".into()),
             Value::Text("true".into()),
             Value::Text("PUBLIC".into()),
+            Value::Text("false".into()),
             Value::Text("owner_id = current_user".into()),
+            Value::Text("true".into()),
             Value::Null,
+            Value::Text("false".into()),
             Value::Text("true".into()),
             Value::Text("false".into()),
         ])]))
@@ -403,6 +406,7 @@ async fn policy_list_is_bounded_and_expressions_are_display_only() {
         Some("owner_id = current_user")
     );
     assert!(page.items[0].row_security_enabled);
+    assert!(page.items[0].using_truncated);
 }
 
 #[tokio::test]

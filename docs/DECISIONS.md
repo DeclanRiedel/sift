@@ -2595,7 +2595,8 @@ The first row-level security editor slice lists policies through a bounded
 PostgreSQL catalog query and permits a typed policy rename. A rename preserves
 the policy command, roles, expressions, and permissive mode while giving users
 a useful, low-risk correction path. Policy expressions are display-only; the
-server never accepts expression text as a SQL fragment.
+server never accepts expression text as a SQL fragment. Long displayed role
+lists and expressions carry explicit truncation flags.
 
 Only the table owner (including effective role membership) or a superuser may
 preview a rename. Preview captures the policy and table catalog state and the
