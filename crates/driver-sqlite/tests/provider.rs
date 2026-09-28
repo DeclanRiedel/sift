@@ -253,6 +253,9 @@ async fn catalog_graph_keeps_sqlite_dependencies_schema_correct_and_partial() {
             "CREATE TABLE parent(id INTEGER PRIMARY KEY);
              CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id));
              CREATE TABLE orphan(id INTEGER, missing_id INTEGER REFERENCES temp_only(id));
+             CREATE TABLE external_content(body TEXT);
+             CREATE VIRTUAL TABLE docs USING fts5(body, content='external_content');
+             CREATE VIRTUAL TABLE orphan_docs USING fts5(body, content='missing_content');
              CREATE VIEW joined AS SELECT c.parent_id FROM child AS c JOIN parent AS p ON p.id=c.parent_id;
              CREATE VIEW with_cte AS WITH x AS (SELECT id FROM child) SELECT id FROM x;
              CREATE TRIGGER child_ai AFTER INSERT ON child BEGIN UPDATE parent SET id=NEW.parent_id WHERE id=NEW.parent_id; END;",
@@ -302,6 +305,19 @@ async fn catalog_graph_keeps_sqlite_dependencies_schema_correct_and_partial() {
             .clone()
     };
     let parent = node("main", "parent", CatalogNodeKind::Table);
+    let external_content = node("main", "external_content", CatalogNodeKind::Table);
+    let docs = node("main", "docs", CatalogNodeKind::Table);
+    let orphan_docs = node("main", "orphan_docs", CatalogNodeKind::Table);
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == docs)
+            .unwrap()
+            .extra
+            .get("sqlite_metadata_gap"),
+        Some(&serde_json::json!("virtual_table_columns_unavailable"))
+    );
     let child = node("main", "child", CatalogNodeKind::Table);
     let joined = node("main", "joined", CatalogNodeKind::View);
     let with_cte = node("main", "with_cte", CatalogNodeKind::View);
@@ -353,11 +369,18 @@ async fn catalog_graph_keeps_sqlite_dependencies_schema_correct_and_partial() {
         1
     );
     assert_eq!(graph.coverage.state, CatalogCoverageState::Partial);
-    assert!(graph
-        .coverage
-        .failures
-        .iter()
-        .any(|failure| failure.code == "sqlite_trigger_body_dependencies_unavailable"));
+    assert!(graph.edges.iter().any(|edge| edge.from == trigger
+        && edge.kind == CatalogEdgeKind::DependsOn
+        && edge.to.as_ref() == Some(&parent)
+        && edge.certainty == CatalogEdgeCertainty::Parsed));
+    assert!(graph.edges.iter().any(|edge| edge.from == docs
+        && edge.kind == CatalogEdgeKind::DependsOn
+        && edge.to.as_ref() == Some(&external_content)
+        && edge.certainty == CatalogEdgeCertainty::Parsed));
+    assert!(graph.edges.iter().any(|edge| edge.from == orphan_docs
+        && edge.kind == CatalogEdgeKind::DependsOn
+        && edge.certainty == CatalogEdgeCertainty::Unresolved
+        && edge.referenced_path.as_deref() == Some("missing_content")));
     execute(
         &f.driver,
         &c,

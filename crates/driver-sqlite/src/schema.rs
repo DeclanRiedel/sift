@@ -4,6 +4,7 @@ use sift_protocol::*;
 use sqlparser::ast::{ObjectName, Query, Visit, Visitor};
 use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Token, Tokenizer};
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 const MAX_OBJECTS: usize = 10_000;
@@ -18,6 +19,10 @@ struct DependencySource {
     kind: ObjectKind,
     view_sql: Option<String>,
     view_sql_limited: bool,
+    trigger_sql: Option<String>,
+    trigger_sql_limited: bool,
+    virtual_sql: Option<String>,
+    virtual_sql_limited: bool,
     virtual_table: bool,
     table_name: String,
 }
@@ -150,19 +155,22 @@ fn load_once(
                 continue;
             }
             let mut object = ObjectInfo::new(name.clone(), kind);
-            if kind == ObjectKind::Table
-                && !sql
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim_start()
-                    .to_ascii_uppercase()
-                    .starts_with("CREATE VIRTUAL TABLE")
-            {
+            let virtual_table = kind == ObjectKind::Table
+                && sql.as_deref().is_some_and(|sql| {
+                    sql.trim_start()
+                        .to_ascii_uppercase()
+                        .starts_with("CREATE VIRTUAL TABLE")
+                });
+            if kind == ObjectKind::Table && !virtual_table {
                 object.estimated_rows = table_rows(conn, schema, &object.name, &mut count_budget)?;
+            }
+            if virtual_table && target.is_some() {
+                result.incomplete = true;
             }
 
             if (target.is_some() || navigation)
                 && matches!(kind, ObjectKind::Table | ObjectKind::View)
+                && !virtual_table
             {
                 deepen(conn, schema, &mut object, sql.as_deref().unwrap_or(""))?;
             }
@@ -174,29 +182,35 @@ fn load_once(
                     break;
                 }
                 node_budget -= cost;
-                let view_sql = match (kind, sql.as_ref()) {
-                    (ObjectKind::View, Some(sql))
-                        if sql.len() <= MAX_VIEW_SQL && sql.len() <= dependency_sql_budget =>
+                let dependency_sql = match sql.as_ref() {
+                    Some(sql)
+                        if (kind == ObjectKind::View
+                            || kind == ObjectKind::Trigger
+                            || virtual_table)
+                            && sql.len() <= MAX_VIEW_SQL
+                            && sql.len() <= dependency_sql_budget =>
                     {
                         dependency_sql_budget -= sql.len();
                         Some(sql.clone())
                     }
                     _ => None,
                 };
-                let view_sql_limited =
-                    kind == ObjectKind::View && sql.is_some() && view_sql.is_none();
+                let sql_limited = sql.is_some() && dependency_sql.is_none();
                 dependency_sources.push(DependencySource {
                     schema: schema.into(),
                     name: name.clone(),
                     kind,
-                    view_sql,
-                    view_sql_limited,
-                    virtual_table: kind == ObjectKind::Table
-                        && sql.as_deref().is_some_and(|sql| {
-                            sql.trim_start()
-                                .to_ascii_uppercase()
-                                .starts_with("CREATE VIRTUAL TABLE")
-                        }),
+                    view_sql: (kind == ObjectKind::View)
+                        .then(|| dependency_sql.clone())
+                        .flatten(),
+                    view_sql_limited: kind == ObjectKind::View && sql_limited,
+                    trigger_sql: (kind == ObjectKind::Trigger)
+                        .then(|| dependency_sql.clone())
+                        .flatten(),
+                    trigger_sql_limited: kind == ObjectKind::Trigger && sql_limited,
+                    virtual_sql: virtual_table.then_some(dependency_sql).flatten(),
+                    virtual_sql_limited: virtual_table && sql_limited,
+                    virtual_table,
                     table_name,
                 });
             }
@@ -363,12 +377,48 @@ fn enrich_dependencies(graph: &mut CatalogGraphData, sources: &[DependencySource
                     &source.table_name,
                 );
                 new_edges += 1;
-                coverage_failure(
-                    graph,
-                    &source.schema,
-                    "sqlite_trigger_body_dependencies_unavailable",
-                );
-                mark_dependency_gap(graph, from, "trigger_body_unavailable");
+                let Some(sql) = source.trigger_sql.as_deref() else {
+                    let code = if source.trigger_sql_limited {
+                        "sqlite_trigger_sql_limit"
+                    } else {
+                        "sqlite_trigger_sql_unavailable"
+                    };
+                    coverage_failure(graph, &source.schema, code);
+                    mark_dependency_gap(graph, from, code);
+                    continue;
+                };
+                let Some(references) = trigger_body_references(sql) else {
+                    coverage_failure(graph, &source.schema, "sqlite_trigger_body_unparsed");
+                    mark_dependency_gap(graph, from, "trigger_body_unparsed");
+                    continue;
+                };
+                let mut seen = HashSet::new();
+                for reference in references {
+                    let path = reference.to_string();
+                    if path.len() > 4096 {
+                        coverage_failure(graph, &source.schema, "sqlite_dependency_path_limit");
+                        mark_dependency_gap(graph, from, "dependency_path_limit");
+                        continue;
+                    }
+                    if !seen.insert(path.to_ascii_lowercase()) {
+                        continue;
+                    }
+                    if new_edges >= MAX_DEPENDENCY_EDGES {
+                        coverage_failure(graph, &source.schema, "sqlite_dependency_edge_limit");
+                        mark_dependency_gap(graph, from, "dependency_edge_limit");
+                        break;
+                    }
+                    let target = relation_target(&relations, &schema, &reference);
+                    push_dependency(
+                        graph,
+                        from.clone(),
+                        target,
+                        CatalogEdgeKind::DependsOn,
+                        CatalogEdgeCertainty::Parsed,
+                        &path,
+                    );
+                    new_edges += 1;
+                }
             }
             ObjectKind::View => {
                 let Some(sql) = source.view_sql.as_deref() else {
@@ -431,12 +481,52 @@ fn enrich_dependencies(graph: &mut CatalogGraphData, sources: &[DependencySource
                 }
             }
             ObjectKind::Table if source.virtual_table => {
-                coverage_failure(
-                    graph,
-                    &source.schema,
-                    "sqlite_virtual_table_dependencies_unavailable",
-                );
-                mark_dependency_gap(graph, from, "virtual_table_dependencies_unavailable");
+                if graph.coverage.failures.len() < 4_096 {
+                    graph.coverage.failures.push(CatalogCoverageFailure {
+                        stage: "columns".into(),
+                        schema: Some(source.schema.clone()),
+                        code: "sqlite_virtual_table_columns_unavailable".into(),
+                    });
+                }
+                if let Some(node) = graph.nodes.iter_mut().find(|node| &node.id == from) {
+                    node.extra.insert(
+                        "sqlite_metadata_gap".into(),
+                        "virtual_table_columns_unavailable".into(),
+                    );
+                }
+                let Some(sql) = source.virtual_sql.as_deref() else {
+                    let code = if source.virtual_sql_limited {
+                        "sqlite_virtual_table_sql_limit"
+                    } else {
+                        "sqlite_virtual_table_sql_unavailable"
+                    };
+                    coverage_failure(graph, &source.schema, code);
+                    mark_dependency_gap(graph, from, code);
+                    continue;
+                };
+                match fts5_external_content(sql) {
+                    Some(Some(path)) if path.len() <= 4096 && new_edges < MAX_DEPENDENCY_EDGES => {
+                        let target = resolve_relation(&relations, &schema, Some(&schema), &path);
+                        push_dependency(
+                            graph,
+                            from.clone(),
+                            target,
+                            CatalogEdgeKind::DependsOn,
+                            CatalogEdgeCertainty::Parsed,
+                            &path,
+                        );
+                        new_edges += 1;
+                    }
+                    Some(None) => {}
+                    _ => {
+                        coverage_failure(
+                            graph,
+                            &source.schema,
+                            "sqlite_virtual_table_dependencies_unavailable",
+                        );
+                        mark_dependency_gap(graph, from, "virtual_table_dependencies_unavailable");
+                    }
+                }
             }
             _ => {}
         }
@@ -466,6 +556,20 @@ fn resolve_relation(
         (Some(_), Some(_)) => None,
         (Some(id), None) | (None, Some(id)) => Some(id.clone()),
         (None, None) => None,
+    }
+}
+
+fn relation_target(
+    relations: &HashMap<(String, String), CatalogObjectId>,
+    schema: &str,
+    reference: &ObjectName,
+) -> Option<CatalogObjectId> {
+    match reference.0.as_slice() {
+        [name] => resolve_relation(relations, schema, None, &name.value),
+        [named_schema, name] => {
+            resolve_relation(relations, schema, Some(&named_schema.value), &name.value)
+        }
+        _ => None,
     }
 }
 
@@ -565,6 +669,78 @@ fn view_references(sql: &str) -> Option<Vec<ObjectName>> {
         return None;
     }
     Some(collector.references)
+}
+
+// sqlparser's CREATE TRIGGER grammar is PostgreSQL-only. SQLite stores the
+// complete statement, so isolate its BEGIN...END body using SQL tokens and
+// parse the contained DML statements with the SQLite dialect. Token matching
+// avoids mistaking quoted text or comments for the body delimiters.
+fn trigger_body_references(sql: &str) -> Option<Vec<ObjectName>> {
+    if sql.len() > MAX_VIEW_SQL {
+        return None;
+    }
+    let tokens = Tokenizer::new(&SQLiteDialect {}, sql).tokenize().ok()?;
+    let word_is = |token: &Token, value: &str| {
+        matches!(token, Token::Word(word)
+            if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(value))
+    };
+    let begin = tokens.iter().position(|token| word_is(token, "BEGIN"))?;
+    let end = tokens.iter().rposition(|token| word_is(token, "END"))?;
+    if end <= begin + 1 {
+        return None;
+    }
+    let body = tokens[begin + 1..end]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let statements = Parser::parse_sql(&SQLiteDialect {}, &body).ok()?;
+    if statements.is_empty() {
+        return None;
+    }
+    let mut collector = ViewRelations::default();
+    for statement in &statements {
+        if statement.visit(&mut collector).is_break() {
+            return None;
+        }
+    }
+    Some(collector.references)
+}
+
+// FTS5's external-content option names a table in the same SQLite schema.
+// Its other modes have no catalog table dependency. Other virtual-table
+// modules remain unknown because their argument semantics are module-defined.
+fn fts5_external_content(sql: &str) -> Option<Option<String>> {
+    let tokens = Tokenizer::new(&SQLiteDialect {}, sql)
+        .tokenize()
+        .ok()?
+        .into_iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect::<Vec<_>>();
+    let using = tokens.iter().position(|token| {
+        matches!(token, Token::Word(word)
+        if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("USING"))
+    })?;
+    if !matches!(tokens.get(using + 1), Some(Token::Word(word))
+        if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("fts5"))
+    {
+        return None;
+    }
+    for triple in tokens.windows(3) {
+        if !matches!(&triple[0], Token::Word(word)
+            if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("content"))
+            || !matches!(triple[1], Token::Eq)
+        {
+            continue;
+        }
+        return match &triple[2] {
+            Token::SingleQuotedString(value) | Token::DoubleQuotedString(value) => {
+                Some((!value.is_empty()).then(|| value.clone()))
+            }
+            _ => None,
+        };
+    }
+    Some(None)
 }
 
 // Prefer persistent statistics. Count small, unanalyzed tables within a shared
