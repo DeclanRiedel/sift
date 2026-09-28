@@ -63,6 +63,12 @@ pub(super) fn render_bottom_panel(
         )
         .when(
             shell.active_bottom_tool == BottomTool::Monitor
+                && shell.database_monitor.view() == DatabaseMonitorView::Security,
+            |dock| dock.key_context("SiftSqlServerSecurity")
+                .on_key_down(cx.listener(WorkspaceShell::handle_sqlserver_security_key)),
+        )
+        .when(
+            shell.active_bottom_tool == BottomTool::Monitor
                 && shell.database_monitor.view() == DatabaseMonitorView::Maintenance,
             |dock| dock.key_context("SiftSqlServerMaintenance")
                 .on_key_down(cx.listener(WorkspaceShell::handle_sqlserver_maintenance_key)),
@@ -190,6 +196,8 @@ pub(super) fn render_bottom_panel(
                 render_agent_jobs(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::SqlServerSettings {
                 render_sqlserver_settings(shell, cx)
+            } else if shell.database_monitor.view() == DatabaseMonitorView::Security {
+                render_sqlserver_security(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::Maintenance {
                 render_sqlserver_maintenance(shell, cx)
             } else {
@@ -367,6 +375,7 @@ pub(super) fn render_bottom_panel(
                                     DatabaseMonitorView::QueryStore => unreachable!(),
                                     DatabaseMonitorView::AgentJobs => unreachable!(),
                                     DatabaseMonitorView::SqlServerSettings => unreachable!(),
+                                    DatabaseMonitorView::Security => unreachable!(),
                                     DatabaseMonitorView::Maintenance => unreachable!(),
                                 },
                             ))
@@ -1020,6 +1029,7 @@ fn render_server_dashboard(
                         sift_protocol::OperationKind::ReadQueryStore => "Query Store",
                         sift_protocol::OperationKind::ReadAgentJobs => "Agent jobs",
                         sift_protocol::OperationKind::ReadSqlServerSettings => "SQL Server settings",
+                        sift_protocol::OperationKind::ReadSqlServerSecurity => "SQL Server security",
                         _ => "Inspection",
                     };
                     div().child(format!("{label}: {}", if capability.available { "available" } else { capability.reason.as_deref().unwrap_or("unavailable") }))
@@ -1528,6 +1538,191 @@ fn render_sqlserver_settings(
                     && report.settings.is_empty()
             }),
             |panel| panel.child(div().p_4().text_center().child("No settings returned.")),
+        )
+        .into_any_element()
+}
+
+fn append_security_section<T>(
+    lines: &mut Vec<String>,
+    title: &str,
+    section: &sift_protocol::SqlServerSecuritySection<T>,
+    format: impl Fn(&T) -> String,
+) {
+    if section.state == sift_protocol::SqlServerSecurityState::PermissionRequired {
+        lines.push(format!("{title}: permission required"));
+        return;
+    }
+    lines.push(format!(
+        "{title}: {}{}",
+        section.items.len(),
+        if section.truncated { "+" } else { "" }
+    ));
+    lines.extend(
+        section
+            .items
+            .iter()
+            .map(|item| format!("  {}", format(item))),
+    );
+}
+
+fn render_sqlserver_security(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let colors = cx.theme().colors;
+    let state = &shell.database_monitor;
+    let mut lines = Vec::new();
+    if let Some(report) = state.security() {
+        lines.push(format!(
+            "Database: {} · metadata-visible principals · explicit permissions only",
+            report.database
+        ));
+        lines.push("REVIEWABLE CHANGES · d preview selected removal".into());
+        for (index, item) in report.memberships.items.iter().enumerate() {
+            lines.push(format!(
+                "{} Drop membership: {} → {}",
+                if index == state.security_selected() {
+                    "▶"
+                } else {
+                    " "
+                },
+                item.role,
+                item.member
+            ));
+        }
+        for (offset, item) in report
+            .schema_permissions
+            .items
+            .iter()
+            .filter(|item| {
+                item.permission == "SELECT"
+                    && (item.state == "GRANT" || item.state == "GRANT_WITH_GRANT_OPTION")
+            })
+            .enumerate()
+        {
+            let index = report.memberships.items.len() + offset;
+            lines.push(format!(
+                "{} Revoke SELECT: {} → {}",
+                if index == state.security_selected() {
+                    "▶"
+                } else {
+                    " "
+                },
+                item.schema,
+                item.grantee
+            ));
+        }
+        append_security_section(&mut lines, "Visible logins", &report.logins, |item| {
+            format!("{} · {}", item.name, item.kind)
+        });
+        append_security_section(
+            &mut lines,
+            "Database principals",
+            &report.principals,
+            |item| format!("{} · {} · {}", item.name, item.kind, item.authentication),
+        );
+        append_security_section(
+            &mut lines,
+            "Role memberships",
+            &report.memberships,
+            |item| format!("{} → {}", item.role, item.member),
+        );
+        append_security_section(&mut lines, "Schema ownership", &report.schemas, |item| {
+            format!("{} · {}", item.schema, item.owner)
+        });
+        append_security_section(
+            &mut lines,
+            "Schema permissions",
+            &report.schema_permissions,
+            |item| {
+                format!(
+                    "{} · {} · {} · {}",
+                    item.schema, item.grantee, item.permission, item.state
+                )
+            },
+        );
+    }
+    div()
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .flex_col()
+        .child(
+            div()
+                .h(px(30.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(SectionLabel::new("SQL SERVER SECURITY"))
+                .child(
+                    div()
+                        .text_xs()
+                        .child("j/k select · d preview · Enter confirm · Esc cancel · r refresh"),
+                )
+                .child(div().flex_1())
+                .child(
+                    Button::new(
+                        "refresh-sqlserver-security",
+                        if state.security_request().loading() {
+                            "Loading…"
+                        } else {
+                            "Refresh"
+                        },
+                    )
+                    .tone(ButtonTone::Ghost)
+                    .disabled(state.security_request().loading())
+                    .on_click(cx.listener(|shell, _, _, cx| shell.load_sqlserver_security(cx))),
+                ),
+        )
+        .children(state.security_request().error().map(|message| {
+            div()
+                .p_2()
+                .text_color(colors.danger)
+                .child(message.to_string())
+        }))
+        .children(state.security_action_request().error().map(|message| {
+            div()
+                .p_2()
+                .text_color(colors.danger)
+                .child(message.to_string())
+        }))
+        .children(state.security_preview().map(|preview| {
+            div()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(colors.warning)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child("REVIEW SQL SERVER SECURITY CHANGE")
+                .child(div().font_family("monospace").child(preview.sql.clone()))
+                .child(
+                    div()
+                        .text_color(colors.warning)
+                        .child(preview.warning.clone()),
+                )
+                .child("Enter confirms production apply · Esc cancels")
+                .child(
+                    Button::new("sqlserver-security-apply", "Confirm production and apply")
+                        .disabled(state.security_action_request().loading())
+                        .on_click(
+                            cx.listener(|shell, _, _, cx| shell.apply_sqlserver_security(cx)),
+                        ),
+                )
+        }))
+        .child(
+            div()
+                .id("sqlserver-security-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .children(
+                    lines
+                        .into_iter()
+                        .map(|line| div().px_3().py_1().font_family("monospace").child(line)),
+                ),
         )
         .into_any_element()
 }

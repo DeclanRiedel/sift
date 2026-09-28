@@ -3758,6 +3758,13 @@ pub enum ExecutorCommand {
     LoadQueryStore,
     LoadAgentJobs,
     LoadSqlServerSettings,
+    LoadSqlServerSecurity,
+    PreviewSqlServerSecurity {
+        action: sift_protocol::SqlServerSecurityAction,
+    },
+    ApplySqlServerSecurity {
+        request: sift_protocol::ApplySqlServerSecurityRequest,
+    },
     SqlServerRecovery {
         generation: u64,
         apply: bool,
@@ -4653,6 +4660,9 @@ pub enum ExecutorEvent {
     QueryStoreLoaded(Result<sift_protocol::QueryStoreReport, String>),
     AgentJobsLoaded(Result<sift_protocol::AgentJobsReport, String>),
     SqlServerSettingsLoaded(Result<sift_protocol::SqlServerSettingsReport, String>),
+    SqlServerSecurityLoaded(Result<sift_protocol::SqlServerSecurityReport, String>),
+    SqlServerSecurityPreviewed(Result<sift_protocol::SqlServerSecurityPreview, String>),
+    SqlServerSecurityApplied(Result<(), String>),
     SqlServerRecoveryFinished {
         generation: u64,
         apply: bool,
@@ -13696,6 +13706,7 @@ impl WorkspaceShell {
                 self.database_monitor.clear_postgres_diagnostics();
                 self.database_monitor.clear_agent_jobs();
                 self.database_monitor.clear_sqlserver_settings();
+                self.database_monitor.clear_security();
                 if self.pg_notifications.profile_id.is_some() {
                     self.pg_listener_target_changed(cx);
                 }
@@ -16848,6 +16859,20 @@ impl WorkspaceShell {
             }
             ExecutorEvent::SqlServerSettingsLoaded(result) => {
                 self.database_monitor.finish_sqlserver_settings(result);
+                cx.notify();
+            }
+            ExecutorEvent::SqlServerSecurityLoaded(result) => {
+                self.database_monitor.finish_security(result);
+                cx.notify();
+            }
+            ExecutorEvent::SqlServerSecurityPreviewed(result) => {
+                self.database_monitor.finish_security_preview(result);
+                cx.notify();
+            }
+            ExecutorEvent::SqlServerSecurityApplied(result) => {
+                if self.database_monitor.finish_security_apply(result) {
+                    self.load_sqlserver_security(cx);
+                }
                 cx.notify();
             }
             ExecutorEvent::SqlServerRecoveryFinished {
@@ -26973,6 +26998,8 @@ impl WorkspaceShell {
                 self.load_server_dashboard(cx);
             } else if self.database_monitor.view() == DatabaseMonitorView::SqlServerSettings {
                 self.load_sqlserver_settings(cx);
+            } else if self.database_monitor.view() == DatabaseMonitorView::Security {
+                self.load_sqlserver_security(cx);
             } else if self.database_monitor.view() == DatabaseMonitorView::AgentJobs {
                 self.load_agent_jobs(cx);
             } else if self.database_monitor.view() == DatabaseMonitorView::QueryStore {
@@ -27376,6 +27403,9 @@ impl WorkspaceShell {
         if view == DatabaseMonitorView::SqlServerSettings {
             self.load_sqlserver_settings(cx);
         }
+        if view == DatabaseMonitorView::Security {
+            self.load_sqlserver_security(cx);
+        }
         cx.notify();
     }
 
@@ -27468,6 +27498,101 @@ impl WorkspaceShell {
         } else {
             self.database_monitor
                 .finish_sqlserver_settings(Err("Database executor is unavailable".into()));
+        }
+        cx.notify();
+    }
+
+    fn load_sqlserver_security(&mut self, cx: &mut Context<Self>) {
+        if self.database_monitor.security_request().loading() {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.database_monitor
+                .finish_security(Err("Database executor is unavailable".into()));
+            cx.notify();
+            return;
+        };
+        if sender.send(ExecutorCommand::LoadSqlServerSecurity).is_ok() {
+            self.database_monitor.start_security();
+        } else {
+            self.database_monitor
+                .finish_security(Err("Database executor is unavailable".into()));
+        }
+        cx.notify();
+    }
+
+    fn handle_sqlserver_security_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        if self.database_monitor.security_preview().is_some() {
+            match event.keystroke.key.as_str() {
+                "enter" => self.apply_sqlserver_security(cx),
+                "escape" => self.database_monitor.clear_security_preview(),
+                _ => return,
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "r" => self.load_sqlserver_security(cx),
+            "j" => self.database_monitor.move_security_selection(1),
+            "k" => self.database_monitor.move_security_selection(-1),
+            "d" => self.preview_sqlserver_security(cx),
+            "escape" => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn preview_sqlserver_security(&mut self, cx: &mut Context<Self>) {
+        if self.database_monitor.security_action_request().loading() {
+            return;
+        }
+        let Some(action) = self.database_monitor.selected_security_action() else {
+            return;
+        };
+        if self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::PreviewSqlServerSecurity { action })
+                .is_ok()
+        }) {
+            self.database_monitor.start_security_action();
+        } else {
+            self.database_monitor
+                .fail_security_action("Database executor is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn apply_sqlserver_security(&mut self, cx: &mut Context<Self>) {
+        if self.database_monitor.security_action_request().loading() {
+            return;
+        }
+        let Some(preview) = self.database_monitor.security_preview().cloned() else {
+            return;
+        };
+        let request = sift_protocol::ApplySqlServerSecurityRequest {
+            action: preview.action,
+            precondition: preview.precondition,
+            production_confirmed: true,
+        };
+        if self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::ApplySqlServerSecurity { request })
+                .is_ok()
+        }) {
+            self.database_monitor.start_security_action();
+        } else {
+            self.database_monitor
+                .fail_security_action("Database executor is unavailable");
         }
         cx.notify();
     }
@@ -37314,6 +37439,12 @@ impl WorkspaceShell {
                 self.active_bottom_tool = BottomTool::Monitor;
                 self.bottom_dock.presentation.open = true;
                 self.set_database_monitor_view(DatabaseMonitorView::Roles, cx);
+                self.focus_handle.focus(window, cx);
+            }
+            CommandId::OpenSqlServerSecurity => {
+                self.active_bottom_tool = BottomTool::Monitor;
+                self.bottom_dock.presentation.open = true;
+                self.set_database_monitor_view(DatabaseMonitorView::Security, cx);
                 self.focus_handle.focus(window, cx);
             }
             CommandId::ShowBenchmarkLibrary => {

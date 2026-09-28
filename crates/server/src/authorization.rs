@@ -234,6 +234,9 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | ReadQueryStore
             | ReadAgentJobs
             | ReadSqlServerSettings
+            | ReadSqlServerSecurity
+            | PreviewSqlServerSecurity
+            | ApplySqlServerSecurity
             | KillProcess
             | ImportCsv
             | BulkInsert
