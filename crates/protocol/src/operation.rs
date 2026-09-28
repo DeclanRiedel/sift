@@ -647,6 +647,20 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
     },
+    ReadSqlServerSecurity {
+        session: SessionId,
+        connection: ConnectionId,
+    },
+    PreviewSqlServerSecurity {
+        session: SessionId,
+        connection: ConnectionId,
+        action: crate::SqlServerSecurityAction,
+    },
+    ApplySqlServerSecurity {
+        session: SessionId,
+        connection: ConnectionId,
+        action: crate::SqlServerSecurityAction,
+    },
     KillProcess {
         session: SessionId,
         connection: ConnectionId,
@@ -894,6 +908,9 @@ impl Operation {
             Self::ReadQueryStore { .. } => OperationKind::ReadQueryStore,
             Self::ReadAgentJobs { .. } => OperationKind::ReadAgentJobs,
             Self::ReadSqlServerSettings { .. } => OperationKind::ReadSqlServerSettings,
+            Self::ReadSqlServerSecurity { .. } => OperationKind::ReadSqlServerSecurity,
+            Self::PreviewSqlServerSecurity { .. } => OperationKind::PreviewSqlServerSecurity,
+            Self::ApplySqlServerSecurity { .. } => OperationKind::ApplySqlServerSecurity,
             Self::KillProcess { .. } => OperationKind::KillProcess,
             Self::ImportCsv { .. } => OperationKind::ImportCsv,
             Self::BulkInsert { .. } => OperationKind::BulkInsert,
@@ -1359,6 +1376,15 @@ impl Operation {
             }
             Operation::ReadSqlServerSettings { connection, .. } => {
                 summary("read", "sqlserver_settings", Some(connection.0 as i64))
+            }
+            Operation::ReadSqlServerSecurity { connection, .. } => {
+                summary("read", "sqlserver_security", Some(connection.0 as i64))
+            }
+            Operation::PreviewSqlServerSecurity { connection, .. } => {
+                summary("preview", "sqlserver_security", Some(connection.0 as i64))
+            }
+            Operation::ApplySqlServerSecurity { connection, .. } => {
+                summary("apply", "sqlserver_security", Some(connection.0 as i64))
             }
             Operation::KillProcess { request, .. } => {
                 summary("kill", "process", Some(request.process_id))

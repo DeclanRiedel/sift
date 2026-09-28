@@ -1294,6 +1294,18 @@ pub fn app(state: AppState) -> Router {
             get_with(read_sqlserver_settings, doc("readSqlServerSettings", "Inspect SQL Server instance settings")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/sqlserver/security",
+            get_with(read_sqlserver_security, doc("readSqlServerSecurity", "Inspect bounded SQL Server security catalogs")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/sqlserver/security/preview",
+            post_with(preview_sqlserver_security, doc("previewSqlServerSecurity", "Preview a typed SQL Server security change")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/sqlserver/security/apply",
+            post_with(apply_sqlserver_security, doc("applySqlServerSecurity", "Apply a confirmed SQL Server security change")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/processes/kill",
             post_with(kill_process, doc("killProcess", "Terminate a database process")),
         )
