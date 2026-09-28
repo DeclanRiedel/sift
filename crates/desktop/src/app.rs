@@ -4,13 +4,69 @@ mod query;
 use query::{run_streamed_query, QueryRun};
 
 use futures::StreamExt as _;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt as _;
 
 const HISTORY_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const ESTIMATED_PLAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const ANALYZED_PLAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+fn relationship_component(
+    graph: &sift_protocol::CatalogGraph,
+    anchor: &sift_protocol::CatalogObjectId,
+) -> (Vec<sift_protocol::CatalogObjectId>, u8) {
+    use sift_protocol::{CatalogEdgeKind, CatalogNodeKind, CatalogObjectId};
+
+    let nodes = graph
+        .data
+        .nodes
+        .iter()
+        .map(|node| (&node.id, node))
+        .collect::<HashMap<_, _>>();
+    let owner = |id: &CatalogObjectId| {
+        let mut current = id;
+        while let Some(node) = nodes.get(current) {
+            if node
+                .parent_id
+                .as_ref()
+                .and_then(|parent| nodes.get(parent))
+                .is_some_and(|parent| parent.kind == CatalogNodeKind::Schema)
+            {
+                return Some(node.id.clone());
+            }
+            current = node.parent_id.as_ref()?;
+        }
+        None
+    };
+    let mut neighbors = HashMap::<CatalogObjectId, Vec<CatalogObjectId>>::new();
+    for edge in &graph.data.edges {
+        if edge.kind != CatalogEdgeKind::ForeignKey {
+            continue;
+        }
+        let (Some(from), Some(to)) = (owner(&edge.from), edge.to.as_ref().and_then(&owner)) else {
+            continue;
+        };
+        if from != to {
+            neighbors.entry(from.clone()).or_default().push(to.clone());
+            neighbors.entry(to).or_default().push(from);
+        }
+    }
+    let mut discovered = HashSet::from([anchor.clone()]);
+    let mut queue = VecDeque::from([(anchor.clone(), 0_u8)]);
+    let mut component = Vec::new();
+    let mut max_hops = 0;
+    while let Some((object, hops)) = queue.pop_front() {
+        max_hops = max_hops.max(hops);
+        component.push(object.clone());
+        for neighbor in neighbors.get(&object).into_iter().flatten() {
+            if discovered.insert(neighbor.clone()) {
+                queue.push_back((neighbor.clone(), hops.saturating_add(1)));
+            }
+        }
+    }
+    (component, max_hops)
+}
 
 fn system_epoch_millis() -> u64 {
     std::time::SystemTime::now()
@@ -5476,6 +5532,7 @@ async fn run_query_executor(
                 request_id,
                 source,
                 depth,
+                all,
             } => {
                 let result =
                     match query_context(&context, &parked_contexts, Some(source.profile_id)) {
@@ -5563,31 +5620,44 @@ async fn run_query_executor(
                                     ))
                                 });
                                 match anchor {
-                                    Some(anchor) => opened
-                                        .client
-                                        .catalog_diagram(
-                                            opened.session,
-                                            opened.metadata_connection,
-                                            sift_protocol::CatalogDiagramRequest {
-                                                expected_revision: graph.revision,
-                                                schemas: Vec::new(),
-                                                object_ids: vec![anchor.clone()],
-                                                edge_kinds: vec![
-                                                    sift_protocol::CatalogEdgeKind::ForeignKey,
-                                                ],
-                                                neighborhood_depth: depth,
-                                                include_columns: true,
-                                                include_routines: false,
-                                                max_nodes: Some(500),
-                                            },
-                                        )
-                                        .await
-                                        .map(|diagram| {
-                                            (anchor, Box::new(diagram), available_tables)
-                                        })
-                                        .map_err(|error| {
-                                            format!("loading relationships failed: {error}")
-                                        }),
+                                    Some(anchor) => {
+                                        let (component, max_hops) =
+                                            relationship_component(&graph, &anchor);
+                                        opened
+                                            .client
+                                            .catalog_diagram(
+                                                opened.session,
+                                                opened.metadata_connection,
+                                                sift_protocol::CatalogDiagramRequest {
+                                                    expected_revision: graph.revision,
+                                                    schemas: Vec::new(),
+                                                    object_ids: if all {
+                                                        component
+                                                    } else {
+                                                        vec![anchor.clone()]
+                                                    },
+                                                    edge_kinds: vec![
+                                                        sift_protocol::CatalogEdgeKind::ForeignKey,
+                                                    ],
+                                                    neighborhood_depth: if all { 0 } else { depth },
+                                                    include_columns: true,
+                                                    include_routines: false,
+                                                    max_nodes: Some(if all { 20_000 } else { 500 }),
+                                                },
+                                            )
+                                            .await
+                                            .map(|diagram| {
+                                                (
+                                                    anchor,
+                                                    Box::new(diagram),
+                                                    available_tables,
+                                                    max_hops,
+                                                )
+                                            })
+                                            .map_err(|error| {
+                                                format!("loading relationships failed: {error}")
+                                            })
+                                    }
                                     None => {
                                         Err("Table is absent from the visible catalog graph".into())
                                     }
@@ -7775,6 +7845,68 @@ pub fn display_rects(cx: &App) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relationship_hops_stop_at_farthest_connected_table() {
+        use sift_protocol::{
+            CatalogCompleteness, CatalogCoverage, CatalogEdge, CatalogEdgeCertainty,
+            CatalogEdgeKind, CatalogGraphData, CatalogNode, CatalogNodeDetails, CatalogNodeKind,
+            CatalogObjectId, CatalogRevision, DialectId, ProviderId, ProviderRef,
+        };
+        let node = |id: &str, kind, parent: Option<&str>| CatalogNode {
+            id: CatalogObjectId(id.into()),
+            native_id: None,
+            kind,
+            name: id.into(),
+            qualified_name: id.into(),
+            parent_id: parent.map(|parent| CatalogObjectId(parent.into())),
+            ordinal: None,
+            definition_digest: None,
+            completeness: CatalogCompleteness::Complete,
+            details: CatalogNodeDetails::None,
+            extra: Default::default(),
+        };
+        let edge = |from: &str, to: &str| CatalogEdge {
+            from: CatalogObjectId(from.into()),
+            to: Some(CatalogObjectId(to.into())),
+            kind: CatalogEdgeKind::ForeignKey,
+            certainty: CatalogEdgeCertainty::CatalogProven,
+            referenced_path: None,
+            column_pairs: Vec::new(),
+        };
+        let graph = sift_protocol::CatalogGraph {
+            revision: CatalogRevision(1),
+            content_digest: String::new(),
+            invalidation_epoch: 0,
+            captured_at: serde_json::from_value(serde_json::json!("2026-01-01T00:00:00Z")).unwrap(),
+            provider: ProviderRef {
+                provider_id: ProviderId::new("sift/postgres").unwrap(),
+                dialect_id: DialectId::new("sift/postgres").unwrap(),
+                provider_version: "1".into(),
+            },
+            database_identity: String::new(),
+            data: CatalogGraphData {
+                coverage: CatalogCoverage::complete(),
+                nodes: vec![
+                    node("schema", CatalogNodeKind::Schema, None),
+                    node("a", CatalogNodeKind::Table, Some("schema")),
+                    node("b", CatalogNodeKind::Table, Some("schema")),
+                    node("c", CatalogNodeKind::Table, Some("schema")),
+                    node("isolated", CatalogNodeKind::Table, Some("schema")),
+                    node("a_fk", CatalogNodeKind::Column, Some("a")),
+                    node("b_fk", CatalogNodeKind::Column, Some("b")),
+                ],
+                edges: vec![edge("a_fk", "b"), edge("b_fk", "c")],
+            },
+        };
+        let (component, hops) = relationship_component(&graph, &CatalogObjectId("a".into()));
+        assert_eq!(hops, 2);
+        assert_eq!(component.len(), 3);
+        assert!(!component.contains(&CatalogObjectId("isolated".into())));
+        let (_, isolated_hops) =
+            relationship_component(&graph, &CatalogObjectId("isolated".into()));
+        assert_eq!(isolated_hops, 0);
+    }
 
     #[tokio::test]
     async fn failed_connection_validation_leaves_no_profile_or_session() {

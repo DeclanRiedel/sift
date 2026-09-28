@@ -4196,6 +4196,7 @@ pub enum ExecutorCommand {
         request_id: u64,
         source: DatabaseObjectSource,
         depth: u8,
+        all: bool,
     },
     TerminateDatabaseProcess {
         process_id: i64,
@@ -4821,6 +4822,7 @@ pub enum ExecutorEvent {
                 sift_protocol::CatalogObjectId,
                 Box<sift_protocol::CatalogDiagram>,
                 Vec<DatabaseObjectSource>,
+                u8,
             ),
             String,
         >,
@@ -31597,14 +31599,14 @@ impl WorkspaceShell {
         else {
             return;
         };
-        let (request_id, source, depth) = pane.update(cx, |pane, cx| {
+        let (request_id, source, depth, all) = pane.update(cx, |pane, cx| {
             let viewer = pane
                 .relationship_viewers
                 .get_mut(&item_id)
                 .expect("viewer exists");
             let request_id = viewer.start();
             cx.notify();
-            (request_id, viewer.source.clone(), viewer.depth)
+            (request_id, viewer.source.clone(), viewer.depth, viewer.all)
         });
         let fail = |pane: &Entity<Pane>, message: &str, cx: &mut Context<Self>| {
             pane.update(cx, |pane, cx| {
@@ -31647,6 +31649,7 @@ impl WorkspaceShell {
                 request_id,
                 source,
                 depth,
+                all,
             })
             .is_err()
         {
@@ -47383,6 +47386,7 @@ mod tests {
                 request_id,
                 source: requested,
                 depth: 1,
+                all: false,
             }) => {
                 assert_eq!(requested.object, "people");
                 (item_id, request_id)
@@ -47413,6 +47417,7 @@ mod tests {
                             partial: false,
                         }),
                         vec![source.clone()],
+                        2,
                     )),
                 },
                 cx,
@@ -47480,10 +47485,10 @@ mod tests {
         cx.simulate_click(fit.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("relationship-details").is_none());
-        let fitted_viewport = cx.debug_bounds("relationship-cards").unwrap();
         workspace.read_with(&cx, |shell, cx| {
             let viewer = &shell.panes[0].read(cx).relationship_viewers[&item_id];
-            assert!(1472.0 * viewer.zoom <= f32::from(fitted_viewport.size.width) - 24.0);
+            assert!(viewer.fit_active);
+            assert!(viewer.zoom <= 1.0);
         });
         let actual_size = cx.debug_bounds("relationship-fit-width").unwrap();
         cx.simulate_click(actual_size.center(), Modifiers::default());

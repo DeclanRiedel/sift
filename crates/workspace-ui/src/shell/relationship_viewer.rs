@@ -8,18 +8,28 @@ const CARD_HEADER_HEIGHT: f32 = 39.0;
 const CARD_ROW_HEIGHT: f32 = 24.0;
 const CARD_VERTICAL_STEP: f32 = 244.0;
 const LANE_STEP: f32 = 368.0;
-const SCENE_WIDTH: f32 = 1472.0;
+const MIN_ZOOM: f32 = 0.0001;
 const CARD_OVERFLOW_ANCHOR_Y: f32 = CARD_HEIGHT - 12.0;
 const RELATION_ROW_STEP: f32 = 56.0;
+const MINIMAP_WIDTH: f32 = 192.0;
+const MINIMAP_HEIGHT: f32 = 124.0;
 
-fn relationship_fit_zoom(width: f32, height: f32, scene_height: f32) -> f32 {
-    let width_zoom = ((width - 32.0) / SCENE_WIDTH).max(0.0);
+fn relationship_card_height(column_count: usize, show_all_fields: bool) -> f32 {
+    if show_all_fields && column_count > 6 {
+        CARD_HEADER_HEIGHT + column_count as f32 * CARD_ROW_HEIGHT + 23.0
+    } else {
+        CARD_HEIGHT
+    }
+}
+
+fn relationship_fit_zoom(width: f32, height: f32, scene_width: f32, scene_height: f32) -> f32 {
+    let width_zoom = ((width - 32.0) / scene_width).max(0.0);
     let height_zoom = if height > 0.0 {
         ((height - 32.0) / scene_height).max(0.0)
     } else {
         1.0
     };
-    width_zoom.min(height_zoom).clamp(0.2, 1.0)
+    width_zoom.min(height_zoom).clamp(MIN_ZOOM, 1.0)
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +37,7 @@ struct CachedCardBody {
     text_style: gpui::TextStyle,
     colors: ThemeColors,
     zoom: f32,
+    card_height: f32,
     row_count: usize,
     lines: Vec<(ShapedLine, gpui::Point<Pixels>, Pixels)>,
 }
@@ -43,6 +54,9 @@ struct CachedRelationRow {
 pub(super) struct RelationshipViewerState {
     pub source: DatabaseObjectSource,
     pub depth: u8,
+    pub all: bool,
+    pub max_hops: u8,
+    show_all_fields: bool,
     pub request_id: u64,
     pub loading: bool,
     pub error: Option<String>,
@@ -76,6 +90,9 @@ impl RelationshipViewerState {
         Self {
             source,
             depth: 1,
+            all: false,
+            max_hops: 0,
+            show_all_fields: false,
             request_id: 0,
             loading: false,
             error: None,
@@ -116,6 +133,7 @@ impl RelationshipViewerState {
                 sift_protocol::CatalogObjectId,
                 Box<sift_protocol::CatalogDiagram>,
                 Vec<DatabaseObjectSource>,
+                u8,
             ),
             String,
         >,
@@ -125,8 +143,18 @@ impl RelationshipViewerState {
         }
         self.loading = false;
         match result {
-            Ok((anchor, diagram, available_tables)) => {
-                let index = RelationshipViewerIndex::new(&diagram, &self.search, &anchor);
+            Ok((anchor, diagram, available_tables, max_hops)) => {
+                self.max_hops = max_hops;
+                self.depth = self.depth.min(max_hops.clamp(1, 8));
+                if max_hops == 0 {
+                    self.all = false;
+                }
+                let index = RelationshipViewerIndex::new(
+                    &diagram,
+                    &self.search,
+                    &anchor,
+                    self.show_all_fields,
+                );
                 if self
                     .selected
                     .as_ref()
@@ -152,6 +180,7 @@ impl RelationshipViewerState {
                         self.zoom = relationship_fit_zoom(
                             width,
                             f32::from(bounds.height),
+                            self.index.as_ref().map_or(680.0, |index| index.scene_width),
                             self.index
                                 .as_ref()
                                 .map_or(280.0, |index| index.scene_height),
@@ -213,7 +242,16 @@ impl RelationshipViewerState {
         let x = x * self.zoom + 12.0;
         let y = y * self.zoom + 12.0;
         let right = x + CARD_WIDTH * self.zoom;
-        let bottom = y + CARD_HEIGHT * self.zoom;
+        let height = self.index.as_ref().map_or(CARD_HEIGHT, |index| {
+            relationship_card_height(
+                index
+                    .columns_by_table
+                    .get(self.selected.as_ref().unwrap())
+                    .map_or(0, Vec::len),
+                self.show_all_fields,
+            )
+        });
+        let bottom = y + height * self.zoom;
         let left_visible = -f32::from(offset.x);
         let top_visible = -f32::from(offset.y);
         let width = f32::from(viewport.width);
@@ -253,6 +291,7 @@ struct RelationshipViewerIndex {
     incoming_ids: HashSet<sift_protocol::CatalogObjectId>,
     outgoing_ids: HashSet<sift_protocol::CatalogObjectId>,
     positions: HashMap<sift_protocol::CatalogObjectId, (f32, f32)>,
+    scene_width: f32,
     scene_height: f32,
 }
 
@@ -261,6 +300,7 @@ impl RelationshipViewerIndex {
         diagram: &sift_protocol::CatalogDiagram,
         search: &str,
         anchor: &sift_protocol::CatalogObjectId,
+        show_all_fields: bool,
     ) -> Self {
         let mut nodes = HashMap::with_capacity(diagram.nodes.len());
         let mut columns_by_table = HashMap::<_, Vec<_>>::new();
@@ -327,17 +367,18 @@ impl RelationshipViewerIndex {
             incoming_ids,
             outgoing_ids,
             positions: HashMap::new(),
+            scene_width: 680.0,
             scene_height: 280.0,
         };
-        result.filter(search);
+        result.filter(search, show_all_fields);
         result
     }
 
-    fn filter(&mut self, search: &str) {
+    fn filter(&mut self, search: &str, show_all_fields: bool) {
         self.visible_tables.clear();
         self.visible_positions.clear();
         self.positions.clear();
-        let mut lane_counts = [0_u32; 4];
+        let mut lane_bottoms = [30.0_f32; 4];
         self.visible_tables.extend(
             self.table_search
                 .iter()
@@ -359,16 +400,30 @@ impl RelationshipViewerIndex {
             };
             self.positions.insert(
                 id.clone(),
-                (
-                    24.0 + lane as f32 * LANE_STEP,
-                    30.0 + lane_counts[lane] as f32 * CARD_VERTICAL_STEP,
-                ),
+                (24.0 + lane as f32 * LANE_STEP, lane_bottoms[lane]),
             );
-            lane_counts[lane] += 1;
+            lane_bottoms[lane] += relationship_card_height(
+                self.columns_by_table.get(id).map_or(0, Vec::len),
+                show_all_fields,
+            ) + (CARD_VERTICAL_STEP - CARD_HEIGHT);
         }
-        self.scene_height =
-            (lane_counts.into_iter().max().unwrap_or(0) as f32 * CARD_VERTICAL_STEP + 42.0)
-                .max(280.0);
+        let left = self
+            .positions
+            .values()
+            .map(|(x, _)| *x)
+            .fold(f32::INFINITY, f32::min);
+        if left.is_finite() {
+            let shift = left - 24.0;
+            for (x, _) in self.positions.values_mut() {
+                *x -= shift;
+            }
+        }
+        self.scene_width = self
+            .positions
+            .values()
+            .map(|(x, _)| x + CARD_WIDTH + 24.0)
+            .fold(320.0, f32::max);
+        self.scene_height = (lane_bottoms.into_iter().fold(0.0, f32::max) + 12.0).max(280.0);
     }
 }
 
@@ -522,8 +577,8 @@ fn relationship_port_key(
     )
 }
 
-fn relationship_column_anchor(position: usize) -> f32 {
-    if position < 6 {
+fn relationship_column_anchor(position: usize, show_all_fields: bool) -> f32 {
+    if show_all_fields || position < 6 {
         CARD_HEADER_HEIGHT + position as f32 * CARD_ROW_HEIGHT + CARD_ROW_HEIGHT / 2.0
     } else {
         CARD_OVERFLOW_ANCHOR_Y
@@ -659,6 +714,7 @@ struct CardSurfaceContent {
 
 fn relationship_card_surface(
     content: CardSurfaceContent,
+    card_height: f32,
     zoom: f32,
     colors: ThemeColors,
     cache: Rc<RefCell<HashMap<sift_protocol::CatalogObjectId, CachedCardBody>>>,
@@ -674,11 +730,18 @@ fn relationship_card_surface(
     } = content;
     canvas(
         move |_, window, _| {
+            if zoom < 0.25 {
+                return (0, Vec::new());
+            }
             let compact = zoom < 0.6;
             let mut style = window.text_style();
             style.font_size = px(if compact { 10.0 } else { 11.0 * zoom }).into();
             if let Some(cached) = cache.borrow().get(&table_id) {
-                if cached.text_style == style && cached.colors == colors && cached.zoom == zoom {
+                if cached.text_style == style
+                    && cached.colors == colors
+                    && cached.zoom == zoom
+                    && cached.card_height == card_height
+                {
                     return (cached.row_count, cached.lines.clone());
                 }
             }
@@ -705,7 +768,7 @@ fn relationship_card_surface(
                         &footer,
                         &type_style,
                         5.0,
-                        CARD_HEIGHT * zoom - 14.0,
+                        card_height * zoom - 14.0,
                         CARD_WIDTH * zoom - 10.0,
                         9.0,
                     ),
@@ -725,7 +788,15 @@ fn relationship_card_surface(
                 for (value, text_style, x, y, width, size, right_align) in [
                     (&title, &name_style, 32.0, 7.0, 184.0, 17.0, false),
                     (&kind_label, &type_style, 222.0, 7.0, 54.0, 10.5, true),
-                    (&footer, &type_style, 10.0, 185.0, 264.0, 10.0, false),
+                    (
+                        &footer,
+                        &type_style,
+                        10.0,
+                        card_height - 21.0,
+                        264.0,
+                        10.0,
+                        false,
+                    ),
                 ] {
                     let mut text_style = text_style.clone();
                     text_style.font_size = px(size * zoom).into();
@@ -778,6 +849,7 @@ fn relationship_card_surface(
                     text_style: style,
                     colors,
                     zoom,
+                    card_height,
                     row_count,
                     lines: lines.clone(),
                 },
@@ -799,8 +871,10 @@ fn relationship_card_surface(
                     bounds.origin,
                     gpui::size(
                         bounds.size.width,
-                        px(if zoom < 0.6 {
-                            24.0
+                        px(if zoom < 0.25 {
+                            (card_height * zoom).clamp(1.0, 3.0)
+                        } else if zoom < 0.6 {
+                            24.0_f32.min(card_height * zoom)
                         } else {
                             CARD_HEADER_HEIGHT * zoom
                         }),
@@ -813,8 +887,10 @@ fn relationship_card_surface(
                     gpui::point(
                         bounds.left(),
                         bounds.top()
-                            + px(if zoom < 0.6 {
-                                23.0
+                            + px(if zoom < 0.25 {
+                                (card_height * zoom).min(3.0)
+                            } else if zoom < 0.6 {
+                                23.0_f32.min(card_height * zoom)
                             } else {
                                 (CARD_HEADER_HEIGHT - 1.0) * zoom
                             }),
@@ -823,24 +899,26 @@ fn relationship_card_surface(
                 ),
                 colors.accent,
             ));
-            let _ = window.paint_svg(
-                gpui::Bounds::new(
-                    bounds.origin
-                        + gpui::point(
-                            px(if zoom < 0.6 { 4.0 } else { 9.0 * zoom }),
-                            px(if zoom < 0.6 { 6.0 } else { 10.5 * zoom }),
+            if zoom >= 0.25 {
+                let _ = window.paint_svg(
+                    gpui::Bounds::new(
+                        bounds.origin
+                            + gpui::point(
+                                px(if zoom < 0.6 { 4.0 } else { 9.0 * zoom }),
+                                px(if zoom < 0.6 { 6.0 } else { 10.5 * zoom }),
+                            ),
+                        gpui::size(
+                            px(if zoom < 0.6 { 10.0 } else { 16.0 * zoom }),
+                            px(if zoom < 0.6 { 10.0 } else { 16.0 * zoom }),
                         ),
-                    gpui::size(
-                        px(if zoom < 0.6 { 10.0 } else { 16.0 * zoom }),
-                        px(if zoom < 0.6 { 10.0 } else { 16.0 * zoom }),
                     ),
-                ),
-                icon.path().into(),
-                None,
-                Default::default(),
-                colors.accent,
-                cx,
-            );
+                    icon.path().into(),
+                    None,
+                    Default::default(),
+                    colors.accent,
+                    cx,
+                );
+            }
             let mut separators = gpui::PathBuilder::stroke(px(1.0));
             for row in 1..=row_count {
                 let y =
@@ -853,7 +931,11 @@ fn relationship_card_surface(
             }
             for (line, relative_origin, width) in lines.drain(..) {
                 let origin = bounds.origin + relative_origin;
-                let line_height = (bounds.bottom() - origin.y).min(px(CARD_ROW_HEIGHT * zoom));
+                let line_height = (bounds.bottom() - origin.y).min(px(if zoom < 0.6 {
+                    14.0
+                } else {
+                    CARD_ROW_HEIGHT * zoom
+                }));
                 if line.width() <= width {
                     let _ = line.paint(
                         origin,
@@ -1176,7 +1258,7 @@ impl Pane {
                     if let Some(viewer) = pane.relationship_viewers.get_mut(&item_id) {
                         viewer.search = input.read(cx).text().to_lowercase();
                         if let Some(index) = viewer.index.as_mut() {
-                            index.filter(&viewer.search);
+                            index.filter(&viewer.search, viewer.show_all_fields);
                             if viewer.selected.as_ref().is_none_or(|selected| {
                                 !index.visible_positions.contains_key(selected)
                             }) {
@@ -1213,6 +1295,7 @@ impl Pane {
         let mut auxiliary_rows = Vec::new();
         let mut scene_edges = Vec::new();
         let mut port_cardinalities = HashMap::new();
+        let mut scene_width = 680.0_f32;
         let mut scene_height = 240.0_f32;
         let zoom = viewer.zoom;
         let mut summary = if viewer.loading {
@@ -1249,6 +1332,7 @@ impl Pane {
                 .collect::<HashSet<_>>();
             let positions = &index.positions;
             let mut column_anchors = HashMap::new();
+            scene_width = index.scene_width;
             scene_height = index.scene_height;
             summary = format!(
                 "{} tables · {} FKs{}",
@@ -1276,11 +1360,20 @@ impl Pane {
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
                 let column_count = all_columns.len();
-                let hidden_columns = column_count.saturating_sub(6);
+                let card_height = relationship_card_height(column_count, viewer.show_all_fields);
+                let visible_columns = if viewer.show_all_fields {
+                    column_count
+                } else {
+                    6
+                };
+                let hidden_columns = column_count.saturating_sub(visible_columns);
                 for (position, &column) in all_columns.iter().enumerate() {
                     let id = &diagram.nodes[column].id;
-                    if position < 6 || edge_columns.contains(id) {
-                        column_anchors.insert(id.clone(), relationship_column_anchor(position));
+                    if position < visible_columns || edge_columns.contains(id) {
+                        column_anchors.insert(
+                            id.clone(),
+                            relationship_column_anchor(position, viewer.show_all_fields),
+                        );
                     }
                 }
                 let card_left = 12.0 + x * zoom;
@@ -1288,7 +1381,7 @@ impl Pane {
                 if cull_cards
                     && (card_left + CARD_WIDTH * zoom < visible_left
                         || card_left > visible_right
-                        || card_top + CARD_HEIGHT * zoom < visible_top
+                        || card_top + card_height * zoom < visible_top
                         || card_top > visible_bottom)
                 {
                     continue;
@@ -1298,10 +1391,12 @@ impl Pane {
                     .as_ref()
                     .and_then(|id| nodes.get(id))
                     .map_or("?", |node| node.name.as_str());
+                let card_title = format!("{table_schema}.{}", table.name);
+                let card_tooltip = card_title.clone();
                 let rows = all_columns
                     .iter()
                     .copied()
-                    .take(6)
+                    .take(if zoom < 0.6 { 0 } else { visible_columns })
                     .map(|column| {
                         let node = &diagram.nodes[column];
                         let (key, data_type) = match &node.details {
@@ -1328,7 +1423,7 @@ impl Pane {
                         .left(px(x * zoom))
                         .top(px(y * zoom))
                         .w(px(CARD_WIDTH * zoom))
-                        .h(px(CARD_HEIGHT * zoom))
+                        .h(px(card_height * zoom))
                         .flex_none()
                         .flex()
                         .flex_col()
@@ -1352,6 +1447,7 @@ impl Pane {
                         .cursor_pointer()
                         .role(Role::Button)
                         .aria_label(format!("Inspect table {}", table.qualified_name))
+                        .tooltip(move |_, cx| cx.new(|_| Tooltip::new(card_tooltip.clone())).into())
                         .occlude()
                         .on_click(cx.listener(move |pane, _, window, cx| {
                             if let Some(viewer) = pane.relationship_viewers.get_mut(&item_id) {
@@ -1368,7 +1464,7 @@ impl Pane {
                         .child(relationship_card_surface(
                             CardSurfaceContent {
                                 table_id: table.id.clone(),
-                                title: format!("{table_schema}.{}", table.name),
+                                title: card_title,
                                 kind: match table.kind {
                                     sift_protocol::CatalogNodeKind::View => "VIEW",
                                     sift_protocol::CatalogNodeKind::MaterializedView => "MAT VIEW",
@@ -1386,6 +1482,7 @@ impl Pane {
                                 icon: object_icon(table.kind),
                                 rows,
                             },
+                            card_height,
                             zoom,
                             colors,
                             viewer.card_text_cache.clone(),
@@ -1684,6 +1781,84 @@ impl Pane {
             Vec::new()
         };
         let scene_scroll = viewer.scroll.clone();
+        let minimap_positions = viewer.index.as_ref().map(|index| {
+            index
+                .visible_tables
+                .iter()
+                .filter_map(|id| {
+                    index.positions.get(id).map(|position| {
+                        (
+                            viewer.selected.as_ref() == Some(id),
+                            *position,
+                            relationship_card_height(
+                                index.columns_by_table.get(id).map_or(0, Vec::len),
+                                viewer.show_all_fields,
+                            ),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        let minimap_scroll = viewer.scroll.clone();
+        let minimap_bounds = Rc::new(RefCell::new(None::<gpui::Bounds<Pixels>>));
+        let paint_minimap_bounds = minimap_bounds.clone();
+        let minimap = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                *paint_minimap_bounds.borrow_mut() = Some(bounds);
+                let Some(positions) = minimap_positions.as_ref() else {
+                    return;
+                };
+                let padding = 8.0;
+                let scale = ((MINIMAP_WIDTH - padding * 2.0) / scene_width)
+                    .min((MINIMAP_HEIGHT - padding * 2.0) / scene_height);
+                let origin = gpui::point(bounds.left() + px(padding), bounds.top() + px(padding));
+                for (selected, (x, y), card_height) in positions {
+                    let color = if *selected {
+                        colors.accent
+                    } else {
+                        colors.muted_text.alpha(0.55)
+                    };
+                    window.paint_quad(gpui::fill(
+                        gpui::Bounds::new(
+                            gpui::point(origin.x + px(*x * scale), origin.y + px(*y * scale)),
+                            gpui::size(
+                                px((CARD_WIDTH * scale).max(2.0)),
+                                px((card_height * scale).max(2.0)),
+                            ),
+                        ),
+                        color,
+                    ));
+                }
+                let viewport = minimap_scroll.bounds().size;
+                if viewport.width > px(0.) && viewport.height > px(0.) {
+                    let offset = minimap_scroll.offset();
+                    let x = (-f32::from(offset.x) / zoom * scale).max(0.0);
+                    let y = (-f32::from(offset.y) / zoom * scale).max(0.0);
+                    let width = (f32::from(viewport.width) / zoom * scale)
+                        .min(scene_width * scale - x)
+                        .max(1.0);
+                    let height = (f32::from(viewport.height) / zoom * scale)
+                        .min(scene_height * scale - y)
+                        .max(1.0);
+                    let mut outline = gpui::PathBuilder::stroke(px(1.0));
+                    let left = origin.x + px(x);
+                    let top = origin.y + px(y);
+                    let right = left + px(width);
+                    let bottom = top + px(height);
+                    outline.move_to(gpui::point(left, top));
+                    outline.line_to(gpui::point(right, top));
+                    outline.line_to(gpui::point(right, bottom));
+                    outline.line_to(gpui::point(left, bottom));
+                    outline.line_to(gpui::point(left, top));
+                    if let Ok(path) = outline.build() {
+                        window.paint_path(path, colors.accent);
+                    }
+                }
+            },
+        )
+        .w(px(MINIMAP_WIDTH))
+        .h(px(MINIMAP_HEIGHT));
         let edge_layer = canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
@@ -1762,6 +1937,11 @@ impl Pane {
                             continue;
                         }
                     }
+                    if zoom < 0.25 {
+                        path.move_to(start);
+                        path.line_to(end);
+                        continue;
+                    }
                     draw_relationship_wire(path, wire_start, wire_end, lane_x);
                     visible_ports
                         .entry(from_key)
@@ -1791,7 +1971,7 @@ impl Pane {
                 }
             },
         )
-        .w(px(SCENE_WIDTH * zoom))
+        .w(px(scene_width * zoom))
         .h(px(scene_height * zoom));
         let wheel_scroll = viewer.scroll.clone();
         let pointer_scroll = viewer.scroll.clone();
@@ -1874,6 +2054,10 @@ impl Pane {
                             .child(div().w(px(180.)).flex_none().child(viewer.search_input.clone()))
                             .child(div().flex_1())
                             .child(div().flex_none().text_xs().text_color(colors.muted_text).child(summary))
+                            .child(Button::new("relationship-fields-toggle", if viewer.show_all_fields { "Fewer fields" } else { "All fields" })
+                                .debug_selector("relationship-fields-toggle")
+                                .tone(if viewer.show_all_fields { ButtonTone::Accent } else { ButtonTone::Ghost })
+                                .on_click(cx.listener(move |pane, _, _, cx| pane.toggle_relationship_fields(item_id, cx))))
                             .child(Button::new("relationship-details-toggle", if viewer.details_open { "Hide details" } else { "Details" })
                                 .debug_selector("relationship-details-toggle")
                                 .tone(if viewer.details_open { ButtonTone::Neutral } else { ButtonTone::Ghost })
@@ -1985,31 +2169,63 @@ impl Pane {
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .child(div().relative().w(px(SCENE_WIDTH * zoom)).h(px(scene_height * zoom))
+                            .child(div().relative().w(px(scene_width * zoom)).h(px(scene_height * zoom))
                                 .child(edge_layer)
                                 .children(table_cards)))
+                        .child(div().id(("relationship-minimap", item_id as usize)).absolute().left(px(16.)).bottom(px(16.))
+                            .w(px(MINIMAP_WIDTH)).h(px(MINIMAP_HEIGHT))
+                            .rounded_sm().border_1().border_color(colors.strong_border)
+                            .bg(colors.elevated_surface).shadow_lg().occlude()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |pane, event: &gpui::ClickEvent, _, cx| {
+                                let position = match event {
+                                    gpui::ClickEvent::Mouse(event) => event.up.position,
+                                    gpui::ClickEvent::Touch(event) => event.position,
+                                    gpui::ClickEvent::Keyboard(_) => return,
+                                };
+                                let Some(bounds) = *minimap_bounds.borrow() else { return; };
+                                let Some(viewer) = pane.relationship_viewers.get_mut(&item_id) else { return; };
+                                let Some(index) = viewer.index.as_ref() else { return; };
+                                let scale = ((MINIMAP_WIDTH - 16.0) / index.scene_width)
+                                    .min((MINIMAP_HEIGHT - 16.0) / index.scene_height);
+                                let world_x = (f32::from(position.x - bounds.left()) - 8.0) / scale;
+                                let world_y = (f32::from(position.y - bounds.top()) - 8.0) / scale;
+                                let viewport = viewer.scroll.bounds().size;
+                                let target_x = (world_x * viewer.zoom - f32::from(viewport.width) / 2.0)
+                                    .clamp(0.0, f32::from(viewer.scroll.max_offset().x));
+                                let target_y = (world_y * viewer.zoom - f32::from(viewport.height) / 2.0)
+                                    .clamp(0.0, f32::from(viewer.scroll.max_offset().y));
+                                viewer.scroll.set_offset(gpui::point(px(-target_x), px(-target_y)));
+                                cx.notify();
+                            }))
+                            .child(minimap))
                         .child(div().absolute().right(px(16.)).bottom(px(16.))
                             .h(px(30.)).px_1().flex().items_center().gap_1()
                             .rounded_sm().border_1().border_color(colors.strong_border)
                             .bg(colors.elevated_surface).shadow_lg()
                             .child(Button::new("relationship-zoom-out", "−").tone(ButtonTone::Ghost)
-                                .disabled(zoom <= 0.2).on_click(cx.listener(move |pane, _, _, cx| pane.change_relationship_zoom(item_id, -0.15, cx))))
+                                .disabled(zoom <= MIN_ZOOM).on_click(cx.listener(move |pane, _, _, cx| pane.change_relationship_zoom(item_id, -0.15, cx))))
                             .child(div().w(px(38.)).text_xs().text_color(colors.muted_text).child(format!("{}%", (zoom * 100.0).round() as u32)))
                             .child(Button::new("relationship-zoom-in", "+").tone(ButtonTone::Ghost)
                                 .disabled(zoom >= 1.5).on_click(cx.listener(move |pane, _, _, cx| pane.change_relationship_zoom(item_id, 0.15, cx))))
                             .child(div().h(px(16.)).w(px(1.)).mx_1().bg(colors.subtle_border))
                             .child(Button::new("relationship-fit-width", if viewer.fit_active { "Actual size" } else { "Fit graph" }).debug_selector("relationship-fit-width").tone(ButtonTone::Ghost)
                                 .on_click(cx.listener(move |pane, _, _, cx| pane.fit_relationship_width(item_id, cx))))
-                            .child(div().h(px(16.)).w(px(1.)).mx_1().bg(colors.subtle_border))
-                            .child(Button::new("relationship-depth-less", "−").tone(ButtonTone::Ghost)
-                                .disabled(depth <= 1 || loading)
-                                .on_click(cx.listener(move |pane, _, _, cx| pane.change_relationship_depth(item_id, -1, cx))))
-                            .child(div().text_xs().text_color(colors.muted_text).child(format!(
-                                "{depth} hop{}", if depth == 1 { "" } else { "s" }
-                            )))
-                            .child(Button::new("relationship-depth-more", "+").debug_selector("relationship-depth-more").tone(ButtonTone::Ghost)
-                                .disabled(depth >= 3 || loading)
-                                .on_click(cx.listener(move |pane, _, _, cx| pane.change_relationship_depth(item_id, 1, cx))))),
+                            .children((viewer.max_hops > 0).then(|| div().flex().items_center().gap_1()
+                                .child(div().h(px(16.)).w(px(1.)).mx_1().bg(colors.subtle_border))
+                                .child(Button::new("relationship-depth-less", "−").tone(ButtonTone::Ghost)
+                                    .disabled(depth <= 1 || loading || viewer.all)
+                                    .on_click(cx.listener(move |pane, _, _, cx| pane.change_relationship_depth(item_id, -1, cx))))
+                                .child(div().text_xs().text_color(colors.muted_text).child(format!(
+                                    "{depth} hop{}", if depth == 1 { "" } else { "s" }
+                                )))
+                                .child(Button::new("relationship-depth-more", "+").debug_selector("relationship-depth-more").tone(ButtonTone::Ghost)
+                                    .disabled(depth >= viewer.max_hops.min(8) || loading || viewer.all)
+                                    .on_click(cx.listener(move |pane, _, _, cx| pane.change_relationship_depth(item_id, 1, cx))))
+                                .child(Button::new("relationship-all-hops", "All").debug_selector("relationship-all-hops")
+                                    .tone(if viewer.all { ButtonTone::Accent } else { ButtonTone::Ghost })
+                                    .disabled(loading)
+                                    .on_click(cx.listener(move |pane, _, _, cx| pane.toggle_relationship_all(item_id, cx))))))),
                     )
                         .children(viewer.details_open.then(||
                         div()
@@ -2132,8 +2348,9 @@ impl Pane {
         let Some(viewer) = self.relationship_viewers.get_mut(&item_id) else {
             return;
         };
-        let depth = (i16::from(viewer.depth) + i16::from(delta)).clamp(1, 3) as u8;
-        if depth == viewer.depth || viewer.loading {
+        let depth = (i16::from(viewer.depth) + i16::from(delta))
+            .clamp(1, i16::from(viewer.max_hops.clamp(1, 8))) as u8;
+        if depth == viewer.depth || viewer.loading || viewer.all || viewer.max_hops == 0 {
             return;
         }
         viewer.depth = depth;
@@ -2141,9 +2358,43 @@ impl Pane {
         cx.notify();
     }
 
+    fn toggle_relationship_all(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let Some(viewer) = self.relationship_viewers.get_mut(&item_id) else {
+            return;
+        };
+        if viewer.max_hops == 0 || viewer.loading {
+            return;
+        }
+        viewer.all = !viewer.all;
+        cx.emit(PaneEvent::RelationshipViewerRefreshRequested { item_id });
+        cx.notify();
+    }
+
+    fn toggle_relationship_fields(&mut self, item_id: u64, cx: &mut Context<Self>) {
+        let Some(viewer) = self.relationship_viewers.get_mut(&item_id) else {
+            return;
+        };
+        viewer.show_all_fields = !viewer.show_all_fields;
+        if let Some(index) = viewer.index.as_mut() {
+            index.filter(&viewer.search, viewer.show_all_fields);
+            if viewer.fit_active {
+                let bounds = viewer.scroll.bounds().size;
+                viewer.zoom = relationship_fit_zoom(
+                    f32::from(bounds.width),
+                    f32::from(bounds.height),
+                    index.scene_width,
+                    index.scene_height,
+                );
+            }
+        }
+        viewer.card_text_cache.borrow_mut().clear();
+        viewer.scroll.set_offset(gpui::point(px(0.), px(0.)));
+        cx.notify();
+    }
+
     fn change_relationship_zoom(&mut self, item_id: u64, delta: f32, cx: &mut Context<Self>) {
         if let Some(viewer) = self.relationship_viewers.get_mut(&item_id) {
-            let zoom = (viewer.zoom + delta).clamp(0.2, 1.5);
+            let zoom = (viewer.zoom * if delta > 0.0 { 1.25 } else { 0.8 }).clamp(MIN_ZOOM, 1.5);
             if zoom != viewer.zoom {
                 viewer.zoom = zoom;
                 viewer.fit_active = false;
@@ -2167,9 +2418,20 @@ impl Pane {
             if width <= 0.0 {
                 return;
             }
+            if viewer.show_all_fields {
+                viewer.show_all_fields = false;
+                if let Some(index) = viewer.index.as_mut() {
+                    index.filter(&viewer.search, false);
+                }
+                viewer.card_text_cache.borrow_mut().clear();
+            }
             let zoom = relationship_fit_zoom(
                 width,
                 f32::from(bounds.height),
+                viewer
+                    .index
+                    .as_ref()
+                    .map_or(680.0, |index| index.scene_width),
                 viewer
                     .index
                     .as_ref()
@@ -2178,6 +2440,7 @@ impl Pane {
             viewer.zoom = zoom;
             viewer.fit_active = true;
             viewer.auto_fit_pending = false;
+            viewer.details_open = false;
             viewer.scroll.set_offset(gpui::point(px(0.), px(0.)));
             cx.notify();
         }
@@ -2216,7 +2479,7 @@ impl WorkspaceShell {
             let viewer = pane.relationship_viewers.get_mut(&item_id).unwrap();
             viewer.details_open = details_open;
             let request_id = viewer.start();
-            viewer.finish(request_id, Ok((anchor, Box::new(diagram), vec![source])));
+            viewer.finish(request_id, Ok((anchor, Box::new(diagram), vec![source], 0)));
             cx.notify();
         });
         cx.notify();
@@ -2257,17 +2520,20 @@ mod cardinality_tests {
 
     #[test]
     fn graph_fit_uses_narrower_of_width_and_height() {
-        assert_eq!(relationship_fit_zoom(768.0, 800.0, 400.0), 0.5);
-        assert_eq!(relationship_fit_zoom(1472.0, 432.0, 800.0), 0.5);
-        assert_eq!(relationship_fit_zoom(200.0, 200.0, 800.0), 0.2);
+        assert_eq!(relationship_fit_zoom(768.0, 800.0, 1472.0, 400.0), 0.5);
+        assert_eq!(relationship_fit_zoom(1472.0, 432.0, 800.0, 800.0), 0.5);
+        assert_eq!(relationship_fit_zoom(200.0, 200.0, 800.0, 800.0), 0.21);
+        assert!(relationship_fit_zoom(800.0, 600.0, 200_000.0, 200_000.0) < 0.005);
     }
 
     #[test]
     fn hidden_relationship_columns_use_overflow_port_not_visible_row() {
-        assert_eq!(relationship_column_anchor(2), 99.0);
-        assert_eq!(relationship_column_anchor(6), CARD_OVERFLOW_ANCHOR_Y);
-        assert_eq!(relationship_column_anchor(9), CARD_OVERFLOW_ANCHOR_Y);
-        assert_ne!(relationship_column_anchor(2), relationship_column_anchor(6));
+        assert_eq!(relationship_column_anchor(2, false), 99.0);
+        assert_eq!(relationship_column_anchor(6, false), CARD_OVERFLOW_ANCHOR_Y);
+        assert_eq!(relationship_column_anchor(9, false), CARD_OVERFLOW_ANCHOR_Y);
+        assert_eq!(relationship_column_anchor(9, true), 267.0);
+        assert_eq!(relationship_card_height(9, false), CARD_HEIGHT);
+        assert_eq!(relationship_card_height(9, true), 278.0);
     }
 
     #[test]
@@ -2316,11 +2582,11 @@ mod cardinality_tests {
             partial: false,
         };
         let anchor = CatalogObjectId("alpha".into());
-        let mut index = RelationshipViewerIndex::new(&diagram, "", &anchor);
+        let mut index = RelationshipViewerIndex::new(&diagram, "", &anchor, false);
         assert_eq!(index.visible_tables.len(), 2);
         assert_eq!(index.visible_positions[&anchor], 0);
-        assert_eq!(index.positions[&anchor].0, 24.0 + LANE_STEP);
-        index.filter("beta");
+        assert_eq!(index.positions[&anchor].0, 24.0);
+        index.filter("beta", false);
         assert_eq!(index.visible_tables, vec![CatalogObjectId("beta".into())]);
         assert_eq!(index.visible_positions[&CatalogObjectId("beta".into())], 0);
         assert_eq!(index.positions.len(), 1);
