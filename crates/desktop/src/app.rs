@@ -7808,7 +7808,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn idle_session_detects_expired_auth_while_server_stays_healthy() {
+    async fn idle_session_detects_expired_or_revoked_auth_while_server_stays_healthy() {
         use axum::{
             http::StatusCode,
             routing::{get, post},
@@ -7819,82 +7819,90 @@ mod tests {
             ProtocolRange, PROTOCOL_VERSION_NUMBER,
         };
 
-        let app = Router::new()
-            .route(
-                "/v1/health",
-                get(|| async {
-                    (
-                        [(
-                            "X-Sift-Protocol-Version",
-                            PROTOCOL_VERSION_NUMBER.to_string(),
-                        )],
-                        Json(sift_protocol::Health {
-                            status: "ok".into(),
-                            version: "test".into(),
-                            providers: vec![],
-                        }),
-                    )
-                }),
-            )
-            .route(
-                "/v1/handshake",
-                post(|| async {
-                    let mut headers = axum::http::HeaderMap::new();
-                    headers.insert(
-                        "X-Sift-Protocol-Version",
-                        axum::http::HeaderValue::from_str(&PROTOCOL_VERSION_NUMBER.to_string())
-                            .unwrap(),
-                    );
-                    (
-                        headers,
-                        Json(HandshakeResponse {
-                            server_version: "test".into(),
-                            protocol: ProtocolRange::exact(PROTOCOL_VERSION_NUMBER),
-                            selected_protocol: PROTOCOL_VERSION_NUMBER,
-                            instance_id: "fixture".into(),
-                            daemon_generation: "generation-1".into(),
-                            deployment: HandshakeDeployment::Personal,
-                            transport: HandshakeTransport::Loopback,
-                            runtime_mode: HandshakeRuntimeMode::Daemon,
-                            capabilities: vec![],
-                        }),
-                    )
-                }),
-            )
-            .route(
-                "/v1/auth/whoami",
-                get(|| async {
-                    (
-                        StatusCode::UNAUTHORIZED,
-                        [(
-                            "X-Sift-Protocol-Version",
-                            PROTOCOL_VERSION_NUMBER.to_string(),
-                        )],
-                        Json(serde_json::json!({
-                            "kind": "authentication_expired", "message": "sign in again"
-                        })),
-                    )
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = Client::new(format!("http://{addr}"));
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            wait_for_server_loss_with_intervals(
-                &client,
-                std::time::Duration::from_millis(20),
-                std::time::Duration::from_millis(50),
+        for (status, expected) in [
+            (
+                StatusCode::UNAUTHORIZED,
+                sift_workspace_ui::DegradedReason::AuthenticationExpired,
             ),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            result,
-            Err(sift_workspace_ui::DegradedReason::AuthenticationExpired)
-        );
-        server.abort();
+            (
+                StatusCode::FORBIDDEN,
+                sift_workspace_ui::DegradedReason::AccessRevoked,
+            ),
+        ] {
+            let app = Router::new()
+                .route(
+                    "/v1/health",
+                    get(|| async {
+                        (
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(sift_protocol::Health {
+                                status: "ok".into(),
+                                version: "test".into(),
+                                providers: vec![],
+                            }),
+                        )
+                    }),
+                )
+                .route(
+                    "/v1/handshake",
+                    post(|| async {
+                        let mut headers = axum::http::HeaderMap::new();
+                        headers.insert(
+                            "X-Sift-Protocol-Version",
+                            axum::http::HeaderValue::from_str(&PROTOCOL_VERSION_NUMBER.to_string())
+                                .unwrap(),
+                        );
+                        (
+                            headers,
+                            Json(HandshakeResponse {
+                                server_version: "test".into(),
+                                protocol: ProtocolRange::exact(PROTOCOL_VERSION_NUMBER),
+                                selected_protocol: PROTOCOL_VERSION_NUMBER,
+                                instance_id: "fixture".into(),
+                                daemon_generation: "generation-1".into(),
+                                deployment: HandshakeDeployment::Personal,
+                                transport: HandshakeTransport::Loopback,
+                                runtime_mode: HandshakeRuntimeMode::Daemon,
+                                capabilities: vec![],
+                            }),
+                        )
+                    }),
+                )
+                .route(
+                    "/v1/auth/whoami",
+                    get(move || async move {
+                        (
+                            status,
+                            [(
+                                "X-Sift-Protocol-Version",
+                                PROTOCOL_VERSION_NUMBER.to_string(),
+                            )],
+                            Json(serde_json::json!({
+                                "kind": "authentication_expired", "message": "sign in again"
+                            })),
+                        )
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let client = Client::new(format!("http://{addr}"));
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                wait_for_server_loss_with_intervals(
+                    &client,
+                    std::time::Duration::from_millis(20),
+                    std::time::Duration::from_millis(50),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result, Err(expected));
+            server.abort();
+        }
     }
 
     #[tokio::test]
