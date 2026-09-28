@@ -29,6 +29,20 @@ binary with `--bench`, fixture name, `--sample-size`, `--warm-up-time`, and
 headless CPU-renderer observations; physical display latency and platform
 memory acceptance remain unmeasured.
 
+### Schema filter follow-up
+
+The filter now tests each catalog/schema scope and enabled object group once
+per projection, and computes whether the query is qualified once before
+visiting objects. Borrowed object names still use the existing Unicode-aware
+matching path. Full workspace tests and strict Clippy passed. On a fresh Rust
+1.96.1 `release-dev` build of the same 100,000-object fixture (30 Criterion
+samples, two-second warmup, five-second measurement), the final run recorded
+98 dirty-to-draw frames: p50 7.668 ms, p95 8.385 ms, and eight frames over
+8.33 ms. Criterion's mean iteration was 3.599 ms. The earlier binary used a
+different Rust version, so these absolute runs are not a controlled speedup
+comparison. Schema-filter acceptance remains open by 0.055 ms at p95, and
+physical display latency remains unmeasured.
+
 Correction (2026-09-09): the historical `vim_typing_large_document` runs below
 did not install the desktop Backspace binding in the standalone GPUI fixture.
 They measured insertion with a non-editing Backspace event, not a stable-length

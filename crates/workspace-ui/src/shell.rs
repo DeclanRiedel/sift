@@ -18896,6 +18896,9 @@ impl WorkspaceShell {
     fn build_visible_connection_items(&self) -> Vec<ConnectionTreeItem> {
         let mut items = Vec::new();
         let mut search_buffer = String::new();
+        let unqualified_query = explorer_filter::is_unqualified_query(&self.connections_find_query);
+        let enabled_groups =
+            ObjectGroupKind::CANONICAL.map(|group| self.schema_search_filters.contains(&group));
         if self.show_favorite_database_objects {
             items.extend(
                 self.favorite_database_objects
@@ -19008,9 +19011,15 @@ impl WorkspaceShell {
                             continue;
                         }
                         let mut objects_by_group: [Vec<_>; 5] = std::array::from_fn(|_| Vec::new());
+                        let filter_mode = explorer_filter::filter_mode(
+                            &catalog.name,
+                            &schema.name,
+                            &self.connections_find_query,
+                            unqualified_query,
+                        );
                         for object in &schema.objects {
                             let group = ObjectGroupKind::from_object_kind(object.kind);
-                            if !self.schema_search_filters.contains(&group) {
+                            if !enabled_groups[group.index()] {
                                 continue;
                             }
                             if self.connections_find_open
@@ -19020,6 +19029,7 @@ impl WorkspaceShell {
                                     &object.name,
                                     object.kind,
                                     &self.connections_find_query,
+                                    filter_mode,
                                     &mut search_buffer,
                                 )
                             {
@@ -19028,7 +19038,7 @@ impl WorkspaceShell {
                             objects_by_group[group.index()].push(object);
                         }
                         for group in ObjectGroupKind::CANONICAL {
-                            if !self.schema_search_filters.contains(&group) {
+                            if !enabled_groups[group.index()] {
                                 continue;
                             }
                             let group_objects = &objects_by_group[group.index()];

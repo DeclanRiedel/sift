@@ -535,7 +535,8 @@ ADR amendment instead of burying a second UI toolkit behind an abstraction.
 - [ ] Meet measured performance and memory budgets on representative large
       schemas, documents, results, diagrams, histories, and logs. A 2026-09-28
       Linux `release-dev` run measured a 100,000-object schema-filter p95 of
-      11.821 ms over 52 frames (all over the 8.33 ms CPU budget); a 500-row
+      11.821 ms over 52 frames; a follow-up filter optimization measured 8.385
+      ms over 98 frames, with eight over the 8.33 ms CPU budget. A 500-row
       first-result-page p95 was 5.419 ms over 1,906 frames. Benchmark-process
       memory is recorded separately; desktop and platform ceilings remain open.
 - [ ] Validate dark/light themes, scaling, IME, keyboard layouts, clipboard,
