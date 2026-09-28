@@ -1,10 +1,11 @@
-//! PostgreSQL instrumented read plans. The source connection remains untouched;
-//! a supervised job owns a dedicated read-only connection and its cleanup.
+//! Instrumented read plans. The source connection remains untouched; a
+//! supervised job owns a dedicated connection and its cleanup.
 use super::*;
 use sift_protocol::{ProfileRequest, ProfileResponse, TxAccessMode, TxMode};
 use tokio_util::sync::CancellationToken;
 
 const MAX_PROFILE_TIMEOUT_MS: u64 = 120_000;
+const MAX_PROFILE_RESULT_ROWS: usize = 10_000;
 
 pub(super) struct ActiveProfile {
     pub(super) run_id: uuid::Uuid,
@@ -88,13 +89,16 @@ impl SessionStore {
             Some(&request.sql),
             &[],
         )?;
-        if entry.driver.semantic_engine() != Some(Engine::Postgres) {
+        let engine = entry.driver.semantic_engine().ok_or_else(|| {
+            ApiError::BadRequest("Profile requires a supported SQL dialect".into())
+        })?;
+        if !matches!(engine, Engine::Postgres | Engine::SqlServer) {
             return Err(ApiError::Driver(DriverError::new(
                 Code::UnsupportedForEngine,
-                "Profile currently supports PostgreSQL only",
+                "Profile supports PostgreSQL and SQL Server",
             )));
         }
-        benchmark::validate_read(Engine::Postgres, &request.sql)?;
+        benchmark::validate_read(engine, &request.sql)?;
         let cancellation = CancellationToken::new();
         match self.inner.profiles.entry((session, source)) {
             dashmap::mapref::entry::Entry::Occupied(_) => {
@@ -117,7 +121,7 @@ impl SessionStore {
                 source,
             };
             store
-                .profile_owned(session, source, request, cancellation)
+                .profile_owned(session, source, request, cancellation, engine)
                 .await
         })
         .await
@@ -152,6 +156,7 @@ impl SessionStore {
         source: ConnectionId,
         request: ProfileRequest,
         cancellation: CancellationToken,
+        engine: Engine,
     ) -> ApiResult<ProfileResponse> {
         let (configuration, credentials, provenance, driver) = self
             .with_session(&session, |s| {
@@ -180,7 +185,7 @@ impl SessionStore {
         let dedicated = self
             .open_connection_with_provenance(
                 session,
-                Some(Engine::Postgres),
+                Some(engine),
                 configuration,
                 credentials,
                 provenance,
@@ -194,6 +199,18 @@ impl SessionStore {
             connection: dedicated.id,
         };
         let entry = self.conn_entry(session, dedicated.id)?;
+        if engine == Engine::SqlServer {
+            return self
+                .profile_owned_mssql(
+                    session,
+                    source,
+                    dedicated.id,
+                    &entry,
+                    &request,
+                    &cancellation,
+                )
+                .await;
+        }
         let transaction = {
             let driver = entry.driver.clone();
             let handle = entry.handle.clone();
@@ -426,4 +443,249 @@ impl SessionStore {
             warnings: vec!["Instrumentation adds overhead; this run used a dedicated read-only connection. Cache state and external function side effects are unknown".into()],
         })
     }
+
+    async fn profile_owned_mssql(
+        &self,
+        session: SessionId,
+        source: ConnectionId,
+        dedicated: ConnectionId,
+        entry: &ConnectionEntryClone,
+        request: &ProfileRequest,
+        cancellation: &CancellationToken,
+    ) -> ApiResult<ProfileResponse> {
+        let setup = self
+            .profile_mssql_setting(entry, "SET STATISTICS XML ON")
+            .await;
+        if let Err(error) = setup {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.close_connection_unchecked(session, dedicated),
+            )
+            .await;
+            return Err(error);
+        }
+        let result = self
+            .profile_mssql_plan(session, source, entry, request, cancellation)
+            .await;
+        let reset = if result.is_ok() {
+            self.profile_mssql_setting(entry, "SET STATISTICS XML OFF")
+                .await
+        } else {
+            Ok(())
+        };
+        let cleanup = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.close_connection_unchecked(session, dedicated),
+        )
+        .await;
+        let mut response = result?;
+        if reset.is_err() {
+            response
+                .warnings
+                .push("STATISTICS XML reset failed; dedicated connection was discarded".into());
+        }
+        if !matches!(cleanup, Ok(Ok(()))) {
+            response
+                .warnings
+                .push("Dedicated connection cleanup did not complete cleanly".into());
+        }
+        Ok(response)
+    }
+
+    async fn profile_mssql_setting(
+        &self,
+        entry: &ConnectionEntryClone,
+        sql: &'static str,
+    ) -> ApiResult<()> {
+        let driver = entry.driver.clone();
+        let handle = entry.handle.clone();
+        self.run_bounded("SQL Server profile setting", async move {
+            let mut stream = driver
+                .execute(
+                    handle,
+                    ExecuteRequest {
+                        sql: sql.into(),
+                        params: Vec::new(),
+                        transform: None,
+                    },
+                )
+                .await?;
+            while let Some(page) = stream.rows.recv().await {
+                match page {
+                    Page::Done { .. } => return Ok(()),
+                    Page::Error { error } => return Err(error),
+                    _ => {}
+                }
+            }
+            Err(DriverError::new(
+                Code::DriverInternal,
+                "SQL Server profile setting did not complete",
+            ))
+        })
+        .await
+    }
+
+    async fn profile_mssql_plan(
+        &self,
+        session: SessionId,
+        source: ConnectionId,
+        entry: &ConnectionEntryClone,
+        request: &ProfileRequest,
+        cancellation: &CancellationToken,
+    ) -> ApiResult<ProfileResponse> {
+        self.authorize_connection_operation(
+            session,
+            source,
+            sift_protocol::OperationKind::ProfileQuery,
+            Some(&request.sql),
+            &[],
+        )?;
+        self.authorize_connection_operation(
+            session,
+            source,
+            sift_protocol::OperationKind::ExecuteQuery,
+            Some(&request.sql),
+            &[],
+        )?;
+        let resources = self.reserve_query_resources(entry)?;
+        let driver = entry.driver.clone();
+        let handle = entry.handle.clone();
+        let sql = request.sql.clone();
+        let params = request.params.clone();
+        let (configured_rows, configured_bytes) = self.result_limits();
+        let max_rows = configured_rows.min(MAX_PROFILE_RESULT_ROWS);
+        let max_bytes = configured_bytes.min(16 * 1024 * 1024);
+        let cursor = Arc::new(Mutex::new(None));
+        let cursor_slot = cursor.clone();
+        let started = Instant::now();
+        let mut task = tokio::spawn(async move {
+            let _resources = resources;
+            let mut stream = driver
+                .execute(
+                    handle,
+                    ExecuteRequest {
+                        sql,
+                        params,
+                        transform: None,
+                    },
+                )
+                .await?;
+            *cursor_slot.lock().unwrap() = Some(stream.cursor_id);
+            let mut xml = None;
+            let mut ordinary_rows = 0usize;
+            let mut ordinary_bytes = 0usize;
+            let mut showplan_result = false;
+            while let Some(page) = stream.rows.recv().await {
+                match page {
+                    Page::Rows { rows } => {
+                        for row in rows {
+                            let showplan = showplan_result
+                                && row.values.len() == 1
+                                && row.values.first().and_then(showplan_text).is_some();
+                            if showplan {
+                                let text = showplan_text(&row.values[0]).unwrap();
+                                if text.len() > max_bytes {
+                                    return Err(DriverError::new(
+                                        Code::ResultTooLarge,
+                                        "SQL Server actual plan exceeds result byte limit",
+                                    ));
+                                }
+                                if xml.replace(text.to_owned()).is_some() {
+                                    return Err(DriverError::new(
+                                        Code::UnsupportedResultShape,
+                                        "Profile returned multiple SQL Server plans",
+                                    ));
+                                }
+                            } else {
+                                ordinary_rows += 1;
+                                ordinary_bytes = ordinary_bytes.saturating_add(
+                                    serde_json::to_vec(&row)
+                                        .map_err(|_| {
+                                            DriverError::new(
+                                                Code::DriverInternal,
+                                                "Profile row cannot be sized",
+                                            )
+                                        })?
+                                        .len(),
+                                );
+                                if ordinary_rows > max_rows || ordinary_bytes > max_bytes {
+                                    return Err(DriverError::new(
+                                        Code::ResultTooLarge,
+                                        "Profile result exceeds row or byte limit",
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Page::Error { error } => return Err(error),
+                    Page::Done { .. } => {
+                        return xml.ok_or_else(|| {
+                            DriverError::new(
+                                Code::UnsupportedResultShape,
+                                "SQL Server returned no actual plan",
+                            )
+                        })
+                    }
+                    Page::NextResult { columns } => {
+                        showplan_result = columns.len() == 1
+                            && columns[0].name.to_ascii_lowercase().contains("showplan");
+                    }
+                }
+            }
+            Err(DriverError::new(
+                Code::DriverInternal,
+                "Profile stream ended without completion",
+            ))
+        });
+        let outcome = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(ApiError::Driver(DriverError::new(Code::QueryCanceled, "Profile cancelled"))),
+            _ = tokio::time::sleep(Duration::from_millis(request.timeout_ms)) => Err(ApiError::Driver(DriverError::new(Code::QueryTimedOut, "Profile timed out"))),
+            result = &mut task => match result {
+                Ok(Ok(xml)) => Ok(xml),
+                Ok(Err(error)) => Err(ApiError::Driver(error)),
+                Err(_) => Err(ApiError::Internal("profile driver task failed".into())),
+            }
+        };
+        if outcome.is_err() {
+            task.abort();
+            let cursor_id = *cursor.lock().unwrap();
+            if let Some(cursor_id) = cursor_id {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    entry.driver.cancel(entry.handle.clone(), cursor_id),
+                )
+                .await;
+            }
+        }
+        let xml = outcome?;
+        let root = crate::plan::parse_mssql_plan(&xml).map_err(ApiError::Driver)?;
+        let execution_ms = crate::plan::mssql_query_elapsed_ms(&xml);
+        Ok(ProfileResponse {
+            run_id: request.run_id,
+            plan: sift_protocol::ExplainResponse {
+                engine: Engine::SqlServer,
+                analyzed: true,
+                root,
+                raw: xml,
+                warnings: Vec::new(),
+            },
+            server_elapsed_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            planning_ms: None,
+            execution_ms,
+            warnings: vec![
+                "Instrumentation adds overhead; this run used a dedicated connection. SQL Server has no read-only transaction mode: use a read-only database account. Cache state and external function side effects are unknown".into(),
+                "STATISTICS IO/TIME messages are unavailable through this driver; per-node counters are shown only where Showplan XML provides them".into(),
+            ],
+        })
+    }
+}
+
+fn showplan_text(value: &sift_protocol::Value) -> Option<&str> {
+    let text = match value {
+        sift_protocol::Value::Text(text) => text.as_str(),
+        sift_protocol::Value::Native { display_text, .. } => display_text.as_str(),
+        _ => return None,
+    };
+    text.contains("<ShowPlanXML").then_some(text)
 }

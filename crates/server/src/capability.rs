@@ -303,8 +303,10 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         ListDeadlocks if engine != Some(Engine::SqlServer) => {
             Some("retained deadlock history is only available for SQL Server")
         }
-        ProfileQuery | CancelProfile if engine != Some(Engine::Postgres) => {
-            Some("Profile is currently available only for PostgreSQL")
+        ProfileQuery | CancelProfile
+            if !matches!(engine, Some(Engine::Postgres | Engine::SqlServer)) =>
+        {
+            Some("Profile is available only for PostgreSQL and SQL Server")
         }
         ListPostgresObjects | PreviewPostgresObject | ApplyPostgresObject
             if engine != Some(Engine::Postgres) =>
