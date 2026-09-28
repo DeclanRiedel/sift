@@ -2521,3 +2521,21 @@ Unavailable values remain nullable, and a single snapshot does not imply a
 rate or predict replication catch-up time. Managed schema-restricted profiles
 cannot access these cross-schema catalog views. The desktop Monitor has
 explicit refresh and Vim navigation, with no automatic polling or mutation.
+
+## ADR-066 — SQL Server constraint state stays native and migration-fenced
+
+Status: accepted. Date: 2026-09-29.
+
+For ordinary rowstore tables, native SQL Server table export preserves disabled
+and enabled-but-untrusted CHECK and foreign-key constraints. The exporter first
+creates each constraint, then emits ordered `NOCHECK CONSTRAINT` statements;
+an untrusted enabled constraint is re-enabled with `CHECK CONSTRAINT` without
+validating old rows. Constraint names are quoted. SQL Server's catalog remains
+the authority for each state. `NOT FOR REPLICATION` remains an explicit native
+DDL refusal until its behavior is verified.
+
+The generic catalog diff has no constraint-state model. SQL Server graph
+snapshots therefore fingerprint advanced constraint state and fence structural
+migrations for affected tables, including unsupported replication flags. A
+live fixture replays generated DDL into a second schema and compares the
+regenerated native definition before this support is claimed.
