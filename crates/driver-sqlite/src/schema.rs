@@ -1,7 +1,26 @@
 use super::{db_error, error, values};
 use rusqlite::{Connection, OptionalExtension};
 use sift_protocol::*;
+use sqlparser::ast::{ObjectName, Query, Visit, Visitor};
+use sqlparser::dialect::SQLiteDialect;
+use sqlparser::parser::Parser;
+use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 const MAX_OBJECTS: usize = 10_000;
+const MAX_DEPENDENCY_EDGES: usize = 10_000;
+const MAX_VIEW_REFERENCES: usize = 64;
+const MAX_VIEW_SQL: usize = 1024 * 1024;
+const MAX_DEPENDENCY_SQL_BYTES: usize = 16 * 1024 * 1024;
+
+struct DependencySource {
+    schema: String,
+    name: String,
+    kind: ObjectKind,
+    view_sql: Option<String>,
+    view_sql_limited: bool,
+    virtual_table: bool,
+    table_name: String,
+}
 fn schema_name(object: &ObjectPath) -> Result<&str, DriverError> {
     match object.schema.as_deref().unwrap_or("main") {
         name @ ("main" | "temp") => Ok(name),
@@ -58,6 +77,8 @@ fn load_once(
     let navigation = matches!(scope.depth, SchemaDepth::Graph { .. });
     let mut node_budget = 10_000usize;
     let mut count_budget = 100_000u64;
+    let mut dependency_sources = Vec::new();
+    let mut dependency_sql_budget = MAX_DEPENDENCY_SQL_BYTES;
     let mut result = SchemaSnapshot::empty(scope.clone());
     let mut catalog = CatalogTree {
         name: name.into(),
@@ -94,13 +115,14 @@ fn load_once(
             .as_ref()
             .and_then(|f| f.name_pattern.as_deref())
             .unwrap_or("*");
-        let mut statement=conn.prepare(&format!("SELECT name,type,sql FROM {schema}.sqlite_schema WHERE type IN ('table','view','trigger') AND name NOT LIKE 'sqlite_%' AND (?1 IS NULL OR name=?1) AND name GLOB ?2 ORDER BY type,name LIMIT 10001")).map_err(db_error)?;
+        let mut statement=conn.prepare(&format!("SELECT name,type,sql,tbl_name FROM {schema}.sqlite_schema WHERE type IN ('table','view','trigger') AND name NOT LIKE 'sqlite_%' AND (?1 IS NULL OR name=?1) AND name GLOB ?2 ORDER BY type,name LIMIT 10001")).map_err(db_error)?;
         let rows = statement
             .query_map(rusqlite::params![target, pattern], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })
             .map_err(db_error)?;
@@ -113,7 +135,7 @@ fn load_once(
                 result.incomplete = true;
                 break;
             }
-            let (name, kind, sql) = row.map_err(db_error)?;
+            let (name, kind, sql, table_name) = row.map_err(db_error)?;
             let kind = match kind.as_str() {
                 "view" => ObjectKind::View,
                 "trigger" => ObjectKind::Trigger,
@@ -127,7 +149,7 @@ fn load_once(
             {
                 continue;
             }
-            let mut object = ObjectInfo::new(name, kind);
+            let mut object = ObjectInfo::new(name.clone(), kind);
             if kind == ObjectKind::Table
                 && !sql
                     .as_deref()
@@ -152,6 +174,31 @@ fn load_once(
                     break;
                 }
                 node_budget -= cost;
+                let view_sql = match (kind, sql.as_ref()) {
+                    (ObjectKind::View, Some(sql))
+                        if sql.len() <= MAX_VIEW_SQL && sql.len() <= dependency_sql_budget =>
+                    {
+                        dependency_sql_budget -= sql.len();
+                        Some(sql.clone())
+                    }
+                    _ => None,
+                };
+                let view_sql_limited =
+                    kind == ObjectKind::View && sql.is_some() && view_sql.is_none();
+                dependency_sources.push(DependencySource {
+                    schema: schema.into(),
+                    name: name.clone(),
+                    kind,
+                    view_sql,
+                    view_sql_limited,
+                    virtual_table: kind == ObjectKind::Table
+                        && sql.as_deref().is_some_and(|sql| {
+                            sql.trim_start()
+                                .to_ascii_uppercase()
+                                .starts_with("CREATE VIRTUAL TABLE")
+                        }),
+                    table_name,
+                });
             }
             tree.objects.push(object);
         }
@@ -169,7 +216,7 @@ fn load_once(
         coverage.failures.push(CatalogCoverageFailure {
             stage: "dependencies".into(),
             schema: None,
-            code: "sqlite_navigation_only".into(),
+            code: "sqlite_expression_dependencies_unavailable".into(),
         });
         // Counts describe current data, not schema identity. Keep them in the
         // navigation trees without invalidating catalog revisions after DML.
@@ -182,6 +229,7 @@ fn load_once(
             object.estimated_rows = None;
         }
         let mut graph = sift_core::catalog::graph_from_trees(&schema_trees, coverage, identity);
+        enrich_dependencies(&mut graph, &dependency_sources);
         if let Some(kinds) = &options.kinds {
             graph.nodes.retain(|node| kinds.contains(&node.kind));
         }
@@ -205,6 +253,320 @@ fn load_once(
     }
     Ok(result)
 }
+
+/// SQLite has catalog-proven FK and trigger targets, but view reads come from
+/// stored SQL. Keep those certainty levels distinct and leave missing or
+/// filtered targets unresolved instead of inferring a cross-schema match.
+fn enrich_dependencies(graph: &mut CatalogGraphData, sources: &[DependencySource]) {
+    let schemas = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == CatalogNodeKind::Schema)
+        .map(|node| (node.id.clone(), node.name.to_ascii_lowercase()))
+        .collect::<HashMap<_, _>>();
+    let parents = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), node.parent_id.clone()))
+        .collect::<HashMap<_, _>>();
+    let references = graph
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.details {
+            CatalogNodeDetails::Constraint { constraint }
+                if constraint.kind == ConstraintKind::ForeignKey =>
+            {
+                constraint
+                    .references
+                    .as_ref()
+                    .map(|reference| (node.id.clone(), reference.clone()))
+            }
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let mut objects = HashMap::new();
+    let mut relations = HashMap::new();
+    for node in &graph.nodes {
+        let Some(schema) = node.parent_id.as_ref().and_then(|id| schemas.get(id)) else {
+            continue;
+        };
+        let key = (schema.clone(), node.name.to_ascii_lowercase());
+        if matches!(node.kind, CatalogNodeKind::Table | CatalogNodeKind::View) {
+            relations.insert(key.clone(), node.id.clone());
+        }
+        objects.insert((key.0, key.1, node.kind), node.id.clone());
+    }
+
+    // The provider-neutral normalizer resolves unqualified FK names across
+    // every schema. SQLite FKs target a table in their own schema only.
+    for edge in &mut graph.edges {
+        if edge.kind != CatalogEdgeKind::ForeignKey {
+            continue;
+        }
+        let Some(table) = parents.get(&edge.from).and_then(Option::as_ref) else {
+            continue;
+        };
+        let Some(schema) = parents
+            .get(table)
+            .and_then(Option::as_ref)
+            .and_then(|id| schemas.get(id))
+        else {
+            continue;
+        };
+        let Some(reference) = references.get(&edge.from) else {
+            continue;
+        };
+        let target = objects.get(&(
+            schema.clone(),
+            reference.to_ascii_lowercase(),
+            CatalogNodeKind::Table,
+        ));
+        edge.to = target.cloned();
+        edge.certainty = if target.is_some() {
+            CatalogEdgeCertainty::CatalogProven
+        } else {
+            CatalogEdgeCertainty::Unresolved
+        };
+        edge.referenced_path = target.is_none().then(|| format!("{schema}.{reference}"));
+        edge.column_pairs.clear();
+    }
+
+    let mut new_edges = 0usize;
+    for source in sources {
+        let schema = source.schema.to_ascii_lowercase();
+        let Some(from) = objects.get(&(
+            schema.clone(),
+            source.name.to_ascii_lowercase(),
+            CatalogNodeKind::from(source.kind),
+        )) else {
+            continue;
+        };
+        if new_edges >= MAX_DEPENDENCY_EDGES {
+            coverage_failure(graph, &source.schema, "sqlite_dependency_edge_limit");
+            mark_dependency_gap(graph, from, "dependency_edge_limit");
+            break;
+        }
+        match source.kind {
+            ObjectKind::Trigger => {
+                if source.table_name.len() > 4096 {
+                    coverage_failure(graph, &source.schema, "sqlite_dependency_path_limit");
+                    mark_dependency_gap(graph, from, "dependency_path_limit");
+                    continue;
+                }
+                let target = resolve_relation(&relations, &schema, None, &source.table_name);
+                push_dependency(
+                    graph,
+                    from.clone(),
+                    target,
+                    CatalogEdgeKind::TriggerOn,
+                    CatalogEdgeCertainty::CatalogProven,
+                    &source.table_name,
+                );
+                new_edges += 1;
+                coverage_failure(
+                    graph,
+                    &source.schema,
+                    "sqlite_trigger_body_dependencies_unavailable",
+                );
+                mark_dependency_gap(graph, from, "trigger_body_unavailable");
+            }
+            ObjectKind::View => {
+                let Some(sql) = source.view_sql.as_deref() else {
+                    let code = if source.view_sql_limited {
+                        "sqlite_view_sql_limit"
+                    } else {
+                        "sqlite_view_sql_unavailable"
+                    };
+                    coverage_failure(graph, &source.schema, code);
+                    mark_dependency_gap(graph, from, code);
+                    continue;
+                };
+                let Some(references) = view_references(sql) else {
+                    coverage_failure(graph, &source.schema, "sqlite_view_sql_unparsed");
+                    mark_dependency_gap(graph, from, "view_sql_unparsed");
+                    continue;
+                };
+                let mut seen = HashSet::new();
+                for reference in references {
+                    let path = reference.to_string();
+                    if path.len() > 4096 {
+                        coverage_failure(graph, &source.schema, "sqlite_dependency_path_limit");
+                        mark_dependency_gap(graph, from, "dependency_path_limit");
+                        continue;
+                    }
+                    if !seen.insert(path.to_ascii_lowercase()) {
+                        continue;
+                    }
+                    if new_edges >= MAX_DEPENDENCY_EDGES {
+                        coverage_failure(graph, &source.schema, "sqlite_dependency_edge_limit");
+                        mark_dependency_gap(graph, from, "dependency_edge_limit");
+                        break;
+                    }
+                    let (target_schema, name) = match reference.0.as_slice() {
+                        [name] => (None, name.value.as_str()),
+                        [schema, name] => (Some(schema.value.as_str()), name.value.as_str()),
+                        _ => {
+                            push_dependency(
+                                graph,
+                                from.clone(),
+                                None,
+                                CatalogEdgeKind::ReadsFrom,
+                                CatalogEdgeCertainty::Parsed,
+                                &path,
+                            );
+                            new_edges += 1;
+                            continue;
+                        }
+                    };
+                    let target = resolve_relation(&relations, &schema, target_schema, name);
+                    push_dependency(
+                        graph,
+                        from.clone(),
+                        target,
+                        CatalogEdgeKind::ReadsFrom,
+                        CatalogEdgeCertainty::Parsed,
+                        &path,
+                    );
+                    new_edges += 1;
+                }
+            }
+            ObjectKind::Table if source.virtual_table => {
+                coverage_failure(
+                    graph,
+                    &source.schema,
+                    "sqlite_virtual_table_dependencies_unavailable",
+                );
+                mark_dependency_gap(graph, from, "virtual_table_dependencies_unavailable");
+            }
+            _ => {}
+        }
+    }
+    sift_core::catalog::normalize_graph(graph);
+}
+
+fn resolve_relation(
+    relations: &HashMap<(String, String), CatalogObjectId>,
+    source_schema: &str,
+    named_schema: Option<&str>,
+    name: &str,
+) -> Option<CatalogObjectId> {
+    let name = name.to_ascii_lowercase();
+    if let Some(schema) = named_schema {
+        return matches!(schema.to_ascii_lowercase().as_str(), "main" | "temp")
+            .then(|| relations.get(&(schema.to_ascii_lowercase(), name)))
+            .flatten()
+            .cloned();
+    }
+    let local = relations.get(&(source_schema.into(), name.clone()));
+    if source_schema == "main" {
+        return local.cloned();
+    }
+    let main = relations.get(&("main".into(), name));
+    match (local, main) {
+        (Some(_), Some(_)) => None,
+        (Some(id), None) | (None, Some(id)) => Some(id.clone()),
+        (None, None) => None,
+    }
+}
+
+fn push_dependency(
+    graph: &mut CatalogGraphData,
+    from: CatalogObjectId,
+    target: Option<CatalogObjectId>,
+    kind: CatalogEdgeKind,
+    proven: CatalogEdgeCertainty,
+    path: &str,
+) {
+    graph.edges.push(CatalogEdge {
+        from,
+        to: target.clone(),
+        kind,
+        certainty: if target.is_some() {
+            proven
+        } else {
+            CatalogEdgeCertainty::Unresolved
+        },
+        referenced_path: target.is_none().then(|| path.into()),
+        column_pairs: Vec::new(),
+    });
+}
+
+fn coverage_failure(graph: &mut CatalogGraphData, schema: &str, code: &str) {
+    if graph.coverage.failures.len() < 4_096 {
+        graph.coverage.failures.push(CatalogCoverageFailure {
+            stage: "dependencies".into(),
+            schema: Some(schema.into()),
+            code: code.into(),
+        });
+    }
+}
+
+fn mark_dependency_gap(graph: &mut CatalogGraphData, id: &CatalogObjectId, reason: &str) {
+    if let Some(node) = graph.nodes.iter_mut().find(|node| &node.id == id) {
+        node.extra
+            .insert("sqlite_dependency_gap".into(), reason.into());
+    }
+}
+
+#[derive(Default)]
+struct ViewRelations {
+    cte_scopes: Vec<HashSet<String>>,
+    references: Vec<ObjectName>,
+}
+
+impl Visitor for ViewRelations {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        self.cte_scopes
+            .push(query.with.as_ref().map_or_else(HashSet::new, |with| {
+                with.cte_tables
+                    .iter()
+                    .map(|cte| cte.alias.name.value.to_ascii_lowercase())
+                    .collect()
+            }));
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
+        self.cte_scopes.pop();
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
+        if let [name] = relation.0.as_slice() {
+            if self
+                .cte_scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.contains(&name.value.to_ascii_lowercase()))
+            {
+                return ControlFlow::Continue(());
+            }
+        }
+        if self.references.len() >= MAX_VIEW_REFERENCES {
+            return ControlFlow::Break(());
+        }
+        self.references.push(relation.clone());
+        ControlFlow::Continue(())
+    }
+}
+
+fn view_references(sql: &str) -> Option<Vec<ObjectName>> {
+    if sql.len() > MAX_VIEW_SQL {
+        return None;
+    }
+    let mut statements = Parser::parse_sql(&SQLiteDialect {}, sql).ok()?;
+    let [sqlparser::ast::Statement::CreateView { query, .. }] = statements.as_mut_slice() else {
+        return None;
+    };
+    let mut collector = ViewRelations::default();
+    if query.visit(&mut collector).is_break() {
+        return None;
+    }
+    Some(collector.references)
+}
+
 // Prefer persistent statistics. Count small, unanalyzed tables within a shared
 // catalog budget so inspection snapshots have useful counts without unbounded scans.
 fn table_rows(

@@ -9,8 +9,13 @@ claims.
 
 ## Catalog, schema, and editing
 
-- [ ] Complete dependency coverage beyond the partial navigation catalog;
-      identify omitted edges rather than presenting a full graph.
+- [~] Complete dependency coverage beyond the partial navigation catalog.
+      The graph now keeps SQLite foreign keys within their source schema,
+      adds catalog-proven trigger targets and parsed direct view reads, and
+      preserves missing or ambiguous targets as unresolved edges. Object-level
+      `sqlite_dependency_gap` markers identify affected objects. Trigger-body,
+      expression, virtual-table, and unparsed-view dependencies remain explicit
+      coverage gaps; the graph is still partial.
 - [ ] Add schema snapshots, diff, migration preview/apply, and designer changes
       only for DDL shapes the native model can round-trip. Reject lossy changes.
 - [x] Improve CHECK metadata coverage while stored native SQL remains

@@ -1146,7 +1146,10 @@ pub fn validate_graph(
             (CatalogNodeKind::Column, CatalogNodeDetails::Column { .. })
             | (CatalogNodeKind::Index, CatalogNodeDetails::Index { .. })
             | (CatalogNodeKind::Constraint, CatalogNodeDetails::Constraint { .. })
-            | (CatalogNodeKind::Trigger, CatalogNodeDetails::Trigger { .. }) => {}
+            | (CatalogNodeKind::Trigger, CatalogNodeDetails::Trigger { .. })
+            // A standalone trigger can enter through CatalogObject rather
+            // than a table's TriggerInfo list.
+            | (CatalogNodeKind::Trigger, CatalogNodeDetails::Object { .. }) => {}
             (
                 CatalogNodeKind::Catalog
                 | CatalogNodeKind::Schema

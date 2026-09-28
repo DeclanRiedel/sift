@@ -80,10 +80,15 @@ WAL and shared-memory sidecars. Sift preserves their journal and sync settings.
   source rows with bounded reasons; the desktop report workflow remains open.
   Bounded batches roll back together on fatal failure.
 
-The IDE navigation catalog is explicitly partial. Full dependency graphs,
-schema comparison/migration, database designer mutations, process controls,
-notifications, native bulk/transfer targets, database creation, ATTACH/DETACH,
-unsafe PRAGMAs and file/extension functions are not advertised.
+The IDE catalog graph is explicitly partial. It includes same-schema foreign
+keys, trigger targets, and parsed direct view reads. Missing or ambiguous
+references stay unresolved. Trigger bodies, expression dependencies, virtual
+tables, and view SQL the parser cannot read are recorded as coverage gaps;
+affected nodes carry `sqlite_dependency_gap` markers.
+Full dependency graphs, schema comparison/migration, database designer
+mutations, process controls, notifications, native bulk/transfer targets,
+database creation, ATTACH/DETACH, unsafe PRAGMAs and file/extension functions
+are not advertised.
 
 Values retain SQLite storage classes: null, signed 64-bit integer, float, text
 or bytes, including mixed classes in one result column. Decimal parameters bind
