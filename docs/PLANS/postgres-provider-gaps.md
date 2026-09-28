@@ -35,6 +35,24 @@ sources for current support claims.
 
 ## Workbench and administration
 
+### Extension and partition workbench design
+
+This slice separates database extensions from Sift's own extension packages.
+Read operations return bounded, role-visible PostgreSQL extension and partition
+catalog rows through the existing supervised query path, with PostgreSQL-only
+capabilities and audited Operations. Catalog reads must not infer ownership or
+privilege from a displayed name. Permission failures remain explicit.
+
+Management uses a frozen, server-generated preview containing the exact SQL,
+the affected object, and the risk. A later apply request repeats the typed
+action and preview token; the server rechecks the current catalog and the
+caller’s operation policy before executing on a bounded dedicated connection.
+Identifier inputs are quoted, never accepted as SQL fragments. Initial actions
+are extension install/drop with RESTRICT and partition detach; partition attach,
+extension update/cascade, and cross-object dependency previews remain separate
+work. The desktop offers Vim navigation, preview, and explicit confirmation.
+An inspection view alone does not complete the management checklist.
+
 - [x] Open CSV quarantine reports from the current import result, with
       authorized retrieval and rejected source-row details.
 - [x] Configure and retry durable CSV import from the desktop using a target
