@@ -2360,12 +2360,27 @@ recovery because their context cannot be isolated by tenant. Imported schedules
 and projections are disabled, repository credentials removed and active work
 made terminal. Opaque extension storage requires a future migration contract.
 
+The operator selects `backup restore-tenant --tenant-id ID`; preview is the
+default and requires the stopped-server maintenance lock. An existing tenant
+must match the source name and kind. The recovered subtree includes memberships,
+connection profiles and credentials, rooms and documents, saved queries and
+scoped history, workspaces and checkpoints, DDL, run definitions and history,
+transfer recipes, plans, catalog snapshots, and vaults. Filesystem projections
+stay disabled. Artifacts, projection reconciliation state, repository credentials,
+unscoped principal history, and external database state are excluded. No
+scheduler resumes imported work automatically.
+
 Portable connection/vault secrets are copied into a staged destination store
 under fresh handles; source authentication keys are never imported. Preview
 validates the full staged result with audit-only destination writes. Apply
 installs secrets before metadata using the existing recoverable journal.
-Cross-instance identity migration and external database DR orchestration remain
-separate work. Details and exclusions: [tenant recovery design](PLANS/tenant-selective-restore.md).
+File-secret archives and destinations are supported; memory mode requires no
+selected secret references. Old unreferenced destination secrets remain for
+separate garbage collection. Apply first creates an encrypted rescue backup.
+Tests cover two tenants sharing a principal, scoped recovery, unchanged unrelated
+authentication and secrets, identity/ID/FK/schema refusal, secret remapping,
+and rescue-journal recovery. Cross-instance identity migration and external
+database DR orchestration remain separate work.
 
 ## ADR-060 — Private Immutable Benchmark Snapshots
 
@@ -2433,17 +2448,35 @@ See [Tailnet setup and recovery](TAILNET.md).
 
 Status: accepted. Date: 2026-09-23.
 
-The desktop CSV preview offers per-column SQL types for new tables. Blank input
-uses the inferred type for the selected engine. The desktop validates each
+The desktop CSV preview owns one SQL type input per source column, initially
+showing the inferred type for the selected engine. Blank input restores that
+inferred type. The desktop validates each
 explicit value as one bounded SQL data type before generating reviewable DDL or
 preparing a transfer recipe. The CSV API repeats that validation at execution;
 recipe options and desktop validation never become an authorization boundary.
 
-Transfer recipes persist type mappings and desktop execution choices in their
-options. Reopening a recipe restores those choices before sending a normal
-audited execution request. Existing target tables use their actual column
-types. For a new table, skip and quarantine ingestion casts against the same
-explicit types used in CREATE TABLE. Durable resume remains incompatible with
-explicit type mappings and table creation.
+For a new table, the preview opens reviewable CREATE TABLE SQL using the chosen
+types. For an existing table, import sends the selected mapping to the CSV API.
+The preview can populate a transfer recipe with type mappings, table, conflict
+policy, and create-table choice. Reopening a recipe restores those choices
+before sending a normal audited execution request. Existing target tables use
+their actual column types. For a new table, skip and quarantine ingestion casts
+against the same explicit types used in CREATE TABLE. Durable resume remains
+incompatible with explicit type mappings and table creation.
 
-See [CSV type mapping design](PLANS/csv-type-mapping-editor.md).
+## ADR-063 — PostgreSQL object administration uses typed preview and apply
+
+Status: accepted. Date: 2026-09-29.
+
+Database extensions are PostgreSQL objects, separate from Sift extension
+packages. The first workbench slice reads bounded catalogs through existing
+supervised driver execution. A typed action generates exact quoted SQL on the
+server; the preview includes a digest of the observed catalog state. Apply
+requires confirmation and repeats authorization and catalog inspection before
+running that SQL through the supervised query path. The digest detects ordinary
+stale previews but is not a database lock; PostgreSQL remains the final owner,
+permission, and dependency authority. Managed schema-restricted profiles are
+denied this cross-schema workbench, and read-only profiles cannot apply. Each
+read, preview, and apply has its own audited Operation. Partition attach,
+extension update, dependency graph previews, and atomic cross-object plans
+require separate designs.

@@ -287,6 +287,9 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ListProcesses
         | ListDeadlocks
         | ListPostgresSettings
+        | ListPostgresObjects
+        | PreviewPostgresObject
+        | ApplyPostgresObject
         | ReadQueryStore
         | ReadAgentJobs
         | ReadSqlServerSettings
@@ -304,6 +307,11 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
             if !matches!(engine, Some(Engine::Postgres | Engine::SqlServer)) =>
         {
             Some("Profile is available only for PostgreSQL and SQL Server")
+        }
+        ListPostgresObjects | PreviewPostgresObject | ApplyPostgresObject
+            if engine != Some(Engine::Postgres) =>
+        {
+            Some("PostgreSQL objects require a PostgreSQL connection")
         }
         ExecuteRun if !has_connection => Some("connection context required"),
         ExecuteQuery if has_active_transaction && !selected_transaction => {
@@ -348,6 +356,9 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | ListProcesses
         | ListDeadlocks
         | ListPostgresSettings
+        | ListPostgresObjects
+        | PreviewPostgresObject
+        | ApplyPostgresObject
         | ReadQueryStore
         | ReadAgentJobs
         | ReadSqlServerSettings

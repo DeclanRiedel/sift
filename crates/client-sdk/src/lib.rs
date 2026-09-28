@@ -18,6 +18,10 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "saveBenchmarkRun",
     "listBenchmarkRuns",
     "listPostgresSettings",
+    "listPostgresExtensions",
+    "listPostgresPartitions",
+    "previewPostgresObject",
+    "applyPostgresObject",
     "getBenchmarkRun",
     "deleteBenchmarkRun",
     "clearMetadataVaultItemSecret",
@@ -54,6 +58,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "bulkInsert",
     "cloneWorkspaceRepository",
     "cancelComparison",
+    "cancelProfile",
     "cancelQuery",
     "cancelMigration",
     "captureSemanticPlan",
@@ -104,6 +109,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "exchangeSshProxyCapability",
     "executeQuery",
     "explainQuery",
+    "profileQuery",
     "benchmarkQuery",
     "cancelBenchmark",
     "exportQuery",
@@ -1629,6 +1635,52 @@ impl Client {
             query.offset,
             query.limit.unwrap_or(100)
         ))
+        .await
+    }
+
+    pub async fn list_postgres_extensions(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        query: sift_protocol::PostgresObjectPageQuery,
+    ) -> Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresExtension>> {
+        self.get(&format!("/v1/sessions/{session}/connections/{connection}/postgres/extensions?offset={}&limit={}",
+            query.offset, query.limit.unwrap_or(100))).await
+    }
+
+    pub async fn list_postgres_partitions(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        query: sift_protocol::PostgresObjectPageQuery,
+    ) -> Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPartition>> {
+        self.get(&format!("/v1/sessions/{session}/connections/{connection}/postgres/partitions?offset={}&limit={}",
+            query.offset, query.limit.unwrap_or(100))).await
+    }
+
+    pub async fn preview_postgres_object(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        action: sift_protocol::PostgresObjectAction,
+    ) -> Result<sift_protocol::PostgresObjectPreview> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/postgres/objects/preview"),
+            &action,
+        )
+        .await
+    }
+
+    pub async fn apply_postgres_object(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        request: sift_protocol::ApplyPostgresObjectRequest,
+    ) -> Result<serde_json::Value> {
+        self.post(
+            &format!("/v1/sessions/{session}/connections/{connection}/postgres/objects/apply"),
+            &request,
+        )
         .await
     }
 

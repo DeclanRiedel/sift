@@ -2732,6 +2732,85 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadPostgresExtensions { offset } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .list_postgres_extensions(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::PostgresObjectPageQuery {
+                                offset,
+                                limit: Some(100),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before loading PostgreSQL extensions".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresExtensionsLoaded { offset, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadPostgresPartitions { offset } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .list_postgres_partitions(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::PostgresObjectPageQuery {
+                                offset,
+                                limit: Some(100),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before loading PostgreSQL partitions".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresPartitionsLoaded { offset, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::PreviewPostgresObject { action } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .preview_postgres_object(opened.session, opened.metadata_connection, action)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before previewing PostgreSQL changes".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresObjectPreviewed(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ApplyPostgresObject { request } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .apply_postgres_object(opened.session, opened.metadata_connection, request)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before applying PostgreSQL changes".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresObjectApplied(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadQueryStore => {
                 let result = match context.as_ref() {
                     Some(opened) => opened

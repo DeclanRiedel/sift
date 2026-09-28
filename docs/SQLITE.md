@@ -82,9 +82,11 @@ WAL and shared-memory sidecars. Sift preserves their journal and sync settings.
 
 The IDE catalog graph is explicitly partial. It includes same-schema foreign
 keys, trigger targets, parsed trigger-body dependencies, parsed direct view
-reads, and FTS5 external-content dependencies. Missing or ambiguous references
-stay unresolved. Expression dependencies, unsupported virtual-table modules,
-and trigger/view SQL the parser cannot read are recorded as coverage gaps;
+reads, FTS5 external-content dependencies, and column references in parsed
+CHECK clauses, partial-index predicates, generated columns, and expression
+indexes. Missing or ambiguous references stay unresolved. Unsupported
+expression syntax, virtual-table modules, table functions in views, and
+trigger/view SQL the parser cannot read remain gaps;
 affected nodes carry `sqlite_dependency_gap` markers. Virtual-table columns
 are omitted under the restricted connection authorizer and marked with
 `sqlite_metadata_gap`.

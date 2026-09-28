@@ -347,7 +347,9 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [~] SQL Server plans
 - [~] SQL Server process control
 - [~] SQL Server bulk import
-- [ ] PostgreSQL extensions and partition management UI
+- [~] PostgreSQL extensions and partition management UI (bounded catalog views,
+      Vim preview/apply for extension install/drop and partition detach;
+      attach, update, and dependency previews remain)
 - [ ] PostgreSQL replication and statistics UI
 - [x] PostgreSQL settings browser (read-only, bounded paging, role-visible
       `pg_settings`, sensitive-value redaction, audited API and Vim desktop view)

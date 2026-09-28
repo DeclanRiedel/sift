@@ -245,6 +245,194 @@ async fn sql_authority_and_readonly_are_enforced_by_sqlite() {
 }
 
 #[tokio::test]
+async fn catalog_graph_links_generated_columns_and_expression_indexes() {
+    let f = Fixture::new(2);
+    rusqlite::Connection::open(f.root.path().join("data.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE calc(a INTEGER, b INTEGER, c INTEGER GENERATED ALWAYS AS (a + abs(b)) STORED);
+             CREATE INDEX calc_expression ON calc(lower(a), b + 1);",
+        )
+        .unwrap();
+    rusqlite::Connection::open(f.root.path().join("data.db"))
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE INDEX calc_oversized ON calc(abs(a /*{}*/))",
+            "x".repeat(1_048_600)
+        ))
+        .unwrap();
+    let c = f.open(SqliteOpenMode::ReadOnly).await;
+    let graph = f
+        .driver
+        .schema(
+            c.clone(),
+            SchemaScope {
+                depth: SchemaDepth::Graph {
+                    options: CatalogGraphOptions::default(),
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    sift_core::catalog::validate_graph(&graph, 10_000, 100_000).unwrap();
+    let table = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Table && node.name == "calc")
+        .unwrap();
+    let column = |name: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == CatalogNodeKind::Column
+                    && node.name == name
+                    && node.parent_id.as_ref() == Some(&table.id)
+            })
+            .unwrap()
+    };
+    let a = column("a");
+    let b = column("b");
+    let c_node = column("c");
+    let index = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == CatalogNodeKind::Index
+                && node.name == "calc_expression"
+                && node.parent_id.as_ref() == Some(&table.id)
+        })
+        .unwrap();
+    let oversized = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == CatalogNodeKind::Index
+                && node.name == "calc_oversized"
+                && node.parent_id.as_ref() == Some(&table.id)
+        })
+        .unwrap();
+    for target in [&a.id, &b.id] {
+        assert!(graph.edges.iter().any(|edge| edge.from == c_node.id
+            && edge.to.as_ref() == Some(target)
+            && edge.kind == CatalogEdgeKind::DependsOn
+            && edge.certainty == CatalogEdgeCertainty::Parsed));
+        assert!(graph.edges.iter().any(|edge| edge.from == index.id
+            && edge.to.as_ref() == Some(target)
+            && edge.kind == CatalogEdgeKind::DependsOn
+            && edge.certainty == CatalogEdgeCertainty::Parsed));
+    }
+    assert!(!graph.coverage.failures.iter().any(|failure| failure.code
+        == "sqlite_generated_expression_unparsed"
+        || failure.code == "sqlite_index_expression_unparsed"));
+    assert_eq!(
+        oversized.extra.get("sqlite_dependency_gap"),
+        Some(&serde_json::json!("sqlite_index_sql_limit"))
+    );
+    f.driver.close(c).await.unwrap();
+}
+
+#[tokio::test]
+async fn catalog_graph_links_check_and_partial_index_columns_without_inventing_table_functions() {
+    let f = Fixture::new(2);
+    rusqlite::Connection::open(f.root.path().join("data.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE measured(a INTEGER, b INTEGER, CHECK(a > b AND abs(b) > 0));
+             CREATE INDEX measured_partial ON measured(a) WHERE b > 0;
+             CREATE VIRTUAL TABLE geo USING rtree(id, min_x, max_x, min_y, max_y);
+             CREATE VIEW function_source AS SELECT value FROM json_each('[1]');",
+        )
+        .unwrap();
+    let c = f.open(SqliteOpenMode::ReadOnly).await;
+    let graph = f
+        .driver
+        .schema(
+            c.clone(),
+            SchemaScope {
+                depth: SchemaDepth::Graph {
+                    options: CatalogGraphOptions::default(),
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    sift_core::catalog::validate_graph(&graph, 10_000, 100_000).unwrap();
+    let table = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Table && node.name == "measured")
+        .unwrap();
+    let a = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == CatalogNodeKind::Column
+                && node.name == "a"
+                && node.parent_id.as_ref() == Some(&table.id)
+        })
+        .unwrap();
+    let b = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == CatalogNodeKind::Column
+                && node.name == "b"
+                && node.parent_id.as_ref() == Some(&table.id)
+        })
+        .unwrap();
+    let check = graph.nodes.iter().find(|node| node.kind == CatalogNodeKind::Constraint && node.parent_id.as_ref() == Some(&table.id) && matches!(&node.details, CatalogNodeDetails::Constraint { constraint } if constraint.kind == ConstraintKind::Check)).unwrap();
+    let index = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Index && node.name == "measured_partial")
+        .unwrap();
+    for target in [&a.id, &b.id] {
+        assert!(graph.edges.iter().any(|edge| edge.from == check.id
+            && edge.to.as_ref() == Some(target)
+            && edge.kind == CatalogEdgeKind::DependsOn
+            && edge.certainty == CatalogEdgeCertainty::Parsed));
+    }
+    assert!(graph.edges.iter().any(|edge| edge.from == index.id
+        && edge.to.as_ref() == Some(&b.id)
+        && edge.kind == CatalogEdgeKind::DependsOn
+        && edge.certainty == CatalogEdgeCertainty::Parsed));
+    let view = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::View && node.name == "function_source")
+        .unwrap();
+    assert_eq!(
+        view.extra.get("sqlite_dependency_gap"),
+        Some(&serde_json::json!("view_table_function_unavailable"))
+    );
+    assert!(!graph
+        .edges
+        .iter()
+        .any(|edge| edge.from == view.id && edge.kind == CatalogEdgeKind::ReadsFrom));
+    let geo = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == CatalogNodeKind::Table && node.name == "geo")
+        .unwrap();
+    assert_eq!(
+        geo.extra.get("sqlite_dependency_gap"),
+        Some(&serde_json::json!("virtual_table_dependencies_unavailable"))
+    );
+    assert_eq!(
+        geo.extra.get("sqlite_virtual_module"),
+        Some(&serde_json::json!("rtree"))
+    );
+    f.driver.close(c).await.unwrap();
+}
+
+#[tokio::test]
 async fn catalog_graph_keeps_sqlite_dependencies_schema_correct_and_partial() {
     let f = Fixture::new(2);
     rusqlite::Connection::open(f.root.path().join("data.db"))

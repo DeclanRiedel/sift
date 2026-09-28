@@ -271,6 +271,86 @@ pub(super) async fn list_postgres_settings(
     Ok(Json(page))
 }
 
+pub(super) async fn list_postgres_extensions(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Query(query): Query<sift_protocol::PostgresObjectPageQuery>,
+) -> ApiResult<Json<sift_protocol::PostgresObjectPage<sift_protocol::PostgresExtension>>> {
+    let operation = Operation::ListPostgresObjects {
+        session,
+        connection,
+        object: "extension".into(),
+        offset: query.offset,
+        limit: query.limit.unwrap_or(100),
+    };
+    let page = finish_operation(
+        &state.sessions,
+        operation,
+        crate::postgres_workbench::extensions(&state.sessions, session, connection, query).await,
+        |page| Some(page.items.len() as i64),
+    )?;
+    Ok(Json(page))
+}
+
+pub(super) async fn list_postgres_partitions(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Query(query): Query<sift_protocol::PostgresObjectPageQuery>,
+) -> ApiResult<Json<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPartition>>> {
+    let operation = Operation::ListPostgresObjects {
+        session,
+        connection,
+        object: "partition".into(),
+        offset: query.offset,
+        limit: query.limit.unwrap_or(100),
+    };
+    let page = finish_operation(
+        &state.sessions,
+        operation,
+        crate::postgres_workbench::partitions(&state.sessions, session, connection, query).await,
+        |page| Some(page.items.len() as i64),
+    )?;
+    Ok(Json(page))
+}
+
+pub(super) async fn preview_postgres_object(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(action): Json<sift_protocol::PostgresObjectAction>,
+) -> ApiResult<Json<sift_protocol::PostgresObjectPreview>> {
+    let operation = Operation::PreviewPostgresObject {
+        session,
+        connection,
+        action: action.clone(),
+    };
+    let preview = finish_operation(
+        &state.sessions,
+        operation,
+        crate::postgres_workbench::preview(&state.sessions, session, connection, action).await,
+        |_| None,
+    )?;
+    Ok(Json(preview))
+}
+
+pub(super) async fn apply_postgres_object(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::ApplyPostgresObjectRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let operation = Operation::ApplyPostgresObject {
+        session,
+        connection,
+        action: request.action.clone(),
+    };
+    finish_operation(
+        &state.sessions,
+        operation,
+        crate::postgres_workbench::apply(&state.sessions, session, connection, request).await,
+        |_| None,
+    )?;
+    Ok(Json(serde_json::json!({"applied": true})))
+}
+
 pub(super) async fn read_query_store(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
