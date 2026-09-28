@@ -54493,6 +54493,11 @@ mod tests {
                     wait: Some("Lock".into()),
                     blocked_by: vec![7],
                     lock_wait: None,
+                    held_locks: vec![sift_protocol::DatabaseHeldLock {
+                        resource: "relation:42".into(),
+                        mode: "AccessShareLock".into(),
+                    }],
+                    held_locks_truncated: false,
                 }])),
                 cx,
             );
@@ -54509,6 +54514,7 @@ mod tests {
         cx.simulate_click(statement.center(), Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("database-process-details-42").is_some());
+        assert!(cx.debug_bounds("database-process-held-locks-42").is_some());
         let copy = cx
             .debug_bounds("copy-process-statement-42")
             .expect("copy action should be visible");

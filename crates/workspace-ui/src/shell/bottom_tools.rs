@@ -1140,6 +1140,18 @@ fn render_database_process_details(
             format!("{} on {}{}", lock.mode, lock.resource, age)
         },
     );
+    let held_count = process.held_locks.len();
+    let held_locks = process
+        .held_locks
+        .iter()
+        .map(|lock| format!("{} on {}", lock.mode, lock.resource))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let held_label = if process.held_locks_truncated {
+        format!("HELD LOCKS {held_count}+")
+    } else {
+        format!("HELD LOCKS {held_count}")
+    };
     let metadata = format!(
         "{:?} · {} @ {} · {} · wait: {} · lock: {} · blocked by: {} · started: {}{}",
         process.engine,
@@ -1197,6 +1209,28 @@ fn render_database_process_details(
         )
         .child(
             div()
+                .debug_selector(move || format!("database-process-held-locks-{process_id}"))
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(SectionLabel::new(held_label))
+                .child(
+                    div()
+                        .id(("database-process-held-lock-list", process_id as usize))
+                        .max_h(px(112.))
+                        .overflow_y_scroll()
+                        .font_family("monospace")
+                        .text_xs()
+                        .whitespace_normal()
+                        .child(if held_locks.is_empty() {
+                            "None".to_string()
+                        } else {
+                            held_locks
+                        }),
+                ),
+        )
+        .child(
+            div()
                 .id(("database-process-sql", process_id as usize))
                 .max_h(px(96.))
                 .overflow_y_scroll()
@@ -1226,6 +1260,8 @@ mod tests {
             wait: None,
             blocked_by,
             lock_wait: None,
+            held_locks: Vec::new(),
+            held_locks_truncated: false,
         }
     }
 

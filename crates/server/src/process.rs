@@ -1,6 +1,6 @@
 use sift_protocol::{
-    Code, ConnectionId, DatabaseLockWait, DatabaseProcess, DriverError, Engine, ExecuteRequestHttp,
-    KillProcessResponse, SessionId, Value,
+    Code, ConnectionId, DatabaseHeldLock, DatabaseLockWait, DatabaseProcess, DriverError, Engine,
+    ExecuteRequestHttp, KillProcessResponse, SessionId, Value,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -11,13 +11,27 @@ const PG_LIST: &str = r#"SELECT a.pid::bigint, a.usename, a.datname, a.state, a.
     a.xact_start, a.state_change,
     concat_ws(':', waiting.locktype, COALESCE(waiting.relation::text,
         waiting.transactionid::text, waiting.virtualxid, waiting.objid::text)),
-    waiting.mode, waiting.waitstart
+    waiting.mode, waiting.waitstart, held.locks, held.truncated
 FROM pg_stat_activity a
 LEFT JOIN LATERAL (
     SELECT l.locktype, l.relation, l.transactionid, l.virtualxid, l.objid, l.mode, l.waitstart
     FROM pg_locks l WHERE l.pid = a.pid AND NOT l.granted
     ORDER BY l.waitstart NULLS LAST LIMIT 1
 ) waiting ON TRUE
+LEFT JOIN LATERAL (
+    SELECT COALESCE(json_agg(json_build_object('resource', resource, 'mode', mode)
+        ORDER BY resource, mode) FILTER (WHERE ordinal <= 16), '[]'::json)::text AS locks,
+        count(*) > 16 AS truncated
+    FROM (
+        SELECT resource, mode, row_number() OVER (ORDER BY resource, mode) AS ordinal
+        FROM (
+            SELECT concat_ws(':', l.locktype, COALESCE(l.relation::text,
+                l.transactionid::text, l.virtualxid, l.objid::text)) AS resource, l.mode
+            FROM pg_locks l WHERE l.pid = a.pid AND l.granted
+        ) granted
+        ORDER BY resource, mode LIMIT 17
+    ) sampled
+) held ON TRUE
 WHERE a.pid <> pg_backend_pid()
 ORDER BY (a.state = 'active') DESC, a.query_start NULLS LAST LIMIT 500"#;
 const MSSQL_LIST: &str = r#"SELECT TOP (500) CONVERT(bigint, s.session_id), s.login_name,
@@ -31,7 +45,8 @@ const MSSQL_LIST: &str = r#"SELECT TOP (500) CONVERT(bigint, s.session_id), s.lo
     CONCAT(waiting.resource_type, ':', waiting.resource_associated_entity_id, ':', waiting.resource_description),
     waiting.request_mode,
     CASE WHEN waiting.request_mode IS NOT NULL AND r.wait_time IS NOT NULL
-         THEN DATEADD(millisecond, -r.wait_time, SYSUTCDATETIME()) END
+         THEN DATEADD(millisecond, -r.wait_time, SYSUTCDATETIME()) END,
+    held.locks, held.truncated
 FROM sys.dm_exec_sessions s
 LEFT JOIN sys.dm_exec_requests r ON s.session_id = r.session_id
 OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) t
@@ -44,6 +59,15 @@ OUTER APPLY (SELECT TOP (1) l.resource_type, l.resource_associated_entity_id,
     WHERE l.request_session_id = s.session_id
       AND l.request_status IN ('WAIT', 'CONVERT', 'LOW_PRIORITY_WAIT', 'LOW_PRIORITY_CONVERT')
     ORDER BY l.resource_type, l.request_mode) waiting
+OUTER APPLY (SELECT
+    (SELECT TOP (16) CONCAT(l.resource_type, ':', l.resource_associated_entity_id, ':',
+        l.resource_description) AS resource, l.request_mode AS mode
+     FROM sys.dm_tran_locks l WHERE l.request_session_id=s.session_id AND l.request_status='GRANT'
+     ORDER BY l.resource_type, l.resource_associated_entity_id, l.resource_description,
+         l.request_mode FOR JSON PATH) AS locks,
+    CASE WHEN (SELECT COUNT_BIG(*) FROM sys.dm_tran_locks l
+        WHERE l.request_session_id=s.session_id AND l.request_status='GRANT') > 16
+        THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS truncated) held
 WHERE s.session_id <> @@SPID AND s.is_user_process = 1
 ORDER BY CASE WHEN r.session_id IS NOT NULL THEN 0 ELSE 1 END,
     COALESCE(r.start_time, tx.started_at)"#;
@@ -179,6 +203,18 @@ fn parse_row(engine: Engine, values: &[Value]) -> ApiResult<DatabaseProcess> {
                 mode,
                 started_at: values.get(12).and_then(value_timestamp),
             }),
+        held_locks: values.get(13).and_then(value_string).map_or_else(
+            || Ok(Vec::new()),
+            |json| {
+                serde_json::from_str::<Vec<DatabaseHeldLock>>(&json).map_err(|_| {
+                    ApiError::Driver(DriverError::new(
+                        Code::UnsupportedResultShape,
+                        "held-lock catalog returned invalid JSON",
+                    ))
+                })
+            },
+        )?,
+        held_locks_truncated: values.get(14).and_then(value_bool).unwrap_or(false),
     })
 }
 
@@ -235,6 +271,8 @@ mod tests {
             Value::Text("relation:orders".into()),
             Value::Text("AccessExclusiveLock".into()),
             Value::Null,
+            Value::Text(r#"[{"resource":"relation:9","mode":"AccessShareLock"}]"#.into()),
+            Value::Bool(true),
         ];
         let process = parse_row(Engine::Postgres, &row).unwrap();
         assert_eq!(process.process_id, 42);
@@ -243,6 +281,9 @@ mod tests {
         let lock = process.lock_wait.unwrap();
         assert_eq!(lock.resource, "relation:orders");
         assert_eq!(lock.mode, "AccessExclusiveLock");
+        assert_eq!(process.held_locks.len(), 1);
+        assert_eq!(process.held_locks[0].resource, "relation:9");
+        assert!(process.held_locks_truncated);
     }
 
     #[cfg(any(feature = "live-pg", feature = "live-mssql"))]

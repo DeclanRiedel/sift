@@ -21,6 +21,12 @@ pub struct DatabaseProcess {
     /// Waiting lock, when the provider exposes one in its process snapshot.
     #[serde(default)]
     pub lock_wait: Option<DatabaseLockWait>,
+    /// First sixteen granted locks in deterministic order. The source can
+    /// expose more, as indicated by `held_locks_truncated`.
+    #[serde(default)]
+    pub held_locks: Vec<DatabaseHeldLock>,
+    #[serde(default)]
+    pub held_locks_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -29,6 +35,12 @@ pub struct DatabaseLockWait {
     pub mode: String,
     #[serde(default)]
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseHeldLock {
+    pub resource: String,
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

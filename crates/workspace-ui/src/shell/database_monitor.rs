@@ -232,6 +232,8 @@ mod tests {
             wait: None,
             blocked_by,
             lock_wait: None,
+            held_locks: Vec::new(),
+            held_locks_truncated: false,
         }
     }
 

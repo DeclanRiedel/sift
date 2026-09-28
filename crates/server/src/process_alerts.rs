@@ -153,6 +153,8 @@ mod tests {
             wait: None,
             blocked_by: vec![],
             lock_wait: None,
+            held_locks: Vec::new(),
+            held_locks_truncated: false,
         };
         let options = AlertOptions::default();
         let mut tracker = AlertTracker::default();
