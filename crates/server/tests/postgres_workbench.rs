@@ -209,3 +209,106 @@ async fn apply_rejects_stale_extension_state() {
         .unwrap();
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn role_catalog_excludes_secrets_and_is_paged() {
+    let driver = pg_driver()
+        .execute_ok(rows(vec![
+            Row::new(vec![
+                Value::Text("analyst".into()),
+                Value::Text("false".into()),
+                Value::Text("false".into()),
+                Value::Text("false".into()),
+            ]),
+            Row::new(vec![
+                Value::Text("operator".into()),
+                Value::Text("true".into()),
+                Value::Text("true".into()),
+                Value::Text("false".into()),
+            ]),
+        ]))
+        .build();
+    let (router, session, connection) = setup(driver).await;
+    let response = router
+        .oneshot(
+            Request::get(format!(
+                "/v1/sessions/{session}/connections/{connection}/postgres/roles?limit=1"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: PostgresObjectPage<sift_protocol::PostgresRole> = json(response.into_body()).await;
+    assert_eq!(page.items[0].name, "analyst");
+    assert!(!page.items[0].can_login);
+    assert_eq!(page.next_offset, Some(1));
+    assert!(!serde_json::to_string(&page).unwrap().contains("password"));
+}
+
+#[tokio::test]
+async fn role_creation_requires_preview_and_production_confirmation() {
+    let state = Row::new(vec![
+        Value::Text("false".into()),
+        Value::Text("true".into()),
+    ]);
+    let driver = pg_driver()
+        .execute_ok(rows(vec![state.clone()]))
+        .execute_ok(rows(vec![state]))
+        .execute_ok(rows(Vec::new()))
+        .build();
+    let (router, session, connection) = setup(driver).await;
+    let base = format!("/v1/sessions/{session}/connections/{connection}/postgres/objects");
+    let action = serde_json::json!({"kind":"create_role","name":"reader\"; DROP ROLE x; --"});
+    let response = router
+        .clone()
+        .oneshot(post(format!("{base}/preview"), action.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: PostgresObjectPreview = json(response.into_body()).await;
+    assert_eq!(
+        preview.sql,
+        "CREATE ROLE \"reader\"\"; DROP ROLE x; --\" NOLOGIN"
+    );
+    let denied = router
+        .clone()
+        .oneshot(post(
+            format!("{base}/apply"),
+            serde_json::json!({
+                "action": action, "precondition": preview.precondition, "confirmed": true,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+    let applied = router
+        .oneshot(post(
+            format!("{base}/apply"),
+            serde_json::json!({
+                "action": preview.action, "precondition": preview.precondition,
+                "confirmed": true, "production_confirmed": true,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(applied.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn schema_grant_preview_requires_owner_authority() {
+    let driver = pg_driver()
+        .execute_ok(rows(vec![Row::new(vec![
+            Value::Text("17".into()),
+            Value::Text("".into()),
+            Value::Text("false".into()),
+            Value::Text("true".into()),
+        ])]))
+        .build();
+    let (router, session, connection) = setup(driver).await;
+    let response = router.oneshot(post(format!("/v1/sessions/{session}/connections/{connection}/postgres/objects/preview"), serde_json::json!({
+        "kind":"grant_schema_privilege", "schema":"public", "grantee":"analyst", "privilege":"usage",
+    }))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}

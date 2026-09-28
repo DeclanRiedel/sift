@@ -457,6 +457,69 @@ pub(super) async fn read_postgres_statistics(
     Ok(Json(report))
 }
 
+pub(super) async fn list_postgres_roles(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Query(query): Query<sift_protocol::PostgresObjectPageQuery>,
+) -> ApiResult<Json<sift_protocol::PostgresObjectPage<sift_protocol::PostgresRole>>> {
+    let operation = Operation::ListPostgresObjects {
+        session,
+        connection,
+        object: "role".into(),
+        offset: query.offset,
+        limit: query.limit.unwrap_or(100),
+    };
+    let page = finish_operation(
+        &state.sessions,
+        operation,
+        crate::postgres_workbench::roles(&state.sessions, session, connection, query).await,
+        |page| Some(page.items.len() as i64),
+    )?;
+    Ok(Json(page))
+}
+
+pub(super) async fn list_postgres_owners(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Query(query): Query<sift_protocol::PostgresObjectPageQuery>,
+) -> ApiResult<Json<sift_protocol::PostgresObjectPage<sift_protocol::PostgresOwnedObject>>> {
+    let operation = Operation::ListPostgresObjects {
+        session,
+        connection,
+        object: "owner".into(),
+        offset: query.offset,
+        limit: query.limit.unwrap_or(100),
+    };
+    let page = finish_operation(
+        &state.sessions,
+        operation,
+        crate::postgres_workbench::owners(&state.sessions, session, connection, query).await,
+        |page| Some(page.items.len() as i64),
+    )?;
+    Ok(Json(page))
+}
+
+pub(super) async fn list_postgres_schema_grants(
+    State(state): State<AppState>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Query(query): Query<sift_protocol::PostgresObjectPageQuery>,
+) -> ApiResult<Json<sift_protocol::PostgresObjectPage<sift_protocol::PostgresSchemaGrant>>> {
+    let operation = Operation::ListPostgresObjects {
+        session,
+        connection,
+        object: "schema_grant".into(),
+        offset: query.offset,
+        limit: query.limit.unwrap_or(100),
+    };
+    let page = finish_operation(
+        &state.sessions,
+        operation,
+        crate::postgres_workbench::schema_grants(&state.sessions, session, connection, query).await,
+        |page| Some(page.items.len() as i64),
+    )?;
+    Ok(Json(page))
+}
+
 pub(super) async fn preview_postgres_object(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

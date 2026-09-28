@@ -35,7 +35,7 @@ pub(super) fn render_bottom_panel(
         )
         .when(
             shell.active_bottom_tool == BottomTool::Monitor
-                && matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions),
+                && matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants),
             |dock| dock.key_context("SiftPostgresObjects")
                 .on_key_down(cx.listener(WorkspaceShell::handle_postgres_objects_key)),
         )
@@ -178,7 +178,7 @@ pub(super) fn render_bottom_panel(
                 render_database_deadlock_history(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::Settings {
                 render_postgres_settings(shell, cx).into_any_element()
-            } else if matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions) {
+            } else if matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants) {
                 render_postgres_objects(shell, cx).into_any_element()
             } else if shell.database_monitor.view() == DatabaseMonitorView::Replication {
                 render_postgres_replication(shell, cx).into_any_element()
@@ -362,7 +362,7 @@ pub(super) fn render_bottom_panel(
                                     }
                                     DatabaseMonitorView::Overview => unreachable!(),
                                     DatabaseMonitorView::Settings => unreachable!(),
-                                    DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions => unreachable!(),
+                                    DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants => unreachable!(),
                                     DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics => unreachable!(),
                                     DatabaseMonitorView::QueryStore => unreachable!(),
                                     DatabaseMonitorView::AgentJobs => unreachable!(),
@@ -1703,7 +1703,7 @@ fn render_postgres_objects(
                     .into_any_element()
             })
             .collect::<Vec<_>>()
-    } else {
+    } else if state.view() == DatabaseMonitorView::Partitions {
         state
             .partitions()
             .iter()
@@ -1730,6 +1730,85 @@ fn render_postgres_objects(
                     .into_any_element()
             })
             .collect::<Vec<_>>()
+    } else if state.view() == DatabaseMonitorView::Roles {
+        state
+            .roles()
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "{} · {}{}{}",
+                        item.name,
+                        if item.can_login { "LOGIN" } else { "NOLOGIN" },
+                        if item.can_create_role {
+                            " · CREATEROLE"
+                        } else {
+                            ""
+                        },
+                        if item.superuser { " · SUPERUSER" } else { "" }
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>()
+    } else if state.view() == DatabaseMonitorView::Ownership {
+        state
+            .owners()
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "{:?} {} · owner {}",
+                        item.kind, item.name, item.owner
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>()
+    } else {
+        state
+            .schema_grants()
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "{} · {} → {}{}",
+                        item.schema,
+                        item.grantee,
+                        item.privilege,
+                        if item.grantable { " (grantable)" } else { "" }
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>()
     };
     div()
         .debug_selector(|| "postgres-objects-browser".into())
@@ -1744,15 +1823,22 @@ fn render_postgres_objects(
                 .gap_2()
                 .px_3()
                 .h(px(30.))
-                .child(SectionLabel::new(if extensions {
-                    "POSTGRESQL EXTENSIONS"
-                } else {
-                    "POSTGRESQL PARTITIONS"
+                .child(SectionLabel::new(match state.view() {
+                    DatabaseMonitorView::Extensions => "POSTGRESQL EXTENSIONS",
+                    DatabaseMonitorView::Partitions => "POSTGRESQL PARTITIONS",
+                    DatabaseMonitorView::Roles => "POSTGRESQL ROLES",
+                    DatabaseMonitorView::Ownership => "POSTGRESQL OWNERSHIP",
+                    DatabaseMonitorView::SchemaGrants => "EXPLICIT SCHEMA GRANTS",
+                    _ => unreachable!(),
                 }))
-                .child(div().text_xs().child(if extensions {
-                    "j/k select · i install · d drop · n/p pages · r refresh"
-                } else {
-                    "j/k select · d detach · n/p pages · r refresh"
+                .child(div().text_xs().child(match state.view() {
+                    DatabaseMonitorView::Extensions => {
+                        "j/k select · i install · d drop · n/p pages · r refresh"
+                    }
+                    DatabaseMonitorView::Partitions => {
+                        "j/k select · d detach · n/p pages · r refresh"
+                    }
+                    _ => "j/k select · n/p pages · r refresh",
                 }))
                 .child(div().flex_1())
                 .child(
