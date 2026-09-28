@@ -35,6 +35,25 @@ sources for current support claims.
 
 ## Workbench and administration
 
+### Replication and statistics inspection design
+
+This slice is read-only. The server returns bounded snapshots from
+`pg_stat_replication`, `pg_stat_wal_receiver`, and `pg_replication_slots`, plus
+current-database and accessible user-table statistics. It omits connection
+strings, host addresses, SQL text, and other credential-bearing fields.
+Replication reads require `pg_read_all_stats` membership or superuser rights;
+PostgreSQL permission errors are surfaced explicitly. Database statistics are
+limited to `current_database()`, and table statistics require SELECT privilege
+on each relation. Managed schema-restricted profiles cannot use these
+cross-schema views. Each endpoint has its own audited Operation and
+PostgreSQL-only capability. Queries use the existing supervised driver path,
+with a fixed server-owned SQL statement, hard row limits, and paged table rows.
+
+The desktop Monitor adds Replication and Statistics views with Vim navigation,
+refresh, and table-statistics paging. Values are snapshots, not live rates;
+statistics reset time and unavailable counters remain explicit. No
+replication control, slot mutation, setting changes, or polling loop is added.
+
 ### Extension and partition workbench design
 
 This slice separates database extensions from Sift's own extension packages.
