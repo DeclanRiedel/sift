@@ -2463,3 +2463,20 @@ before sending a normal audited execution request. Existing target tables use
 their actual column types. For a new table, skip and quarantine ingestion casts
 against the same explicit types used in CREATE TABLE. Durable resume remains
 incompatible with explicit type mappings and table creation.
+
+## ADR-063 — PostgreSQL object administration uses typed preview and apply
+
+Status: accepted. Date: 2026-09-29.
+
+Database extensions are PostgreSQL objects, separate from Sift extension
+packages. The first workbench slice reads bounded catalogs through existing
+supervised driver execution. A typed action generates exact quoted SQL on the
+server; the preview includes a digest of the observed catalog state. Apply
+requires confirmation and repeats authorization and catalog inspection before
+running that SQL through the supervised query path. The digest detects ordinary
+stale previews but is not a database lock; PostgreSQL remains the final owner,
+permission, and dependency authority. Managed schema-restricted profiles are
+denied this cross-schema workbench, and read-only profiles cannot apply. Each
+read, preview, and apply has its own audited Operation. Partition attach,
+extension update, dependency graph previews, and atomic cross-object plans
+require separate designs.

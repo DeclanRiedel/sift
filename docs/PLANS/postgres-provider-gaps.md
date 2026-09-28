@@ -35,6 +35,26 @@ sources for current support claims.
 
 ## Workbench and administration
 
+### Extension and partition workbench design
+
+This slice separates database extensions from Sift's own extension packages.
+Read operations return bounded, role-visible PostgreSQL extension and partition
+catalog rows through the existing supervised query path, with PostgreSQL-only
+capabilities and audited Operations. Catalog reads must not infer ownership or
+privilege from a displayed name. Permission failures remain explicit.
+
+Management uses a frozen, server-generated preview containing the exact SQL,
+the affected object, and the risk. A later apply request repeats the typed
+action and preview token; the server rechecks the current catalog and the
+caller’s operation policy before executing through the supervised query path.
+Apply rejects active editor transactions, uses the request timeout, and leaves
+PostgreSQL permission and dependency failures visible to the user.
+Identifier inputs are quoted, never accepted as SQL fragments. Initial actions
+are extension install/drop with RESTRICT and partition detach; partition attach,
+extension update/cascade, and cross-object dependency previews remain separate
+work. The desktop offers Vim navigation, preview, and explicit confirmation.
+An inspection view alone does not complete the management checklist.
+
 - [x] Open CSV quarantine reports from the current import result, with
       authorized retrieval and rejected source-row details.
 - [x] Configure and retry durable CSV import from the desktop using a target
@@ -44,8 +64,11 @@ sources for current support claims.
       cleanup, bounded history, and keyboard navigation.
 - [ ] Finish the PostgreSQL plans, process-control, and bulk-import
       desktop workflows currently marked partial in the product inventory.
-- [ ] Add extension and partition inspection/management UI through audited,
-      previewable operations.
+- [~] Add extension and partition inspection/management UI through audited,
+      previewable operations. Bounded inspection, extension install/drop, and
+      partition detach have typed preview/apply and Vim desktop controls;
+      partition attach, extension update, dependency graph previews, and broader
+      object management remain open.
 - [ ] Add replication and statistics inspection UI with bounded reads and
       explicit permission errors.
 - [x] Add a read-only server-settings browser with bounded, role-visible reads,
@@ -57,6 +80,29 @@ sources for current support claims.
       to complete Linux desktop workflows where operator policy permits.
 
 ## Acceptance
+
+### Extension and partition workbench implementation
+
+The server exposes audited paged PostgreSQL extension and partition catalog
+reads (100 rows per desktop page, API maximum 200, offset ceiling 10,000).
+Partition reads require SELECT privilege on parent and child. Managed profiles
+with schema restrictions cannot use this cross-schema workbench; read-only
+profiles cannot apply changes. The preview endpoint quotes identifiers and
+returns exact SQL, a risk warning, and a hash of the observed catalog state.
+Apply requires explicit confirmation, repeats the catalog read, rejects stale
+state, checks query and object-operation permissions, and runs through the
+server's supervised query path. PostgreSQL enforces ownership, CREATE and
+dependency rules; errors are shown directly. Preview checks are not a lock on
+concurrent DDL, so PostgreSQL may still reject an apply after preview.
+
+The desktop Monitor has Extensions and Partitions views. Vim `j/k` selects,
+`n/p` pages, `r` refreshes, `i` previews extension install, and `d` previews
+extension drop or partition detach. The preview shows exact SQL and warning;
+Enter confirms and Esc closes it. Other management actions remain open.
+Verification: API/SDK and desktop/workspace UI checks pass; three focused
+server integration tests cover pagination, confirmation, apply and stale-state
+rejection. Formatting passes. Strict workspace Clippy and full tests remain for
+the post-merge integration gate.
 
 - [ ] Live round trips for each added native DDL shape, including restricted
       roles, cross-object dependencies, and explicit unsupported cases.

@@ -1242,6 +1242,22 @@ pub fn app(state: AppState) -> Router {
             get_with(list_postgres_settings, doc("listPostgresSettings", "Browse PostgreSQL server settings")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/extensions",
+            get_with(list_postgres_extensions, doc("listPostgresExtensions", "Browse PostgreSQL database extensions")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/partitions",
+            get_with(list_postgres_partitions, doc("listPostgresPartitions", "Browse PostgreSQL partitions")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/objects/preview",
+            post_with(preview_postgres_object, doc("previewPostgresObject", "Preview a guarded PostgreSQL object change")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/objects/apply",
+            post_with(apply_postgres_object, doc("applyPostgresObject", "Apply a confirmed PostgreSQL object change")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/query-store",
             get_with(read_query_store, doc("readQueryStore", "Inspect the current SQL Server database's Query Store")),
         )

@@ -604,6 +604,23 @@ pub enum Operation {
         offset: u32,
         limit: u32,
     },
+    ListPostgresObjects {
+        session: SessionId,
+        connection: ConnectionId,
+        object: String,
+        offset: u32,
+        limit: u32,
+    },
+    PreviewPostgresObject {
+        session: SessionId,
+        connection: ConnectionId,
+        action: crate::PostgresObjectAction,
+    },
+    ApplyPostgresObject {
+        session: SessionId,
+        connection: ConnectionId,
+        action: crate::PostgresObjectAction,
+    },
     ReadQueryStore {
         session: SessionId,
         connection: ConnectionId,
@@ -854,6 +871,9 @@ impl Operation {
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
             Self::ListDeadlocks { .. } => OperationKind::ListDeadlocks,
             Self::ListPostgresSettings { .. } => OperationKind::ListPostgresSettings,
+            Self::ListPostgresObjects { .. } => OperationKind::ListPostgresObjects,
+            Self::PreviewPostgresObject { .. } => OperationKind::PreviewPostgresObject,
+            Self::ApplyPostgresObject { .. } => OperationKind::ApplyPostgresObject,
             Self::ReadQueryStore { .. } => OperationKind::ReadQueryStore,
             Self::ReadAgentJobs { .. } => OperationKind::ReadAgentJobs,
             Self::ReadSqlServerSettings { .. } => OperationKind::ReadSqlServerSettings,
@@ -1295,6 +1315,15 @@ impl Operation {
             }
             Operation::ListPostgresSettings { connection, .. } => {
                 summary("list", "postgres_setting", Some(connection.0 as i64))
+            }
+            Operation::ListPostgresObjects { connection, .. } => {
+                summary("list", "postgres_object", Some(connection.0 as i64))
+            }
+            Operation::PreviewPostgresObject { connection, .. } => {
+                summary("preview", "postgres_object", Some(connection.0 as i64))
+            }
+            Operation::ApplyPostgresObject { connection, .. } => {
+                summary("apply", "postgres_object", Some(connection.0 as i64))
             }
             Operation::ReadQueryStore { connection, .. } => {
                 summary("read", "query_store", Some(connection.0 as i64))

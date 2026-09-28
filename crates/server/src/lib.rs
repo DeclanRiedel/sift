@@ -43,6 +43,7 @@ mod parquet_transfer;
 pub mod plan;
 pub mod postgres_backup;
 pub mod postgres_settings;
+pub mod postgres_workbench;
 pub mod process;
 pub mod process_alerts;
 pub mod query_store;

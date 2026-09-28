@@ -37,6 +37,18 @@ pub fn enforce(
         // them as caller SQL would needlessly reject read-only profiles.
         return Ok(());
     }
+    if matches!(
+        operation,
+        OperationKind::ListPostgresObjects
+            | OperationKind::PreviewPostgresObject
+            | OperationKind::ApplyPostgresObject
+    ) && policy.allowed_schemas.is_some()
+    {
+        return Err(ApiError::Forbidden(
+            "PostgreSQL object workbench is unavailable for schema-restricted connection profiles"
+                .into(),
+        ));
+    }
     if policy.read_only && is_structured_write(operation) {
         return Err(ApiError::Forbidden(
             "connection profile is read-only".into(),
@@ -217,6 +229,7 @@ fn is_structured_write(operation: OperationKind) -> bool {
     matches!(
         operation,
         OperationKind::ApplyEdits
+            | OperationKind::ApplyPostgresObject
             | OperationKind::KillProcess
             | OperationKind::ImportCsv
             | OperationKind::BulkInsert
@@ -571,6 +584,35 @@ mod tests {
                 OperationKind::ReadAgentJobs,
                 Some("SELECT 1"),
                 &[],
+            ),
+            Err(ApiError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn postgres_object_workbench_respects_profile_boundaries() {
+        let restricted = restricted();
+        assert!(matches!(
+            enforce(
+                &restricted,
+                Some(Engine::Postgres),
+                OperationKind::ListPostgresObjects,
+                None,
+                &[]
+            ),
+            Err(ApiError::Forbidden(_))
+        ));
+        let read_only = ConnectionPolicy {
+            read_only: true,
+            ..ConnectionPolicy::default()
+        };
+        assert!(matches!(
+            enforce(
+                &read_only,
+                Some(Engine::Postgres),
+                OperationKind::ApplyPostgresObject,
+                None,
+                &[]
             ),
             Err(ApiError::Forbidden(_))
         ));
