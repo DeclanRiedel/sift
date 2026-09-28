@@ -193,6 +193,51 @@ async fn acceptance(engine: Engine) {
             .await
             .unwrap();
         assert!(matches!(result.rows[0].values[0], Value::Bool(true)));
+    } else {
+        let profile = store
+            .profile(
+                session.id,
+                connection.id,
+                ProfileRequest {
+                    connection: connection.id,
+                    run_id: uuid::Uuid::new_v4(),
+                    sql: format!("SELECT * FROM {table} WHERE id = @P1"),
+                    params: vec![Value::Int32(1)],
+                    timeout_ms: 10_000,
+                    workload_confirmed: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(profile.plan.engine, Engine::SqlServer);
+        assert!(profile.plan.analyzed);
+        assert!(profile.plan.root.actual_rows.is_some());
+        assert!(profile.plan.raw.contains("ShowPlanXML"));
+        let oversized = store
+            .profile(
+                session.id,
+                connection.id,
+                ProfileRequest {
+                    connection: connection.id,
+                    run_id: uuid::Uuid::new_v4(),
+                    sql: "SELECT TOP (10001) 1 AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b".into(),
+                    params: vec![],
+                    timeout_ms: 10_000,
+                    workload_confirmed: true,
+                },
+            )
+            .await;
+        assert!(matches!(
+            oversized,
+            Err(sift_server::error::ApiError::Driver(DriverError {
+                code: Code::ResultTooLarge,
+                ..
+            }))
+        ));
+        store
+            .execute_http(session.id, request("SELECT 1".into(), None))
+            .await
+            .unwrap();
     }
     process::list(&store, session.id, connection.id)
         .await
