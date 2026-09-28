@@ -3721,6 +3721,7 @@ pub enum ExecutorCommand {
         tenant_id: i64,
         profile_id: i64,
     },
+    LoadServerDashboard,
     LoadDatabaseProcesses,
     LoadDatabaseDeadlocks,
     LoadPostgresSettings {
@@ -3730,6 +3731,13 @@ pub enum ExecutorCommand {
         offset: u32,
     },
     LoadPostgresPartitions {
+        offset: u32,
+    },
+    LoadPostgresReplication {
+        epoch: u64,
+    },
+    LoadPostgresStatistics {
+        epoch: u64,
         offset: u32,
     },
     PreviewPostgresObject {
@@ -4593,6 +4601,7 @@ pub enum ExecutorEvent {
         profile_id: i64,
     },
     ProfileDeletionFailed(String),
+    ServerDashboardLoaded(Result<sift_protocol::ServerDashboard, String>),
     DatabaseProcessesLoaded(Result<Vec<sift_protocol::DatabaseProcess>, String>),
     DatabaseDeadlocksLoaded(Result<Vec<sift_protocol::DatabaseDeadlockEvent>, String>),
     PostgresSettingsLoaded {
@@ -4606,6 +4615,15 @@ pub enum ExecutorEvent {
     PostgresPartitionsLoaded {
         offset: u32,
         result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPartition>, String>,
+    },
+    PostgresReplicationLoaded {
+        epoch: u64,
+        result: Result<sift_protocol::PostgresReplicationReport, String>,
+    },
+    PostgresStatisticsLoaded {
+        epoch: u64,
+        offset: u32,
+        result: Result<sift_protocol::PostgresStatisticsReport, String>,
     },
     PostgresObjectPreviewed(Result<sift_protocol::PostgresObjectPreview, String>),
     PostgresObjectApplied(Result<(), String>),
@@ -13649,8 +13667,10 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::Connection(status) => {
+                self.database_monitor.clear_dashboard();
                 self.database_monitor.clear_query_store();
                 self.database_monitor.clear_objects();
+                self.database_monitor.clear_postgres_diagnostics();
                 self.database_monitor.clear_agent_jobs();
                 self.database_monitor.clear_sqlserver_settings();
                 if self.pg_notifications.profile_id.is_some() {
@@ -16734,6 +16754,10 @@ impl WorkspaceShell {
             ExecutorEvent::ProfileDeletionFailed(message) => {
                 self.show_error_toast(message, cx);
             }
+            ExecutorEvent::ServerDashboardLoaded(result) => {
+                self.database_monitor.finish_dashboard(result);
+                cx.notify();
+            }
             ExecutorEvent::DatabaseProcessesLoaded(result) => {
                 self.database_monitor.finish_loading(result);
                 cx.notify();
@@ -16752,6 +16776,19 @@ impl WorkspaceShell {
             }
             ExecutorEvent::PostgresPartitionsLoaded { offset, result } => {
                 self.database_monitor.finish_partitions(offset, result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresReplicationLoaded { epoch, result } => {
+                self.database_monitor.finish_replication(epoch, result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresStatisticsLoaded {
+                epoch,
+                offset,
+                result,
+            } => {
+                self.database_monitor
+                    .finish_statistics(epoch, offset, result);
                 cx.notify();
             }
             ExecutorEvent::PostgresObjectPreviewed(result) => {
@@ -26897,7 +26934,9 @@ impl WorkspaceShell {
             self.bottom_dock.presentation.open = true;
         }
         if tool == BottomTool::Monitor && self.bottom_dock.presentation.open {
-            if self.database_monitor.view() == DatabaseMonitorView::SqlServerSettings {
+            if self.database_monitor.view() == DatabaseMonitorView::Overview {
+                self.load_server_dashboard(cx);
+            } else if self.database_monitor.view() == DatabaseMonitorView::SqlServerSettings {
                 self.load_sqlserver_settings(cx);
             } else if self.database_monitor.view() == DatabaseMonitorView::AgentJobs {
                 self.load_agent_jobs(cx);
@@ -27247,8 +27286,30 @@ impl WorkspaceShell {
         cx.notify();
     }
 
+    fn load_server_dashboard(&mut self, cx: &mut Context<Self>) {
+        if self.database_monitor.dashboard_request().loading() {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.database_monitor
+                .finish_dashboard(Err("Database executor is unavailable".into()));
+            cx.notify();
+            return;
+        };
+        if sender.send(ExecutorCommand::LoadServerDashboard).is_ok() {
+            self.database_monitor.start_dashboard();
+        } else {
+            self.database_monitor
+                .finish_dashboard(Err("Database executor is unavailable".into()));
+        }
+        cx.notify();
+    }
+
     fn set_database_monitor_view(&mut self, view: DatabaseMonitorView, cx: &mut Context<Self>) {
         self.database_monitor.set_view(view);
+        if view == DatabaseMonitorView::Overview {
+            self.load_server_dashboard(cx);
+        }
         if view == DatabaseMonitorView::History {
             self.load_database_deadlocks(cx);
         }
@@ -27260,6 +27321,12 @@ impl WorkspaceShell {
             DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions
         ) {
             self.load_postgres_objects(0, cx);
+        }
+        if view == DatabaseMonitorView::Replication {
+            self.load_postgres_replication(cx);
+        }
+        if view == DatabaseMonitorView::Statistics {
+            self.load_postgres_statistics(0, cx);
         }
         if view == DatabaseMonitorView::QueryStore {
             self.load_query_store(cx);
@@ -27595,6 +27662,90 @@ impl WorkspaceShell {
                 .fail_objects_load("Database executor is unavailable");
         }
         cx.notify();
+    }
+
+    fn load_postgres_replication(&mut self, cx: &mut Context<Self>) {
+        if self.database_monitor.replication_request().loading() {
+            return;
+        }
+        let epoch = self.database_monitor.start_replication();
+        if !self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::LoadPostgresReplication { epoch })
+                .is_ok()
+        }) {
+            self.database_monitor
+                .fail_replication("Database executor is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn load_postgres_statistics(&mut self, offset: u32, cx: &mut Context<Self>) {
+        if self.database_monitor.statistics_request().loading() {
+            return;
+        }
+        let epoch = self.database_monitor.start_statistics();
+        if !self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::LoadPostgresStatistics { epoch, offset })
+                .is_ok()
+        }) {
+            self.database_monitor
+                .fail_statistics("Database executor is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn handle_postgres_diagnostics_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        match (self.database_monitor.view(), key) {
+            (DatabaseMonitorView::Replication, "r") => self.load_postgres_replication(cx),
+            (DatabaseMonitorView::Replication, "j") => {
+                self.database_monitor.move_replication_selection(1);
+                cx.notify();
+            }
+            (DatabaseMonitorView::Replication, "k") => {
+                self.database_monitor.move_replication_selection(-1);
+                cx.notify();
+            }
+            (DatabaseMonitorView::Statistics, "r") => {
+                self.load_postgres_statistics(self.database_monitor.statistics_offset(), cx)
+            }
+            (DatabaseMonitorView::Statistics, "j") => {
+                self.database_monitor.move_statistics_selection(1);
+                cx.notify();
+            }
+            (DatabaseMonitorView::Statistics, "k") => {
+                self.database_monitor.move_statistics_selection(-1);
+                cx.notify();
+            }
+            (DatabaseMonitorView::Statistics, "n") => {
+                if let Some(next) = self
+                    .database_monitor
+                    .statistics()
+                    .and_then(|report| report.next_offset)
+                {
+                    self.load_postgres_statistics(next, cx);
+                }
+            }
+            (DatabaseMonitorView::Statistics, "p") => {
+                let offset = self.database_monitor.statistics_offset();
+                if offset > 0 {
+                    self.load_postgres_statistics(offset.saturating_sub(100), cx);
+                }
+            }
+            (_, "escape") => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
     }
 
     fn preview_postgres_object(
@@ -37091,6 +37242,12 @@ impl WorkspaceShell {
             }
             CommandId::PickForeignKeyValue => self.open_foreign_key_picker(window, cx),
             CommandId::FocusResults => self.focus_results(window, cx),
+            CommandId::OpenServerDashboard => {
+                self.active_bottom_tool = BottomTool::Monitor;
+                self.bottom_dock.presentation.open = true;
+                self.set_database_monitor_view(DatabaseMonitorView::Overview, cx);
+                self.focus_handle.focus(window, cx);
+            }
             CommandId::ShowBenchmarkLibrary => {
                 self.open_benchmark_library(None, cx);
                 self.focus_handle.focus(window, cx);

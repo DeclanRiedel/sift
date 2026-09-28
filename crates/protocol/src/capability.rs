@@ -79,10 +79,13 @@ pub enum OperationKind {
     CancelProfile,
     BenchmarkQuery,
     CancelBenchmark,
+    ReadServerDashboard,
     ListProcesses,
     ListDeadlocks,
     ListPostgresSettings,
     ListPostgresObjects,
+    ReadPostgresReplication,
+    ReadPostgresStatistics,
     PreviewPostgresObject,
     ApplyPostgresObject,
     ReadQueryStore,
@@ -126,7 +129,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 118] = [
+    pub const ALL: [Self; 121] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -201,10 +204,13 @@ impl OperationKind {
         Self::CancelProfile,
         Self::BenchmarkQuery,
         Self::CancelBenchmark,
+        Self::ReadServerDashboard,
         Self::ListProcesses,
         Self::ListDeadlocks,
         Self::ListPostgresSettings,
         Self::ListPostgresObjects,
+        Self::ReadPostgresReplication,
+        Self::ReadPostgresStatistics,
         Self::PreviewPostgresObject,
         Self::ApplyPostgresObject,
         Self::ReadQueryStore,

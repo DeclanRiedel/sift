@@ -6,6 +6,7 @@ use super::RequestState;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum DatabaseMonitorView {
+    Overview,
     #[default]
     Activity,
     Locks,
@@ -15,6 +16,8 @@ pub(super) enum DatabaseMonitorView {
     Settings,
     Extensions,
     Partitions,
+    Replication,
+    Statistics,
     QueryStore,
     AgentJobs,
     SqlServerSettings,
@@ -40,6 +43,8 @@ impl DatabaseAlertKind {
 
 #[derive(Debug, Default)]
 pub(super) struct DatabaseMonitorState {
+    dashboard: Option<sift_protocol::ServerDashboard>,
+    dashboard_request: RequestState,
     processes: Vec<DatabaseProcess>,
     deadlocks: Vec<DatabaseDeadlockEvent>,
     request: RequestState,
@@ -59,6 +64,15 @@ pub(super) struct DatabaseMonitorState {
     objects_selected: usize,
     object_preview: Option<sift_protocol::PostgresObjectPreview>,
     object_action_request: RequestState,
+    replication: Option<sift_protocol::PostgresReplicationReport>,
+    replication_request: RequestState,
+    replication_epoch: u64,
+    replication_selected: usize,
+    statistics: Option<sift_protocol::PostgresStatisticsReport>,
+    statistics_request: RequestState,
+    statistics_epoch: u64,
+    statistics_offset: u32,
+    statistics_selected: usize,
     query_store: Option<sift_protocol::QueryStoreReport>,
     query_store_request: RequestState,
     agent_jobs: Option<sift_protocol::AgentJobsReport>,
@@ -70,6 +84,159 @@ pub(super) struct DatabaseMonitorState {
 }
 
 impl DatabaseMonitorState {
+    pub(super) fn replication(&self) -> Option<&sift_protocol::PostgresReplicationReport> {
+        self.replication.as_ref()
+    }
+    pub(super) fn replication_request(&self) -> &RequestState {
+        &self.replication_request
+    }
+    pub(super) fn replication_selected(&self) -> usize {
+        self.replication_selected
+    }
+    pub(super) fn start_replication(&mut self) -> u64 {
+        self.replication_epoch = self.replication_epoch.wrapping_add(1);
+        self.replication_request.start();
+        self.replication_epoch
+    }
+    pub(super) fn fail_replication(&mut self, message: impl Into<String>) {
+        self.replication_request.fail(message);
+    }
+    pub(super) fn finish_replication(
+        &mut self,
+        epoch: u64,
+        result: Result<sift_protocol::PostgresReplicationReport, String>,
+    ) {
+        if self.view != DatabaseMonitorView::Replication
+            || !self.replication_request.loading()
+            || epoch != self.replication_epoch
+        {
+            return;
+        }
+        match result {
+            Ok(report) => {
+                let count = report.senders.len()
+                    + report.slots.len()
+                    + usize::from(report.receiver.is_some());
+                self.replication_selected = self.replication_selected.min(count.saturating_sub(1));
+                self.replication = Some(report);
+                self.replication_request.succeed();
+            }
+            Err(message) => self.replication_request.fail(message),
+        }
+    }
+    pub(super) fn move_replication_selection(&mut self, delta: isize) {
+        let count = self.replication.as_ref().map_or(0, |report| {
+            report.senders.len() + report.slots.len() + usize::from(report.receiver.is_some())
+        });
+        if count > 0 {
+            self.replication_selected = self
+                .replication_selected
+                .saturating_add_signed(delta)
+                .min(count - 1);
+        }
+    }
+    pub(super) fn statistics(&self) -> Option<&sift_protocol::PostgresStatisticsReport> {
+        self.statistics.as_ref()
+    }
+    pub(super) fn statistics_request(&self) -> &RequestState {
+        &self.statistics_request
+    }
+    pub(super) fn statistics_offset(&self) -> u32 {
+        self.statistics_offset
+    }
+    pub(super) fn statistics_selected(&self) -> usize {
+        self.statistics_selected
+    }
+    pub(super) fn start_statistics(&mut self) -> u64 {
+        self.statistics_epoch = self.statistics_epoch.wrapping_add(1);
+        self.statistics_request.start();
+        self.statistics_epoch
+    }
+    pub(super) fn fail_statistics(&mut self, message: impl Into<String>) {
+        self.statistics_request.fail(message);
+    }
+    pub(super) fn finish_statistics(
+        &mut self,
+        epoch: u64,
+        offset: u32,
+        result: Result<sift_protocol::PostgresStatisticsReport, String>,
+    ) {
+        if self.view != DatabaseMonitorView::Statistics
+            || !self.statistics_request.loading()
+            || epoch != self.statistics_epoch
+        {
+            return;
+        }
+        match result {
+            Ok(report) => {
+                self.statistics_selected = 0;
+                self.statistics_offset = offset;
+                self.statistics = Some(report);
+                self.statistics_request.succeed();
+            }
+            Err(message) => self.statistics_request.fail(message),
+        }
+    }
+    pub(super) fn move_statistics_selection(&mut self, delta: isize) {
+        let count = self
+            .statistics
+            .as_ref()
+            .map_or(0, |report| report.tables.len());
+        if count > 0 {
+            self.statistics_selected = self
+                .statistics_selected
+                .saturating_add_signed(delta)
+                .min(count - 1);
+        }
+    }
+    pub(super) fn clear_postgres_diagnostics(&mut self) {
+        self.replication_epoch = self.replication_epoch.wrapping_add(1);
+        self.statistics_epoch = self.statistics_epoch.wrapping_add(1);
+        self.replication = None;
+        self.replication_request = RequestState::default();
+        self.replication_selected = 0;
+        self.statistics = None;
+        self.statistics_request = RequestState::default();
+        self.statistics_offset = 0;
+        self.statistics_selected = 0;
+        if matches!(
+            self.view,
+            DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics
+        ) {
+            self.view = DatabaseMonitorView::Activity;
+        }
+    }
+    pub(super) fn dashboard(&self) -> Option<&sift_protocol::ServerDashboard> {
+        self.dashboard.as_ref()
+    }
+
+    pub(super) fn dashboard_request(&self) -> &RequestState {
+        &self.dashboard_request
+    }
+
+    pub(super) fn start_dashboard(&mut self) {
+        self.dashboard = None;
+        self.dashboard_request.start();
+    }
+
+    pub(super) fn clear_dashboard(&mut self) {
+        self.dashboard = None;
+        self.dashboard_request = RequestState::Idle;
+    }
+
+    pub(super) fn finish_dashboard(
+        &mut self,
+        result: Result<sift_protocol::ServerDashboard, String>,
+    ) {
+        match result {
+            Ok(report) => {
+                self.dashboard = Some(report);
+                self.dashboard_request.succeed();
+            }
+            Err(message) => self.dashboard_request.fail(message),
+        }
+    }
+
     pub(super) fn request(&self) -> &RequestState {
         &self.request
     }
@@ -275,8 +442,18 @@ impl DatabaseMonitorState {
             self.objects_selected = 0;
             self.clear_object_preview();
         }
+        if self.view != view && view == DatabaseMonitorView::Replication {
+            self.replication_request = RequestState::default();
+            self.replication_selected = 0;
+        }
+        if self.view != view && view == DatabaseMonitorView::Statistics {
+            self.statistics_request = RequestState::default();
+            self.statistics_offset = 0;
+            self.statistics_selected = 0;
+        }
         self.view = view;
         if self.selected.is_some_and(|selected| match view {
+            DatabaseMonitorView::Overview => true,
             DatabaseMonitorView::Activity => false,
             DatabaseMonitorView::Locks => !self.lock_process_ids().contains(&selected),
             DatabaseMonitorView::Deadlocks => !self.deadlock_process_ids().contains(&selected),
@@ -284,6 +461,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Alerts => !self.alerts.contains_key(&selected),
             DatabaseMonitorView::Settings => true,
             DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions => true,
+            DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics => true,
             DatabaseMonitorView::QueryStore => true,
             DatabaseMonitorView::AgentJobs => true,
             DatabaseMonitorView::SqlServerSettings => true,
@@ -295,6 +473,7 @@ impl DatabaseMonitorState {
 
     pub(super) fn visible_processes(&self) -> Vec<DatabaseProcess> {
         let included = match self.view {
+            DatabaseMonitorView::Overview => return Vec::new(),
             DatabaseMonitorView::Activity => return self.processes.clone(),
             DatabaseMonitorView::Locks => self.lock_process_ids(),
             DatabaseMonitorView::Deadlocks => self.deadlock_process_ids(),
@@ -302,6 +481,9 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Alerts => self.alerts.keys().copied().collect(),
             DatabaseMonitorView::Settings => return Vec::new(),
             DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions => return Vec::new(),
+            DatabaseMonitorView::Replication | DatabaseMonitorView::Statistics => {
+                return Vec::new()
+            }
             DatabaseMonitorView::QueryStore => return Vec::new(),
             DatabaseMonitorView::AgentJobs => return Vec::new(),
             DatabaseMonitorView::SqlServerSettings => return Vec::new(),
@@ -662,6 +844,36 @@ fn classify_alerts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn postgres_diagnostics_ignore_stale_results_after_connection_change() {
+        let mut monitor = DatabaseMonitorState::default();
+        monitor.set_view(DatabaseMonitorView::Replication);
+        let old_replication = monitor.start_replication();
+        monitor.clear_postgres_diagnostics();
+        monitor.set_view(DatabaseMonitorView::Replication);
+        let current_replication = monitor.start_replication();
+        monitor.finish_replication(old_replication, Err("previous connection".into()));
+        assert!(monitor.replication_request().loading());
+        monitor.finish_replication(current_replication, Err("current connection".into()));
+        assert_eq!(
+            monitor.replication_request().error(),
+            Some("current connection")
+        );
+
+        monitor.set_view(DatabaseMonitorView::Statistics);
+        let old_statistics = monitor.start_statistics();
+        monitor.clear_postgres_diagnostics();
+        monitor.set_view(DatabaseMonitorView::Statistics);
+        let current_statistics = monitor.start_statistics();
+        monitor.finish_statistics(old_statistics, 0, Err("previous connection".into()));
+        assert!(monitor.statistics_request().loading());
+        monitor.finish_statistics(current_statistics, 0, Err("current connection".into()));
+        assert_eq!(
+            monitor.statistics_request().error(),
+            Some("current connection")
+        );
+    }
 
     fn process(process_id: i64, blocked_by: Vec<i64>) -> DatabaseProcess {
         DatabaseProcess {

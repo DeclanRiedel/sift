@@ -284,10 +284,13 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | CancelProfile
         | BenchmarkQuery
         | CancelBenchmark
+        | ReadServerDashboard
         | ListProcesses
         | ListDeadlocks
         | ListPostgresSettings
         | ListPostgresObjects
+        | ReadPostgresReplication
+        | ReadPostgresStatistics
         | PreviewPostgresObject
         | ApplyPostgresObject
         | ReadQueryStore
@@ -308,7 +311,11 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         {
             Some("Profile is available only for PostgreSQL and SQL Server")
         }
-        ListPostgresObjects | PreviewPostgresObject | ApplyPostgresObject
+        ListPostgresObjects
+        | PreviewPostgresObject
+        | ApplyPostgresObject
+        | ReadPostgresReplication
+        | ReadPostgresStatistics
             if engine != Some(Engine::Postgres) =>
         {
             Some("PostgreSQL objects require a PostgreSQL connection")
@@ -353,10 +360,13 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | CancelProfile
         | BenchmarkQuery
         | CancelBenchmark
+        | ReadServerDashboard
         | ListProcesses
         | ListDeadlocks
         | ListPostgresSettings
         | ListPostgresObjects
+        | ReadPostgresReplication
+        | ReadPostgresStatistics
         | PreviewPostgresObject
         | ApplyPostgresObject
         | ReadQueryStore

@@ -246,7 +246,9 @@ and open the live collaborative document, reusing existing tabs.
       `system_health` history; PostgreSQL historical events remain)
 - [x] Long-running-query alerts (bounded API subscriptions)
 - [x] Idle-in-transaction alerts (bounded API subscriptions)
-- [ ] Server dashboard
+- [x] Server dashboard (audited per-connection Overview with bounded process
+      counts, sampled-at and truncation state, capability/permission states,
+      and a Vim command path through `<leader> d s`)
 - [x] Query-performance history (scoped hourly API summaries)
 - [~] Query performance workbench: profiling, repeatable benchmarks, saved runs
   and comparisons — [implementation checklist](query-performance.md)
@@ -350,7 +352,9 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [~] PostgreSQL extensions and partition management UI (bounded catalog views,
       Vim preview/apply for extension install/drop and partition detach;
       attach, update, and dependency previews remain)
-- [ ] PostgreSQL replication and statistics UI
+- [x] PostgreSQL replication and statistics inspection UI (bounded, audited
+      read-only snapshots of senders, receiver, slots, database and accessible
+      table counters; explicit replication privilege errors, Vim Monitor views)
 - [x] PostgreSQL settings browser (read-only, bounded paging, role-visible
       `pg_settings`, sensitive-value redaction, audited API and Vim desktop view)
 - [x] SQL Server Query Store (read-only, bounded database-state and plan inspection)

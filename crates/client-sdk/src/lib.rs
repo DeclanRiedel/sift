@@ -20,6 +20,8 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listPostgresSettings",
     "listPostgresExtensions",
     "listPostgresPartitions",
+    "readPostgresReplication",
+    "readPostgresStatistics",
     "previewPostgresObject",
     "applyPostgresObject",
     "getBenchmarkRun",
@@ -190,6 +192,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listPlanCaptures",
     "listPrincipalKeys",
     "listProcesses",
+    "readServerDashboard",
     "listDeadlocks",
     "watchProcessAlerts",
     "listProviders",
@@ -413,11 +416,11 @@ use sift_protocol::{
     RepositoryBindingId, RoomQueryResult, RoomResultId, RoomResultPages, RoomSelection, Run,
     RunConfiguration, RunConfigurationId, RunId, RunLogEntry, RunManifest, RunSchedule,
     RunStepResult, SavepointRequest, ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId,
-    SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerInfo, SessionId, SessionInfo,
-    SshProxyAccessGrant, SshProxyCapabilityExchangeRequest, TenantResourceLimits,
-    TenantUsageSnapshot, ToolContext, TransactionEndAction, TransactionInfo, TransactionPreview,
-    TransactionPreviewRequest, TransactionState, TransferExecutionResult, TransferRecipe,
-    TransferRecipeId, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
+    SchemaSearchRequest, SchemaSearchResponse, SchemaSnapshot, ServerDashboard, ServerInfo,
+    SessionId, SessionInfo, SshProxyAccessGrant, SshProxyCapabilityExchangeRequest,
+    TenantResourceLimits, TenantUsageSnapshot, ToolContext, TransactionEndAction, TransactionInfo,
+    TransactionPreview, TransactionPreviewRequest, TransactionState, TransferExecutionResult,
+    TransferRecipe, TransferRecipeId, TxHandleRef, TxId, TxMode, UpdateConnectionPolicyRequest,
     UpdateTenantLimitsRequest, ValidatedExtensionPackage, Value, VcsAdapterDiagnostics, VcsBranch,
     VcsCommitDetail, VcsCommitResult, VcsConflictFile, VcsDiff, VcsDiffSide, VcsHeadMutationResult,
     VcsHistoricalFile, VcsHistoryPage, VcsRemote, VcsRemoteResult, VcsStatus,
@@ -1612,6 +1615,17 @@ impl Client {
         .await
     }
 
+    pub async fn server_dashboard(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<ServerDashboard> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/dashboard"
+        ))
+        .await
+    }
+
     pub async fn list_deadlocks(
         &self,
         session: SessionId,
@@ -1655,6 +1669,27 @@ impl Client {
         query: sift_protocol::PostgresObjectPageQuery,
     ) -> Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPartition>> {
         self.get(&format!("/v1/sessions/{session}/connections/{connection}/postgres/partitions?offset={}&limit={}",
+            query.offset, query.limit.unwrap_or(100))).await
+    }
+
+    pub async fn read_postgres_replication(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<sift_protocol::PostgresReplicationReport> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/postgres/replication"
+        ))
+        .await
+    }
+
+    pub async fn read_postgres_statistics(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        query: sift_protocol::PostgresStatisticsQuery,
+    ) -> Result<sift_protocol::PostgresStatisticsReport> {
+        self.get(&format!("/v1/sessions/{session}/connections/{connection}/postgres/statistics?offset={}&limit={}",
             query.offset, query.limit.unwrap_or(100))).await
     }
 

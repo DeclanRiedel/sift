@@ -590,6 +590,10 @@ pub enum Operation {
         connection: ConnectionId,
         run_id: uuid::Uuid,
     },
+    ReadServerDashboard {
+        session: SessionId,
+        connection: ConnectionId,
+    },
     ListProcesses {
         session: SessionId,
         connection: ConnectionId,
@@ -608,6 +612,16 @@ pub enum Operation {
         session: SessionId,
         connection: ConnectionId,
         object: String,
+        offset: u32,
+        limit: u32,
+    },
+    ReadPostgresReplication {
+        session: SessionId,
+        connection: ConnectionId,
+    },
+    ReadPostgresStatistics {
+        session: SessionId,
+        connection: ConnectionId,
         offset: u32,
         limit: u32,
     },
@@ -868,10 +882,13 @@ impl Operation {
             Self::CancelProfile { .. } => OperationKind::CancelProfile,
             Self::BenchmarkQuery { .. } => OperationKind::BenchmarkQuery,
             Self::CancelBenchmark { .. } => OperationKind::CancelBenchmark,
+            Self::ReadServerDashboard { .. } => OperationKind::ReadServerDashboard,
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
             Self::ListDeadlocks { .. } => OperationKind::ListDeadlocks,
             Self::ListPostgresSettings { .. } => OperationKind::ListPostgresSettings,
             Self::ListPostgresObjects { .. } => OperationKind::ListPostgresObjects,
+            Self::ReadPostgresReplication { .. } => OperationKind::ReadPostgresReplication,
+            Self::ReadPostgresStatistics { .. } => OperationKind::ReadPostgresStatistics,
             Self::PreviewPostgresObject { .. } => OperationKind::PreviewPostgresObject,
             Self::ApplyPostgresObject { .. } => OperationKind::ApplyPostgresObject,
             Self::ReadQueryStore { .. } => OperationKind::ReadQueryStore,
@@ -1307,6 +1324,9 @@ impl Operation {
             Operation::CancelBenchmark { connection, .. } => {
                 summary("cancel_benchmark", "query", Some(connection.0 as i64))
             }
+            Operation::ReadServerDashboard { connection, .. } => {
+                summary("read", "server_dashboard", Some(connection.0 as i64))
+            }
             Operation::ListProcesses { connection, .. } => {
                 summary("list", "process", Some(connection.0 as i64))
             }
@@ -1318,6 +1338,12 @@ impl Operation {
             }
             Operation::ListPostgresObjects { connection, .. } => {
                 summary("list", "postgres_object", Some(connection.0 as i64))
+            }
+            Operation::ReadPostgresReplication { connection, .. } => {
+                summary("read", "postgres_replication", Some(connection.0 as i64))
+            }
+            Operation::ReadPostgresStatistics { connection, .. } => {
+                summary("read", "postgres_statistics", Some(connection.0 as i64))
             }
             Operation::PreviewPostgresObject { connection, .. } => {
                 summary("preview", "postgres_object", Some(connection.0 as i64))

@@ -2676,6 +2676,22 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadServerDashboard => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .server_dashboard(opened.session, opened.metadata_connection)
+                        .await
+                        .map_err(|error| format!("loading server overview failed: {error}")),
+                    None => Err("Connect before loading server overview".into()),
+                };
+                if events
+                    .send(ExecutorEvent::ServerDashboardLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadDatabaseProcesses => {
                 let result = match context.as_ref() {
                     Some(opened) => opened
@@ -2773,6 +2789,49 @@ async fn run_query_executor(
                 };
                 if events
                     .send(ExecutorEvent::PostgresPartitionsLoaded { offset, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadPostgresReplication { epoch } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .read_postgres_replication(opened.session, opened.metadata_connection)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before inspecting PostgreSQL replication".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresReplicationLoaded { epoch, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadPostgresStatistics { epoch, offset } => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .read_postgres_statistics(
+                            opened.session,
+                            opened.metadata_connection,
+                            sift_protocol::PostgresStatisticsQuery {
+                                offset,
+                                limit: Some(100),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("Connect before inspecting PostgreSQL statistics".into()),
+                };
+                if events
+                    .send(ExecutorEvent::PostgresStatisticsLoaded {
+                        epoch,
+                        offset,
+                        result,
+                    })
                     .is_err()
                 {
                     return;

@@ -40,6 +40,7 @@ pub mod performance;
 pub mod plan;
 pub use performance::*;
 pub mod policy;
+pub mod postgres_diagnostics;
 pub mod postgres_settings;
 pub mod postgres_workbench;
 pub mod process;
@@ -129,15 +130,21 @@ pub use policy::{
     SchemaSelector, TenantResource, TenantResourceLimits, TenantResourceUsage, TenantRole,
     TenantUsageSnapshot, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest,
 };
+pub use postgres_diagnostics::{
+    PostgresDatabaseStatistics, PostgresReplicationReport, PostgresReplicationSender,
+    PostgresReplicationSlot, PostgresStatisticsQuery, PostgresStatisticsReport,
+    PostgresTableStatistics, PostgresWalReceiver,
+};
 pub use postgres_settings::{PostgresSetting, PostgresSettingsPage, PostgresSettingsQuery};
 pub use postgres_workbench::{
     ApplyPostgresObjectRequest, PostgresExtension, PostgresObjectAction, PostgresObjectPage,
     PostgresObjectPageQuery, PostgresObjectPreview, PostgresPartition,
 };
 pub use process::{
-    DatabaseDeadlockEvent, DatabaseDeadlockParticipant, DatabaseHeldLock, DatabaseLockWait,
-    DatabaseProcess, KillProcessRequest, KillProcessResponse, ProcessAlert, ProcessAlertKind,
-    ProcessAlertSample,
+    DashboardProcessSummary, DashboardProcesses, DashboardSectionState, DatabaseDeadlockEvent,
+    DatabaseDeadlockParticipant, DatabaseHeldLock, DatabaseLockWait, DatabaseProcess,
+    KillProcessRequest, KillProcessResponse, ProcessAlert, ProcessAlertKind, ProcessAlertSample,
+    ServerDashboard,
 };
 pub use provider::*;
 pub use remote::{
