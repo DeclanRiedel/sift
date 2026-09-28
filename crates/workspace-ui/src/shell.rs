@@ -3707,6 +3707,7 @@ pub enum ExecutorCommand {
         offset: u32,
     },
     LoadQueryStore,
+    LoadAgentJobs,
     LoadRoomMembers {
         room_id: i64,
     },
@@ -4548,6 +4549,7 @@ pub enum ExecutorEvent {
         result: Result<sift_protocol::PostgresSettingsPage, String>,
     },
     QueryStoreLoaded(Result<sift_protocol::QueryStoreReport, String>),
+    AgentJobsLoaded(Result<sift_protocol::AgentJobsReport, String>),
     RoomMembersLoaded {
         room_id: i64,
         result: Result<Vec<sift_api_types::RoomMember>, String>,
@@ -13523,6 +13525,7 @@ impl WorkspaceShell {
             }
             ExecutorEvent::Connection(status) => {
                 self.database_monitor.clear_query_store();
+                self.database_monitor.clear_agent_jobs();
                 if self.pg_notifications.profile_id.is_some() {
                     self.pg_listener_target_changed(cx);
                 }
@@ -16592,6 +16595,10 @@ impl WorkspaceShell {
             }
             ExecutorEvent::QueryStoreLoaded(result) => {
                 self.database_monitor.finish_query_store(result);
+                cx.notify();
+            }
+            ExecutorEvent::AgentJobsLoaded(result) => {
+                self.database_monitor.finish_agent_jobs(result);
                 cx.notify();
             }
             ExecutorEvent::CatalogDiagramLoaded(result) => {
@@ -26642,7 +26649,9 @@ impl WorkspaceShell {
             self.bottom_dock.presentation.open = true;
         }
         if tool == BottomTool::Monitor && self.bottom_dock.presentation.open {
-            if self.database_monitor.view() == DatabaseMonitorView::QueryStore {
+            if self.database_monitor.view() == DatabaseMonitorView::AgentJobs {
+                self.load_agent_jobs(cx);
+            } else if self.database_monitor.view() == DatabaseMonitorView::QueryStore {
                 self.load_query_store(cx);
             } else {
                 self.load_database_processes(cx);
@@ -26999,6 +27008,9 @@ impl WorkspaceShell {
         if view == DatabaseMonitorView::QueryStore {
             self.load_query_store(cx);
         }
+        if view == DatabaseMonitorView::AgentJobs {
+            self.load_agent_jobs(cx);
+        }
         cx.notify();
     }
 
@@ -27018,6 +27030,46 @@ impl WorkspaceShell {
             self.database_monitor
                 .finish_query_store(Err("Database executor is unavailable".into()));
         }
+        cx.notify();
+    }
+
+    fn load_agent_jobs(&mut self, cx: &mut Context<Self>) {
+        if self.database_monitor.agent_jobs_request().loading() {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.database_monitor
+                .finish_agent_jobs(Err("Database executor is unavailable".into()));
+            cx.notify();
+            return;
+        };
+        if sender.send(ExecutorCommand::LoadAgentJobs).is_ok() {
+            self.database_monitor.start_agent_jobs();
+        } else {
+            self.database_monitor
+                .finish_agent_jobs(Err("Database executor is unavailable".into()));
+        }
+        cx.notify();
+    }
+
+    fn handle_agent_jobs_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "j" | "k" | "g" | "G" => self
+                .database_monitor
+                .move_agent_jobs_selection(event.keystroke.key.as_str()),
+            "r" => self.load_agent_jobs(cx),
+            "escape" => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
         cx.notify();
     }
 

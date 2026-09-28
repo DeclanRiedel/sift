@@ -9,6 +9,7 @@ pub const PROTOCOL_VERSION_NUMBER: u32 = 2;
 /// Header representation of [`PROTOCOL_VERSION_NUMBER`].
 pub const PROTOCOL_VERSION: &str = "2";
 
+pub mod agent_jobs;
 pub mod auth;
 pub mod automation;
 pub mod capability;
@@ -65,6 +66,7 @@ pub mod vault;
 pub mod vcs;
 pub mod workspace;
 
+pub use agent_jobs::{AgentJob, AgentJobOutcome, AgentJobsReport, AgentJobsState};
 pub use auth::{
     AcceptTenantInvitationRequest, AdminCreatePasswordPrincipalRequest,
     AdminLinkPasswordIdentityRequest, AdminSetPrincipalDisabledRequest, AuthClientKind,

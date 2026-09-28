@@ -37,6 +37,14 @@ pub(super) fn render_bottom_panel(
                     .on_key_down(cx.listener(WorkspaceShell::handle_postgres_settings_key))
             },
         )
+        .when(
+            shell.active_bottom_tool == BottomTool::Monitor
+                && shell.database_monitor.view() == DatabaseMonitorView::AgentJobs,
+            |dock| {
+                dock.key_context("SiftAgentJobs")
+                    .on_key_down(cx.listener(WorkspaceShell::handle_agent_jobs_key))
+            },
+        )
         .relative()
         .h(px(dock.presentation.size))
         .flex_none()
@@ -217,6 +225,21 @@ pub(super) fn render_bottom_panel(
                                 })),
                         )
                         .child(
+                            Button::new("monitor-view-agent-jobs", "Agent jobs")
+                                .disabled(!query_store_available)
+                                .tone(if view == DatabaseMonitorView::AgentJobs {
+                                    ButtonTone::Neutral
+                                } else {
+                                    ButtonTone::Ghost
+                                })
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.set_database_monitor_view(
+                                        DatabaseMonitorView::AgentJobs,
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(
                             Button::new("monitor-view-settings", "Settings")
                                 .tone(if view == DatabaseMonitorView::Settings {
                                     ButtonTone::Neutral
@@ -246,6 +269,8 @@ pub(super) fn render_bottom_panel(
                 render_postgres_settings(shell, cx).into_any_element()
             } else if shell.database_monitor.view() == DatabaseMonitorView::QueryStore {
                 render_query_store(shell, cx)
+            } else if shell.database_monitor.view() == DatabaseMonitorView::AgentJobs {
+                render_agent_jobs(shell, cx)
             } else {
                 let transaction =
                     shell.transaction_state.transaction().map(|transaction| {
@@ -416,6 +441,7 @@ pub(super) fn render_bottom_panel(
                                     }
                                     DatabaseMonitorView::Settings => unreachable!(),
                                     DatabaseMonitorView::QueryStore => unreachable!(),
+                                    DatabaseMonitorView::AgentJobs => unreachable!(),
                                 },
                             ))
                         },
@@ -1080,6 +1106,150 @@ fn render_query_store(
                         .child(div().text_xs().child(format!("Query {} · Plan {} · {} executions · {:.3} ms average · Last {}", plan.query_id, plan.plan_id, plan.executions, plan.average_duration_ms, last)))
                         .child(div().text_xs().whitespace_normal().text_color(colors.muted_text).child(plan.sql_text.clone()))
                 })),
+        )
+        .into_any_element()
+}
+
+fn render_agent_jobs(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -> gpui::AnyElement {
+    let colors = cx.theme().colors;
+    let report = shell.database_monitor.agent_jobs();
+    let loading = shell.database_monitor.agent_jobs_request().loading();
+    let selected = shell.database_monitor.agent_jobs_selected();
+    div()
+        .debug_selector(|| "agent-jobs-browser".into())
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .flex_col()
+        .child(
+            div()
+                .h(px(30.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(SectionLabel::new("SQL SERVER AGENT JOBS"))
+                .child(div().text_xs().child("j/k select · g/G ends · r refresh"))
+                .child(div().flex_1())
+                .child(
+                    Button::new(
+                        "refresh-agent-jobs",
+                        if loading { "Loading…" } else { "Refresh" },
+                    )
+                    .tone(ButtonTone::Ghost)
+                    .disabled(loading)
+                    .on_click(cx.listener(|shell, _, _, cx| shell.load_agent_jobs(cx))),
+                ),
+        )
+        .children(
+            shell
+                .database_monitor
+                .agent_jobs_request()
+                .error()
+                .map(|message| {
+                    div()
+                        .p_2()
+                        .text_color(colors.danger)
+                        .child(message.to_string())
+                }),
+        )
+        .children(report.map(|report| {
+            div().px_3().py_1().text_xs().child(format!(
+                "{} visible job{}{} · whole-job history only · server-local run times",
+                report.jobs.len(),
+                if report.jobs.len() == 1 { "" } else { "s" },
+                if report.truncated {
+                    " (first 100 shown)"
+                } else {
+                    ""
+                },
+            ))
+        }))
+        .when(
+            report.is_some_and(|report| {
+                report.state == sift_protocol::AgentJobsState::PermissionRequired
+            }),
+            |panel| {
+                panel.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_color(colors.warning)
+                        .child("This login cannot read SQL Server Agent jobs and history in msdb."),
+                )
+            },
+        )
+        .child(
+            div()
+                .id("agent-jobs-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .children(
+                    report
+                        .into_iter()
+                        .flat_map(|report| report.jobs.iter())
+                        .enumerate()
+                        .map(|(index, job)| {
+                            let outcome = match job.last_outcome {
+                                Some(sift_protocol::AgentJobOutcome::Failed) => "Failed",
+                                Some(sift_protocol::AgentJobOutcome::Succeeded) => "Succeeded",
+                                Some(sift_protocol::AgentJobOutcome::Retry) => "Retry",
+                                Some(sift_protocol::AgentJobOutcome::Canceled) => "Canceled",
+                                Some(sift_protocol::AgentJobOutcome::InProgress) => "In progress",
+                                Some(sift_protocol::AgentJobOutcome::Unknown) => "Unknown",
+                                None => "Never run",
+                            };
+                            div()
+                                .debug_selector(move || format!("agent-job-{index}"))
+                                .px_3()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(colors.subtle_border)
+                                .when(index == selected, |row| row.bg(colors.active_surface))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .font_family("monospace")
+                                                .child(job.name.clone()),
+                                        )
+                                        .child(div().w(px(80.)).child(if job.enabled {
+                                            "Enabled"
+                                        } else {
+                                            "Disabled"
+                                        }))
+                                        .child(div().w(px(100.)).child(outcome)),
+                                )
+                                .child(div().text_xs().text_color(colors.disabled_text).child(
+                                    format!(
+                                            "Owner: {} · Last run: {} · Duration: {}",
+                                            job.owner.as_deref().unwrap_or("Unavailable"),
+                                            job.last_run_local.as_deref().unwrap_or("Never"),
+                                            job.last_duration_seconds
+                                                .map_or("—".into(), |seconds| format!(
+                                                    "{seconds}s"
+                                                )),
+                                        ),
+                                ))
+                        }),
+                ),
+        )
+        .when(
+            report.is_some_and(|report| {
+                report.state == sift_protocol::AgentJobsState::Available && report.jobs.is_empty()
+            }),
+            |panel| {
+                panel.child(
+                    div()
+                        .p_4()
+                        .text_center()
+                        .child("No Agent jobs are visible to this login."),
+                )
+            },
         )
         .into_any_element()
 }

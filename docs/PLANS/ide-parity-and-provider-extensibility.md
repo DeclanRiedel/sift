@@ -352,7 +352,9 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [x] PostgreSQL settings browser (read-only, bounded paging, role-visible
       `pg_settings`, sensitive-value redaction, audited API and Vim desktop view)
 - [x] SQL Server Query Store (read-only, bounded database-state and plan inspection)
-- [ ] SQL Server Agent
+- [x] SQL Server Agent jobs browser (read-only, bounded owned-job reads for
+      non-sysadmins, whole-job history, audited API and Vim desktop view;
+      live role-specific acceptance pending)
 - [ ] SQL Server server-settings browser
 - [x] SQLite provider design ([scope and acceptance](sqlite-provider.md))
 - [x] SQLite provider implementation (protocol 2; scoped Linux file support)

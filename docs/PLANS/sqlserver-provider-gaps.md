@@ -41,7 +41,10 @@ current public support boundary.
 - [x] Add read-only Query Store inspection before designing any plan-forcing
       action. The audited API and desktop monitor show database state, permission
       needs, and up to 100 recent plans with bounded SQL text and runtime metrics.
-- [ ] Add SQL Server Agent and server-settings browsers with bounded reads and
+- [x] Add a read-only SQL Server Agent jobs browser with bounded owned-job
+      reads for non-sysadmins, whole-job history, permission-aware state,
+      audit, and Vim desktop view. Live role-specific acceptance remains open.
+- [ ] Add a read-only SQL Server server-settings browser with bounded reads and
       permission-aware states.
 - [ ] Add login, user, role, permission, grant, and ownership editors with
       audited preview/apply paths.

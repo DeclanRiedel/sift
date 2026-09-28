@@ -14,6 +14,7 @@ pub(super) enum DatabaseMonitorView {
     Alerts,
     Settings,
     QueryStore,
+    AgentJobs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,9 @@ pub(super) struct DatabaseMonitorState {
     settings_next_offset: Option<u32>,
     query_store: Option<sift_protocol::QueryStoreReport>,
     query_store_request: RequestState,
+    agent_jobs: Option<sift_protocol::AgentJobsReport>,
+    agent_jobs_request: RequestState,
+    agent_jobs_selected: usize,
 }
 
 impl DatabaseMonitorState {
@@ -117,6 +121,65 @@ impl DatabaseMonitorState {
         }
     }
 
+    pub(super) fn agent_jobs(&self) -> Option<&sift_protocol::AgentJobsReport> {
+        self.agent_jobs.as_ref()
+    }
+
+    pub(super) fn agent_jobs_request(&self) -> &RequestState {
+        &self.agent_jobs_request
+    }
+
+    pub(super) fn agent_jobs_selected(&self) -> usize {
+        self.agent_jobs_selected
+    }
+
+    pub(super) fn move_agent_jobs_selection(&mut self, key: &str) {
+        let count = self
+            .agent_jobs
+            .as_ref()
+            .map_or(0, |report| report.jobs.len());
+        if count == 0 {
+            return;
+        }
+        self.agent_jobs_selected = match key {
+            "j" => (self.agent_jobs_selected + 1).min(count - 1),
+            "k" => self.agent_jobs_selected.saturating_sub(1),
+            "g" => 0,
+            "G" => count - 1,
+            _ => self.agent_jobs_selected,
+        };
+    }
+
+    pub(super) fn start_agent_jobs(&mut self) {
+        self.agent_jobs = None;
+        self.agent_jobs_request.start();
+    }
+
+    pub(super) fn clear_agent_jobs(&mut self) {
+        self.agent_jobs = None;
+        self.agent_jobs_request = RequestState::Idle;
+        self.agent_jobs_selected = 0;
+        if self.view == DatabaseMonitorView::AgentJobs {
+            self.view = DatabaseMonitorView::Activity;
+        }
+    }
+
+    pub(super) fn finish_agent_jobs(
+        &mut self,
+        result: Result<sift_protocol::AgentJobsReport, String>,
+    ) {
+        match result {
+            Ok(report) => {
+                self.agent_jobs_selected = self
+                    .agent_jobs_selected
+                    .min(report.jobs.len().saturating_sub(1));
+                self.agent_jobs = Some(report);
+                self.agent_jobs_request.succeed();
+            }
+            Err(message) => self.agent_jobs_request.fail(message),
+        }
+    }
+
     pub(super) fn selected(&self) -> Option<i64> {
         self.selected
     }
@@ -135,6 +198,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Alerts => !self.alerts.contains_key(&selected),
             DatabaseMonitorView::Settings => true,
             DatabaseMonitorView::QueryStore => true,
+            DatabaseMonitorView::AgentJobs => true,
         }) {
             self.selected = None;
         }
@@ -149,6 +213,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Alerts => self.alerts.keys().copied().collect(),
             DatabaseMonitorView::Settings => return Vec::new(),
             DatabaseMonitorView::QueryStore => return Vec::new(),
+            DatabaseMonitorView::AgentJobs => return Vec::new(),
         };
         self.processes
             .iter()
