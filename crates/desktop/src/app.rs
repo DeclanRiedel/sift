@@ -2676,6 +2676,22 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadServerDashboard => {
+                let result = match context.as_ref() {
+                    Some(opened) => opened
+                        .client
+                        .server_dashboard(opened.session, opened.metadata_connection)
+                        .await
+                        .map_err(|error| format!("loading server overview failed: {error}")),
+                    None => Err("Connect before loading server overview".into()),
+                };
+                if events
+                    .send(ExecutorEvent::ServerDashboardLoaded(result))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadDatabaseProcesses => {
                 let result = match context.as_ref() {
                     Some(opened) => opened

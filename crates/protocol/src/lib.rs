@@ -130,9 +130,10 @@ pub use policy::{
 };
 pub use postgres_settings::{PostgresSetting, PostgresSettingsPage, PostgresSettingsQuery};
 pub use process::{
-    DatabaseDeadlockEvent, DatabaseDeadlockParticipant, DatabaseHeldLock, DatabaseLockWait,
-    DatabaseProcess, KillProcessRequest, KillProcessResponse, ProcessAlert, ProcessAlertKind,
-    ProcessAlertSample,
+    DashboardProcessSummary, DashboardProcesses, DashboardSectionState, DatabaseDeadlockEvent,
+    DatabaseDeadlockParticipant, DatabaseHeldLock, DatabaseLockWait, DatabaseProcess,
+    KillProcessRequest, KillProcessResponse, ProcessAlert, ProcessAlertKind, ProcessAlertSample,
+    ServerDashboard,
 };
 pub use provider::*;
 pub use remote::{

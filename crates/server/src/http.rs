@@ -1230,6 +1230,10 @@ pub fn app(state: AppState) -> Router {
             post_with(post_cancel_benchmark, doc("cancelBenchmark", "Cancel a benchmark and retain partial samples")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/dashboard",
+            get_with(read_server_dashboard, doc("readServerDashboard", "Read a bounded database server overview")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/processes",
             get_with(list_processes, doc("listProcesses", "List database processes")),
         )

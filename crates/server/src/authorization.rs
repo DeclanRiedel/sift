@@ -222,6 +222,7 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | CancelProfile
             | BenchmarkQuery
             | CancelBenchmark
+            | ReadServerDashboard
             | ListProcesses
             | ListDeadlocks
             | ListPostgresSettings

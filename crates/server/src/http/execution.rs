@@ -235,6 +235,109 @@ pub(super) async fn list_processes(
     Ok(Json(processes))
 }
 
+pub(super) async fn read_server_dashboard(
+    State(state): State<AppState>,
+    auth: Option<Extension<AuthContext>>,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+) -> ApiResult<Json<sift_protocol::ServerDashboard>> {
+    use sift_protocol::{
+        DashboardProcesses, DashboardSectionState, OperationCapabilityContext, OperationKind,
+    };
+    let operation = Operation::ReadServerDashboard {
+        session,
+        connection,
+    };
+    let result: ApiResult<sift_protocol::ServerDashboard> = async {
+        let context = OperationCapabilityContext {
+            session: Some(session),
+            connection: Some(connection),
+            ..Default::default()
+        };
+        let authorization = capability_authorization_scope(
+            &state,
+            auth.as_ref().map(|Extension(auth)| auth),
+            &context,
+        )?;
+        let all = crate::capability::evaluate(&state.sessions, &context, authorization.as_ref())?;
+        let dashboard_access = all
+            .iter()
+            .find(|item| item.operation == OperationKind::ReadServerDashboard)
+            .expect("dashboard capability belongs to the operation inventory");
+        if !dashboard_access.available {
+            return Err(ApiError::Forbidden(
+                dashboard_access
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "dashboard access denied".into()),
+            ));
+        }
+        let entry = state.sessions.conn_entry(session, connection)?;
+        let engine = entry.driver.engine();
+        let relevant = [
+            OperationKind::ListProcesses,
+            OperationKind::ListDeadlocks,
+            OperationKind::ListPostgresSettings,
+            OperationKind::ReadQueryStore,
+            OperationKind::ReadAgentJobs,
+            OperationKind::ReadSqlServerSettings,
+        ];
+        let capabilities = all
+            .into_iter()
+            .filter(|item| relevant.contains(&item.operation))
+            .collect::<Vec<_>>();
+        let process_access = capabilities
+            .iter()
+            .find(|item| item.operation == OperationKind::ListProcesses)
+            .expect("process capability belongs to the operation inventory");
+        let processes = if !process_access.available {
+            DashboardProcesses {
+                state: if !entry
+                    .driver
+                    .supports_operation(OperationKind::ListProcesses)
+                {
+                    DashboardSectionState::Unsupported
+                } else {
+                    DashboardSectionState::PermissionDenied
+                },
+                summary: None,
+                reason: process_access.reason.clone(),
+            }
+        } else {
+            match crate::process::list(&state.sessions, session, connection).await {
+                Ok(processes) => DashboardProcesses {
+                    state: DashboardSectionState::Ready,
+                    summary: Some(crate::process::dashboard_summary(&processes)),
+                    reason: None,
+                },
+                Err(ApiError::Forbidden(_))
+                | Err(ApiError::Unauthorized)
+                | Err(ApiError::Driver(sift_protocol::DriverError {
+                    code: sift_protocol::Code::AuthFailed,
+                    ..
+                })) => DashboardProcesses {
+                    state: DashboardSectionState::PermissionDenied,
+                    summary: None,
+                    reason: Some("database monitoring permission denied".into()),
+                },
+                Err(_) => DashboardProcesses {
+                    state: DashboardSectionState::Unavailable,
+                    summary: None,
+                    reason: Some("database monitoring sample unavailable".into()),
+                },
+            }
+        };
+        Ok(sift_protocol::ServerDashboard {
+            sampled_at: chrono::Utc::now(),
+            engine,
+            processes,
+            capabilities,
+        })
+    }
+    .await;
+    let dashboard = finish_operation(&state.sessions, operation, result, |_| None)?;
+    Ok(Json(dashboard))
+}
+
 pub(super) async fn list_deadlocks(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

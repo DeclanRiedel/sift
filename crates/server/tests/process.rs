@@ -2,7 +2,8 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use sift_driver_api::mock::MockDriver;
 use sift_protocol::{
-    ColumnMetadata, DatabaseProcess, Engine, Page, PrimitiveType, Row, ServerInfo, TypeRef, Value,
+    ColumnMetadata, DashboardSectionState, DatabaseProcess, Engine, Page, PrimitiveType, Row,
+    ServerDashboard, ServerInfo, TypeRef, Value,
 };
 use sift_server::http::{app, AppState, AuthState};
 use sift_server::{DriverRegistry, RoomRuntime, SessionStore, Shutdown};
@@ -49,6 +50,7 @@ fn state() -> AppState {
             current_user: "alice".into(),
             pool_warm_slots: None,
         })
+        .execute_ok(process_pages())
         .execute_ok(process_pages())
         .execute_ok(process_pages())
         .execute_ok(vec![
@@ -130,6 +132,34 @@ async fn process_routes_list_and_kill() {
     let processes: Vec<DatabaseProcess> = json(response.into_body()).await;
     assert_eq!(processes[0].process_id, 73);
     assert_eq!(processes[0].blocked_by, vec![41, 42]);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/v1/sessions/{}/connections/{}/dashboard",
+                session.id, connection.id
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("select * from jobs"));
+    let dashboard: ServerDashboard = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(dashboard.processes.state, DashboardSectionState::Ready);
+    let summary = dashboard.processes.summary.unwrap();
+    assert_eq!(
+        (
+            summary.observed,
+            summary.active,
+            summary.waiting,
+            summary.blocked
+        ),
+        (1, 1, 1, 1)
+    );
 
     let invalid = router
         .clone()

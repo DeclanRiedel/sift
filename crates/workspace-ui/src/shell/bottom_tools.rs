@@ -141,6 +141,17 @@ pub(super) fn render_bottom_panel(
                         .items_center()
                         .gap_1()
                         .child(
+                            Button::new("monitor-view-overview", "Overview")
+                                .tone(if view == DatabaseMonitorView::Overview {
+                                    ButtonTone::Neutral
+                                } else {
+                                    ButtonTone::Ghost
+                                })
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.set_database_monitor_view(DatabaseMonitorView::Overview, cx)
+                                })),
+                        )
+                        .child(
                             Button::new("monitor-view-activity", "Activity")
                                 .tone(if view == DatabaseMonitorView::Activity {
                                     ButtonTone::Neutral
@@ -286,7 +297,9 @@ pub(super) fn render_bottom_panel(
                 })),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {
-            if shell.database_monitor.view() == DatabaseMonitorView::History {
+            if shell.database_monitor.view() == DatabaseMonitorView::Overview {
+                render_server_dashboard(shell, cx)
+            } else if shell.database_monitor.view() == DatabaseMonitorView::History {
                 render_database_deadlock_history(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::Settings {
                 render_postgres_settings(shell, cx).into_any_element()
@@ -464,6 +477,7 @@ pub(super) fn render_bottom_panel(
                                     DatabaseMonitorView::Activity => {
                                         "No database activity reported."
                                     }
+                                    DatabaseMonitorView::Overview => unreachable!(),
                                     DatabaseMonitorView::Settings => unreachable!(),
                                     DatabaseMonitorView::QueryStore => unreachable!(),
                                     DatabaseMonitorView::AgentJobs => unreachable!(),
@@ -1055,6 +1069,76 @@ pub(super) fn render_bottom_panel(
                 )
                 .into_any_element()
         })
+        .into_any_element()
+}
+
+fn render_server_dashboard(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let colors = cx.theme().colors;
+    let report = shell.database_monitor.dashboard();
+    div()
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .flex_col()
+        .child(
+            div()
+                .h(px(30.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(SectionLabel::new("SERVER OVERVIEW"))
+                .child(div().flex_1())
+                .child(
+                    Button::new("refresh-server-dashboard", if shell.database_monitor.dashboard_request().loading() { "Loading…" } else { "Refresh" })
+                        .tone(ButtonTone::Ghost)
+                        .disabled(shell.database_monitor.dashboard_request().loading())
+                        .on_click(cx.listener(|shell, _, _, cx| shell.load_server_dashboard(cx))),
+                ),
+        )
+        .children(shell.database_monitor.dashboard_request().error().map(|message| {
+            div().p_2().text_color(colors.danger).child(message.to_string())
+        }))
+        .children(report.map(|report| {
+            let process_text = match &report.processes.summary {
+                Some(summary) => format!(
+                    "Processes sampled: {}{}  ·  Active: {}  ·  Waiting: {}  ·  Blocked: {}  ·  Idle in transaction: {}",
+                    summary.observed,
+                    if summary.incomplete { "+" } else { "" },
+                    summary.active,
+                    summary.waiting,
+                    summary.blocked,
+                    summary.idle_in_transaction,
+                ),
+                None => format!(
+                    "Processes: {}",
+                    report.processes.reason.as_deref().unwrap_or("unavailable")
+                ),
+            };
+            div()
+                .px_3()
+                .py_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(format!("{:?} · sampled {}", report.engine, report.sampled_at.format("%Y-%m-%d %H:%M:%S UTC")))
+                .child(process_text)
+                .children(report.capabilities.iter().map(|capability| {
+                    let label = match capability.operation {
+                        sift_protocol::OperationKind::ListProcesses => "Activity and locks",
+                        sift_protocol::OperationKind::ListDeadlocks => "Deadlock history",
+                        sift_protocol::OperationKind::ListPostgresSettings => "PostgreSQL settings",
+                        sift_protocol::OperationKind::ReadQueryStore => "Query Store",
+                        sift_protocol::OperationKind::ReadAgentJobs => "Agent jobs",
+                        sift_protocol::OperationKind::ReadSqlServerSettings => "SQL Server settings",
+                        _ => "Inspection",
+                    };
+                    div().child(format!("{label}: {}", if capability.available { "available" } else { capability.reason.as_deref().unwrap_or("unavailable") }))
+                }))
+        }))
         .into_any_element()
 }
 

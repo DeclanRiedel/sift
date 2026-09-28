@@ -284,6 +284,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | CancelProfile
         | BenchmarkQuery
         | CancelBenchmark
+        | ReadServerDashboard
         | ListProcesses
         | ListDeadlocks
         | ListPostgresSettings
@@ -343,6 +344,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | CancelProfile
         | BenchmarkQuery
         | CancelBenchmark
+        | ReadServerDashboard
         | ListProcesses
         | ListDeadlocks
         | ListPostgresSettings
