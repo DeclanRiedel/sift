@@ -6525,7 +6525,7 @@ impl ResultsView {
                 .filter(|s| !s.warmup && s.outcome == sift_protocol::BenchmarkOutcome::Success)
                 .count();
             format!(
-                "{} · {measured} measured reads · median {} · mean {} · range {}–{} · deviation {} · p95 {} · p99 {}",
+                "{} · {measured} measured reads · client elapsed median {} · mean {} · range {}–{} · deviation {} · p95 {} · p99 {}",
                 if report.completed {
                     "Complete"
                 } else {
@@ -6575,12 +6575,17 @@ impl ResultsView {
             .children(summary.map(|s| div().text_sm().child(s)))
             .children(comparison.map(|s| div().text_sm().text_color(colors.muted_text).child(s)))
             .children(self.benchmark_report.as_ref().map(|report| div().text_xs().text_color(colors.muted_text).child(report.warnings.join(" · "))))
-            .child(div().text_xs().text_color(colors.muted_text).child("Run · phase · outcome · full drain · first row · rows"))
+            .child(div().text_xs().text_color(colors.muted_text).child("Run · phase · outcome · client elapsed · first row · full consumption · database execution · rows"))
             .child(uniform_list("benchmark-samples", count, cx.processor(|view, range: Range<usize>, _, _| {
-                range.filter_map(|index| view.benchmark_report.as_ref()?.samples.get(index)).map(|sample| {
-                    div().h(px(26.)).text_sm().child(format!("{} · {} · {:?} · {} · {} · {}",
+                range.filter_map(|index| {
+                    let report = view.benchmark_report.as_ref()?;
+                    let sample = report.samples.get(index)?;
+                    let client = sample.client_elapsed_ns.unwrap_or(sample.elapsed_ns);
+                    Some(div().h(px(26.)).text_sm().child(format!("{} · {} · {:?} · {} · {} · {} · {} · {}",
                         sample.ordinal + 1, if sample.warmup { "warm-up" } else { "measured" }, sample.outcome,
-                        benchmark_ms(Some(sample.elapsed_ns as f64)), benchmark_ms(sample.first_row_ns.map(|v| v as f64)), sample.rows.map_or_else(|| "unavailable".into(), |rows| rows.to_string())))
+                        benchmark_ms(Some(client as f64)), benchmark_ms(sample.first_row_ns.map(|v| v as f64)),
+                        benchmark_ms(sample.full_consumption_ns.map(|v| v as f64)), benchmark_ms(sample.database_execution_ns.map(|v| v as f64)),
+                        sample.rows.map_or_else(|| "unavailable".into(), |rows| rows.to_string()))))
                 }).collect::<Vec<_>>()
             })).flex_1().min_h_0())
             .into_any_element()

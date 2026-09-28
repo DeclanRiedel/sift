@@ -20,6 +20,13 @@ library implemented; profiling, definitions and advanced tools remain in progres
 - Missing counters are unavailable, not zero. Planner costs are engine-relative.
   Cache state is unknown unless independently established; reconnect is not cold
   cache. Never clear shared caches or change database settings automatically.
+- Benchmark report version 2 records separate optional nanosecond clocks: native
+  database execution (only when independently observed), server-side client
+  elapsed (before driver.execute through task completion), first row received,
+  and full stream consumption (when Done reaches the server). Legacy elapsed_ns
+  remains the client-elapsed summary and display source when the optional typed
+  alias is absent. Version 1 saved reports decode with new dimensions absent;
+  no old duration is relabelled as database execution.
 - Persist definitions separately from immutable runs. SQL, plans and parameters
   can contain sensitive data: private by default, explicit sharing/redaction,
   secret handles only. Do not store result rows by default.
@@ -30,8 +37,8 @@ library implemented; profiling, definitions and advanced tools remain in progres
 - [x] Pure measurement model: warm-up/measured samples and explicit outcomes.
 - [x] Deterministic summaries excluding warm-ups and unsuccessful samples;
   retain outcome counts and flag insufficient samples for tail percentiles.
-- [ ] Timing dimensions: database execution, client elapsed, first row, full
-  consumption; unavailable dimensions remain optional and separate.
+- [x] Timing dimensions: database execution, server-side client elapsed, first
+  row, full consumption; unavailable dimensions remain optional and separate.
 - [x] Validated serial-run iteration, warm-up, timeout, delay and total budgets.
 - [x] Freeze SQL, parameters and configuration for a serial benchmark.
 - [ ] Full profiling capability matrix and captured environment context.
@@ -119,6 +126,15 @@ library implemented; profiling, definitions and advanced tools remain in progres
 - [ ] Graduate stable cross-layer decisions into docs/DECISIONS.md.
 
 ## Implementation log
+
+- Timing dimensions milestone: report version 2 records server-side client
+  elapsed at task completion, first nonempty row page, and full consumption at
+  the Done page as distinct boundaries. Database execution stays unavailable:
+  no driver exposes a comparable native measurement. Existing elapsed_ns and
+  summary fields remain client-elapsed clocks; version 1 saved reports decode
+  with new dimensions absent. Saved-report validation rejects contradictory
+  version 2 boundaries, and both Performance views label each dimension.
+  Server tests cover success/timeout boundaries and version 1/2 persistence.
 
 - Initial core foundation: `crates/core/src/performance.rs` provides serial-run
   budget validation and single-dimension timing summaries. Four focused tests
