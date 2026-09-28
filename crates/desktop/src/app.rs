@@ -1140,6 +1140,75 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadExtensionContributions {
+                generation,
+                instance_id,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let result = match server.client().await {
+                    Ok(client) => client.extensions().await.map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ExtensionContributionsLoaded { generation, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::InvokeExtensionContribution {
+                generation,
+                instance_id,
+                request,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .invoke_extension(&request)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ExtensionContributionInvoked { generation, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ApproveExtensionContribution {
+                generation,
+                instance_id,
+                approval_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .approve_operation(
+                            &approval_id,
+                            &sift_protocol::ExpectedRevision { expected_revision },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ExtensionContributionApproved { generation, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::IssueApiToken { name, tenant_id } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {

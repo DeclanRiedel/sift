@@ -1,7 +1,8 @@
 //! Host-owned command metadata shared by menus, keybindings, and palette UI.
 //!
 //! Commands stay compile-time Rust values. Extensions may expose governed
-//! server operations, but cannot register desktop commands or render UI.
+//! operations in the fixed host-owned Extensions dialog, but cannot register
+//! desktop command ids or inject UI code.
 
 use std::collections::BTreeMap;
 

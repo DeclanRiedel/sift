@@ -186,6 +186,10 @@ pub struct ActionContribution {
 #[serde(deny_unknown_fields)]
 pub struct GenericContribution {
     pub id: SegmentId,
+    /// For `client_panel`, a read-only command or governed tool whose output
+    /// supplies the panel's data. Other generic contribution kinds ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_action: Option<SegmentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<String>,
     #[serde(default)]
@@ -306,5 +310,22 @@ capabilities = ["driver.core@1"]
     fn unknown_manifest_fields_fail_closed() {
         let invalid = format!("{MANIFEST}\nunknown = true\n");
         assert!(toml::from_str::<ExtensionManifest>(&invalid).is_err());
+    }
+
+    #[test]
+    fn client_panel_can_bind_one_governed_read_source() {
+        let source = r#"[[contributions.client_panel]]
+id = "usage"
+source_action = "read-usage"
+"#;
+        let manifest: ExtensionManifest =
+            toml::from_str(&format!("{MANIFEST}\n{source}")).expect("typed source action parses");
+        assert_eq!(
+            manifest.contributions.client_panel[0]
+                .source_action
+                .as_ref()
+                .map(SegmentId::as_str),
+            Some("read-usage")
+        );
     }
 }

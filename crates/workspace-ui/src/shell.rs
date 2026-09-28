@@ -62,6 +62,7 @@ mod benchmark_library;
 mod database_monitor;
 mod dock_layout;
 mod docks;
+mod extension_contributions;
 mod items;
 mod modal_layout;
 mod modals;
@@ -2221,6 +2222,7 @@ pub enum Modal {
     Keymaps,
     Account,
     ApiTokens,
+    ExtensionContributions,
     ConnectionPolicy,
     TenantUsage,
     VcsDiagnostics,
@@ -3499,6 +3501,21 @@ pub enum ExecutorCommand {
     Disconnect,
     LoadSessions,
     LoadApiTokens,
+    LoadExtensionContributions {
+        generation: u64,
+        instance_id: String,
+    },
+    InvokeExtensionContribution {
+        generation: u64,
+        instance_id: String,
+        request: sift_protocol::InvokeExtensionRequest,
+    },
+    ApproveExtensionContribution {
+        generation: u64,
+        instance_id: String,
+        approval_id: String,
+        expected_revision: u64,
+    },
     IssueApiToken {
         name: String,
         tenant_id: Option<i64>,
@@ -4380,6 +4397,18 @@ pub enum ExecutorEvent {
     Connection(ConnectionStatus),
     SessionsLoaded(Result<Vec<sift_protocol::SessionInfo>, String>),
     ApiTokensLoaded(Result<Vec<sift_api_types::ApiTokenRow>, String>),
+    ExtensionContributionsLoaded {
+        generation: u64,
+        result: Result<Vec<sift_protocol::ExtensionDescriptor>, String>,
+    },
+    ExtensionContributionInvoked {
+        generation: u64,
+        result: Result<sift_protocol::InvokeExtensionOutcome, String>,
+    },
+    ExtensionContributionApproved {
+        generation: u64,
+        result: Result<sift_protocol::OperationApproval, String>,
+    },
     ApiTokenIssued(Result<sift_api_types::IssueTokenResponse, String>),
     ApiTokenRevoked {
         token_id: sift_api_types::ApiTokenId,
@@ -10892,6 +10921,7 @@ pub struct WorkspaceShell {
     api_token_plaintext: Option<String>,
     api_tokens_pending: bool,
     api_tokens_error: Option<String>,
+    extension_contributions: extension_contributions::ExtensionContributionsUi,
     principal_admin_pending: bool,
     principal_admin_error: Option<String>,
     principal_keys: Vec<sift_api_types::PrincipalKey>,
@@ -12240,6 +12270,7 @@ impl WorkspaceShell {
             api_token_plaintext: None,
             api_tokens_pending: false,
             api_tokens_error: None,
+            extension_contributions: extension_contributions::ExtensionContributionsUi::default(),
             principal_admin_pending: false,
             principal_admin_error: None,
             principal_keys: Vec::new(),
@@ -12812,6 +12843,11 @@ impl WorkspaceShell {
             });
         }
         self.presence.apply(PresenceEvent::Left);
+        let generation = self.extension_contributions.generation.saturating_add(1);
+        self.extension_contributions = extension_contributions::ExtensionContributionsUi {
+            generation,
+            ..Default::default()
+        };
         self.modal = None;
         self.app_bar_menu = None;
         self.active_pane = self.active_pane.min(self.panes.len().saturating_sub(1));
@@ -13650,6 +13686,61 @@ impl WorkspaceShell {
                         self.api_tokens_error = None;
                     }
                     Err(message) => self.api_tokens_error = Some(message),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ExtensionContributionsLoaded { generation, result } => {
+                if generation != self.extension_contributions.generation {
+                    return;
+                }
+                self.extension_contributions.loading = false;
+                match result {
+                    Ok(descriptors) => {
+                        self.extension_contributions.descriptors = descriptors;
+                        self.extension_contributions.selected = None;
+                        self.extension_contributions.inputs.clear();
+                        self.extension_contributions.fields.clear();
+                        self.extension_contributions.result = None;
+                        self.extension_contributions.error = None;
+                    }
+                    Err(error) => self.extension_contributions.error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ExtensionContributionInvoked { generation, result } => {
+                if generation != self.extension_contributions.generation {
+                    return;
+                }
+                self.extension_contributions.pending = false;
+                match result {
+                    Ok(sift_protocol::InvokeExtensionOutcome::Completed { result }) => {
+                        self.extension_contributions.result = Some(result);
+                        self.extension_contributions.approval = None;
+                        self.extension_contributions.pending_request = None;
+                        self.extension_contributions.error = None;
+                    }
+                    Ok(sift_protocol::InvokeExtensionOutcome::ApprovalRequired { approval }) => {
+                        self.extension_contributions.approval = Some(approval);
+                    }
+                    Err(error) => {
+                        self.extension_contributions.approval = None;
+                        self.extension_contributions.pending_request = None;
+                        self.extension_contributions.error = Some(error);
+                    }
+                }
+                cx.notify();
+            }
+            ExecutorEvent::ExtensionContributionApproved { generation, result } => {
+                if generation != self.extension_contributions.generation {
+                    return;
+                }
+                self.extension_contributions.pending = false;
+                match result {
+                    Ok(approval) => {
+                        self.extension_contributions.approval = Some(approval);
+                        self.extension_contributions.error = None;
+                    }
+                    Err(error) => self.extension_contributions.error = Some(error),
                 }
                 cx.notify();
             }
@@ -30597,6 +30688,12 @@ impl WorkspaceShell {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.unparse();
+        if self.modal == Some(Modal::ExtensionContributions)
+            && self.handle_extension_contributions_key(event, window, cx)
+        {
+            cx.stop_propagation();
+            return;
+        }
         if self.modal.is_some() && key == "escape" && !event.keystroke.modifiers.modified() {
             self.dismiss_modal(&DismissModal, window, cx);
             cx.stop_propagation();
@@ -44141,6 +44238,102 @@ mod tests {
         assert!(!edge_resize_enabled(true, false));
         assert!(!edge_resize_enabled(false, true));
         assert!(!edge_resize_enabled(true, true));
+    }
+
+    #[gpui::test]
+    fn extension_modal_vim_invocation_stays_bound_to_its_instance(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(128);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("server-a".into());
+            shell.modal = Some(Modal::ExtensionContributions);
+            shell.extension_contributions.descriptors = vec![sift_protocol::ExtensionDescriptor {
+                id: sift_protocol::ExtensionId::new("acme/usage").unwrap(),
+                name: "Usage".into(),
+                version: "1.0.0".into(),
+                archive_sha256: String::new(),
+                manifest_sha256: String::new(),
+                provenance: sift_protocol::ExtensionProvenance::Local,
+                lifecycle: sift_protocol::ExtensionLifecycleState::Ready,
+                isolation: sift_protocol::ExtensionIsolation::ProcessOnly,
+                enabled: true,
+                revision: 1,
+                contributions: vec![sift_protocol::ContributionDescriptor {
+                    id: sift_protocol::ContributionId::new("acme/usage/command/read-usage")
+                        .unwrap(),
+                    kind: "command".into(),
+                    display_name: "Read usage".into(),
+                    active: true,
+                    invocable: true,
+                    required_capabilities: Vec::new(),
+                    operation: Some(sift_protocol::ExtensionActionDescriptor {
+                        action: sift_protocol::SegmentId::new("read-usage").unwrap(),
+                        classification: sift_protocol::OperationClassification::Read,
+                        input_schema: serde_json::json!({"type":"object"}),
+                        output_schema: serde_json::json!({"type":"object"}),
+                        timeout_ms: 1000,
+                        max_result_bytes: 1024,
+                    }),
+                    client: Some(sift_protocol::ClientContributionDescriptor::Command {
+                        title: "Read usage".into(),
+                        action: sift_protocol::SegmentId::new("read-usage").unwrap(),
+                    }),
+                    result: None,
+                    source_contribution_id: None,
+                }],
+            }];
+            let second = shell.extension_contributions.descriptors[0].contributions[0].clone();
+            let mut second = second;
+            second.id = sift_protocol::ContributionId::new("acme/usage/command/second").unwrap();
+            second.display_name = "Second action".into();
+            shell.extension_contributions.descriptors[0]
+                .contributions
+                .push(second);
+            cx.notify();
+        });
+        cx.simulate_keystrokes("j");
+        workspace.update(&mut cx, |shell, _| {
+            shell.extension_contributions.pending = true;
+        });
+        cx.simulate_keystrokes("j");
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(shell.extension_contributions.selected, Some((0, 0)));
+        });
+        workspace.update(&mut cx, |shell, _| {
+            shell.extension_contributions.pending = false;
+        });
+        cx.simulate_keystrokes("enter");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::InvokeExtensionContribution { instance_id, .. })
+                if instance_id == "server-a"
+        ));
+        workspace.update(&mut cx, |shell, _| {
+            shell.extension_contributions.pending = false;
+            shell.extension_contributions.approval = Some(sift_protocol::OperationApproval {
+                id: "approval-1".into(),
+                principal_id: 1,
+                operation_id: "operation-1".into(),
+                input_fingerprint: "fingerprint".into(),
+                expires_at: "2030-01-01T00:00:00Z".into(),
+                approved_at: None,
+                consumed_at: None,
+                revision: 3,
+            });
+        });
+        cx.simulate_keystrokes("a");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ExecutorCommand::ApproveExtensionContribution {
+                instance_id,
+                approval_id,
+                expected_revision: 3,
+                ..
+            }) if instance_id == "server-a" && approval_id == "approval-1"
+        ));
     }
 
     #[gpui::test]

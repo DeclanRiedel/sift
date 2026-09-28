@@ -13,7 +13,7 @@ The Rust wire contract and generated JSON Schema source are in
 
 | Contract | Current version | Compatibility rule |
 | --- | ---: | --- |
-| Public HTTP/WebSocket protocol | 1 | A package range must contain `1`. |
+| Public HTTP/WebSocket protocol | 2 | A package range must contain `2`. |
 | Extension RPC | 1 | The manifest and `hello` range must contain `1`. |
 | Driver method family | 1 | The manifest and negotiated family range must contain `1`. |
 | Manifest | 1 | Unknown fields and any other schema version are rejected. |
@@ -104,6 +104,38 @@ Commands and governed tools pass through central authorization, schema
 validation, classification, timeout/result limits, one-use approvals, and
 operation audit. MCP exposes only descriptors that are both `mcp_exposable`
 and currently authorized.
+
+## Desktop contributions
+
+Settings → Extensions opens a fixed host-owned dialog. Instance-scoped command
+contributions render as buttons when they take no input. Flat object input
+schemas with string, integer, number, or boolean properties render as forms;
+unsupported nested schemas remain unavailable in the desktop. The server
+validates the complete input schema on invocation. Password-format fields are
+masked, and action arguments never enter presentation storage or action labels.
+
+Object outputs render as read-only detail fields; arrays of objects render as
+read-only tables. The desktop caps the dialog at 200 contributions and each
+result at 16 fields, 100 rows, and 256 characters per cell. Other output
+shapes use a bounded generic value display. The server's declared output schema
+and result-byte limit remain authoritative.
+
+A `client_panel` can bind to a read operation by setting `source_action` to the
+id of exactly one command or governed tool in the same package:
+
+```toml
+[[contributions.client_panel]]
+id = "usage"
+source_action = "read-usage"
+```
+
+The source must be instance-scoped, classified `read`, accept an empty object,
+and declare an object or array-of-objects output. The desktop shows a Refresh
+button; it invokes the source through the same audited operation path. Invalid
+or ambiguous bindings remain unavailable. Context targets beyond the instance
+need server scope binding before the desktop can
+render them safely. Extension code cannot add GPUI elements, scripts, styles,
+or layout slots.
 
 ## Operator workflow
 

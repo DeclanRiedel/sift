@@ -4256,6 +4256,8 @@ fn extension_descriptor(
             .map_err(|error| ApiError::Internal(error.to_string()))?;
         let mut operation = None;
         let mut client = None;
+        let mut result = None;
+        let mut source_contribution_id = None;
         let action = if matches!(contribution.kind.as_str(), "command" | "governed_tool") {
             Some(
                 serde_json::from_str::<sift_extension_protocol::ActionContribution>(
@@ -4277,19 +4279,107 @@ fn extension_descriptor(
                 &package.selection.selected_archive_sha256,
                 &action.output_schema,
             )?;
+            result = extension_result_descriptor(&contribution.local_id, &output_schema);
             operation = Some(sift_protocol::ExtensionActionDescriptor {
                 action: action.action.clone(),
                 classification: action.classification,
-                input_schema,
+                input_schema: input_schema.clone(),
                 output_schema,
                 timeout_ms: action.timeout_ms,
                 max_result_bytes: action.max_result_bytes,
             });
-            if contribution.kind == "command" {
-                client = Some(sift_protocol::ClientContributionDescriptor::Command {
-                    title: contribution.local_id.clone(),
-                    action: action.action,
-                });
+            if contribution.kind == "command"
+                && action.required_context.iter().all(|context| {
+                    matches!(
+                        context,
+                        sift_extension_protocol::ContributionContext::Instance
+                    )
+                })
+            {
+                client = Some(
+                    if input_schema.get("properties").is_some_and(|properties| {
+                        properties
+                            .as_object()
+                            .is_some_and(|fields| !fields.is_empty())
+                    }) {
+                        sift_protocol::ClientContributionDescriptor::Form {
+                            title: contribution.local_id.clone(),
+                            action: action.action,
+                            schema: input_schema.clone(),
+                        }
+                    } else {
+                        sift_protocol::ClientContributionDescriptor::Command {
+                            title: contribution.local_id.clone(),
+                            action: action.action,
+                        }
+                    },
+                );
+            }
+        }
+        if contribution.kind == "client_panel" {
+            let panel: sift_extension_protocol::GenericContribution =
+                serde_json::from_str(&contribution.descriptor_json)
+                    .map_err(|error| ApiError::Internal(error.to_string()))?;
+            if let Some(source_action) = panel.source_action.as_ref() {
+                let matches = manifest
+                    .contributions
+                    .command
+                    .iter()
+                    .map(|source| ("command", source))
+                    .chain(
+                        manifest
+                            .contributions
+                            .governed_tool
+                            .iter()
+                            .map(|source| ("governed_tool", source)),
+                    )
+                    .filter(|(_, source)| &source.id == source_action)
+                    .collect::<Vec<_>>();
+                if let [(source_kind, source)] = matches.as_slice() {
+                    if source.classification
+                        == sift_extension_protocol::OperationClassification::Read
+                        && source.required_context.iter().all(|context| {
+                            matches!(
+                                context,
+                                sift_extension_protocol::ContributionContext::Instance
+                            )
+                        })
+                    {
+                        let input = load_package_schema(
+                            registry.as_ref(),
+                            &package.selection.selected_archive_sha256,
+                            &source.input_schema,
+                        )?;
+                        let no_arguments = jsonschema::draft202012::new(&input)
+                            .is_ok_and(|validator| validator.is_valid(&serde_json::json!({})));
+                        if no_arguments {
+                            let output = load_package_schema(
+                                registry.as_ref(),
+                                &package.selection.selected_archive_sha256,
+                                &source.output_schema,
+                            )?;
+                            client = extension_result_descriptor(&contribution.local_id, &output);
+                            result = client.clone();
+                            if client.is_some() {
+                                source_contribution_id = Some(
+                                    sift_protocol::ContributionId::new(format!(
+                                        "{}/{source_kind}/{}",
+                                        manifest.id, source.id
+                                    ))
+                                    .map_err(|error| ApiError::Internal(error.to_string()))?,
+                                );
+                                operation = Some(sift_protocol::ExtensionActionDescriptor {
+                                    action: source.action.clone(),
+                                    classification: source.classification,
+                                    input_schema: input,
+                                    output_schema: output,
+                                    timeout_ms: source.timeout_ms,
+                                    max_result_bytes: source.max_result_bytes,
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
         let invocable_kind = matches!(
@@ -4303,10 +4393,12 @@ fn extension_descriptor(
             active: package.selection.enabled,
             invocable: package.selection.enabled
                 && package.selection.lifecycle == sift_protocol::ExtensionLifecycleState::Ready
-                && invocable_kind,
+                && (invocable_kind || source_contribution_id.is_some()),
             required_capabilities: required_capabilities.clone(),
             operation,
             client,
+            result,
+            source_contribution_id,
         });
     }
     Ok(sift_protocol::ExtensionDescriptor {
@@ -4322,6 +4414,82 @@ fn extension_descriptor(
         revision: package.selection.revision,
         contributions,
     })
+}
+
+fn extension_result_descriptor(
+    title: &str,
+    schema: &serde_json::Value,
+) -> Option<sift_protocol::ClientContributionDescriptor> {
+    let (kind, fields_schema) = match schema.get("type").and_then(serde_json::Value::as_str) {
+        Some("array") => ("table", schema.get("items")?),
+        Some("object") => ("detail", schema),
+        _ => return None,
+    };
+    if fields_schema
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        != Some("object")
+    {
+        return None;
+    }
+    let properties = fields_schema.get("properties")?.as_object()?;
+    if properties.is_empty()
+        || properties.len() > 16
+        || properties
+            .keys()
+            .any(|key| key.is_empty() || key.len() > 128)
+    {
+        return None;
+    }
+    let fields = properties
+        .iter()
+        .map(|(key, value)| sift_protocol::ClientFieldDescriptor {
+            key: key.clone(),
+            label: value
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .filter(|label| !label.is_empty())
+                .unwrap_or(key)
+                .chars()
+                .take(128)
+                .collect(),
+        })
+        .collect();
+    Some(if kind == "table" {
+        sift_protocol::ClientContributionDescriptor::Table {
+            title: title.to_owned(),
+            columns: fields,
+        }
+    } else {
+        sift_protocol::ClientContributionDescriptor::DetailPanel {
+            title: title.to_owned(),
+            fields,
+        }
+    })
+}
+
+#[cfg(test)]
+mod extension_result_descriptor_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_bounded_table_and_detail_results() {
+        let detail = serde_json::json!({"type":"object", "properties": {
+            "count": {"type":"integer", "title":"Count"}
+        }});
+        let table = serde_json::json!({"type":"array", "items":detail});
+        assert!(matches!(
+            extension_result_descriptor("Usage", table.get("items").unwrap()),
+            Some(sift_protocol::ClientContributionDescriptor::DetailPanel { .. })
+        ));
+        assert!(matches!(
+            extension_result_descriptor("Usage", &table),
+            Some(sift_protocol::ClientContributionDescriptor::Table { .. })
+        ));
+        assert!(
+            extension_result_descriptor("Invalid", &serde_json::json!({"type":"string"})).is_none()
+        );
+    }
 }
 
 fn load_package_schema(

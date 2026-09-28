@@ -404,6 +404,16 @@ actions require narrowly bound approval by default. Declarative client panels
 may reference registered operations and typed data but cannot ship arbitrary
 JavaScript or bypass server dispatch.
 
+The first-party desktop renders extension commands, flat scalar forms, and
+read-only panels bound to no-argument, instance-scoped read operations in a
+fixed host-owned Extensions dialog. Action results use bounded read-only table
+or detail descriptors derived from declared output schemas. The renderer has
+no dynamic GPUI entities, scripts, HTML, layout slots, or persisted extension
+result data. All action calls use the audited extension operation endpoint;
+approval-required calls remain bound to the original request. Unsupported
+schemas stay unavailable in the desktop instead of falling back to arbitrary
+rendering.
+
 The extension model reserves contribution identities for later SQL semantic and
 workspace contracts until those services are implemented. A marketplace service,
 mandatory OS sandbox, Wasmtime tooling host, ODBC/JDBC bridges, and arbitrary
