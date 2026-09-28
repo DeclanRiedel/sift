@@ -578,6 +578,15 @@ impl RuntimeDriver {
             return self.semantic_engine() == Some(Engine::Postgres)
                 && self.supports("driver.core@1");
         }
+        if matches!(
+            operation,
+            OperationKind::ListPostgresObjects
+                | OperationKind::PreviewPostgresObject
+                | OperationKind::ApplyPostgresObject
+        ) {
+            return self.semantic_engine() == Some(Engine::Postgres)
+                && self.supports("driver.core@1");
+        }
         let capability = match operation {
             OperationKind::PingConnection
             | OperationKind::ExecuteQuery

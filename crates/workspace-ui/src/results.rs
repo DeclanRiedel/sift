@@ -1281,6 +1281,11 @@ fn flatten_plan(root: &PlanNode) -> Vec<RenderedPlanNode> {
             "Temp Written Blocks",
             "I/O Read Time",
             "I/O Write Time",
+            "ActualLogicalReads",
+            "ActualPhysicalReads",
+            "ActualReadAheads",
+            "ActualLobLogicalReads",
+            "ActualLobPhysicalReads",
         ]
         .into_iter()
         .filter_map(|key| node.extra.get(key).map(|value| format!("{key} {value}")))
@@ -6700,7 +6705,7 @@ impl ResultsView {
                     .disabled(pending).on_click(cx.listener(|view, _, window, cx| view.cycle_benchmark_iterations(&CycleBenchmarkIterations, window, cx))))
                 .child(div().debug_selector(|| "benchmark-run".into()).child(Button::new("benchmark-run", self.benchmark_limits(cx).map_or_else(|_| "[r] Check configuration".into(), |limits| format!("[r] Confirm & run {} reads", limits.iterations + limits.warmups)))
                     .disabled(pending).on_click(cx.listener(|view, _, window, cx| view.run_benchmark(&RunBenchmark, window, cx)))))
-                .child(Button::new("profile-run", "[p] Confirm & profile current read (PostgreSQL)").disabled(pending)
+                .child(Button::new("profile-run", "[p] Confirm & profile current read (PostgreSQL / SQL Server)").disabled(pending)
                     .on_click(cx.listener(|view, _, window, cx| view.run_profile(&RunProfile, window, cx))))
                 .child(Button::new("benchmark-cancel", "[Esc] Cancel active run").disabled(!pending)
                     .on_click(cx.listener(|view, _, window, cx| view.stop_benchmark(&StopBenchmark, window, cx))))
@@ -6715,12 +6720,12 @@ impl ResultsView {
                     div().w(px(145.)).flex().flex_col().gap_1().child(div().text_xs().child(label)).child(input.clone())))))
             .child(div().text_sm().text_color(colors.muted_text).child(
                 "Current statement or selection · warm-ups excluded · full result drain, no retained rows. Total budget may stop a run early. Repeated reads can load production databases and invoke side effects. Use a read-only account. Tab/Shift-Tab navigates settings; Tab after delay returns to run controls. p95 needs 100 successful samples; p99 needs 1,000."))
-            .children(pending.then(|| div().text_sm().child(if self.profile_pending.is_some() { "Profile running on a dedicated read-only connection…" } else { "Benchmark running on a dedicated connection… Results arrive when the run finishes or is cancelled." })))
+            .children(pending.then(|| div().text_sm().child(if self.profile_pending.is_some() { "Profile running on a dedicated connection…" } else { "Benchmark running on a dedicated connection… Results arrive when the run finishes or is cancelled." })))
             .children(self.benchmark_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
             .children(self.profile_error.as_ref().map(|e| div().text_sm().text_color(colors.danger).child(e.clone())))
             .children(self.profile_result.as_ref().map(|profile| div().flex().flex_col().gap_1()
-                .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child("Profile · measured PostgreSQL plan"))
-                .child(div().text_xs().child(format!("PostgreSQL planning {} ms · execution {} ms · Sift plan capture elapsed {} ms · {} plan nodes",
+                .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child(format!("Profile · measured {} plan", profile.plan.engine)))
+                .child(div().text_xs().child(format!("Native planning {} ms · native execution {} ms · Sift plan capture elapsed {} ms · {} plan nodes",
                     profile.planning_ms.map_or_else(|| "unavailable".into(), |ms| format!("{ms:.2}")),
                     profile.execution_ms.map_or_else(|| "unavailable".into(), |ms| format!("{ms:.2}")),
                     profile.server_elapsed_ns as f64 / 1_000_000.0, self.profile_nodes.len())))

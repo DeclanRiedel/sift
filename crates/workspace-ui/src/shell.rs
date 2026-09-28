@@ -3725,6 +3725,18 @@ pub enum ExecutorCommand {
     LoadPostgresSettings {
         offset: u32,
     },
+    LoadPostgresExtensions {
+        offset: u32,
+    },
+    LoadPostgresPartitions {
+        offset: u32,
+    },
+    PreviewPostgresObject {
+        action: sift_protocol::PostgresObjectAction,
+    },
+    ApplyPostgresObject {
+        request: sift_protocol::ApplyPostgresObjectRequest,
+    },
     LoadQueryStore,
     LoadAgentJobs,
     LoadSqlServerSettings,
@@ -4578,6 +4590,16 @@ pub enum ExecutorEvent {
         offset: u32,
         result: Result<sift_protocol::PostgresSettingsPage, String>,
     },
+    PostgresExtensionsLoaded {
+        offset: u32,
+        result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresExtension>, String>,
+    },
+    PostgresPartitionsLoaded {
+        offset: u32,
+        result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPartition>, String>,
+    },
+    PostgresObjectPreviewed(Result<sift_protocol::PostgresObjectPreview, String>),
+    PostgresObjectApplied(Result<(), String>),
     QueryStoreLoaded(Result<sift_protocol::QueryStoreReport, String>),
     AgentJobsLoaded(Result<sift_protocol::AgentJobsReport, String>),
     SqlServerSettingsLoaded(Result<sift_protocol::SqlServerSettingsReport, String>),
@@ -13572,6 +13594,7 @@ impl WorkspaceShell {
             ExecutorEvent::Connection(status) => {
                 self.database_monitor.clear_dashboard();
                 self.database_monitor.clear_query_store();
+                self.database_monitor.clear_objects();
                 self.database_monitor.clear_agent_jobs();
                 self.database_monitor.clear_sqlserver_settings();
                 if self.pg_notifications.profile_id.is_some() {
@@ -16665,6 +16688,26 @@ impl WorkspaceShell {
             }
             ExecutorEvent::PostgresSettingsLoaded { offset, result } => {
                 self.database_monitor.finish_settings_load(offset, result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresExtensionsLoaded { offset, result } => {
+                self.database_monitor.finish_extensions(offset, result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresPartitionsLoaded { offset, result } => {
+                self.database_monitor.finish_partitions(offset, result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresObjectPreviewed(result) => {
+                self.database_monitor.finish_object_preview(result);
+                cx.notify();
+            }
+            ExecutorEvent::PostgresObjectApplied(result) => {
+                let success = result.is_ok();
+                self.database_monitor.finish_object_apply(result);
+                if success {
+                    self.load_postgres_objects(0, cx);
+                }
                 cx.notify();
             }
             ExecutorEvent::QueryStoreLoaded(result) => {
@@ -27127,6 +27170,12 @@ impl WorkspaceShell {
         if view == DatabaseMonitorView::Settings && self.database_monitor.settings().is_empty() {
             self.load_postgres_settings(0, cx);
         }
+        if matches!(
+            view,
+            DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions
+        ) {
+            self.load_postgres_objects(0, cx);
+        }
         if view == DatabaseMonitorView::QueryStore {
             self.load_query_store(cx);
         }
@@ -27275,6 +27324,159 @@ impl WorkspaceShell {
                 .fail_settings_load("Database executor is unavailable");
         }
         cx.notify();
+    }
+
+    fn load_postgres_objects(&mut self, offset: u32, cx: &mut Context<Self>) {
+        if self.database_monitor.objects_request().loading() {
+            return;
+        }
+        let command = match self.database_monitor.view() {
+            DatabaseMonitorView::Extensions => ExecutorCommand::LoadPostgresExtensions { offset },
+            DatabaseMonitorView::Partitions => ExecutorCommand::LoadPostgresPartitions { offset },
+            _ => return,
+        };
+        if self
+            .executor_sender
+            .as_ref()
+            .is_some_and(|sender| sender.send(command).is_ok())
+        {
+            self.database_monitor.start_objects_load();
+        } else {
+            self.database_monitor
+                .fail_objects_load("Database executor is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn preview_postgres_object(
+        &mut self,
+        action: sift_protocol::PostgresObjectAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.database_monitor.object_action_request().loading() {
+            return;
+        }
+        if self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::PreviewPostgresObject { action })
+                .is_ok()
+        }) {
+            self.database_monitor.start_object_action();
+        } else {
+            self.database_monitor
+                .fail_object_action("Database executor is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn apply_postgres_object(&mut self, cx: &mut Context<Self>) {
+        if self.database_monitor.object_action_request().loading() {
+            return;
+        }
+        let Some(preview) = self.database_monitor.object_preview().cloned() else {
+            return;
+        };
+        let request = sift_protocol::ApplyPostgresObjectRequest {
+            action: preview.action,
+            precondition: preview.precondition,
+            confirmed: true,
+        };
+        if self.executor_sender.as_ref().is_some_and(|sender| {
+            sender
+                .send(ExecutorCommand::ApplyPostgresObject { request })
+                .is_ok()
+        }) {
+            self.database_monitor.start_object_action();
+        } else {
+            self.database_monitor
+                .fail_object_action("Database executor is unavailable");
+        }
+        cx.notify();
+    }
+
+    fn handle_postgres_objects_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        let offset = self.database_monitor.objects_offset();
+        if self.database_monitor.object_preview().is_some() {
+            match event.keystroke.key.as_str() {
+                "enter" => self.apply_postgres_object(cx),
+                "escape" => {
+                    self.database_monitor.clear_object_preview();
+                    cx.notify();
+                }
+                _ => return,
+            }
+            cx.stop_propagation();
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "j" => {
+                self.database_monitor.move_object_selection(1);
+                cx.notify();
+            }
+            "k" => {
+                self.database_monitor.move_object_selection(-1);
+                cx.notify();
+            }
+            "n" => {
+                if let Some(next) = self.database_monitor.objects_next_offset() {
+                    self.load_postgres_objects(next, cx);
+                }
+            }
+            "p" if offset > 0 => self.load_postgres_objects(offset.saturating_sub(100), cx),
+            "r" => self.load_postgres_objects(offset, cx),
+            "i" if self.database_monitor.view() == DatabaseMonitorView::Extensions => {
+                if let Some(item) = self
+                    .database_monitor
+                    .extensions()
+                    .get(self.database_monitor.objects_selected())
+                {
+                    self.preview_postgres_object(
+                        sift_protocol::PostgresObjectAction::InstallExtension {
+                            name: item.name.clone(),
+                        },
+                        cx,
+                    );
+                }
+            }
+            "d" => {
+                let action = match self.database_monitor.view() {
+                    DatabaseMonitorView::Extensions => self
+                        .database_monitor
+                        .extensions()
+                        .get(self.database_monitor.objects_selected())
+                        .map(|item| sift_protocol::PostgresObjectAction::DropExtension {
+                            name: item.name.clone(),
+                        }),
+                    DatabaseMonitorView::Partitions => self
+                        .database_monitor
+                        .partitions()
+                        .get(self.database_monitor.objects_selected())
+                        .map(
+                            |item| sift_protocol::PostgresObjectAction::DetachPartition {
+                                parent_schema: item.parent_schema.clone(),
+                                parent: item.parent.clone(),
+                                child_schema: item.child_schema.clone(),
+                                child: item.child.clone(),
+                            },
+                        ),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    self.preview_postgres_object(action, cx);
+                }
+            }
+            "escape" => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
     }
 
     fn handle_postgres_settings_key(

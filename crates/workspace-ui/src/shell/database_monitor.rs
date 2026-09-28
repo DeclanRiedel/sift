@@ -14,6 +14,8 @@ pub(super) enum DatabaseMonitorView {
     History,
     Alerts,
     Settings,
+    Extensions,
+    Partitions,
     QueryStore,
     AgentJobs,
     SqlServerSettings,
@@ -51,6 +53,14 @@ pub(super) struct DatabaseMonitorState {
     settings_request: RequestState,
     settings_offset: u32,
     settings_next_offset: Option<u32>,
+    extensions: Vec<sift_protocol::PostgresExtension>,
+    partitions: Vec<sift_protocol::PostgresPartition>,
+    objects_request: RequestState,
+    objects_offset: u32,
+    objects_next_offset: Option<u32>,
+    objects_selected: usize,
+    object_preview: Option<sift_protocol::PostgresObjectPreview>,
+    object_action_request: RequestState,
     query_store: Option<sift_protocol::QueryStoreReport>,
     query_store_request: RequestState,
     agent_jobs: Option<sift_protocol::AgentJobsReport>,
@@ -286,6 +296,18 @@ impl DatabaseMonitorState {
     }
 
     pub(super) fn set_view(&mut self, view: DatabaseMonitorView) {
+        if self.view != view
+            && matches!(
+                view,
+                DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions
+            )
+        {
+            self.objects_request = RequestState::default();
+            self.objects_offset = 0;
+            self.objects_next_offset = None;
+            self.objects_selected = 0;
+            self.clear_object_preview();
+        }
         self.view = view;
         if self.selected.is_some_and(|selected| match view {
             DatabaseMonitorView::Overview => true,
@@ -295,6 +317,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::History => true,
             DatabaseMonitorView::Alerts => !self.alerts.contains_key(&selected),
             DatabaseMonitorView::Settings => true,
+            DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions => true,
             DatabaseMonitorView::QueryStore => true,
             DatabaseMonitorView::AgentJobs => true,
             DatabaseMonitorView::SqlServerSettings => true,
@@ -312,6 +335,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::History => return Vec::new(),
             DatabaseMonitorView::Alerts => self.alerts.keys().copied().collect(),
             DatabaseMonitorView::Settings => return Vec::new(),
+            DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions => return Vec::new(),
             DatabaseMonitorView::QueryStore => return Vec::new(),
             DatabaseMonitorView::AgentJobs => return Vec::new(),
             DatabaseMonitorView::SqlServerSettings => return Vec::new(),
@@ -325,6 +349,163 @@ impl DatabaseMonitorState {
 
     pub(super) fn settings(&self) -> &[PostgresSetting] {
         &self.settings
+    }
+
+    pub(super) fn extensions(&self) -> &[sift_protocol::PostgresExtension] {
+        &self.extensions
+    }
+    pub(super) fn partitions(&self) -> &[sift_protocol::PostgresPartition] {
+        &self.partitions
+    }
+    pub(super) fn objects_request(&self) -> &RequestState {
+        &self.objects_request
+    }
+    pub(super) fn object_action_request(&self) -> &RequestState {
+        &self.object_action_request
+    }
+    pub(super) fn objects_offset(&self) -> u32 {
+        self.objects_offset
+    }
+    pub(super) fn objects_next_offset(&self) -> Option<u32> {
+        self.objects_next_offset
+    }
+    pub(super) fn objects_selected(&self) -> usize {
+        self.objects_selected
+    }
+    pub(super) fn object_preview(&self) -> Option<&sift_protocol::PostgresObjectPreview> {
+        self.object_preview.as_ref()
+    }
+    pub(super) fn clear_object_preview(&mut self) {
+        self.object_preview = None;
+        self.object_action_request = RequestState::default();
+    }
+    pub(super) fn move_object_selection(&mut self, delta: isize) {
+        let len = match self.view {
+            DatabaseMonitorView::Extensions => self.extensions.len(),
+            DatabaseMonitorView::Partitions => self.partitions.len(),
+            _ => 0,
+        };
+        if len > 0 {
+            self.objects_selected = self
+                .objects_selected
+                .saturating_add_signed(delta)
+                .min(len - 1);
+        }
+    }
+    pub(super) fn clear_objects(&mut self) {
+        self.extensions.clear();
+        self.partitions.clear();
+        self.objects_request = RequestState::default();
+        self.objects_offset = 0;
+        self.objects_next_offset = None;
+        self.objects_selected = 0;
+        self.clear_object_preview();
+        if matches!(
+            self.view,
+            DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions
+        ) {
+            self.view = DatabaseMonitorView::Activity;
+        }
+    }
+    pub(super) fn start_objects_load(&mut self) {
+        self.objects_request.start();
+        self.clear_object_preview();
+    }
+    pub(super) fn fail_objects_load(&mut self, message: impl Into<String>) {
+        self.objects_request.fail(message);
+    }
+    pub(super) fn finish_extensions(
+        &mut self,
+        offset: u32,
+        result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresExtension>, String>,
+    ) {
+        if self.view != DatabaseMonitorView::Extensions {
+            return;
+        }
+        match result {
+            Ok(page) => {
+                self.extensions = page.items;
+                self.objects_offset = offset;
+                self.objects_next_offset = page.next_offset;
+                self.objects_selected = 0;
+                self.objects_request.succeed();
+            }
+            Err(message) => self.objects_request.fail(message),
+        }
+    }
+    pub(super) fn finish_partitions(
+        &mut self,
+        offset: u32,
+        result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPartition>, String>,
+    ) {
+        if self.view != DatabaseMonitorView::Partitions {
+            return;
+        }
+        match result {
+            Ok(page) => {
+                self.partitions = page.items;
+                self.objects_offset = offset;
+                self.objects_next_offset = page.next_offset;
+                self.objects_selected = 0;
+                self.objects_request.succeed();
+            }
+            Err(message) => self.objects_request.fail(message),
+        }
+    }
+    pub(super) fn start_object_action(&mut self) {
+        self.object_action_request.start();
+    }
+    pub(super) fn fail_object_action(&mut self, message: impl Into<String>) {
+        self.object_action_request.fail(message);
+    }
+    pub(super) fn finish_object_preview(
+        &mut self,
+        result: Result<sift_protocol::PostgresObjectPreview, String>,
+    ) {
+        if !self.object_action_request.loading() {
+            return;
+        }
+        if !matches!(
+            self.view,
+            DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions
+        ) {
+            return;
+        }
+        if let Ok(preview) = &result {
+            let matches_view = matches!(
+                (self.view, &preview.action),
+                (
+                    DatabaseMonitorView::Extensions,
+                    sift_protocol::PostgresObjectAction::InstallExtension { .. }
+                        | sift_protocol::PostgresObjectAction::DropExtension { .. }
+                ) | (
+                    DatabaseMonitorView::Partitions,
+                    sift_protocol::PostgresObjectAction::DetachPartition { .. }
+                )
+            );
+            if !matches_view {
+                return;
+            }
+        }
+        match result {
+            Ok(preview) => {
+                self.object_preview = Some(preview);
+                self.object_action_request.succeed();
+            }
+            Err(message) => self.object_action_request.fail(message),
+        }
+    }
+    pub(super) fn finish_object_apply(&mut self, result: Result<(), String>) {
+        if !self.object_action_request.loading() {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                self.object_preview = None;
+                self.object_action_request.succeed();
+            }
+            Err(message) => self.object_action_request.fail(message),
+        }
     }
 
     pub(super) fn clear_settings(&mut self) {

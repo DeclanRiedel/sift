@@ -88,8 +88,8 @@ pub struct ExplainResponse {
     pub warnings: Vec<DriverWarning>,
 }
 
-/// One PostgreSQL read-only, instrumented execution. Timings are separate
-/// populations: native PostgreSQL plan clocks and server-observed elapsed.
+/// One instrumented read execution on PostgreSQL or SQL Server. Native plan
+/// clocks and Sift-observed elapsed are separate timing populations.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProfileRequest {
     pub connection: ConnectionId,

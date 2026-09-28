@@ -39,6 +39,12 @@ pub(super) fn render_bottom_panel(
         )
         .when(
             shell.active_bottom_tool == BottomTool::Monitor
+                && matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions),
+            |dock| dock.key_context("SiftPostgresObjects")
+                .on_key_down(cx.listener(WorkspaceShell::handle_postgres_objects_key)),
+        )
+        .when(
+            shell.active_bottom_tool == BottomTool::Monitor
                 && shell.database_monitor.view() == DatabaseMonitorView::AgentJobs,
             |dock| {
                 dock.key_context("SiftAgentJobs")
@@ -294,6 +300,18 @@ pub(super) fn render_bottom_panel(
                                     )
                                 })),
                         )
+                        .child(
+                            Button::new("monitor-view-extensions", "Extensions")
+                                .tone(if view == DatabaseMonitorView::Extensions { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
+                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Extensions, cx))),
+                        )
+                        .child(
+                            Button::new("monitor-view-partitions", "Partitions")
+                                .tone(if view == DatabaseMonitorView::Partitions { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                                .disabled(shell.active_connection_provider_id().is_none_or(|provider| provider.as_str() != "sift/postgres"))
+                                .on_click(cx.listener(|shell, _, _, cx| shell.set_database_monitor_view(DatabaseMonitorView::Partitions, cx))),
+                        )
                 })),
         )
         .child(if shell.active_bottom_tool == BottomTool::Monitor {
@@ -303,6 +321,8 @@ pub(super) fn render_bottom_panel(
                 render_database_deadlock_history(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::Settings {
                 render_postgres_settings(shell, cx).into_any_element()
+            } else if matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions) {
+                render_postgres_objects(shell, cx).into_any_element()
             } else if shell.database_monitor.view() == DatabaseMonitorView::QueryStore {
                 render_query_store(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::AgentJobs {
@@ -479,6 +499,7 @@ pub(super) fn render_bottom_panel(
                                     }
                                     DatabaseMonitorView::Overview => unreachable!(),
                                     DatabaseMonitorView::Settings => unreachable!(),
+                                    DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions => unreachable!(),
                                     DatabaseMonitorView::QueryStore => unreachable!(),
                                     DatabaseMonitorView::AgentJobs => unreachable!(),
                                     DatabaseMonitorView::SqlServerSettings => unreachable!(),
@@ -1622,6 +1643,178 @@ fn render_postgres_settings(
                 )
             },
         )
+}
+
+fn render_postgres_objects(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> impl IntoElement {
+    let colors = cx.theme().colors;
+    let state = &shell.database_monitor;
+    let extensions = state.view() == DatabaseMonitorView::Extensions;
+    let offset = state.objects_offset();
+    let next = state.objects_next_offset();
+    let selected = state.objects_selected();
+    let rows = if extensions {
+        state
+            .extensions()
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "{} · installed {} · available {}{}",
+                        item.name,
+                        item.installed_version.as_deref().unwrap_or("no"),
+                        item.default_version.as_deref().unwrap_or("unknown"),
+                        item.schema
+                            .as_deref()
+                            .map_or_else(String::new, |schema| format!(" · schema {schema}"))
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>()
+    } else {
+        state
+            .partitions()
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(colors.subtle_border)
+                    .bg(if index == selected {
+                        colors.accent_muted
+                    } else {
+                        colors.panel
+                    })
+                    .child(format!(
+                        "{}.{} → {}.{} · {}",
+                        item.parent_schema,
+                        item.parent,
+                        item.child_schema,
+                        item.child,
+                        item.bound.as_deref().unwrap_or("bound unavailable")
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>()
+    };
+    div()
+        .debug_selector(|| "postgres-objects-browser".into())
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .h(px(30.))
+                .child(SectionLabel::new(if extensions {
+                    "POSTGRESQL EXTENSIONS"
+                } else {
+                    "POSTGRESQL PARTITIONS"
+                }))
+                .child(div().text_xs().child(if extensions {
+                    "j/k select · i install · d drop · n/p pages · r refresh"
+                } else {
+                    "j/k select · d detach · n/p pages · r refresh"
+                }))
+                .child(div().flex_1())
+                .child(
+                    Button::new("pg-objects-prev", "Previous")
+                        .tone(ButtonTone::Ghost)
+                        .disabled(offset == 0 || state.objects_request().loading())
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.load_postgres_objects(offset.saturating_sub(100), cx)
+                        })),
+                )
+                .child(
+                    Button::new("pg-objects-next", "Next")
+                        .tone(ButtonTone::Ghost)
+                        .disabled(next.is_none() || state.objects_request().loading())
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            if let Some(next) = next {
+                                shell.load_postgres_objects(next, cx);
+                            }
+                        })),
+                )
+                .child(
+                    Button::new("pg-objects-refresh", "Refresh")
+                        .tone(ButtonTone::Ghost)
+                        .disabled(state.objects_request().loading())
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.load_postgres_objects(offset, cx)
+                        })),
+                ),
+        )
+        .child(
+            div()
+                .id("postgres-objects-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .children(rows),
+        )
+        .children(state.objects_request().error().map(|message| {
+            div()
+                .px_3()
+                .text_color(colors.danger)
+                .child(message.to_string())
+        }))
+        .children(state.object_action_request().error().map(|message| {
+            div()
+                .px_3()
+                .text_color(colors.danger)
+                .child(message.to_string())
+        }))
+        .children(state.object_preview().map(|preview| {
+            div()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(colors.warning)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("REVIEW POSTGRESQL CHANGE"),
+                )
+                .child(div().font_family("monospace").child(preview.sql.clone()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.warning)
+                        .child(preview.warning.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .child("Enter applies exactly this preview · Esc cancels"),
+                )
+                .child(
+                    Button::new("pg-objects-apply", "Apply reviewed change")
+                        .disabled(state.object_action_request().loading())
+                        .on_click(cx.listener(|shell, _, _, cx| shell.apply_postgres_object(cx))),
+                )
+        }))
 }
 
 #[derive(Clone)]

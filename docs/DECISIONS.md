@@ -2463,7 +2463,27 @@ before sending a normal audited execution request. Existing target tables use
 their actual column types. For a new table, skip and quarantine ingestion casts
 against the same explicit types used in CREATE TABLE. Durable resume remains
 incompatible with explicit type mappings and table creation.
-## ADR-063 — A Connection Dashboard Is A Bounded Read-Only Snapshot
+
+## ADR-063 — PostgreSQL object administration uses typed preview and apply
+
+Status: accepted. Date: 2026-09-29.
+
+Database extensions are PostgreSQL objects, separate from Sift extension
+packages. The first workbench slice reads bounded catalogs through existing
+supervised driver execution. A typed action generates exact quoted SQL on the
+server; the preview includes a digest of the observed catalog state. Apply
+requires confirmation and repeats authorization and catalog inspection before
+running that SQL through the supervised query path. The digest detects ordinary
+stale previews but is not a database lock; PostgreSQL remains the final owner,
+permission, and dependency authority. Managed schema-restricted profiles are
+denied this cross-schema workbench, and read-only profiles cannot apply. Each
+read, preview, and apply has its own audited Operation. Partition attach,
+extension update, dependency graph previews, and atomic cross-object plans
+require separate designs.
+
+## ADR-064 — A Connection Dashboard Is A Bounded Read-Only Snapshot
+
+Status: accepted. Date: 2026-09-29.
 
 The database server dashboard is a per-connection inspection surface. Its
 server-owned response contains a sample time, engine, a bounded process-count
@@ -2475,8 +2495,8 @@ process section as unsupported while still returning its connection and
 capability state.
 
 `ReadServerDashboard` is a distinct audited read operation. The handler checks
-connection ownership and effective authorization before sampling. A missing
-database monitoring privilege produces a section-level permission state, so
+connection ownership and effective authorization before sampling. Database
+monitoring permission failures produce a section-level permission state, so
 the rest of the dashboard remains usable. Driver calls retain the existing
 execution timeout and cancellation boundary. No `Driver` trait method is
 added. The desktop opens the Overview tab through a Vim-accessible command

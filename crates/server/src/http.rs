@@ -1215,11 +1215,11 @@ pub fn app(state: AppState) -> Router {
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/profile",
-            post_with(post_profile, doc("profileQuery", "Capture a bounded PostgreSQL read-only actual plan")),
+            post_with(post_profile, doc("profileQuery", "Capture a bounded PostgreSQL or SQL Server actual plan")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/profile/:run_id/cancel",
-            post_with(post_cancel_profile, doc("cancelProfile", "Cancel an active PostgreSQL Profile run")),
+            post_with(post_cancel_profile, doc("cancelProfile", "Cancel an active Profile run")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/benchmark",
@@ -1244,6 +1244,22 @@ pub fn app(state: AppState) -> Router {
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/settings/postgres",
             get_with(list_postgres_settings, doc("listPostgresSettings", "Browse PostgreSQL server settings")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/extensions",
+            get_with(list_postgres_extensions, doc("listPostgresExtensions", "Browse PostgreSQL database extensions")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/partitions",
+            get_with(list_postgres_partitions, doc("listPostgresPartitions", "Browse PostgreSQL partitions")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/objects/preview",
+            post_with(preview_postgres_object, doc("previewPostgresObject", "Preview a guarded PostgreSQL object change")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/objects/apply",
+            post_with(apply_postgres_object, doc("applyPostgresObject", "Apply a confirmed PostgreSQL object change")),
         )
         .api_route(
             "/v1/sessions/:id/connections/:conn_id/query-store",
