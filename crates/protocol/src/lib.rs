@@ -39,6 +39,7 @@ pub mod plan;
 pub use performance::*;
 pub mod policy;
 pub mod postgres_settings;
+pub mod postgres_workbench;
 pub mod process;
 pub mod query_store;
 pub use query_store::{QueryStorePlan, QueryStoreReport, QueryStoreState};
@@ -126,6 +127,10 @@ pub use policy::{
     TenantUsageSnapshot, UpdateConnectionPolicyRequest, UpdateTenantLimitsRequest,
 };
 pub use postgres_settings::{PostgresSetting, PostgresSettingsPage, PostgresSettingsQuery};
+pub use postgres_workbench::{
+    ApplyPostgresObjectRequest, PostgresExtension, PostgresObjectAction, PostgresObjectPage,
+    PostgresObjectPageQuery, PostgresObjectPreview, PostgresPartition,
+};
 pub use process::{
     DatabaseDeadlockEvent, DatabaseDeadlockParticipant, DatabaseHeldLock, DatabaseLockWait,
     DatabaseProcess, KillProcessRequest, KillProcessResponse, ProcessAlert, ProcessAlertKind,
