@@ -1234,6 +1234,10 @@ pub fn app(state: AppState) -> Router {
             get_with(list_postgres_settings, doc("listPostgresSettings", "Browse PostgreSQL server settings")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/query-store",
+            get_with(read_query_store, doc("readQueryStore", "Inspect the current SQL Server database's Query Store")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/processes/kill",
             post_with(kill_process, doc("killProcess", "Terminate a database process")),
         )

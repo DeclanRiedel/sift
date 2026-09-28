@@ -593,6 +593,10 @@ pub enum Operation {
         offset: u32,
         limit: u32,
     },
+    ReadQueryStore {
+        session: SessionId,
+        connection: ConnectionId,
+    },
     KillProcess {
         session: SessionId,
         connection: ConnectionId,
@@ -829,6 +833,7 @@ impl Operation {
             Self::ListProcesses { .. } => OperationKind::ListProcesses,
             Self::ListDeadlocks { .. } => OperationKind::ListDeadlocks,
             Self::ListPostgresSettings { .. } => OperationKind::ListPostgresSettings,
+            Self::ReadQueryStore { .. } => OperationKind::ReadQueryStore,
             Self::KillProcess { .. } => OperationKind::KillProcess,
             Self::ImportCsv { .. } => OperationKind::ImportCsv,
             Self::BulkInsert { .. } => OperationKind::BulkInsert,
@@ -1261,6 +1266,9 @@ impl Operation {
             }
             Operation::ListPostgresSettings { connection, .. } => {
                 summary("list", "postgres_setting", Some(connection.0 as i64))
+            }
+            Operation::ReadQueryStore { connection, .. } => {
+                summary("read", "query_store", Some(connection.0 as i64))
             }
             Operation::KillProcess { request, .. } => {
                 summary("kill", "process", Some(request.process_id))

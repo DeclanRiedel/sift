@@ -13,6 +13,7 @@ pub(super) enum DatabaseMonitorView {
     History,
     Alerts,
     Settings,
+    QueryStore,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,8 @@ pub(super) struct DatabaseMonitorState {
     settings_request: RequestState,
     settings_offset: u32,
     settings_next_offset: Option<u32>,
+    query_store: Option<sift_protocol::QueryStoreReport>,
+    query_store_request: RequestState,
 }
 
 impl DatabaseMonitorState {
@@ -80,6 +83,40 @@ impl DatabaseMonitorState {
         }
     }
 
+    pub(super) fn query_store(&self) -> Option<&sift_protocol::QueryStoreReport> {
+        self.query_store.as_ref()
+    }
+
+    pub(super) fn query_store_request(&self) -> &RequestState {
+        &self.query_store_request
+    }
+
+    pub(super) fn start_query_store(&mut self) {
+        self.query_store = None;
+        self.query_store_request.start();
+    }
+
+    pub(super) fn clear_query_store(&mut self) {
+        self.query_store = None;
+        self.query_store_request = RequestState::Idle;
+        if self.view == DatabaseMonitorView::QueryStore {
+            self.view = DatabaseMonitorView::Activity;
+        }
+    }
+
+    pub(super) fn finish_query_store(
+        &mut self,
+        result: Result<sift_protocol::QueryStoreReport, String>,
+    ) {
+        match result {
+            Ok(report) => {
+                self.query_store = Some(report);
+                self.query_store_request.succeed();
+            }
+            Err(message) => self.query_store_request.fail(message),
+        }
+    }
+
     pub(super) fn selected(&self) -> Option<i64> {
         self.selected
     }
@@ -97,6 +134,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::History => true,
             DatabaseMonitorView::Alerts => !self.alerts.contains_key(&selected),
             DatabaseMonitorView::Settings => true,
+            DatabaseMonitorView::QueryStore => true,
         }) {
             self.selected = None;
         }
@@ -110,6 +148,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::History => return Vec::new(),
             DatabaseMonitorView::Alerts => self.alerts.keys().copied().collect(),
             DatabaseMonitorView::Settings => return Vec::new(),
+            DatabaseMonitorView::QueryStore => return Vec::new(),
         };
         self.processes
             .iter()
@@ -350,6 +389,30 @@ mod tests {
         monitor.toggle(1);
         monitor.finish_loading(Ok(vec![process(1, vec![]), process(2, vec![])]));
         assert_eq!(monitor.selected(), None);
+    }
+
+    #[test]
+    fn query_store_report_is_cleared_on_connection_change() {
+        let mut monitor = DatabaseMonitorState::default();
+        monitor.start_query_store();
+        assert!(monitor.query_store_request().loading());
+        monitor.finish_query_store(Ok(sift_protocol::QueryStoreReport {
+            database: "app".into(),
+            state: sift_protocol::QueryStoreState::ReadWrite,
+            plans: vec![sift_protocol::QueryStorePlan {
+                query_id: 1,
+                plan_id: 2,
+                sql_text: "SELECT secret".into(),
+                executions: 1,
+                average_duration_ms: 1.0,
+                last_execution_at: None,
+            }],
+            truncated: false,
+        }));
+        assert!(monitor.query_store().is_some());
+        monitor.clear_query_store();
+        assert!(monitor.query_store().is_none());
+        assert!(!monitor.query_store_request().loading());
     }
 
     #[test]

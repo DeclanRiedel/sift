@@ -351,7 +351,7 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [ ] PostgreSQL replication and statistics UI
 - [x] PostgreSQL settings browser (read-only, bounded paging, role-visible
       `pg_settings`, sensitive-value redaction, audited API and Vim desktop view)
-- [ ] SQL Server Query Store
+- [x] SQL Server Query Store (read-only, bounded database-state and plan inspection)
 - [ ] SQL Server Agent
 - [ ] SQL Server server-settings browser
 - [x] SQLite provider design ([scope and acceptance](sqlite-provider.md))

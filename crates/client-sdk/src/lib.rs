@@ -226,6 +226,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "previewCatalogDiagramMutation",
     "purgeExtension",
     "readSpilledCursorPages",
+    "readQueryStore",
     "ready",
     "refreshAuth",
     "refreshDdlSource",
@@ -1625,6 +1626,17 @@ impl Client {
             urlencoding_replace(&query.filter),
             query.offset,
             query.limit.unwrap_or(100)
+        ))
+        .await
+    }
+
+    pub async fn read_query_store(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<sift_protocol::QueryStoreReport> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/query-store"
         ))
         .await
     }

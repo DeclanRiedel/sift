@@ -223,6 +223,7 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | ListProcesses
             | ListDeadlocks
             | ListPostgresSettings
+            | ReadQueryStore
             | KillProcess
             | ImportCsv
             | BulkInsert
@@ -299,6 +300,20 @@ mod tests {
         assert_eq!(
             authorize(&scope, OperationKind::ExecuteQuery),
             Err(AuthorizationDenial::RoomEditorRequired)
+        );
+    }
+
+    #[test]
+    fn query_store_read_obeys_connection_policy() {
+        let policy = ConnectionPolicy {
+            minimum_tenant_role: TenantRole::Member,
+            blocked_ops: vec![OperationKind::ReadQueryStore],
+            ..ConnectionPolicy::default()
+        };
+        let scope = member_scope(policy);
+        assert_eq!(
+            authorize(&scope, OperationKind::ReadQueryStore),
+            Err(AuthorizationDenial::OperationBlocked)
         );
     }
 

@@ -10,6 +10,10 @@ pub(super) fn render_bottom_panel(
     debug_assert_eq!(dock.id, DockId::Bottom);
     let theme = cx.theme();
     let colors = theme.colors;
+    let query_store_available =
+        matches!(shell.connection_status, ConnectionStatus::Connected { .. })
+            && shell.active_connection_provider_id()
+                == Some(&sift_protocol::Engine::SqlServer.provider_id());
     let body = match shell.active_bottom_tool {
         BottomTool::Console => Some("Press <leader> q n to open a query tab.".to_owned()),
         BottomTool::Monitor => None,
@@ -198,6 +202,21 @@ pub(super) fn render_bottom_panel(
                             )),
                         )
                         .child(
+                            Button::new("monitor-view-query-store", "Query Store")
+                                .disabled(!query_store_available)
+                                .tone(if view == DatabaseMonitorView::QueryStore {
+                                    ButtonTone::Neutral
+                                } else {
+                                    ButtonTone::Ghost
+                                })
+                                .on_click(cx.listener(|shell, _, _, cx| {
+                                    shell.set_database_monitor_view(
+                                        DatabaseMonitorView::QueryStore,
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(
                             Button::new("monitor-view-settings", "Settings")
                                 .tone(if view == DatabaseMonitorView::Settings {
                                     ButtonTone::Neutral
@@ -225,6 +244,8 @@ pub(super) fn render_bottom_panel(
                 render_database_deadlock_history(shell, cx)
             } else if shell.database_monitor.view() == DatabaseMonitorView::Settings {
                 render_postgres_settings(shell, cx).into_any_element()
+            } else if shell.database_monitor.view() == DatabaseMonitorView::QueryStore {
+                render_query_store(shell, cx)
             } else {
                 let transaction =
                     shell.transaction_state.transaction().map(|transaction| {
@@ -394,6 +415,7 @@ pub(super) fn render_bottom_panel(
                                         "No database activity reported."
                                     }
                                     DatabaseMonitorView::Settings => unreachable!(),
+                                    DatabaseMonitorView::QueryStore => unreachable!(),
                                 },
                             ))
                         },
@@ -981,6 +1003,84 @@ pub(super) fn render_bottom_panel(
                 )
                 .into_any_element()
         })
+        .into_any_element()
+}
+
+fn render_query_store(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let colors = cx.theme().colors;
+    let report = shell.database_monitor.query_store();
+    let state = report.map(|report| match report.state {
+        sift_protocol::QueryStoreState::ReadWrite => "Read/write",
+        sift_protocol::QueryStoreState::ReadOnly => "Read-only",
+        sift_protocol::QueryStoreState::ReadCaptureSecondary => "Secondary capture",
+        sift_protocol::QueryStoreState::Off => "Off",
+        sift_protocol::QueryStoreState::Error => "Error",
+        sift_protocol::QueryStoreState::PermissionRequired => "Permission required",
+    });
+    div()
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .flex_col()
+        .child(
+            div()
+                .h(px(30.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(SectionLabel::new("SQL SERVER QUERY STORE"))
+                .child(div().flex_1())
+                .child(
+                    Button::new(
+                        "refresh-query-store",
+                        if shell.database_monitor.query_store_request().loading() {
+                            "Loading…"
+                        } else {
+                            "Refresh"
+                        },
+                    )
+                    .tone(ButtonTone::Ghost)
+                    .disabled(shell.database_monitor.query_store_request().loading())
+                    .on_click(cx.listener(|shell, _, _, cx| shell.load_query_store(cx))),
+                ),
+        )
+        .children(shell.database_monitor.query_store_request().error().map(|message| {
+            div().p_2().text_color(colors.danger).child(message.to_string())
+        }))
+        .children(report.map(|report| {
+            div()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .child(format!("{} · {} · {} plan{}{}", report.database, state.unwrap_or(""), report.plans.len(), if report.plans.len() == 1 { "" } else { "s" }, if report.truncated { " (first 100 shown)" } else { "" }))
+        }))
+        .when(report.is_some_and(|report| report.state == sift_protocol::QueryStoreState::PermissionRequired), |panel| {
+            panel.child(div().px_3().py_2().text_color(colors.warning).child("Query Store requires VIEW DATABASE STATE, or VIEW DATABASE PERFORMANCE STATE on SQL Server 2022+."))
+        })
+        .when(report.is_some_and(|report| report.state == sift_protocol::QueryStoreState::Off), |panel| {
+            panel.child(div().px_3().py_2().child("Query Store is disabled for this database."))
+        })
+        .child(
+            div()
+                .id("query-store-plan-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .children(report.into_iter().flat_map(|report| report.plans.iter()).map(|plan| {
+                    let last = plan.last_execution_at.as_ref().map(|time| time.to_rfc3339()).unwrap_or_else(|| "Never".into());
+                    div()
+                        .px_3()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(colors.subtle_border)
+                        .child(div().text_xs().child(format!("Query {} · Plan {} · {} executions · {:.3} ms average · Last {}", plan.query_id, plan.plan_id, plan.executions, plan.average_duration_ms, last)))
+                        .child(div().text_xs().whitespace_normal().text_color(colors.muted_text).child(plan.sql_text.clone()))
+                })),
+        )
         .into_any_element()
 }
 

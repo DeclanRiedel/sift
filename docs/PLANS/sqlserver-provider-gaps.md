@@ -38,8 +38,9 @@ current public support boundary.
 - [ ] Finish plan, process-control, and bulk-import desktop workflows currently
       marked partial in the product inventory; retain SQL Server's documented
       abort-and-discard cancellation and savepoint limits.
-- [ ] Add read-only Query Store inspection before designing any plan-forcing
-      action.
+- [x] Add read-only Query Store inspection before designing any plan-forcing
+      action. The audited API and desktop monitor show database state, permission
+      needs, and up to 100 recent plans with bounded SQL text and runtime metrics.
 - [ ] Add SQL Server Agent and server-settings browsers with bounded reads and
       permission-aware states.
 - [ ] Add login, user, role, permission, grant, and ownership editors with
