@@ -339,7 +339,7 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [ ] PostgreSQL extensions and partition management UI
 - [ ] PostgreSQL replication and statistics UI
 - [ ] PostgreSQL settings browser
-- [ ] SQL Server Query Store
+- [x] SQL Server Query Store (read-only, bounded database-state and plan inspection)
 - [ ] SQL Server Agent
 - [ ] SQL Server server-settings browser
 - [x] SQLite provider design ([scope and acceptance](sqlite-provider.md))

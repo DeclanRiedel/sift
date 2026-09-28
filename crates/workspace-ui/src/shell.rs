@@ -3702,6 +3702,7 @@ pub enum ExecutorCommand {
         profile_id: i64,
     },
     LoadDatabaseProcesses,
+    LoadQueryStore,
     LoadRoomMembers {
         room_id: i64,
     },
@@ -4537,6 +4538,7 @@ pub enum ExecutorEvent {
     },
     ProfileDeletionFailed(String),
     DatabaseProcessesLoaded(Result<Vec<sift_protocol::DatabaseProcess>, String>),
+    QueryStoreLoaded(Result<sift_protocol::QueryStoreReport, String>),
     RoomMembersLoaded {
         room_id: i64,
         result: Result<Vec<sift_api_types::RoomMember>, String>,
@@ -13511,6 +13513,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::Connection(status) => {
+                self.database_monitor.clear_query_store();
                 if self.pg_notifications.profile_id.is_some() {
                     self.pg_listener_target_changed(cx);
                 }
@@ -13551,6 +13554,14 @@ impl WorkspaceShell {
                     self.operation_capabilities.clear();
                 }
                 self.connection_status = status.clone();
+                if self.database_monitor.view() == DatabaseMonitorView::QueryStore
+                    && (!matches!(&status, ConnectionStatus::Connected { .. })
+                        || self.active_connection_provider_id()
+                            != Some(&sift_protocol::Engine::SqlServer.provider_id()))
+                {
+                    self.database_monitor
+                        .set_view(DatabaseMonitorView::Activity);
+                }
                 self.pending_relationship_viewers.retain(|item_id| {
                     self.panes
                         .iter()
@@ -16559,6 +16570,10 @@ impl WorkspaceShell {
             }
             ExecutorEvent::DatabaseProcessesLoaded(result) => {
                 self.database_monitor.finish_loading(result);
+                cx.notify();
+            }
+            ExecutorEvent::QueryStoreLoaded(result) => {
+                self.database_monitor.finish_query_store(result);
                 cx.notify();
             }
             ExecutorEvent::CatalogDiagramLoaded(result) => {
@@ -26599,7 +26614,11 @@ impl WorkspaceShell {
             self.bottom_dock.presentation.open = true;
         }
         if tool == BottomTool::Monitor && self.bottom_dock.presentation.open {
-            self.load_database_processes(cx);
+            if self.database_monitor.view() == DatabaseMonitorView::QueryStore {
+                self.load_query_store(cx);
+            } else {
+                self.load_database_processes(cx);
+            }
         }
         if tool == BottomTool::Automations && self.bottom_dock.presentation.open {
             self.request_automations(cx);
@@ -26940,6 +26959,28 @@ impl WorkspaceShell {
 
     fn set_database_monitor_view(&mut self, view: DatabaseMonitorView, cx: &mut Context<Self>) {
         self.database_monitor.set_view(view);
+        if view == DatabaseMonitorView::QueryStore {
+            self.load_query_store(cx);
+        }
+        cx.notify();
+    }
+
+    fn load_query_store(&mut self, cx: &mut Context<Self>) {
+        if self.database_monitor.query_store_request().loading() {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.database_monitor
+                .finish_query_store(Err("Database executor is unavailable".into()));
+            cx.notify();
+            return;
+        };
+        if sender.send(ExecutorCommand::LoadQueryStore).is_ok() {
+            self.database_monitor.start_query_store();
+        } else {
+            self.database_monitor
+                .finish_query_store(Err("Database executor is unavailable".into()));
+        }
         cx.notify();
     }
 

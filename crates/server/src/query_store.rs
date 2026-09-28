@@ -11,7 +11,9 @@ use crate::session::SessionStore;
 const PERMISSION_SQL: &str = "SELECT CONVERT(nvarchar(128), DB_NAME()), CONVERT(bit, CASE WHEN HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'VIEW DATABASE STATE') = 1 OR HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'VIEW DATABASE PERFORMANCE STATE') = 1 THEN 1 ELSE 0 END)";
 const STATE_SQL: &str = "SELECT actual_state_desc FROM sys.database_query_store_options";
 // The +1 row is a sentinel. The server discards it and reports truncation.
-const PLANS_SQL: &str = "SELECT TOP (101) CONVERT(bigint, q.query_id), CONVERT(bigint, p.plan_id), COALESCE(LEFT(CONVERT(nvarchar(max), qt.query_sql_text), 2048), N'[SQL text unavailable]'), COALESCE(s.executions, CONVERT(bigint, 0)), COALESCE(s.average_duration_ms, CONVERT(float, 0)), s.last_execution_time FROM sys.query_store_plan AS p JOIN sys.query_store_query AS q ON q.query_id = p.query_id JOIN sys.query_store_query_text AS qt ON qt.query_text_id = q.query_text_id OUTER APPLY (SELECT CONVERT(bigint, COALESCE(SUM(rs.count_executions), 0)) AS executions, COALESCE(SUM(CONVERT(float, rs.avg_duration) * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0), 0) / 1000.0 AS average_duration_ms, MAX(rs.last_execution_time) AS last_execution_time FROM sys.query_store_runtime_stats AS rs WHERE rs.plan_id = p.plan_id) AS s ORDER BY s.last_execution_time DESC, p.plan_id DESC";
+// Query Store reports avg_duration in microseconds. Only regular executions
+// contribute to the displayed count, duration, and last-execution time.
+const PLANS_SQL: &str = "SELECT TOP (101) CONVERT(bigint, q.query_id), CONVERT(bigint, p.plan_id), COALESCE(LEFT(CONVERT(nvarchar(max), qt.query_sql_text), 2048), N'[SQL text unavailable]'), COALESCE(s.executions, CONVERT(bigint, 0)), COALESCE(s.average_duration_ms, CONVERT(float, 0)), s.last_execution_time FROM sys.query_store_plan AS p JOIN sys.query_store_query AS q ON q.query_id = p.query_id JOIN sys.query_store_query_text AS qt ON qt.query_text_id = q.query_text_id OUTER APPLY (SELECT CONVERT(bigint, COALESCE(SUM(rs.count_executions), 0)) AS executions, COALESCE(SUM(CONVERT(float, rs.avg_duration) * rs.count_executions) / NULLIF(SUM(rs.count_executions), 0), 0) / 1000.0 AS average_duration_ms, MAX(rs.last_execution_time) AS last_execution_time FROM sys.query_store_runtime_stats AS rs WHERE rs.plan_id = p.plan_id AND rs.execution_type = 0) AS s ORDER BY s.last_execution_time DESC, p.plan_id DESC";
 
 pub async fn read(
     store: &SessionStore,
@@ -161,6 +163,7 @@ fn integer_value(value: &Value) -> Option<i64> {
 fn text_value(value: &Value) -> Option<String> {
     match value {
         Value::Text(value) => Some(value.clone()),
+        Value::Native { display_text, .. } => Some(display_text.clone()),
         _ => None,
     }
 }
@@ -200,5 +203,23 @@ mod tests {
         assert_eq!(parse_state("READ_WRITE"), Some(QueryStoreState::ReadWrite));
         assert_eq!(parse_state("OFF"), Some(QueryStoreState::Off));
         assert_eq!(parse_state("future_state"), None);
+    }
+
+    #[test]
+    fn distinguishes_permission_errors_from_catalog_failures() {
+        let denied = ApiError::Driver(
+            DriverError::new(
+                Code::Other {
+                    message: "denied".into(),
+                },
+                "denied",
+            )
+            .with_native_code("229"),
+        );
+        assert!(permission_denied(&denied));
+        let missing_view = ApiError::Driver(
+            DriverError::new(Code::UndefinedObject, "missing").with_native_code("208"),
+        );
+        assert!(!permission_denied(&missing_view));
     }
 }
