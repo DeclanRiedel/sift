@@ -132,7 +132,8 @@ pub use policy::{
 pub use postgres_settings::{PostgresSetting, PostgresSettingsPage, PostgresSettingsQuery};
 pub use postgres_workbench::{
     ApplyPostgresObjectRequest, PostgresExtension, PostgresObjectAction, PostgresObjectPage,
-    PostgresObjectPageQuery, PostgresObjectPreview, PostgresPartition,
+    PostgresObjectPageQuery, PostgresObjectPreview, PostgresOwnedObject, PostgresOwnedObjectKind,
+    PostgresPartition, PostgresRole, PostgresSchemaGrant, PostgresSchemaPrivilege,
 };
 pub use process::{
     DashboardProcessSummary, DashboardProcesses, DashboardSectionState, DatabaseDeadlockEvent,

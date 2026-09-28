@@ -1,9 +1,11 @@
-//! Bounded, role-visible PostgreSQL extension and partition inspection.
+//! Bounded PostgreSQL object and administration inspection with guarded edits.
 use sha2::{Digest, Sha256};
 use sift_protocol::{
     ApplyPostgresObjectRequest, Code, ConnectionId, DriverError, Engine, ExecuteRequestHttp,
     OperationKind, PostgresExtension, PostgresObjectAction, PostgresObjectPage,
-    PostgresObjectPageQuery, PostgresObjectPreview, PostgresPartition, SessionId, Value,
+    PostgresObjectPageQuery, PostgresObjectPreview, PostgresOwnedObject, PostgresOwnedObjectKind,
+    PostgresPartition, PostgresRole, PostgresSchemaGrant, PostgresSchemaPrivilege, SessionId,
+    Value,
 };
 
 use crate::error::{ApiError, ApiResult};
@@ -11,6 +13,81 @@ use crate::session::SessionStore;
 
 const EXTENSIONS_SQL: &str = "SELECT a.name::text, a.installed_version::text, a.default_version::text, n.nspname::text FROM pg_catalog.pg_available_extensions a LEFT JOIN pg_catalog.pg_extension e ON e.extname = a.name LEFT JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace ORDER BY a.name LIMIT $1::bigint OFFSET $2::bigint";
 const PARTITIONS_SQL: &str = "SELECT pn.nspname::text, p.relname::text, cn.nspname::text, c.relname::text, pg_catalog.pg_get_expr(c.relpartbound, c.oid)::text FROM pg_catalog.pg_inherits i JOIN pg_catalog.pg_class p ON p.oid = i.inhparent JOIN pg_catalog.pg_namespace pn ON pn.oid = p.relnamespace JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid JOIN pg_catalog.pg_namespace cn ON cn.oid = c.relnamespace WHERE p.relkind = 'p' AND pg_catalog.has_table_privilege(p.oid, 'SELECT') AND pg_catalog.has_table_privilege(c.oid, 'SELECT') ORDER BY pn.nspname, p.relname, cn.nspname, c.relname LIMIT $1::bigint OFFSET $2::bigint";
+const ROLES_SQL: &str = "SELECT rolname::text, rolcanlogin::text, rolcreaterole::text, rolsuper::text FROM pg_catalog.pg_roles ORDER BY rolname LIMIT $1::bigint OFFSET $2::bigint";
+const OWNERS_SQL: &str = "SELECT kind, name, owner FROM (SELECT 'database'::text AS kind, datname::text AS name, pg_catalog.pg_get_userbyid(datdba)::text AS owner FROM pg_catalog.pg_database WHERE datname = current_database() UNION ALL SELECT 'schema'::text, nspname::text, pg_catalog.pg_get_userbyid(nspowner)::text FROM pg_catalog.pg_namespace WHERE nspname <> 'information_schema' AND nspname NOT LIKE 'pg\\_%' ESCAPE '\\') owned ORDER BY kind, name LIMIT $1::bigint OFFSET $2::bigint";
+const SCHEMA_GRANTS_SQL: &str = "SELECT n.nspname::text, CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(acl.grantee) END::text, acl.privilege_type::text, acl.is_grantable::text FROM pg_catalog.pg_namespace n CROSS JOIN LATERAL pg_catalog.aclexplode(n.nspacl) acl WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\' AND (pg_catalog.has_schema_privilege(n.oid, 'USAGE') OR n.nspowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user)) ORDER BY n.nspname, grantee, acl.privilege_type LIMIT $1::bigint OFFSET $2::bigint";
+
+pub async fn roles(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    query: PostgresObjectPageQuery,
+) -> ApiResult<PostgresObjectPage<PostgresRole>> {
+    let (rows, limit) = read(store, session, connection, query.clone(), ROLES_SQL).await?;
+    page(rows, query.offset, limit, |values| {
+        if values.len() != 4 {
+            return Err(invalid_shape());
+        }
+        Ok(PostgresRole {
+            name: required(&values[0])?,
+            can_login: boolean(&values[1])?,
+            can_create_role: boolean(&values[2])?,
+            superuser: boolean(&values[3])?,
+        })
+    })
+}
+
+pub async fn owners(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    query: PostgresObjectPageQuery,
+) -> ApiResult<PostgresObjectPage<PostgresOwnedObject>> {
+    let (rows, limit) = read(store, session, connection, query.clone(), OWNERS_SQL).await?;
+    page(rows, query.offset, limit, |values| {
+        if values.len() != 3 {
+            return Err(invalid_shape());
+        }
+        let kind = match required(&values[0])?.as_str() {
+            "database" => PostgresOwnedObjectKind::Database,
+            "schema" => PostgresOwnedObjectKind::Schema,
+            _ => return Err(invalid_shape()),
+        };
+        Ok(PostgresOwnedObject {
+            kind,
+            name: required(&values[1])?,
+            owner: required(&values[2])?,
+        })
+    })
+}
+
+pub async fn schema_grants(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    query: PostgresObjectPageQuery,
+) -> ApiResult<PostgresObjectPage<PostgresSchemaGrant>> {
+    let (rows, limit) = read(store, session, connection, query.clone(), SCHEMA_GRANTS_SQL).await?;
+    page(rows, query.offset, limit, |values| {
+        if values.len() != 4 {
+            return Err(invalid_shape());
+        }
+        Ok(PostgresSchemaGrant {
+            schema: required(&values[0])?,
+            grantee: required(&values[1])?,
+            privilege: required(&values[2])?,
+            grantable: boolean(&values[3])?,
+        })
+    })
+}
+
+fn boolean(value: &Value) -> ApiResult<bool> {
+    match value {
+        Value::Text(value) if value == "true" => Ok(true),
+        Value::Text(value) if value == "false" => Ok(false),
+        _ => Err(invalid_shape()),
+    }
+}
 
 pub async fn extensions(
     store: &SessionStore,
@@ -160,6 +237,9 @@ pub async fn preview(
         )
         .into());
     }
+    if is_admin_action(&action) {
+        return admin_preview(store, session, connection, action).await;
+    }
     let (lookup, params, sql, warning) = match &action {
         PostgresObjectAction::InstallExtension { name } => {
             let name = identifier(name)?;
@@ -200,6 +280,7 @@ pub async fn preview(
                     .to_string(),
             )
         }
+        _ => unreachable!("administrative action handled above"),
     };
     let response = store
         .execute_http_as(
@@ -255,6 +336,11 @@ pub async fn apply(
             "A current preview and explicit confirmation are required".into(),
         ));
     }
+    if is_admin_action(&request.action) && !request.production_confirmed {
+        return Err(ApiError::BadRequest(
+            "Administrative changes require explicit production confirmation".into(),
+        ));
+    }
     store.authorize_connection_operation(
         session,
         connection,
@@ -292,6 +378,157 @@ pub async fn apply(
         )
         .await?;
     Ok(())
+}
+
+fn is_admin_action(action: &PostgresObjectAction) -> bool {
+    matches!(
+        action,
+        PostgresObjectAction::CreateRole { .. }
+            | PostgresObjectAction::GrantSchemaPrivilege { .. }
+            | PostgresObjectAction::RevokeSchemaPrivilege { .. }
+            | PostgresObjectAction::ChangeOwner { .. }
+    )
+}
+
+async fn admin_preview(
+    store: &SessionStore,
+    session: SessionId,
+    connection: ConnectionId,
+    action: PostgresObjectAction,
+) -> ApiResult<PostgresObjectPreview> {
+    const ROLE_STATE: &str = "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1::text)::text, COALESCE((SELECT (rolcreaterole OR rolsuper)::text FROM pg_catalog.pg_roles WHERE rolname = current_user), 'false')";
+    const SCHEMA_STATE: &str = "SELECT n.oid::text, COALESCE(n.nspacl::text, ''), (n.nspowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user) OR current_setting('is_superuser') = 'on')::text, EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $2::text)::text FROM pg_catalog.pg_namespace n WHERE n.nspname = $1::text";
+    const OWNER_SCHEMA_STATE: &str = "SELECT n.oid::text, n.nspowner::text, (n.nspowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user) OR current_setting('is_superuser') = 'on')::text, EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $2::text)::text FROM pg_catalog.pg_namespace n WHERE n.nspname = $1::text";
+    const OWNER_DATABASE_STATE: &str = "SELECT d.oid::text, d.datdba::text, (d.datdba = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user) OR current_setting('is_superuser') = 'on')::text, EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $2::text)::text FROM pg_catalog.pg_database d WHERE d.datname = $1::text AND d.datname = current_database()";
+    let (lookup, params, sql, warning, authority_index, existence_index) = match &action {
+        PostgresObjectAction::CreateRole { name } => {
+            let name = identifier(name)?;
+            (
+                ROLE_STATE,
+                vec![Value::Text(name.into())],
+                format!("CREATE ROLE {} NOLOGIN", quote(name)),
+                "Creating a role changes database-wide authorization".to_string(),
+                1,
+                0,
+            )
+        }
+        PostgresObjectAction::GrantSchemaPrivilege {
+            schema,
+            grantee,
+            privilege,
+        }
+        | PostgresObjectAction::RevokeSchemaPrivilege {
+            schema,
+            grantee,
+            privilege,
+        } => {
+            let schema = identifier(schema)?;
+            let grantee = identifier(grantee)?;
+            let verb = if matches!(action, PostgresObjectAction::GrantSchemaPrivilege { .. }) {
+                "GRANT"
+            } else {
+                "REVOKE"
+            };
+            let right = match privilege {
+                PostgresSchemaPrivilege::Usage => "USAGE",
+                PostgresSchemaPrivilege::Create => "CREATE",
+            };
+            let sql = if verb == "GRANT" {
+                format!(
+                    "GRANT {right} ON SCHEMA {} TO {}",
+                    quote(schema),
+                    quote(grantee)
+                )
+            } else {
+                format!(
+                    "REVOKE {right} ON SCHEMA {} FROM {}",
+                    quote(schema),
+                    quote(grantee)
+                )
+            };
+            (
+                SCHEMA_STATE,
+                vec![Value::Text(schema.into()), Value::Text(grantee.into())],
+                sql,
+                "Changing a schema grant changes access for the named role and its members"
+                    .to_string(),
+                2,
+                3,
+            )
+        }
+        PostgresObjectAction::ChangeOwner {
+            object_kind,
+            name,
+            new_owner,
+        } => {
+            let name = identifier(name)?;
+            let new_owner = identifier(new_owner)?;
+            let (catalog, object) = match object_kind {
+                PostgresOwnedObjectKind::Database => (OWNER_DATABASE_STATE, "DATABASE"),
+                PostgresOwnedObjectKind::Schema => (OWNER_SCHEMA_STATE, "SCHEMA"),
+            };
+            (
+                catalog,
+                vec![Value::Text(name.into()), Value::Text(new_owner.into())],
+                format!(
+                    "ALTER {object} {} OWNER TO {}",
+                    quote(name),
+                    quote(new_owner)
+                ),
+                "Changing ownership transfers administrative control of the object".to_string(),
+                2,
+                3,
+            )
+        }
+        _ => unreachable!("only administrative actions reach this function"),
+    };
+    let response = store
+        .execute_http_as(
+            session,
+            ExecuteRequestHttp {
+                connection,
+                sql: lookup.into(),
+                params,
+                tx: None,
+                room_id: None,
+                connection_profile_id: None,
+                transform: None,
+                source: None,
+            },
+            OperationKind::PreviewPostgresObject,
+        )
+        .await?;
+    let state = response
+        .rows
+        .first()
+        .map(|row| &row.values)
+        .ok_or_else(|| {
+            ApiError::BadRequest("PostgreSQL administration object was not found".into())
+        })?;
+    if state.len() <= authority_index || state.len() <= existence_index {
+        return Err(invalid_shape());
+    }
+    if !boolean(&state[authority_index])? {
+        return Err(ApiError::Forbidden(
+            "PostgreSQL role or object ownership is required".into(),
+        ));
+    }
+    let exists = boolean(&state[existence_index])?;
+    if matches!(action, PostgresObjectAction::CreateRole { .. }) == exists {
+        return Err(ApiError::BadRequest(
+            "PostgreSQL role is absent or already exists".into(),
+        ));
+    }
+    let state = serde_json::to_vec(state).map_err(|_| invalid_shape())?;
+    let mut digest = Sha256::new();
+    digest.update(sql.as_bytes());
+    digest.update(&state);
+    Ok(PostgresObjectPreview {
+        action,
+        sql,
+        precondition: format!("{:x}", digest.finalize()),
+        warning,
+    })
 }
 
 fn identifier(input: &str) -> ApiResult<&str> {

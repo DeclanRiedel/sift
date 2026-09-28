@@ -1254,6 +1254,18 @@ pub fn app(state: AppState) -> Router {
             get_with(list_postgres_partitions, doc("listPostgresPartitions", "Browse PostgreSQL partitions")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/roles",
+            get_with(list_postgres_roles, doc("listPostgresRoles", "Browse PostgreSQL roles without secrets")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/owners",
+            get_with(list_postgres_owners, doc("listPostgresOwners", "Browse PostgreSQL database and schema owners")),
+        )
+        .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/schema-grants",
+            get_with(list_postgres_schema_grants, doc("listPostgresSchemaGrants", "Browse explicit PostgreSQL schema grants")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/postgres/objects/preview",
             post_with(preview_postgres_object, doc("previewPostgresObject", "Preview a guarded PostgreSQL object change")),
         )
