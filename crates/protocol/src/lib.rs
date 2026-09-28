@@ -28,6 +28,7 @@ pub mod execution;
 pub mod extension;
 pub mod handshake;
 pub mod integrity;
+pub mod server_settings;
 pub mod sql_server_recovery;
 pub use sql_server_recovery::{RestoreFileMove, SqlServerRecoveryReport, SqlServerRecoveryRequest};
 pub mod maintenance;
@@ -159,6 +160,7 @@ pub use search::{
     SchemaSearchRequest, SchemaSearchResponse, SearchHit, SearchTarget,
 };
 pub use semantic::*;
+pub use server_settings::{SqlServerSetting, SqlServerSettingsReport, SqlServerSettingsState};
 pub use session::{
     Ack, AuditEntry, BeginTransactionRequest, BulkInsertFormat, BulkInsertRequest,
     BulkInsertResponse, CancelRequest, ConnectionId, ConnectionInfo, EndTransactionRequest,

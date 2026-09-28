@@ -60,6 +60,7 @@ pub mod runtime;
 pub mod scheduler;
 pub mod schema_cache;
 pub mod search;
+pub mod server_settings;
 pub mod session;
 pub mod shutdown;
 pub mod sql_policy;

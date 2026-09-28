@@ -86,8 +86,9 @@ inference may remain explicit exclusions. Runtime sequence counters are outside
 schema export. The optional AST-equivalence DDL check is not an acceptance gate.
 
 Keep lock/deadlock tooling, alerts/dashboards, database security editors,
-dump/backup/restore, maintenance, replication, Query Store, SQL Server Agent,
-and engine settings browsers in the product backlog. They are not prerequisites
+dump/backup/restore, maintenance, and replication in the product backlog.
+Read-only Query Store, SQL Server Agent, and engine settings browsers are now
+implemented, with live role-specific acceptance still pending. They are not prerequisites
 for calling the supported query/schema workflows graduated.
 
 ## Recommended next-provider order

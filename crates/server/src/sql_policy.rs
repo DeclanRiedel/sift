@@ -23,7 +23,9 @@ pub fn enforce(
     // They use fixed server-owned SELECTs and are allowed on read-only profiles.
     if matches!(
         operation,
-        OperationKind::ReadQueryStore | OperationKind::ReadAgentJobs
+        OperationKind::ReadQueryStore
+            | OperationKind::ReadAgentJobs
+            | OperationKind::ReadSqlServerSettings
     ) {
         if policy.allowed_schemas.is_some() {
             return Err(ApiError::Forbidden(

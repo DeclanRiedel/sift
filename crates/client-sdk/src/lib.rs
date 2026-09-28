@@ -228,6 +228,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "readSpilledCursorPages",
     "readQueryStore",
     "readAgentJobs",
+    "readSqlServerSettings",
     "ready",
     "refreshAuth",
     "refreshDdlSource",
@@ -1638,6 +1639,17 @@ impl Client {
     ) -> Result<sift_protocol::QueryStoreReport> {
         self.get(&format!(
             "/v1/sessions/{session}/connections/{connection}/query-store"
+        ))
+        .await
+    }
+
+    pub async fn read_sqlserver_settings(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> Result<sift_protocol::SqlServerSettingsReport> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/settings/sqlserver"
         ))
         .await
     }

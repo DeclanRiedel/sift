@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-/// Read-only snapshot of SQL Server Agent jobs visible to the connection's login.
+/// Read-only snapshot of SQL Server Agent jobs. Non-sysadmins see owned jobs only.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentJobsReport {
     pub state: AgentJobsState,
     pub jobs: Vec<AgentJob>,
-    /// True when more than 100 jobs were visible.
+    /// True when more than 100 jobs matched the ownership filter.
     pub truncated: bool,
 }
 

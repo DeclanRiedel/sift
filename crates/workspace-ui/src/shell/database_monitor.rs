@@ -15,6 +15,7 @@ pub(super) enum DatabaseMonitorView {
     Settings,
     QueryStore,
     AgentJobs,
+    SqlServerSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,9 @@ pub(super) struct DatabaseMonitorState {
     agent_jobs: Option<sift_protocol::AgentJobsReport>,
     agent_jobs_request: RequestState,
     agent_jobs_selected: usize,
+    sqlserver_settings: Option<sift_protocol::SqlServerSettingsReport>,
+    sqlserver_settings_request: RequestState,
+    sqlserver_settings_selected: usize,
 }
 
 impl DatabaseMonitorState {
@@ -180,6 +184,65 @@ impl DatabaseMonitorState {
         }
     }
 
+    pub(super) fn sqlserver_settings(&self) -> Option<&sift_protocol::SqlServerSettingsReport> {
+        self.sqlserver_settings.as_ref()
+    }
+
+    pub(super) fn sqlserver_settings_request(&self) -> &RequestState {
+        &self.sqlserver_settings_request
+    }
+
+    pub(super) fn sqlserver_settings_selected(&self) -> usize {
+        self.sqlserver_settings_selected
+    }
+
+    pub(super) fn move_sqlserver_settings_selection(&mut self, key: &str) {
+        let count = self
+            .sqlserver_settings
+            .as_ref()
+            .map_or(0, |report| report.settings.len());
+        if count == 0 {
+            return;
+        }
+        self.sqlserver_settings_selected = match key {
+            "j" => (self.sqlserver_settings_selected + 1).min(count - 1),
+            "k" => self.sqlserver_settings_selected.saturating_sub(1),
+            "g" => 0,
+            "G" => count - 1,
+            _ => self.sqlserver_settings_selected,
+        };
+    }
+
+    pub(super) fn start_sqlserver_settings(&mut self) {
+        self.sqlserver_settings = None;
+        self.sqlserver_settings_request.start();
+    }
+
+    pub(super) fn clear_sqlserver_settings(&mut self) {
+        self.sqlserver_settings = None;
+        self.sqlserver_settings_request = RequestState::Idle;
+        self.sqlserver_settings_selected = 0;
+        if self.view == DatabaseMonitorView::SqlServerSettings {
+            self.view = DatabaseMonitorView::Activity;
+        }
+    }
+
+    pub(super) fn finish_sqlserver_settings(
+        &mut self,
+        result: Result<sift_protocol::SqlServerSettingsReport, String>,
+    ) {
+        match result {
+            Ok(report) => {
+                self.sqlserver_settings_selected = self
+                    .sqlserver_settings_selected
+                    .min(report.settings.len().saturating_sub(1));
+                self.sqlserver_settings = Some(report);
+                self.sqlserver_settings_request.succeed();
+            }
+            Err(message) => self.sqlserver_settings_request.fail(message),
+        }
+    }
+
     pub(super) fn selected(&self) -> Option<i64> {
         self.selected
     }
@@ -199,6 +262,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Settings => true,
             DatabaseMonitorView::QueryStore => true,
             DatabaseMonitorView::AgentJobs => true,
+            DatabaseMonitorView::SqlServerSettings => true,
         }) {
             self.selected = None;
         }
@@ -214,6 +278,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Settings => return Vec::new(),
             DatabaseMonitorView::QueryStore => return Vec::new(),
             DatabaseMonitorView::AgentJobs => return Vec::new(),
+            DatabaseMonitorView::SqlServerSettings => return Vec::new(),
         };
         self.processes
             .iter()
