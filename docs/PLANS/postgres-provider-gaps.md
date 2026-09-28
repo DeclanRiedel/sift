@@ -10,13 +10,16 @@ sources for current support claims.
 ## Native definitions and migrations
 
 - [~] Export partition children and inheritance without losing partition bounds,
-      attachment, indexes, and dependency order; simple partition children now
-      round-trip, while local child indexes/constraints/triggers and nonpartition
-      inheritance remain explicitly unsupported.
+      attachment, indexes, and dependency order; partition children with local
+      indexes, constraints, and triggers now round-trip and are fenced from
+      structural migrations. Single-parent inheritance with local columns and
+      indexes also round-trips; multiple inheritance and full dependency order
+      remain open.
 - [ ] Export foreign-table server/options metadata with permission-aware reads.
 - [~] Represent row-level security policies and rules in native DDL, with
       explicit ownership and grant boundaries. Table export now includes policies,
-      ENABLE/FORCE state, and a migration fence; rules and ownership/grants remain.
+      ENABLE/FORCE state, rewrite rules and their enabled state, plus a migration
+      fence; ownership and grants remain.
 - [ ] Cover custom table storage/options and currently rejected index states.
 - [ ] Export extension definitions and dependencies without treating extension
       member objects as independent creations.

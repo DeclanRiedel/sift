@@ -191,11 +191,19 @@ CREATE TABLE {src}.items (
 CREATE INDEX items_expr ON {src}.items ((lower(label)) DESC) INCLUDE (amount) WHERE amount > 2;
 CREATE TRIGGER changed BEFORE UPDATE ON {src}.items FOR EACH ROW EXECUTE FUNCTION {src}.changed();
 ALTER TABLE {src}.items DISABLE TRIGGER changed;
+CREATE RULE ignore_zero AS ON INSERT TO {src}.items WHERE NEW.amount = 0 DO INSTEAD NOTHING;
+ALTER TABLE {src}.items DISABLE RULE ignore_zero;
 CREATE POLICY visible_items ON {src}.items AS RESTRICTIVE FOR SELECT TO PUBLIC USING (amount > 0);
 ALTER TABLE {src}.items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE {src}.items FORCE ROW LEVEL SECURITY;
 CREATE TABLE {src}.partitioned (id int NOT NULL) PARTITION BY RANGE (id);
 CREATE TABLE {src}.child PARTITION OF {src}.partitioned FOR VALUES FROM (0) TO (10);
+ALTER TABLE {src}.child ADD CONSTRAINT child_positive CHECK (id >= 0);
+CREATE INDEX child_id_desc ON {src}.child (id DESC);
+CREATE TRIGGER child_changed BEFORE UPDATE ON {src}.child FOR EACH ROW EXECUTE FUNCTION {src}.changed();
+CREATE TABLE {src}.inherited_parent (base_id int NOT NULL);
+CREATE TABLE {src}.inherited_child (local_note text) INHERITS ({src}.inherited_parent);
+CREATE INDEX inherited_note_idx ON {src}.inherited_child (local_note);
 CREATE TABLE {src}.policy_only (id integer);
 CREATE POLICY positive_id ON {src}.policy_only FOR SELECT TO PUBLIC USING (id > 0);
 ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
@@ -217,6 +225,7 @@ ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
         "STORED",
         "INCLUDE",
         "DISABLE TRIGGER",
+        "DISABLE RULE",
         "CREATE POLICY visible_items",
         "FORCE ROW LEVEL SECURITY",
     ] {
@@ -234,6 +243,30 @@ ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
     let child = round_trip(&driver, &conn, &src, &dst, "child", ObjectKind::Table).await;
     assert!(child.contains("PARTITION OF"));
     assert!(child.contains("FOR VALUES FROM (0) TO (10)"));
+    assert!(child.contains("child_positive"));
+    assert!(child.contains("child_id_desc"));
+    assert!(child.contains("child_changed"));
+    round_trip(
+        &driver,
+        &conn,
+        &src,
+        &dst,
+        "inherited_parent",
+        ObjectKind::Table,
+    )
+    .await;
+    let inherited = round_trip(
+        &driver,
+        &conn,
+        &src,
+        &dst,
+        "inherited_child",
+        ObjectKind::Table,
+    )
+    .await;
+    assert!(inherited.contains("INHERITS"));
+    assert!(inherited.contains("local_note"));
+    assert!(inherited.contains("inherited_note_idx"));
     round_trip(&driver, &conn, &src, &dst, "policy_only", ObjectKind::Table).await;
     let security_shape = |graph: &sift_protocol::CatalogGraphData| {
         let table = graph
@@ -257,7 +290,53 @@ ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
         },
         filter: None,
     };
-    let before = security_shape(
+    let before_graph = driver
+        .schema(conn.clone(), scope.clone())
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    let before = security_shape(&before_graph);
+    let inherited_node = before_graph
+        .nodes
+        .iter()
+        .find(|node| node.name == "inherited_child")
+        .unwrap();
+    assert_eq!(
+        inherited_node.extra.get("migration_unsupported"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert!(inherited_node
+        .extra
+        .contains_key("native_inheritance_shape"));
+    execute(
+        &driver,
+        &conn,
+        &format!("ALTER POLICY positive_id ON {src}.policy_only USING (id >= 0);"),
+    )
+    .await;
+    let after = security_shape(
+        &driver
+            .schema(conn.clone(), scope.clone())
+            .await
+            .unwrap()
+            .graph
+            .unwrap(),
+    );
+    assert_ne!(before, after);
+    let rule_shape = |graph: &sift_protocol::CatalogGraphData| {
+        let table = graph
+            .nodes
+            .iter()
+            .find(|node| node.name == "items")
+            .unwrap();
+        assert_eq!(
+            table.extra.get("migration_unsupported"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        table.extra.get("native_rule_shape").cloned().unwrap()
+    };
+    let before_rule = rule_shape(
         &driver
             .schema(conn.clone(), scope.clone())
             .await
@@ -268,10 +347,10 @@ ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
     execute(
         &driver,
         &conn,
-        &format!("ALTER POLICY positive_id ON {src}.policy_only USING (id >= 0);"),
+        &format!("ALTER TABLE {src}.items ENABLE RULE ignore_zero;"),
     )
     .await;
-    let after = security_shape(
+    let after_rule = rule_shape(
         &driver
             .schema(conn.clone(), scope)
             .await
@@ -279,7 +358,66 @@ ALTER TABLE {src}.policy_only ENABLE ROW LEVEL SECURITY;
             .graph
             .unwrap(),
     );
-    assert_ne!(before, after);
+    assert_ne!(before_rule, after_rule);
+    let partition_shape = |graph: &sift_protocol::CatalogGraphData| {
+        let child = graph
+            .nodes
+            .iter()
+            .find(|node| node.name == "child")
+            .unwrap();
+        assert_eq!(
+            child.extra.get("migration_unsupported"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        child.extra.get("native_partition_shape").cloned().unwrap()
+    };
+    let before_partition = partition_shape(
+        &driver
+            .schema(
+                conn.clone(),
+                sift_protocol::SchemaScope {
+                    depth: sift_protocol::SchemaDepth::Graph {
+                        options: sift_protocol::CatalogGraphOptions {
+                            schemas: Some(vec![src.clone()]),
+                            include_definitions: true,
+                            ..Default::default()
+                        },
+                    },
+                    filter: None,
+                },
+            )
+            .await
+            .unwrap()
+            .graph
+            .unwrap(),
+    );
+    execute(
+        &driver,
+        &conn,
+        &format!("CREATE INDEX child_id_asc ON {src}.child (id ASC);"),
+    )
+    .await;
+    let after_partition = partition_shape(
+        &driver
+            .schema(
+                conn.clone(),
+                sift_protocol::SchemaScope {
+                    depth: sift_protocol::SchemaDepth::Graph {
+                        options: sift_protocol::CatalogGraphOptions {
+                            schemas: Some(vec![src.clone()]),
+                            include_definitions: true,
+                            ..Default::default()
+                        },
+                    },
+                    filter: None,
+                },
+            )
+            .await
+            .unwrap()
+            .graph
+            .unwrap(),
+    );
+    assert_ne!(before_partition, after_partition);
     let trigger = generate_ddl(
         &driver,
         conn.clone(),
@@ -331,6 +469,9 @@ CREATE TABLE {src}.items (
  CONSTRAINT items_pk PRIMARY KEY NONCLUSTERED (id DESC), CONSTRAINT items_check CHECK (amount > 0));
 CREATE INDEX items_label ON {src}.items (label DESC) INCLUDE (amount) WHERE amount > 2;
 CREATE TABLE {src}.sparse_items (id int NOT NULL, optional_amount int SPARSE NULL);
+CREATE TABLE {src}.compressed_items (id int NOT NULL, payload char(80));
+ALTER TABLE {src}.compressed_items REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX compressed_payload ON {src}.compressed_items (payload) WITH (DATA_COMPRESSION = ROW);
 CREATE TABLE {src}.temporal_items (
  id int NOT NULL CONSTRAINT temporal_pk PRIMARY KEY,
  valid_from datetime2 GENERATED ALWAYS AS ROW START HIDDEN NOT NULL,
@@ -355,6 +496,17 @@ DISABLE TRIGGER {src}.changed ON {src}.items;
     )
     .await;
     assert!(sparse.contains("SPARSE NULL"));
+    let compressed = round_trip(
+        &driver,
+        &conn,
+        &src,
+        &dst,
+        "compressed_items",
+        ObjectKind::Table,
+    )
+    .await;
+    assert!(compressed.contains("DATA_COMPRESSION = PAGE"));
+    assert!(compressed.contains("DATA_COMPRESSION = ROW"));
     let temporal = round_trip(
         &driver,
         &conn,
@@ -416,13 +568,52 @@ DISABLE TRIGGER {src}.changed ON {src}.items;
         .unwrap()
         .graph
         .unwrap();
-    for name in ["temporal_items", "sparse_items"] {
+    for name in ["temporal_items", "sparse_items", "compressed_items"] {
         let table = graph.nodes.iter().find(|node| node.name == name).unwrap();
         assert_eq!(
             table.extra.get("migration_unsupported"),
             Some(&serde_json::Value::Bool(true))
         );
     }
+    let compressed_shape = |graph: &sift_protocol::CatalogGraphData| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.name == "compressed_items")
+            .unwrap()
+            .extra
+            .get("native_column_shape")
+            .cloned()
+            .unwrap()
+    };
+    let before_compression = compressed_shape(&graph);
+    execute(
+        &driver,
+        &conn,
+        &format!("ALTER INDEX compressed_payload ON {src}.compressed_items REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = PAGE);"),
+    )
+    .await;
+    let after_compression = compressed_shape(
+        &driver
+            .schema(
+                conn.clone(),
+                sift_protocol::SchemaScope {
+                    depth: sift_protocol::SchemaDepth::Graph {
+                        options: sift_protocol::CatalogGraphOptions {
+                            schemas: Some(vec![src.clone()]),
+                            include_definitions: true,
+                            ..Default::default()
+                        },
+                    },
+                    filter: None,
+                },
+            )
+            .await
+            .unwrap()
+            .graph
+            .unwrap(),
+    );
+    assert_ne!(before_compression, after_compression);
     execute(&driver, &conn, &format!("CREATE USER {src} WITHOUT LOGIN; GRANT SELECT ON {src}.items TO {src}; EXECUTE AS USER = '{src}';")).await;
     execute(&driver, &conn, &format!("SELECT * FROM {src}.items")).await;
     assert_write_denied(
@@ -439,6 +630,6 @@ DISABLE TRIGGER {src}.changed ON {src}.items;
     .await
     .is_err());
     execute(&driver, &conn, &format!("REVERT; DROP USER {src};")).await;
-    execute(&driver,&conn,&format!("ALTER TABLE {dst}.temporal_items SET (SYSTEM_VERSIONING = OFF); ALTER TABLE {src}.temporal_items SET (SYSTEM_VERSIONING = OFF); DROP TABLE {dst}.temporal_items; DROP TABLE {dst}.temporal_items_history; DROP TABLE {src}.temporal_items; DROP TABLE {src}.temporal_items_history; DROP TABLE {dst}.sparse_items; DROP TABLE {src}.sparse_items; DROP TABLE {dst}.items; DROP TABLE {src}.items; DROP SEQUENCE {dst}.counter; DROP SEQUENCE {src}.counter; DROP TYPE {dst}.label; DROP TYPE {src}.label; DROP SCHEMA {dst}; DROP SCHEMA {src};")).await;
+    execute(&driver,&conn,&format!("ALTER TABLE {dst}.temporal_items SET (SYSTEM_VERSIONING = OFF); ALTER TABLE {src}.temporal_items SET (SYSTEM_VERSIONING = OFF); DROP TABLE {dst}.temporal_items; DROP TABLE {dst}.temporal_items_history; DROP TABLE {src}.temporal_items; DROP TABLE {src}.temporal_items_history; DROP TABLE {dst}.compressed_items; DROP TABLE {src}.compressed_items; DROP TABLE {dst}.sparse_items; DROP TABLE {src}.sparse_items; DROP TABLE {dst}.items; DROP TABLE {src}.items; DROP SEQUENCE {dst}.counter; DROP SEQUENCE {src}.counter; DROP TYPE {dst}.label; DROP TYPE {src}.label; DROP SCHEMA {dst}; DROP SCHEMA {src};")).await;
     driver.close(conn).await.unwrap();
 }

@@ -522,6 +522,102 @@ async fn enrich_graph_identity_and_foreign_keys(
         }
     }
 
+    // Rewrite rules are also outside the portable table model. A definition
+    // or enabled-state change must affect drift detection, and structural
+    // migrations must not silently drop a rule.
+    let rule_rows = conn
+        .query(
+            "SELECT n.nspname,c.relname,md5(string_agg(concat_ws('|',r.rulename,
+            r.ev_enabled::text,pg_get_ruledef(r.oid)), E'\\n' ORDER BY r.rulename))
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+         JOIN pg_rewrite r ON r.ev_class=c.oid AND r.rulename<>'_RETURN'
+         WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p')
+         GROUP BY n.nspname,c.relname",
+            &[&schemas],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in rule_rows {
+        let key = (row.get::<_, String>(0), row.get::<_, String>(1));
+        if let Some(index) = object_nodes.get(&key).and_then(|id| node_indexes.get(id)) {
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+            graph.nodes[*index]
+                .extra
+                .insert("native_rule_shape".into(), row.get::<_, String>(2).into());
+        }
+    }
+
+    // A partition child is attached to a parent and has a native bound. The
+    // portable table projection has neither relationship, so fence structural
+    // migrations and fingerprint child-local objects for drift detection.
+    let partition_rows = conn
+        .query(
+            "SELECT n.nspname,c.relname,md5(concat_ws('|',pn.nspname,parent.relname,
+            pg_get_expr(c.relpartbound,c.oid),pg_get_partkeydef(c.oid),
+            (SELECT string_agg(pg_get_constraintdef(k.oid),'|' ORDER BY k.conname)
+                FROM pg_constraint k WHERE k.conrelid=c.oid),
+            (SELECT string_agg(pg_get_indexdef(i.indexrelid),'|' ORDER BY i.indexrelid)
+                FROM pg_index i WHERE i.indrelid=c.oid),
+            (SELECT string_agg(concat_ws('|',g.tgname,g.tgenabled::text,
+                pg_get_triggerdef(g.oid)),'|' ORDER BY g.tgname)
+                FROM pg_trigger g WHERE g.tgrelid=c.oid AND NOT g.tgisinternal)))
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+         JOIN pg_inherits inh ON inh.inhrelid=c.oid
+         JOIN pg_class parent ON parent.oid=inh.inhparent
+         JOIN pg_namespace pn ON pn.oid=parent.relnamespace
+         WHERE n.nspname=ANY($1::text[]) AND c.relispartition AND c.relkind IN ('r','p')",
+            &[&schemas],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in partition_rows {
+        let key = (row.get::<_, String>(0), row.get::<_, String>(1));
+        if let Some(index) = object_nodes.get(&key).and_then(|id| node_indexes.get(id)) {
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+            graph.nodes[*index].extra.insert(
+                "native_partition_shape".into(),
+                row.get::<_, String>(2).into(),
+            );
+        }
+    }
+
+    let inheritance_rows = conn
+        .query(
+            "SELECT n.nspname,c.relname,md5(concat_ws('|',
+            (SELECT string_agg(pn.nspname||'.'||parent.relname,'|' ORDER BY inh.inhseqno)
+                FROM pg_inherits inh JOIN pg_class parent ON parent.oid=inh.inhparent
+                JOIN pg_namespace pn ON pn.oid=parent.relnamespace WHERE inh.inhrelid=c.oid),
+            (SELECT string_agg(concat_ws('|',a.attname,format_type(a.atttypid,a.atttypmod),
+                a.attislocal::text), E'\\n' ORDER BY a.attnum)
+                FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped),
+            (SELECT string_agg(pg_get_constraintdef(k.oid),'|' ORDER BY k.conname)
+                FROM pg_constraint k WHERE k.conrelid=c.oid),
+            (SELECT string_agg(pg_get_indexdef(i.indexrelid),'|' ORDER BY i.indexrelid)
+                FROM pg_index i WHERE i.indrelid=c.oid)))
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+         WHERE n.nspname=ANY($1::text[]) AND NOT c.relispartition AND c.relkind='r'
+           AND EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid=c.oid)",
+            &[&schemas],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in inheritance_rows {
+        let key = (row.get::<_, String>(0), row.get::<_, String>(1));
+        if let Some(index) = object_nodes.get(&key).and_then(|id| node_indexes.get(id)) {
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+            graph.nodes[*index].extra.insert(
+                "native_inheritance_shape".into(),
+                row.get::<_, String>(2).into(),
+            );
+        }
+    }
+
     let foreign_keys = conn
         .query(
             "SELECT sn.nspname, sc.relname, con.conname,

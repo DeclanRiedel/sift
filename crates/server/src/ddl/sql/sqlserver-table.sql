@@ -18,7 +18,9 @@ ELSE IF HAS_PERMS_BY_NAME(@name,N'OBJECT',N'VIEW DEFINITION')<>1
          OR encryption_type IS NOT NULL OR is_masked=1))
     OR EXISTS (SELECT 1 FROM sys.indexes i LEFT JOIN sys.data_spaces d ON d.data_space_id=i.data_space_id
         WHERE i.object_id=@id AND (i.type NOT IN (0,1,2) OR i.is_disabled=1 OR i.is_hypothetical=1 OR d.type=N'PS'))
-    OR EXISTS (SELECT 1 FROM sys.partitions WHERE object_id=@id AND data_compression<>0)
+    OR EXISTS (SELECT 1 FROM sys.partitions WHERE object_id=@id AND data_compression NOT IN (0,1,2))
+    OR EXISTS (SELECT 1 FROM sys.partitions WHERE object_id=@id GROUP BY index_id
+        HAVING MIN(data_compression)<>MAX(data_compression))
     OR EXISTS (SELECT 1 FROM sys.foreign_keys WHERE parent_object_id=@id AND (is_disabled=1 OR is_not_trusted=1 OR is_not_for_replication=1))
     OR EXISTS (SELECT 1 FROM sys.check_constraints WHERE parent_object_id=@id AND (is_disabled=1 OR is_not_trusted=1 OR is_not_for_replication=1))
     OR EXISTS (SELECT 1 FROM sys.columns c JOIN sys.types t ON t.user_type_id=c.user_type_id
@@ -54,6 +56,10 @@ ELSE BEGIN
         QUOTENAME(COL_NAME(@id,start_column_id))+N', '+QUOTENAME(COL_NAME(@id,end_column_id))+N')'
         FROM sys.periods WHERE object_id=@id),N'');
     SELECT @ddl=@ddl+N');'+CHAR(10);
+    SELECT @ddl=@ddl+COALESCE((SELECT CHAR(10)+N'ALTER TABLE '+@name+
+        N' REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = '+MAX(p.data_compression_desc)+N');'
+        FROM sys.partitions p WHERE p.object_id=@id AND p.index_id=0
+        HAVING MAX(p.data_compression)>0),N'');
     SELECT @ddl=@ddl+COALESCE(STRING_AGG(CAST(
         CASE WHEN i.is_primary_key=1 OR i.is_unique_constraint=1 THEN N'ALTER TABLE '+@name+N' ADD CONSTRAINT '+QUOTENAME(i.name)+CASE WHEN i.is_primary_key=1 THEN N' PRIMARY KEY ' ELSE N' UNIQUE ' END
         ELSE N'CREATE '+CASE WHEN i.is_unique=1 THEN N'UNIQUE ' ELSE N'' END END+
@@ -63,9 +69,13 @@ ELSE BEGIN
         COALESCE(N' WHERE '+i.filter_definition,N'')+N' WITH (PAD_INDEX = '+CASE WHEN i.is_padded=1 THEN N'ON' ELSE N'OFF' END+
         CASE WHEN i.fill_factor=0 THEN N'' ELSE N', FILLFACTOR = '+CONVERT(nvarchar(10),i.fill_factor) END+N', IGNORE_DUP_KEY = '+CASE WHEN i.ignore_dup_key=1 THEN N'ON' ELSE N'OFF' END+
         N', ALLOW_ROW_LOCKS = '+CASE WHEN i.allow_row_locks=1 THEN N'ON' ELSE N'OFF' END+
-        N', ALLOW_PAGE_LOCKS = '+CASE WHEN i.allow_page_locks=1 THEN N'ON' ELSE N'OFF' END+N')'+
+        N', ALLOW_PAGE_LOCKS = '+CASE WHEN i.allow_page_locks=1 THEN N'ON' ELSE N'OFF' END+
+        CASE compression.mode WHEN 1 THEN N', DATA_COMPRESSION = ROW'
+            WHEN 2 THEN N', DATA_COMPRESSION = PAGE' ELSE N'' END+N')'+
         COALESCE(N' ON '+QUOTENAME(ds.name),N'')+N';' AS nvarchar(max)) COLLATE DATABASE_DEFAULT,CHAR(10)),N'')
     FROM sys.indexes i LEFT JOIN sys.data_spaces ds ON ds.data_space_id=i.data_space_id
+    OUTER APPLY (SELECT MAX(p.data_compression) AS mode FROM sys.partitions p
+        WHERE p.object_id=i.object_id AND p.index_id=i.index_id) compression
     CROSS APPLY (SELECT STRING_AGG(CAST(QUOTENAME(c.name)+CASE WHEN ic.is_descending_key=1 THEN N' DESC' ELSE N' ASC' END AS nvarchar(max)) COLLATE DATABASE_DEFAULT,N', ') WITHIN GROUP (ORDER BY ic.key_ordinal) cols
         FROM sys.index_columns ic JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
         WHERE ic.object_id=i.object_id AND ic.index_id=i.index_id AND ic.key_ordinal>0) keys

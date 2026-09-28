@@ -19,7 +19,8 @@ current public support boundary.
       system-versioned tables now round-trip; other shapes remain excluded.
 - [~] Preserve advanced storage, nonordinary indexes, disabled/untrusted
       constraints, CLR/table types, and bound defaults/rules where supported.
-      Sparse nullable columns now round-trip; other listed shapes remain.
+      Sparse nullable columns and uniform ROW/PAGE compression on ordinary
+      rowstore tables and indexes now round-trip; other listed shapes remain.
 - [ ] Export synonym DDL and dependency references.
 - [ ] Extend schema diff/migration to represent new native shapes without
       silently reducing them to ordinary tables or indexes.

@@ -23,51 +23,68 @@ WITH target AS (
     LEFT JOIN pg_catalog.pg_sequence seq ON a.attidentity <> ''
         AND seq.seqrelid=pg_get_serial_sequence(t.oid::regclass::text,a.attname)::regclass
     WHERE a.attnum>0 AND NOT a.attisdropped
+        AND (NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=t.oid)
+            OR a.attislocal)
 ), constraints AS (
     SELECT oid, format('CONSTRAINT %I %s', conname, pg_get_constraintdef(oid)) AS definition
     FROM pg_catalog.pg_constraint WHERE conrelid=(SELECT oid FROM target) AND contype IN ('p','u','f','c','x')
+        AND (NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=conrelid)
+            OR conislocal)
 )
 SELECT CASE WHEN t.relispartition THEN
     CASE WHEN t.reloptions IS NOT NULL OR t.reltablespace <> 0 OR t.relrowsecurity OR t.relforcerowsecurity
-        OR EXISTS (SELECT 1 FROM pg_catalog.pg_index i WHERE i.indrelid=t.oid
-            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=i.indexrelid))
-        OR EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid=t.oid AND conislocal)
-        OR EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid=t.oid AND NOT tgisinternal)
         OR EXISTS (SELECT 1 FROM pg_catalog.pg_policy WHERE polrelid=t.oid)
-        THEN 'sift:unsupported:partition child has local indexes, constraints, triggers, policies or storage options'
+        THEN 'sift:unsupported:partition child has policies or storage options'
         ELSE (SELECT format('CREATE TABLE %I.%I PARTITION OF %I.%I %s',
                 n.nspname,t.relname,pn.nspname,parent.relname,pg_get_expr(t.relpartbound,t.oid)) ||
-                CASE WHEN t.relkind='p' THEN ' PARTITION BY ' || pg_get_partkeydef(t.oid) ELSE '' END || ';'
+                CASE WHEN t.relkind='p' THEN ' PARTITION BY ' || pg_get_partkeydef(t.oid) ELSE '' END || ';' ||
+                COALESCE((SELECT E'\n' || string_agg(format('ALTER TABLE %I.%I ADD CONSTRAINT %I %s;',
+                    n.nspname,t.relname,c.conname,pg_get_constraintdef(c.oid)), E'\n' ORDER BY c.conname)
+                    FROM pg_catalog.pg_constraint c WHERE c.conrelid=t.oid AND c.conislocal
+                    AND c.contype IN ('p','u','f','c','x')),'') ||
+                COALESCE((SELECT E'\n' || string_agg(pg_get_indexdef(i.indexrelid) || ';',E'\n' ORDER BY i.indexrelid)
+                    FROM pg_catalog.pg_index i WHERE i.indrelid=t.oid
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=i.indexrelid)
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c WHERE c.conindid=i.indexrelid)),'') ||
+                COALESCE((SELECT E'\n' || string_agg(pg_get_triggerdef(g.oid) || ';' ||
+                    CASE g.tgenabled WHEN 'D' THEN format(' ALTER TABLE %I.%I DISABLE TRIGGER %I;',n.nspname,t.relname,g.tgname)
+                    WHEN 'R' THEN format(' ALTER TABLE %I.%I ENABLE REPLICA TRIGGER %I;',n.nspname,t.relname,g.tgname)
+                    WHEN 'A' THEN format(' ALTER TABLE %I.%I ENABLE ALWAYS TRIGGER %I;',n.nspname,t.relname,g.tgname) ELSE '' END,
+                    E'\n' ORDER BY g.tgname) FROM pg_catalog.pg_trigger g
+                    WHERE g.tgrelid=t.oid AND NOT g.tgisinternal AND g.tgparentid=0),'')
             FROM pg_catalog.pg_inherits inh JOIN pg_catalog.pg_class parent ON parent.oid=inh.inhparent
             JOIN pg_catalog.pg_namespace pn ON pn.oid=parent.relnamespace
             WHERE inh.inhrelid=t.oid)
     END
     WHEN t.relkind NOT IN ('r','p')
-    OR EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=t.oid)
+    OR (SELECT count(*) FROM pg_catalog.pg_inherits WHERE inhrelid=t.oid)>1
     OR t.reloptions IS NOT NULL
     OR t.reltablespace <> 0 OR (t.relam <> 0 AND t.relam <> (SELECT oid FROM pg_catalog.pg_am WHERE amname='heap'))
     OR EXISTS (SELECT 1 FROM pg_catalog.pg_index WHERE indrelid=t.oid AND (NOT indisvalid OR NOT indisready OR indisclustered OR indisreplident))
     OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type ty ON ty.oid=a.atttypid
         WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped AND
         (a.attstorage<>ty.typstorage OR a.attcompression<>'' OR a.attoptions IS NOT NULL OR a.attfdwoptions IS NOT NULL))
-    OR EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite WHERE ev_class=t.oid AND rulename <> '_RETURN')
-    THEN 'sift:unsupported:table inheritance, partition children, policies, rules, custom storage or table options'
+    THEN 'sift:unsupported:multiple inheritance, custom storage or table options'
     ELSE COALESCE((SELECT string_agg(format(
         'CREATE SEQUENCE %I.%I AS %s START WITH %s INCREMENT BY %s MINVALUE %s MAXVALUE %s CACHE %s %s;',
         sn.nspname,sc.relname,format_type(s.seqtypid,NULL),s.seqstart,s.seqincrement,s.seqmin,s.seqmax,s.seqcache,
         CASE WHEN s.seqcycle THEN 'CYCLE' ELSE 'NO CYCLE' END),E'\n' ORDER BY a.attnum) || E'\n'
         FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_sequence s ON s.seqrelid=pg_get_serial_sequence(t.oid::regclass::text,a.attname)::regclass
         JOIN pg_catalog.pg_class sc ON sc.oid=s.seqrelid JOIN pg_catalog.pg_namespace sn ON sn.oid=sc.relnamespace
-        WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attidentity=''),'') ||
+        WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attidentity='' AND a.attislocal),'') ||
         'CREATE ' || CASE WHEN t.relpersistence='u' THEN 'UNLOGGED ' WHEN t.relpersistence='t' THEN 'TEMPORARY ' ELSE '' END ||
         format('TABLE %I.%I (', n.nspname,t.relname) || E'\n    ' ||
         COALESCE((SELECT string_agg(definition,E',\n    ' ORDER BY attnum) FROM columns),'') ||
         COALESCE((SELECT E',\n    ' || string_agg(definition,E',\n    ' ORDER BY oid) FROM constraints),'') || E'\n)' ||
-        CASE WHEN t.relkind='p' THEN ' PARTITION BY ' || pg_get_partkeydef(t.oid) ELSE '' END || ';' ||
+        CASE WHEN t.relkind='p' THEN ' PARTITION BY ' || pg_get_partkeydef(t.oid) ELSE '' END ||
+        COALESCE((SELECT format(' INHERITS (%I.%I)',pn.nspname,parent.relname)
+            FROM pg_catalog.pg_inherits inh JOIN pg_catalog.pg_class parent ON parent.oid=inh.inhparent
+            JOIN pg_catalog.pg_namespace pn ON pn.oid=parent.relnamespace
+            WHERE inh.inhrelid=t.oid),'') || ';' ||
         COALESCE((SELECT E'\n' || string_agg(format('ALTER SEQUENCE %I.%I OWNED BY %I.%I.%I;',sn.nspname,sc.relname,n.nspname,t.relname,a.attname),E'\n' ORDER BY a.attnum)
         FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_sequence s ON s.seqrelid=pg_get_serial_sequence(t.oid::regclass::text,a.attname)::regclass
         JOIN pg_catalog.pg_class sc ON sc.oid=s.seqrelid JOIN pg_catalog.pg_namespace sn ON sn.oid=sc.relnamespace
-        WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attidentity=''),'') ||
+        WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attidentity='' AND a.attislocal),'') ||
         COALESCE((SELECT E'\n' || string_agg(pg_get_indexdef(i.indexrelid) || ';',E'\n' ORDER BY i.indexrelid)
             FROM pg_catalog.pg_index i WHERE i.indrelid=t.oid
             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c WHERE c.conindid=i.indexrelid AND c.contype IN ('p','u','x'))),'') ||
@@ -87,6 +104,12 @@ SELECT CASE WHEN t.relispartition THEN
             CASE WHEN p.polqual IS NOT NULL THEN ' USING (' || pg_get_expr(p.polqual,p.polrelid) || ')' ELSE '' END ||
             CASE WHEN p.polwithcheck IS NOT NULL THEN ' WITH CHECK (' || pg_get_expr(p.polwithcheck,p.polrelid) || ')' ELSE '' END || ';',
             E'\n' ORDER BY p.polname) FROM pg_catalog.pg_policy p WHERE p.polrelid=t.oid),'') ||
+        COALESCE((SELECT E'\n' || string_agg(pg_get_ruledef(r.oid) ||
+            CASE r.ev_enabled WHEN 'D' THEN format(E'\nALTER TABLE %I.%I DISABLE RULE %I;',n.nspname,t.relname,r.rulename)
+            WHEN 'R' THEN format(E'\nALTER TABLE %I.%I ENABLE REPLICA RULE %I;',n.nspname,t.relname,r.rulename)
+            WHEN 'A' THEN format(E'\nALTER TABLE %I.%I ENABLE ALWAYS RULE %I;',n.nspname,t.relname,r.rulename) ELSE '' END,
+            E'\n' ORDER BY r.rulename) FROM pg_catalog.pg_rewrite r
+            WHERE r.ev_class=t.oid AND r.rulename <> '_RETURN'),'') ||
         CASE WHEN t.relrowsecurity THEN format(E'\nALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY;',n.nspname,t.relname) ELSE '' END ||
         CASE WHEN t.relforcerowsecurity THEN format(E'\nALTER TABLE %I.%I FORCE ROW LEVEL SECURITY;',n.nspname,t.relname) ELSE '' END END
 FROM target t JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
