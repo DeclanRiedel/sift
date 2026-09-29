@@ -2744,3 +2744,28 @@ tables because the portable table/index projection cannot represent the full
 native shape or dependency order. This is a safe diff boundary, not automatic
 rich-index migration support. PostgreSQL table export still includes supported
 indexes with the table; callers should select one export path for a replay.
+
+## ADR-077 — PostgreSQL desktop maintenance uses audited explicit-target operations
+
+Status: accepted. Date: 2026-09-29.
+
+The Vim Monitor maintenance view uses the existing `postgresMaintenance` and
+`checkIntegrity` HTTP operations through the SDK. It requires an explicit
+schema and table or index name; it never defaults to a whole database. VACUUM,
+ANALYZE and REINDEX first return the exact quoted SQL without executing it.
+The desktop retains that preview only for the current connection generation,
+unchanged target and action, and a typed confirmation. The server continues to
+enforce connection policy, PostgreSQL authority, transaction state, bounded
+driver execution and audit. A stale preview or response cannot authorize an
+apply after switching or reconnecting. The read-only integrity action uses
+`amcheck.verify_heapam` only when amcheck is installed; it reports the bounded
+findings and incomplete state without claiming a whole-database check.
+
+PostgreSQL custom-archive dump and restore remain operator-only CLI actions.
+Their current `postgres_backup::run` contract reads a local specification and
+archive, validates tool paths and target identity, and audits against the
+server's local metadata store. The desktop can point at a remote server, so
+launching that CLI from the desktop would cross the file, credential and audit
+boundary. A future desktop path needs a server-owned, policy-scoped endpoint
+with a bounded archive transfer and explicit target confirmation. This change
+does not add a wire operation or Driver trait method for dump and restore.
