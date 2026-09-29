@@ -141,8 +141,8 @@ The resolved source mode is private machine state, not another config file:
   apply through the deployment workflow.
 
 Manual file edits never hot-apply. `inspect/plan/apply` compares file,
-generation, and lock digests. Lock regeneration after an ordinary semantic edit
-preserves already selected input versions; only `lock --update` changes them.
+generation, and lock digests. The current CLI supports `instance lock <root>`;
+selective `lock --update` version changes are a planned part of this contract.
 
 ## Infrastructure-as-code contract
 
@@ -271,13 +271,13 @@ Normal workflow:
 ```text
 sift instance fmt .
 sift instance validate .
-sift instance lock .        # refresh config digest; preserve locked inputs
+sift instance lock .        # regenerate for the current Sift binary and protocol
 sift instance plan .
 sift instance apply .
 git add sift.toml sift.lock
 ```
 
-Dependency update is visibly different:
+Planned selective dependency update (not yet accepted by the CLI):
 
 ```text
 sift instance lock . --update sift
