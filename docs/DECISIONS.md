@@ -2667,3 +2667,42 @@ revoke rights after the list was fetched. Canceling an editor query and killing
 another server session are separate operations. Server session IDs can be
 reused between observation and execution, so the confirmation is a careful UI
 guard, not an atomic database guarantee.
+
+---
+## ADR-074 — SQLite native bulk targets bind typed rows under a preview lease
+
+Status: Accepted, 2026-09-29.
+
+SQLite has no separate wire-level bulk protocol. Its native bulk target is a
+bounded sequence of prepared, parameterized multi-row inserts on the admitted
+SQLite worker. Existing CSV import and transfer recipes already use that
+mechanism, but their dry run does not prove destination affinity or exact
+decimal storage. The generic SQL Server CSV bulk route must not silently grow
+SQLite semantics, and the locked `Driver` signatures stay unchanged.
+
+Extend the existing audited `BulkInsert` operation additively for SQLite
+`Native` format with column names and typed `Value` rows. Preview and apply
+share this operation kind and route. The server validates the complete bounded
+batch, target table metadata, and every value before issuing a short lived,
+scope-bound, one-use preview token. Apply requires that token and explicit write
+confirmation, repeats authorization and validation, and refuses a changed
+request or table shape. The audit record drops both CSV bytes and native rows.
+Only an authorized existing ordinary `main` table can be targeted; the file
+policy remains the final read/write boundary.
+
+The safe affinity matrix is intentionally narrow: integer and boolean values
+to INTEGER or NUMERIC, finite float values to REAL, text/date/time/UUID/JSON
+to TEXT, bytes to BLOB, and null only to nullable columns. Decimal values use
+canonical base-10 text with at most 38 digits and 18 fractional digits, and
+only a TEXT-affinity destination; NUMERIC and REAL may silently round them.
+Generated, hidden and virtual columns, triggers, ambiguous target metadata,
+and unsupported value kinds are refused. No automatic SQLite coercion is
+presented as lossless conversion.
+
+Admission bounds rows, columns, serialized bytes and parameters. Execution
+uses the existing supervised query path in finite batches within one managed
+Serializable transaction; cancellation, timeout or any batch failure rolls
+back, and rollback failure discards the connection. The current HTTP request
+is bounded in memory; this decision does not claim unbounded socket streaming
+or a resumable native batch. Existing CSV/transfer recipes remain the path for
+uploaded files and retain their own checkpoint semantics.
