@@ -2979,3 +2979,37 @@ triggers, and foreign tables refuses independent creation. Automatic extension
 install/update/drop migration, package equivalence across servers, membership
 changes made through `ALTER EXTENSION ADD/DROP`, data in config tables, and
 cross-object ordering require a separate proof and remain unsupported.
+
+## ADR-085 — SQLite VACUUM is a bounded in-place maintenance action
+
+Status: accepted. Date: 2026-09-29.
+
+`VACUUM` rewrites the connected `main` SQLite database. It is admitted only
+through the existing audited SQLite maintenance endpoint for a managed,
+writable connection in an allowed tenant and configured writable root. The
+native SQLite extension owns file policy and execution; the locked `Driver`
+trait remains unchanged. This adds a public maintenance action and backup
+acknowledgment to the request, so the wire protocol advances to version 5.
+
+Preview is read-only and returns the source/root identity, source size,
+estimated extra space requirement, backup expectation, and a short-lived
+one-use token. Apply requires that token, explicit write confirmation, and a
+separate acknowledgment that a backup has been verified. It repeats root,
+tenant, file identity, transaction, size and free-space checks. The server
+does not infer that a backup exists from the acknowledgment. The desktop
+names the connected source and asks for an exact typed confirmation; a stale
+connection, action, or preview cannot authorize apply.
+
+The worker executes only literal `VACUUM` on the connected `main` database,
+with a 120-second deadline, SQLite progress-handler cancellation, and the
+existing worker close signal. A source above 1 GiB is refused. On Unix the
+source filesystem must report sufficient available space for SQLite's
+temporary rebuild and a safety margin; the estimate is conservative, not a
+reservation, so an actual `SQLITE_FULL` remains possible. SQLite's own VACUUM
+transaction provides atomic failure rollback; Sift never copies a partially
+vacuumed file over the source. Cancellation, timeout and space failure return
+an explicit error and leave the source connection usable when SQLite permits.
+
+This decision does not add arbitrary PRAGMA writes, checkpoint, ATTACH,
+restore, delete or implicit repair. Broader real-file acceptance, including
+physical ENOSPC injection and concurrent external writers, remains required.
