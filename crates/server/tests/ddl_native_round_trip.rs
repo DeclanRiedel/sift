@@ -262,6 +262,217 @@ fn schemas() -> (String, String) {
 }
 
 #[cfg(feature = "live-pg")]
+async fn postgres_graph(
+    driver: &dyn Driver,
+    conn: &ConnHandle,
+    schema: &str,
+) -> sift_protocol::CatalogGraph {
+    let snapshot = driver
+        .schema(
+            conn.clone(),
+            sift_protocol::SchemaScope {
+                depth: sift_protocol::SchemaDepth::Graph {
+                    options: sift_protocol::CatalogGraphOptions {
+                        schemas: Some(vec![schema.into()]),
+                        include_definitions: true,
+                        ..Default::default()
+                    },
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap();
+    sift_protocol::CatalogGraph {
+        revision: sift_protocol::CatalogRevision(1),
+        content_digest: "catfp:fixture".into(),
+        invalidation_epoch: 0,
+        captured_at: chrono::Utc::now(),
+        provider: Engine::Postgres.provider_ref("16"),
+        database_identity: "fixture".into(),
+        data: snapshot.graph.unwrap(),
+    }
+}
+
+#[cfg(feature = "live-pg")]
+#[tokio::test]
+async fn postgres_native_index_migration_round_trip() {
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let (schema, _) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!("CREATE SCHEMA {schema}; CREATE TABLE {schema}.items(id integer, name text);"),
+    )
+    .await;
+    let before = postgres_graph(&driver, &conn, &schema).await;
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE INDEX expression_idx ON {schema}.items USING btree \
+             (lower(name) text_pattern_ops) INCLUDE (id) \
+             WITH (fillfactor=80) WHERE name IS NOT NULL;"
+        ),
+    )
+    .await;
+    let after = postgres_graph(&driver, &conn, &schema).await;
+    let sources = (
+        sift_protocol::CatalogSourceRef::Live {
+            expected_revision: before.revision,
+            options: sift_protocol::CatalogGraphOptions {
+                schemas: Some(vec![schema.clone()]),
+                include_definitions: true,
+                ..Default::default()
+            },
+        },
+        sift_protocol::CatalogSourceRef::Snapshot {
+            snapshot_id: sift_protocol::CatalogSnapshotId(uuid::Uuid::new_v4()),
+        },
+    );
+    let create_diff = sift_core::schema_diff::diff_catalogs(
+        sources.0.clone(),
+        &before,
+        sources.1.clone(),
+        &after,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(create_diff.changes.len(), 1, "{:#?}", create_diff.changes);
+    assert_eq!(
+        create_diff.changes[0].kind,
+        sift_protocol::SchemaChangeKind::Create
+    );
+    let plan = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &create_diff,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(plan.groups[0].statements.len(), 1);
+    let sql = &plan.groups[0].statements[0].sql;
+    assert!(sql.contains("text_pattern_ops"), "{sql}");
+    assert!(sql.contains("fillfactor='80'"), "{sql}");
+
+    let mut untrusted_diff = create_diff.clone();
+    untrusted_diff.to = sift_protocol::CatalogSourceRef::DdlSource {
+        source_id: sift_protocol::DdlSourceId(1),
+        expected_model_revision: 1,
+    };
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &untrusted_diff,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+    let mut missing_definition = create_diff.clone();
+    missing_definition.changes[0]
+        .object_after
+        .as_mut()
+        .unwrap()
+        .extra
+        .remove("native_index_ddl");
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &missing_definition,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+    let mut policy_table = after.clone();
+    policy_table
+        .data
+        .nodes
+        .iter_mut()
+        .find(|node| node.kind == sift_protocol::CatalogNodeKind::Table && node.name == "items")
+        .unwrap()
+        .extra
+        .insert("native_security_shape".into(), "changed".into());
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &create_diff,
+        &before,
+        &policy_table,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+
+    let drop_diff = sift_core::schema_diff::diff_catalogs(
+        sources.0.clone(),
+        &after,
+        sources.1.clone(),
+        &before,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(drop_diff.changes.len(), 1, "{:#?}", drop_diff.changes);
+    let drop_plan = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &drop_diff,
+        &after,
+        &before,
+        &[],
+        after.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        drop_plan.groups[0].statements[0].sql,
+        format!("DROP INDEX \"{schema}\".\"expression_idx\" RESTRICT;")
+    );
+
+    execute(&driver, &conn, &drop_plan.groups[0].statements[0].sql).await;
+    execute(&driver, &conn, sql).await;
+    let replayed = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&schema, "expression_idx", ObjectKind::Index),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed.ddl, sql.as_str());
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE FUNCTION {schema}.normalize_index(text) RETURNS text \
+             LANGUAGE sql IMMUTABLE AS 'SELECT lower($1)'; \
+             CREATE INDEX custom_fn_idx ON {schema}.items \
+             ({schema}.normalize_index(name));"
+        ),
+    )
+    .await;
+    let custom_graph = postgres_graph(&driver, &conn, &schema).await;
+    let custom_index = custom_graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == sift_protocol::CatalogNodeKind::Index && node.name == "custom_fn_idx"
+        })
+        .unwrap();
+    assert!(!custom_index.extra.contains_key("native_index_ddl"));
+    execute(&driver, &conn, &format!("DROP SCHEMA {schema} CASCADE;")).await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-pg")]
 #[tokio::test]
 async fn postgres_standalone_index_round_trips_and_fences_generic_migration() {
     let driver = sift_driver_postgres::PgDriver::new();

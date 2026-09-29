@@ -4,9 +4,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use sha2::{Digest, Sha256};
 use sift_protocol::{
-    CatalogGraph, CatalogNode, CatalogNodeDetails, CatalogNodeKind, ConstraintKind, Engine,
-    MigrationGroup, MigrationOptions, MigrationPlan, MigrationPlanId, MigrationStatement,
-    Nullability, SchemaChange, SchemaChangeId, SchemaChangeKind, SchemaChangeRisk, SchemaDiff,
+    CatalogCoverageState, CatalogGraph, CatalogNode, CatalogNodeDetails, CatalogNodeKind,
+    CatalogSourceRef, ConstraintKind, Engine, MigrationGroup, MigrationOptions, MigrationPlan,
+    MigrationPlanId, MigrationStatement, Nullability, SchemaChange, SchemaChangeId,
+    SchemaChangeKind, SchemaChangeRisk, SchemaDiff,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -102,7 +103,18 @@ pub fn render_plan(
         if implicitly_covered(change, &created, &dropped) {
             continue;
         }
-        let sql = render_change(engine, change, &from_nodes, &to_nodes, to)?;
+        let sql = if engine == Engine::Postgres && is_index_create_or_drop(change) {
+            Some(render_postgres_index_change(
+                change,
+                diff,
+                from,
+                to,
+                &from_nodes,
+                &to_nodes,
+            )?)
+        } else {
+            render_change(engine, change, &from_nodes, &to_nodes, to)?
+        };
         let Some(sql) = sql else {
             continue;
         };
@@ -147,7 +159,12 @@ pub fn render_plan(
             continue;
         }
         let inverse = invert_change(change);
-        match render_change(engine, &inverse, &to_nodes, &from_nodes, from) {
+        let rollback = if engine == Engine::Postgres && is_index_create_or_drop(&inverse) {
+            render_postgres_index_change(&inverse, diff, to, from, &to_nodes, &from_nodes).map(Some)
+        } else {
+            render_change(engine, &inverse, &to_nodes, &from_nodes, from)
+        };
+        match rollback {
             Ok(Some(sql)) => rollback_statements.push(MigrationStatement {
                 ordinal: u32::try_from(rollback_statements.len() + 1).unwrap_or(u32::MAX),
                 fingerprint: crate::fingerprint::sql(&sql),
@@ -223,6 +240,142 @@ fn nodes(graph: &CatalogGraph) -> HashMap<sift_protocol::CatalogObjectId, &Catal
         .iter()
         .map(|node| (node.id.clone(), node))
         .collect()
+}
+
+fn is_index_create_or_drop(change: &SchemaChange) -> bool {
+    matches!(
+        change.kind,
+        SchemaChangeKind::Create | SchemaChangeKind::Drop
+    ) && change
+        .object_after
+        .as_ref()
+        .or(change.object_before.as_ref())
+        .is_some_and(|node| node.kind == CatalogNodeKind::Index)
+}
+
+fn render_postgres_index_change(
+    change: &SchemaChange,
+    diff: &SchemaDiff,
+    from: &CatalogGraph,
+    to: &CatalogGraph,
+    from_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    to_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+) -> Result<String, MigrationRenderError> {
+    let node = change
+        .object_after
+        .as_ref()
+        .or(change.object_before.as_ref())
+        .ok_or_else(|| MigrationRenderError::InvalidChangeShape(change.id.clone()))?;
+    let reject = || MigrationRenderError::UnsupportedChange {
+        change: change.id.clone(),
+        kind: CatalogNodeKind::Index,
+    };
+    if !matches!(
+        diff.from,
+        CatalogSourceRef::Live { .. } | CatalogSourceRef::Snapshot { .. }
+    ) || !matches!(
+        diff.to,
+        CatalogSourceRef::Live { .. } | CatalogSourceRef::Snapshot { .. }
+    ) || [from, to].iter().any(|graph| {
+        graph.provider.provider_id != Engine::Postgres.provider_id()
+            || graph.data.coverage.state != CatalogCoverageState::Complete
+            || !graph.data.coverage.requested_kinds.is_empty()
+            || !graph.data.coverage.omitted_schemas.is_empty()
+            || graph.data.coverage.truncated_at_nodes.is_some()
+    }) {
+        return Err(reject());
+    }
+    let (active_nodes, other_nodes) = if change.kind == SchemaChangeKind::Create {
+        (to_nodes, from_nodes)
+    } else {
+        (from_nodes, to_nodes)
+    };
+    let table = node
+        .parent_id
+        .as_ref()
+        .and_then(|id| active_nodes.get(id))
+        .copied()
+        .filter(|parent| parent.kind == CatalogNodeKind::Table)
+        .ok_or_else(reject)?;
+    let other_table = other_nodes
+        .values()
+        .copied()
+        .find(|candidate| {
+            candidate.kind == CatalogNodeKind::Table
+                && candidate.qualified_name == table.qualified_name
+        })
+        .ok_or_else(reject)?;
+    let stable_table = serde_json::to_value(&table.details).ok()
+        == serde_json::to_value(&other_table.details).ok()
+        && table.name == other_table.name
+        && table.definition_digest == other_table.definition_digest
+        && index_only_table_extra(table).is_some()
+        && index_only_table_extra(table) == index_only_table_extra(other_table);
+    if !stable_table
+        || diff.changes.iter().any(|other| {
+            if other.id == change.id {
+                return false;
+            }
+            let affects_table = other.object_before.as_ref().is_some_and(|node| {
+                node.id == table.id
+                    || node.id == other_table.id
+                    || node.parent_id.as_ref() == Some(&table.id)
+                    || node.parent_id.as_ref() == Some(&other_table.id)
+            }) || other.object_after.as_ref().is_some_and(|node| {
+                node.id == table.id
+                    || node.id == other_table.id
+                    || node.parent_id.as_ref() == Some(&table.id)
+                    || node.parent_id.as_ref() == Some(&other_table.id)
+            });
+            affects_table && !is_index_create_or_drop(other)
+        })
+        || node
+            .extra
+            .get("native_index_shape")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+    {
+        return Err(reject());
+    }
+    let ddl = node
+        .extra
+        .get("native_index_ddl")
+        .and_then(serde_json::Value::as_str)
+        .filter(|ddl| ddl.len() <= 65_536 && ddl.starts_with("CREATE ") && ddl.ends_with(';'))
+        .ok_or_else(reject)?;
+    match change.kind {
+        SchemaChangeKind::Create => Ok(ddl.to_owned()),
+        SchemaChangeKind::Drop => {
+            let schema = schema_ancestor(change, table, active_nodes)?;
+            Ok(format!(
+                "DROP INDEX {}.{} RESTRICT;",
+                crate::ddl::quote_ident(&schema.name, Engine::Postgres),
+                crate::ddl::quote_ident(&node.name, Engine::Postgres)
+            ))
+        }
+        _ => Err(reject()),
+    }
+}
+
+fn index_only_table_extra(
+    table: &CatalogNode,
+) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
+    let mut extra = table.extra.clone();
+    extra.remove("estimated_rows");
+    extra.remove("modified_at");
+    if extra
+        .keys()
+        .any(|key| key.starts_with("native_") && key != "native_index_set_shape")
+    {
+        return None;
+    }
+    let has_indexes = extra.remove("native_index_set_shape").is_some();
+    if has_indexes {
+        extra.remove("migration_unsupported");
+    } else if extra.get("migration_unsupported") == Some(&serde_json::Value::Bool(true)) {
+        return None;
+    }
+    Some(extra)
 }
 
 fn implicitly_covered(
