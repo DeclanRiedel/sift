@@ -33842,10 +33842,12 @@ impl WorkspaceShell {
                         .columns
                         .iter()
                         .map(|column| {
-                            cx.new(|cx| {
+                            let input = cx.new(|cx| {
                                 TextInput::new("", column.target.clone(), cx)
                                     .aria_label(format!("Target column for {}", column.source))
-                            })
+                            });
+                            input.update(cx, |input, cx| input.set_text(column.target.clone(), cx));
+                            input
                         })
                         .collect();
                     shell.csv_import_preview = Some(preview);
@@ -49585,7 +49587,11 @@ mod tests {
             preview.target_inputs = preview
                 .columns
                 .iter()
-                .map(|column| cx.new(|cx| TextInput::new("", column.target.clone(), cx)))
+                .map(|column| {
+                    let input = cx.new(|cx| TextInput::new("", column.target.clone(), cx));
+                    input.update(cx, |input, cx| input.set_text(column.target.clone(), cx));
+                    input
+                })
                 .collect();
             preview.target_inputs[0].update(cx, |input, cx| input.set_text("target", cx));
             shell.csv_import_preview = Some(preview);
