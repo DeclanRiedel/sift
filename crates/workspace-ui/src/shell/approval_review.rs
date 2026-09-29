@@ -59,7 +59,7 @@ impl ApprovalReview {
     }
 }
 
-fn fingerprint(value: &serde_json::Value) -> Result<String, String> {
+pub(super) fn fingerprint(value: &serde_json::Value) -> Result<String, String> {
     let mut canonical = String::new();
     write_canonical(value, &mut canonical)?;
     let digest = Sha256::digest(canonical.as_bytes());

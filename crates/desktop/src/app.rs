@@ -1190,6 +1190,94 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadGovernedTools {
+                generation,
+                instance_id,
+                context: tool_context,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let mut scoped = Some(tool_context);
+                let binding =
+                    bind_active_extension_context(&mut scoped, context.as_ref(), &instance_id);
+                let result = match binding {
+                    Ok(()) => match server.client().await {
+                        Ok(client) => client
+                            .governed_tools(scoped.as_ref().expect("tool context exists"), false)
+                            .await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::GovernedToolsLoaded { generation, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::InvokeGovernedTool {
+                generation,
+                instance_id,
+                mut request,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let mut scoped = Some(request.context);
+                let binding =
+                    bind_active_extension_context(&mut scoped, context.as_ref(), &instance_id);
+                let result = match binding {
+                    Ok(()) => {
+                        request.context = scoped.expect("tool context exists");
+                        match server.client().await {
+                            Ok(client) => client
+                                .invoke_tool(&request)
+                                .await
+                                .map_err(|error| error.to_string()),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::GovernedToolInvoked { generation, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::ApproveGovernedTool {
+                generation,
+                instance_id,
+                approval_id,
+                expected_revision,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .approve_operation(
+                            &approval_id,
+                            &sift_protocol::ExpectedRevision { expected_revision },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::GovernedToolApproved { generation, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::InvokeExtensionContribution {
                 generation,
                 instance_id,
