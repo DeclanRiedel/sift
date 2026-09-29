@@ -2647,3 +2647,23 @@ This admits a useful snapshot-to-live additive migration without pretending
 that partial dependency coverage proves a destructive change safe. Broader
 native DDL round trips and designer changes need a separate supported-shape
 contract and real-file acceptance before this restriction can be widened.
+
+## ADR-071 — SQL Server process termination uses a fresh Monitor target
+
+Status: accepted. Date: 2026-09-29.
+
+The desktop uses the existing audited `KillProcess` operation for SQL Server
+session termination. Vim navigation chooses a row from the bounded process
+snapshot, then opens a confirmation that names the session, login, database,
+and rollback consequence. A confirmation is accepted only while that snapshot,
+connection, and selected session are still current. Refreshing, reconnecting,
+or losing the session invalidates it. One request is allowed at a time; results
+from an earlier connection or request are ignored. The server remains the final
+authority and reports missing `ALTER ANY CONNECTION` permission from SQL Server.
+
+The UI also shows the negotiated `KillProcess` capability reason before a
+request. It does not claim a SQL Server permission preflight: the server can
+revoke rights after the list was fetched. Canceling an editor query and killing
+another server session are separate operations. Server session IDs can be
+reused between observation and execution, so the confirmation is a careful UI
+guard, not an atomic database guarantee.

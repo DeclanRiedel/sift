@@ -176,6 +176,11 @@ pub(super) struct DatabaseMonitorState {
     dashboard: Option<sift_protocol::ServerDashboard>,
     dashboard_request: RequestState,
     processes: Vec<DatabaseProcess>,
+    process_generation: u64,
+    process_cursor: Option<i64>,
+    termination_preview: Option<ProcessTerminationPreview>,
+    termination_pending: Option<(u64, i64)>,
+    termination_sequence: u64,
     deadlocks: Vec<DatabaseDeadlockEvent>,
     request: RequestState,
     deadlock_request: RequestState,
@@ -220,6 +225,12 @@ pub(super) struct DatabaseMonitorState {
     security_action_request: RequestState,
     sqlserver_settings_request: RequestState,
     sqlserver_settings_selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ProcessTerminationPreview {
+    pub process: DatabaseProcess,
+    generation: u64,
 }
 
 impl DatabaseMonitorState {
@@ -701,6 +712,9 @@ impl DatabaseMonitorState {
     }
 
     pub(super) fn set_view(&mut self, view: DatabaseMonitorView) {
+        if self.view != view {
+            self.termination_preview = None;
+        }
         if self.view != view
             && matches!(
                 view,
@@ -750,6 +764,13 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Maintenance => true,
         }) {
             self.selected = None;
+        }
+        let visible = self.visible_processes();
+        if !visible
+            .iter()
+            .any(|process| Some(process.process_id) == self.process_cursor)
+        {
+            self.process_cursor = visible.first().map(|process| process.process_id);
         }
     }
 
@@ -1136,15 +1157,25 @@ impl DatabaseMonitorState {
             .collect()
     }
 
-    pub(super) fn start_loading(&mut self) {
+    pub(super) fn start_loading(&mut self) -> u64 {
+        self.process_generation = self.process_generation.wrapping_add(1);
+        self.termination_preview = None;
         self.request.start();
+        self.process_generation
     }
 
     pub(super) fn fail_loading(&mut self, message: impl Into<String>) {
         self.request.fail(message);
     }
 
-    pub(super) fn finish_loading(&mut self, result: Result<Vec<DatabaseProcess>, String>) {
+    pub(super) fn finish_loading(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<DatabaseProcess>, String>,
+    ) {
+        if generation != self.process_generation || !self.request.loading() {
+            return;
+        }
         match result {
             Ok(processes) => {
                 if self.selected.is_some_and(|selected| {
@@ -1163,13 +1194,97 @@ impl DatabaseMonitorState {
         }
     }
 
-    pub(super) fn terminated(&mut self, process_id: i64) {
-        self.processes
-            .retain(|process| process.process_id != process_id);
-        self.alerts.remove(&process_id);
-        if self.selected == Some(process_id) {
-            self.selected = None;
+    pub(super) fn clear_processes(&mut self) {
+        self.process_generation = self.process_generation.wrapping_add(1);
+        self.termination_sequence = self.termination_sequence.wrapping_add(1);
+        self.processes.clear();
+        self.selected = None;
+        self.process_cursor = None;
+        self.termination_preview = None;
+        self.termination_pending = None;
+        self.alerts.clear();
+        self.request = RequestState::default();
+    }
+
+    pub(super) fn process_cursor(&self) -> Option<i64> {
+        self.process_cursor
+    }
+
+    pub(super) fn move_process_cursor(&mut self, delta: isize) {
+        let visible = self.visible_processes();
+        if visible.is_empty() {
+            self.process_cursor = None;
+            return;
         }
+        let index = visible
+            .iter()
+            .position(|process| Some(process.process_id) == self.process_cursor)
+            .unwrap_or(0);
+        let next = index.saturating_add_signed(delta).min(visible.len() - 1);
+        self.process_cursor = Some(visible[next].process_id);
+    }
+
+    pub(super) fn termination_preview(&self) -> Option<&ProcessTerminationPreview> {
+        self.termination_preview.as_ref()
+    }
+    pub(super) fn termination_pending(&self) -> bool {
+        self.termination_pending.is_some()
+    }
+
+    pub(super) fn preview_termination(&mut self, process_id: i64) -> bool {
+        if self.termination_pending.is_some() {
+            return false;
+        }
+        let Some(process) = self
+            .visible_processes()
+            .into_iter()
+            .find(|process| process.process_id == process_id)
+        else {
+            return false;
+        };
+        self.termination_preview = Some(ProcessTerminationPreview {
+            process,
+            generation: self.process_generation,
+        });
+        true
+    }
+
+    pub(super) fn clear_termination_preview(&mut self) {
+        self.termination_preview = None;
+    }
+
+    pub(super) fn start_termination(&mut self, process_id: i64) -> Option<u64> {
+        if self.termination_pending.is_some() {
+            return None;
+        }
+        let preview = self.termination_preview.as_ref()?;
+        if preview.generation != self.process_generation || preview.process.process_id != process_id
+        {
+            return None;
+        }
+        let current = self
+            .processes
+            .iter()
+            .find(|process| process.process_id == process_id)?;
+        if current.user != preview.process.user
+            || current.database != preview.process.database
+            || current.started_at != preview.process.started_at
+        {
+            return None;
+        }
+        self.termination_sequence = self.termination_sequence.wrapping_add(1);
+        let sequence = self.termination_sequence;
+        self.termination_pending = Some((sequence, process_id));
+        Some(sequence)
+    }
+
+    pub(super) fn finish_termination(&mut self, sequence: u64, process_id: i64) -> bool {
+        if self.termination_pending != Some((sequence, process_id)) {
+            return false;
+        }
+        self.termination_pending = None;
+        self.termination_preview = None;
+        true
     }
 
     pub(super) fn toggle(&mut self, process_id: i64) {
@@ -1351,11 +1466,15 @@ mod tests {
     #[test]
     fn lock_view_keeps_waiters_and_their_blockers() {
         let mut monitor = DatabaseMonitorState::default();
-        monitor.finish_loading(Ok(vec![
-            process(1, vec![]),
-            process(2, vec![1]),
-            process(3, vec![]),
-        ]));
+        let generation = monitor.start_loading();
+        monitor.finish_loading(
+            generation,
+            Ok(vec![
+                process(1, vec![]),
+                process(2, vec![1]),
+                process(3, vec![]),
+            ]),
+        );
         monitor.set_view(DatabaseMonitorView::Locks);
         assert_eq!(monitor.lock_process_count(), 2);
         assert_eq!(
@@ -1367,7 +1486,8 @@ mod tests {
             vec![1, 2]
         );
         monitor.toggle(1);
-        monitor.finish_loading(Ok(vec![process(1, vec![]), process(2, vec![])]));
+        let generation = monitor.start_loading();
+        monitor.finish_loading(generation, Ok(vec![process(1, vec![]), process(2, vec![])]));
         assert_eq!(monitor.selected(), None);
     }
 
@@ -1418,11 +1538,15 @@ mod tests {
     #[test]
     fn deadlock_view_contains_only_cycle_participants() {
         let mut monitor = DatabaseMonitorState::default();
-        monitor.finish_loading(Ok(vec![
-            process(1, vec![2]),
-            process(2, vec![1]),
-            process(3, vec![2]),
-        ]));
+        let generation = monitor.start_loading();
+        monitor.finish_loading(
+            generation,
+            Ok(vec![
+                process(1, vec![2]),
+                process(2, vec![1]),
+                process(3, vec![2]),
+            ]),
+        );
         monitor.set_view(DatabaseMonitorView::Deadlocks);
         assert_eq!(monitor.deadlock_process_count(), 2);
         assert_eq!(
@@ -1433,5 +1557,60 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
+    }
+
+    #[test]
+    fn process_termination_preview_expires_on_refresh_and_connection_change() {
+        let mut monitor = DatabaseMonitorState::default();
+        let generation = monitor.start_loading();
+        let mut target = process(42, vec![]);
+        target.engine = sift_protocol::Engine::SqlServer;
+        target.user = Some("operator".into());
+        monitor.finish_loading(generation, Ok(vec![target.clone()]));
+        assert!(monitor.preview_termination(42));
+        assert_eq!(
+            monitor
+                .termination_preview()
+                .unwrap()
+                .process
+                .user
+                .as_deref(),
+            Some("operator")
+        );
+        let newer = monitor.start_loading();
+        assert!(monitor.termination_preview().is_none());
+        assert!(monitor.start_termination(42).is_none());
+        monitor.finish_loading(generation, Ok(vec![process(99, vec![])]));
+        assert_eq!(monitor.process_cursor(), Some(42));
+        monitor.finish_loading(newer, Ok(vec![target]));
+        assert!(monitor.preview_termination(42));
+        let sequence = monitor.start_termination(42).unwrap();
+        assert!(monitor.start_termination(42).is_none());
+        monitor.clear_processes();
+        assert!(!monitor.finish_termination(sequence, 42));
+        assert!(monitor.visible_processes().is_empty());
+    }
+
+    #[test]
+    fn process_cursor_tracks_visible_sessions() {
+        let mut monitor = DatabaseMonitorState::default();
+        let generation = monitor.start_loading();
+        monitor.finish_loading(
+            generation,
+            Ok(vec![
+                process(1, vec![]),
+                process(2, vec![1]),
+                process(3, vec![]),
+            ]),
+        );
+        assert_eq!(monitor.process_cursor(), Some(1));
+        monitor.move_process_cursor(1);
+        assert_eq!(monitor.process_cursor(), Some(2));
+        monitor.set_view(DatabaseMonitorView::Locks);
+        assert_eq!(monitor.process_cursor(), Some(2));
+        monitor.move_process_cursor(1);
+        assert_eq!(monitor.process_cursor(), Some(2));
+        monitor.move_process_cursor(-1);
+        assert_eq!(monitor.process_cursor(), Some(1));
     }
 }

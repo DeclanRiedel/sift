@@ -484,8 +484,11 @@ pub(super) fn render_status_bar(
                             None,
                             false,
                         )
-                        .on_click(cx.listener(|shell, _, _, cx| {
-                            shell.select_bottom_tool(BottomTool::Monitor, cx)
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            shell.select_bottom_tool(BottomTool::Monitor, cx);
+                            if shell.bottom_dock.presentation.open {
+                                shell.automation_focus_handle.focus(window, cx);
+                            }
                         }))
                     }),
                 )

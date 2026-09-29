@@ -2692,7 +2692,7 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::LoadDatabaseProcesses => {
+            ExecutorCommand::LoadDatabaseProcesses { generation } => {
                 let result = match context.as_ref() {
                     Some(opened) => opened
                         .client
@@ -2702,7 +2702,7 @@ async fn run_query_executor(
                     None => Err("Connect before loading database activity".into()),
                 };
                 if events
-                    .send(ExecutorEvent::DatabaseProcessesLoaded(result))
+                    .send(ExecutorEvent::DatabaseProcessesLoaded { generation, result })
                     .is_err()
                 {
                     return;
@@ -6269,18 +6269,36 @@ async fn run_query_executor(
                     return;
                 }
             }
-            ExecutorCommand::TerminateDatabaseProcess { process_id } => {
+            ExecutorCommand::TerminateDatabaseProcess {
+                process_id,
+                profile_id,
+                instance_id,
+                sequence,
+            } => {
                 let result = match context.as_ref() {
-                    Some(opened) => opened
-                        .client
-                        .kill_process(opened.session, opened.metadata_connection, process_id)
-                        .await
-                        .map(|response| response.terminated)
-                        .map_err(|error| format!("terminating database process failed: {error}")),
-                    None => Err("Connect before terminating database activity".into()),
+                    Some(opened)
+                        if opened.profile_id == profile_id
+                            && instance_id
+                                .as_deref()
+                                .is_none_or(|expected| expected == opened.instance_id.as_str()) =>
+                    {
+                        opened
+                            .client
+                            .kill_process(opened.session, opened.metadata_connection, process_id)
+                            .await
+                            .map(|response| response.terminated)
+                            .map_err(|error| {
+                                format!("terminating database process failed: {error}")
+                            })
+                    }
+                    _ => Err("The selected database connection changed before termination".into()),
                 };
                 if events
-                    .send(ExecutorEvent::DatabaseProcessTerminated { process_id, result })
+                    .send(ExecutorEvent::DatabaseProcessTerminated {
+                        process_id,
+                        sequence,
+                        result,
+                    })
                     .is_err()
                 {
                     return;
