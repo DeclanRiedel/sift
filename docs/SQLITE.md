@@ -98,7 +98,7 @@ transactional. Unsupported native shapes and all drops, alters and renames are
 refused. The Vim desktop baseline action accepts SQLite's partial snapshot and
 previews restoring missing supported tables; any other diff change refuses the
 plan. Full dependency graphs, general schema migration, database designer
-mutations, process controls, notifications, native bulk/transfer targets,
+mutations, process controls, notifications, desktop native bulk/transfer targets,
 database creation, ATTACH/DETACH, unsafe PRAGMAs and file/extension functions
 are not advertised.
 
@@ -108,6 +108,18 @@ as text; a destination's numeric affinity may still coerce them. Generated CSV
 decimal/date/time columns use TEXT, booleans INTEGER. Invalid UTF-8, non-finite
 numbers, intervals and opaque native parameters fail explicitly. Parameters must
 use all anonymous `?` slots or contiguous `?1.. ?N`, in one statement.
+
+The audited `bulk-insert` API also accepts SQLite `format=native` with typed
+rows. A preview validates an existing ordinary `main` table, explicit column
+affinities, and a bounded payload; apply requires a matching one-use token and
+`confirm_write`. It accepts at most 10,000 rows, 128 columns and 8 MiB of typed
+data, then inserts batches within one managed transaction with a 120-second
+deadline checked between batches. Decimal values are
+accepted only as canonical text with at most 38 digits and scale 18, into TEXT
+affinity columns; NUMERIC affinity would coerce the value and is refused.
+Triggers, virtual/generated/hidden columns, implicit storage-class conversion,
+and non-finite numbers are refused. This target does not provide a socket-level
+bulk protocol, resumable upload, or desktop transfer-source integration (ADR-074).
 
 Each connection owns one admitted worker, one active operation and bounded page
 buffers. Overlapping catalog, semantic and query requests wait asynchronously

@@ -77,6 +77,14 @@ pub async fn execute_recipe(
         } else if recipe.format_id != "csv" {
             data = invoke_extension_formatter(sessions, metadata, actor, recipe, &data).await?;
         }
+        if let Some(mappings) = recipe.options.get("column_mappings") {
+            if recipe.format_id != "csv" {
+                return Err(ApiError::BadRequest(
+                    "column mappings require CSV format".into(),
+                ));
+            }
+            data = map_csv_headers(&data, mappings)?;
+        }
         let table = request
             .table
             .ok_or_else(|| ApiError::BadRequest("import table is required".into()))?;
@@ -299,6 +307,80 @@ pub async fn execute_recipe(
         )
         .map_err(ApiError::from)?;
     Ok(TransferExecutionResult::Artifact { artifact })
+}
+
+fn map_csv_headers(data: &[u8], mappings: &serde_json::Value) -> ApiResult<Vec<u8>> {
+    if data.len() > MAX_ARTIFACT_BYTES {
+        return Err(ApiError::BadRequest("CSV exceeds the 64 MiB limit".into()));
+    }
+    let mappings = mappings.as_object().ok_or_else(|| {
+        ApiError::BadRequest("column_mappings must be an object of source and target names".into())
+    })?;
+    if mappings.len() > 256 {
+        return Err(ApiError::BadRequest("too many CSV column mappings".into()));
+    }
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(data);
+    let headers = reader
+        .headers()
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?
+        .iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut targets = Vec::with_capacity(headers.len());
+    for source in &headers {
+        let target = match mappings.get(source) {
+            Some(serde_json::Value::String(target)) => target.as_str(),
+            Some(_) => {
+                return Err(ApiError::BadRequest(format!(
+                    "target for `{source}` must be a string"
+                )));
+            }
+            None => source.as_str(),
+        };
+        if target.is_empty()
+            || target.trim() != target
+            || target.contains('\0')
+            || target.len() > 128
+        {
+            return Err(ApiError::BadRequest("target column name is invalid".into()));
+        }
+        targets.push(target.to_owned());
+    }
+    if mappings.keys().any(|source| !headers.contains(source)) {
+        return Err(ApiError::BadRequest(
+            "column mapping references an unknown source".into(),
+        ));
+    }
+    if targets
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        != targets.len()
+    {
+        return Err(ApiError::BadRequest(
+            "mapped target columns must be distinct".into(),
+        ));
+    }
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer
+        .write_record(targets)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    for row in reader.records() {
+        writer
+            .write_record(&row.map_err(|error| ApiError::BadRequest(error.to_string()))?)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    }
+    let data = writer
+        .into_inner()
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    if data.len() > MAX_ARTIFACT_BYTES {
+        return Err(ApiError::BadRequest(
+            "mapped CSV exceeds the 64 MiB limit".into(),
+        ));
+    }
+    Ok(data)
 }
 
 fn bundled_format(id: &str) -> Option<ExportFormat> {
@@ -531,6 +613,23 @@ fn column_index(reference: &str) -> ApiResult<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_recipe_mapping_changes_only_headers_and_rejects_ambiguous_targets() {
+        let source = b"source,amount\n\"a,b\",12\n";
+        let mapped = map_csv_headers(source, &serde_json::json!({"source": "target"})).unwrap();
+        let mut reader = csv::Reader::from_reader(mapped.as_slice());
+        assert_eq!(
+            reader.headers().unwrap(),
+            &csv::StringRecord::from(vec!["target", "amount"])
+        );
+        assert_eq!(
+            reader.records().next().unwrap().unwrap(),
+            csv::StringRecord::from(vec!["a,b", "12"])
+        );
+        assert!(map_csv_headers(source, &serde_json::json!({"source": "amount"})).is_err());
+        assert!(map_csv_headers(source, &serde_json::json!({"missing": "target"})).is_err());
+    }
 
     #[test]
     fn xlsx_import_requires_named_sheet_and_preserves_text_cells() {

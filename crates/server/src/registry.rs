@@ -571,10 +571,6 @@ impl RuntimeDriver {
         {
             return true;
         }
-        if operation == OperationKind::BulkInsert && self.semantic_engine() == Some(Engine::Sqlite)
-        {
-            return false;
-        }
         if operation == OperationKind::ProjectCatalogDiagram
             && self.semantic_engine() == Some(Engine::Sqlite)
         {

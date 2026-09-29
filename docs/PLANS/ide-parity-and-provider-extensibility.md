@@ -360,7 +360,9 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 - [x] SQL Server process control (bounded audited session list and termination;
       Vim Monitor selection and explicit confirmation, capability reasons,
       connection and response generation guards)
-- [~] SQL Server bulk import
+- [~] SQL Server bulk import (Vim CSV preview, target-column mapping, dry-run
+      gate, cancel/result state, and durable recipe retry; in-flight row
+      progress and special identity/computed insertion modes remain)
 - [~] PostgreSQL extensions and partition management UI (bounded catalog views,
       Vim preview/apply for extension install/drop and partition detach;
       attach, update, and dependency previews remain)
@@ -386,7 +388,7 @@ Engine-specific follow-up checklists: [PostgreSQL](postgres-provider-gaps.md),
 
 SQLite is implemented with explicit server roots, bounded workers, dynamic
 values, native DDL, keyed edits and a partial IDE navigation catalog. Full
-dependency graphs/general migrations, actual plans, native bulk targets, maintenance and
+dependency graphs/general migrations, actual plans, desktop native bulk targets, maintenance and
 Windows file access remain outside its scope. See [SQLite support](../SQLITE.md)
 and the [overnight handoff](database-provider-overnight.md).
 
