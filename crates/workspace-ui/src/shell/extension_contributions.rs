@@ -132,6 +132,7 @@ impl WorkspaceShell {
             }
             "c" => self.create_selected_extension_approval(cx),
             "r" => self.open_extension_contributions(cx),
+            "g" => self.open_governed_tools(cx),
             _ => return false,
         }
         cx.notify();
@@ -436,7 +437,10 @@ impl WorkspaceShell {
         cx.notify();
     }
 
-    fn current_extension_context(&self, cx: &Context<Self>) -> sift_protocol::ToolContext {
+    pub(super) fn current_extension_context(
+        &self,
+        cx: &Context<Self>,
+    ) -> sift_protocol::ToolContext {
         let document = self.panes.get(self.active_pane).and_then(|pane| {
             let pane = pane.read(cx);
             match pane.active_item()?.source.as_ref()? {
@@ -677,14 +681,16 @@ impl WorkspaceShell {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child("Extensions"),
                     )
-                    .child(
-                        Button::new("refresh-extension-contributions", "Refresh")
+                    .child(div().flex().gap_2()
+                        .child(Button::new("browse-governed-tools", "Governed tools")
+                            .tone(ButtonTone::Neutral)
+                            .on_click(cx.listener(|shell, _, _, cx| shell.open_governed_tools(cx))))
+                        .child(Button::new("refresh-extension-contributions", "Refresh")
                             .tone(ButtonTone::Ghost)
                             .disabled(ui.loading || ui.pending)
                             .on_click(cx.listener(|shell, _, _, cx| {
                                 shell.open_extension_contributions(cx)
-                            })),
-                    ),
+                            })))),
             )
             .child(
                 div()
@@ -693,7 +699,7 @@ impl WorkspaceShell {
                     .child("Extension actions use the server's audited operation path."),
             )
             .child(div().text_xs().text_color(colors.muted_text).child(
-                "Vim: j/k select · Enter run · i edit fields · p review approval · v type phrase · c create request · a approve · r refresh · Esc close",
+                "Vim: j/k select · Enter run · i edit fields · p review approval · v type phrase · c create request · a approve · g governed tools · r refresh · Esc close",
             ))
             .child(
                 div()

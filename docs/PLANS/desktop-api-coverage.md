@@ -272,7 +272,9 @@ and forwarded health/readiness probes.
   exact typed confirmation, creation and revision-checked approval for write,
   destructive and administrative actions; the server binds actor, target,
   arguments and expiry, and execution consumes the one-use approval (M4/M5)
-- [ ] `governed_tools`, `invoke_tool` — governed tool invocation (M5)
+- [x] `governed_tools`, `invoke_tool` — Vim governed-tool browser scoped to the
+  active server/context, reviewed JSON invocation with typed mutation
+  confirmation, server-driven approval and bounded results (M5)
 - [ ] `openapi` — dev/help surface (optional)
 
 ---

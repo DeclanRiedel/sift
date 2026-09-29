@@ -107,6 +107,7 @@ pub(super) fn content_width(modal: &Modal, wizard: DatabaseWizardStep) -> f32 {
         | Modal::Keymaps
         | Modal::ApiTokens
         | Modal::ExtensionContributions
+        | Modal::GovernedTools
         | Modal::ConnectionPolicy
         | Modal::TenantUsage
         | Modal::VcsDiagnostics

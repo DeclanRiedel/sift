@@ -64,6 +64,7 @@ mod database_monitor;
 mod dock_layout;
 mod docks;
 mod extension_contributions;
+mod governed_tools;
 mod items;
 mod modal_layout;
 mod modals;
@@ -2236,6 +2237,7 @@ pub enum Modal {
     Account,
     ApiTokens,
     ExtensionContributions,
+    GovernedTools,
     ConnectionPolicy,
     TenantUsage,
     VcsDiagnostics,
@@ -3534,6 +3536,22 @@ pub enum ExecutorCommand {
         generation: u64,
         instance_id: String,
     },
+    LoadGovernedTools {
+        generation: u64,
+        instance_id: String,
+        context: sift_protocol::ToolContext,
+    },
+    InvokeGovernedTool {
+        generation: u64,
+        instance_id: String,
+        request: sift_protocol::InvokeToolRequest,
+    },
+    ApproveGovernedTool {
+        generation: u64,
+        instance_id: String,
+        approval_id: String,
+        expected_revision: u64,
+    },
     InvokeExtensionContribution {
         generation: u64,
         instance_id: String,
@@ -4529,6 +4547,18 @@ pub enum ExecutorEvent {
     ExtensionContributionsLoaded {
         generation: u64,
         result: Result<Vec<sift_protocol::ExtensionDescriptor>, String>,
+    },
+    GovernedToolsLoaded {
+        generation: u64,
+        result: Result<Vec<sift_protocol::GovernedToolDescriptor>, String>,
+    },
+    GovernedToolInvoked {
+        generation: u64,
+        result: Result<sift_protocol::InvokeToolResponse, String>,
+    },
+    GovernedToolApproved {
+        generation: u64,
+        result: Result<sift_protocol::OperationApproval, String>,
     },
     ExtensionContributionInvoked {
         generation: u64,
@@ -11218,6 +11248,7 @@ pub struct WorkspaceShell {
     api_tokens_pending: bool,
     api_tokens_error: Option<String>,
     extension_contributions: extension_contributions::ExtensionContributionsUi,
+    governed_tools: governed_tools::GovernedToolsUi,
     principal_admin_pending: bool,
     principal_admin_error: Option<String>,
     principal_keys: Vec<sift_api_types::PrincipalKey>,
@@ -12665,6 +12696,7 @@ impl WorkspaceShell {
             api_tokens_pending: false,
             api_tokens_error: None,
             extension_contributions: extension_contributions::ExtensionContributionsUi::default(),
+            governed_tools: governed_tools::GovernedToolsUi::default(),
             principal_admin_pending: false,
             principal_admin_error: None,
             principal_keys: Vec::new(),
@@ -13240,6 +13272,11 @@ impl WorkspaceShell {
         self.presence.apply(PresenceEvent::Left);
         let generation = self.extension_contributions.generation.saturating_add(1);
         self.extension_contributions = extension_contributions::ExtensionContributionsUi {
+            generation,
+            ..Default::default()
+        };
+        let generation = self.governed_tools.generation.saturating_add(1);
+        self.governed_tools = governed_tools::GovernedToolsUi {
             generation,
             ..Default::default()
         };
@@ -13906,6 +13943,7 @@ impl WorkspaceShell {
                 cx.notify();
             }
             ExecutorEvent::Connection(status) => {
+                self.invalidate_governed_tools("Connection changed; refresh governed tools");
                 self.database_monitor.clear_processes();
                 if matches!(self.modal, Some(Modal::ConfirmTerminateProcess(_))) {
                     self.modal = None;
@@ -14156,6 +14194,89 @@ impl WorkspaceShell {
                         self.extension_contributions.error = None;
                     }
                     Err(error) => self.extension_contributions.error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::GovernedToolsLoaded { generation, result } => {
+                if generation != self.governed_tools.generation
+                    || self.modal != Some(Modal::GovernedTools)
+                {
+                    return;
+                }
+                if !self.governed_target_is_current(cx) {
+                    self.invalidate_governed_tools(
+                        "Server or context changed; refresh governed tools",
+                    );
+                    cx.notify();
+                    return;
+                }
+                self.governed_tools.loading = false;
+                match result {
+                    Ok(tools) => {
+                        self.governed_tools.truncated = tools.len() > governed_tools::MAX_TOOLS;
+                        self.governed_tools.tools =
+                            tools.into_iter().take(governed_tools::MAX_TOOLS).collect();
+                        self.governed_tools.error = None;
+                    }
+                    Err(error) => self.governed_tools.error = Some(error),
+                }
+                cx.notify();
+            }
+            ExecutorEvent::GovernedToolInvoked { generation, result } => {
+                if generation != self.governed_tools.generation
+                    || self.modal != Some(Modal::GovernedTools)
+                {
+                    return;
+                }
+                self.governed_tools.pending = false;
+                if !self.governed_target_is_current(cx) {
+                    self.invalidate_governed_tools(
+                        "Server or context changed; refresh governed tools",
+                    );
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(sift_protocol::InvokeToolResponse::Completed { result }) => {
+                        self.governed_tools.result = Some(result);
+                        self.governed_tools.approval = None;
+                        self.governed_tools.pending_request = None;
+                        self.governed_tools.review = None;
+                        self.governed_tools.confirmation = None;
+                        self.governed_tools.error = None;
+                    }
+                    Ok(sift_protocol::InvokeToolResponse::ApprovalRequired { approval }) => {
+                        self.governed_tools.approval = Some(approval);
+                        self.governed_tools.error = None;
+                    }
+                    Err(error) => {
+                        self.governed_tools.approval = None;
+                        self.governed_tools.pending_request = None;
+                        self.governed_tools.error = Some(error);
+                    }
+                }
+                cx.notify();
+            }
+            ExecutorEvent::GovernedToolApproved { generation, result } => {
+                if generation != self.governed_tools.generation
+                    || self.modal != Some(Modal::GovernedTools)
+                {
+                    return;
+                }
+                self.governed_tools.pending = false;
+                if !self.governed_target_is_current(cx) {
+                    self.invalidate_governed_tools(
+                        "Server or context changed; refresh governed tools",
+                    );
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(approval) => {
+                        self.governed_tools.approval = Some(approval);
+                        self.governed_tools.error = None;
+                    }
+                    Err(error) => self.governed_tools.error = Some(error),
                 }
                 cx.notify();
             }
@@ -32937,6 +33058,12 @@ impl WorkspaceShell {
             cx.stop_propagation();
             return;
         }
+        if self.modal == Some(Modal::GovernedTools)
+            && self.handle_governed_tools_key(event, window, cx)
+        {
+            cx.stop_propagation();
+            return;
+        }
         if self.modal.is_some() && key == "escape" && !event.keystroke.modifiers.modified() {
             self.dismiss_modal(&DismissModal, window, cx);
             cx.stop_propagation();
@@ -46894,6 +47021,145 @@ mod tests {
             );
             assert!(shell.extension_contributions.pending_request.is_some());
         });
+    }
+
+    #[gpui::test]
+    fn governed_tool_vim_flow_requires_review_and_server_approval(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut receiver) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.selected_instance_id = Some("server-a".into());
+            shell.modal = Some(Modal::GovernedTools);
+            let context = shell.current_extension_context(cx);
+            shell.governed_tools = governed_tools::GovernedToolsUi {
+                instance_id: "server-a".into(),
+                context: Some(context),
+                arguments: Some(cx.new(|cx| TextInput::new("{}", "JSON arguments", cx))),
+                tools: vec![sift_protocol::GovernedToolDescriptor {
+                    id: "purge".into(),
+                    title: "Purge".into(),
+                    description: "Purge test data".into(),
+                    operation: sift_protocol::ExtensionOperation {
+                        extension_id: sift_protocol::ExtensionId::new("acme/tools").unwrap(),
+                        contribution_id: sift_protocol::ContributionId::new(
+                            "acme/tools/command/purge",
+                        )
+                        .unwrap(),
+                        action: sift_protocol::SegmentId::new("purge").unwrap(),
+                        classification: sift_protocol::OperationClassification::Destructive,
+                        target_kind: sift_protocol::SegmentId::new("instance").unwrap(),
+                        target_id: None,
+                        sanitized_arguments: Default::default(),
+                    },
+                    input_schema: serde_json::json!({"type":"object"}),
+                    output_schema: serde_json::json!({"type":"object"}),
+                    required_context: vec![],
+                    mcp_exposable: true,
+                    schedulable: false,
+                    interactive: true,
+                }],
+                ..Default::default()
+            };
+            cx.notify();
+        });
+        cx.simulate_keystrokes("j");
+        cx.simulate_keystrokes("c");
+        assert!(receiver.try_recv().is_err());
+        cx.simulate_keystrokes("p");
+        cx.simulate_keystrokes("c");
+        assert!(receiver.try_recv().is_err());
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .governed_tools
+                .confirmation
+                .as_ref()
+                .unwrap()
+                .update(cx, |input, cx| {
+                    input.set_text("INVOKE purge ON server-a", cx)
+                });
+        });
+        cx.simulate_keystrokes("c");
+        let generation = match receiver.try_recv().expect("invoke after confirmation") {
+            ExecutorCommand::InvokeGovernedTool {
+                generation,
+                instance_id,
+                request,
+            } => {
+                assert_eq!(instance_id, "server-a");
+                assert_eq!(request.tool_id, "purge");
+                assert_eq!(request.arguments, serde_json::json!({}));
+                assert_eq!(request.approval_id, None);
+                generation
+            }
+            _ => panic!("expected governed invocation"),
+        };
+        let approval = sift_protocol::OperationApproval {
+            id: "approval-1".into(),
+            principal_id: 4,
+            operation_id: "purge".into(),
+            input_fingerprint: "fingerprint".into(),
+            expires_at: "2030-01-01T00:00:00Z".into(),
+            approved_at: None,
+            consumed_at: None,
+            revision: 0,
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::GovernedToolInvoked {
+                    generation,
+                    result: Ok(sift_protocol::InvokeToolResponse::ApprovalRequired {
+                        approval: approval.clone(),
+                    }),
+                },
+                cx,
+            )
+        });
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .governed_tools
+                .arguments
+                .as_ref()
+                .unwrap()
+                .update(cx, |input, cx| input.set_text("{\"scope\":\"all\"}", cx));
+        });
+        cx.simulate_keystrokes("a");
+        assert!(receiver.try_recv().is_err());
+        workspace.update(&mut cx, |shell, cx| {
+            shell
+                .governed_tools
+                .arguments
+                .as_ref()
+                .unwrap()
+                .update(cx, |input, cx| input.set_text("{}", cx));
+        });
+        cx.simulate_keystrokes("a");
+        assert!(
+            matches!(receiver.try_recv(), Ok(ExecutorCommand::ApproveGovernedTool {
+            approval_id, expected_revision: 0, ..
+        }) if approval_id == "approval-1")
+        );
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::GovernedToolApproved {
+                    generation,
+                    result: Ok(sift_protocol::OperationApproval {
+                        approved_at: Some("2026-09-29T00:00:00Z".into()),
+                        revision: 1,
+                        ..approval
+                    }),
+                },
+                cx,
+            )
+        });
+        cx.simulate_keystrokes("v");
+        assert!(
+            matches!(receiver.try_recv(), Ok(ExecutorCommand::InvokeGovernedTool {
+            request: sift_protocol::InvokeToolRequest { approval_id: Some(id), .. }, ..
+        }) if id == "approval-1")
+        );
     }
 
     #[gpui::test]
