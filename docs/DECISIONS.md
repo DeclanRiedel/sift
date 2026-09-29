@@ -2945,7 +2945,8 @@ classification, contribution/action, scoped target, and canonical input
 fingerprint without displaying secret form values. The user must type the exact
 operation-and-target confirmation before the desktop calls the existing
 `createOperationApproval` SDK method. Changing the selection, form arguments,
-or target context invalidates that preview. The desktop resolves the `active`
+target context, or selected server invalidates that preview. The desktop
+resolves the `active`
 connection marker to its concrete session/connection identity for creation,
 as it already does for invocation. The server binds the approval to the
 authenticated principal, registered operation, authorized context, and input
