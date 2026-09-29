@@ -134,7 +134,7 @@ pub fn render_plan(
         .collect::<Vec<_>>();
     let groups = vec![MigrationGroup {
         ordinal: 1,
-        transactional: options.prefer_transactional,
+        transactional: engine == Engine::Sqlite || options.prefer_transactional,
         statements,
     }];
     let mut rollback_statements = Vec::new();
@@ -260,7 +260,7 @@ fn render_change(
         .or(change.object_before.as_ref())
         .ok_or_else(|| MigrationRenderError::InvalidChangeShape(change.id.clone()))?;
     if engine == Engine::Sqlite {
-        return unsupported(change, node);
+        return sqlite_create_sql(change, node, to_nodes, to).map(Some);
     }
     // A catalog may be useful for navigation while lacking a lossless migration
     // projection. Refuse changes to the marked object or any of its children.
@@ -291,6 +291,94 @@ fn render_change(
             rename_or_move_sql(engine, change, from_nodes, to_nodes).map(Some)
         }
     }
+}
+
+fn sqlite_create_sql(
+    change: &SchemaChange,
+    node: &CatalogNode,
+    nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    graph: &CatalogGraph,
+) -> Result<String, MigrationRenderError> {
+    if change.kind != SchemaChangeKind::Create || node.kind != CatalogNodeKind::Table {
+        return unsupported(change, node);
+    }
+    let schema = schema_ancestor(change, node, nodes)?;
+    if schema.name != "main"
+        || graph.data.coverage.truncated_at_nodes.is_some()
+        || node
+            .extra
+            .get("migration_unsupported")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return unsupported(change, node);
+    }
+    let children = graph
+        .data
+        .nodes
+        .iter()
+        .filter(|candidate| candidate.parent_id.as_ref() == Some(&node.id))
+        .collect::<Vec<_>>();
+    if children.is_empty()
+        || children
+            .iter()
+            .any(|child| child.kind != CatalogNodeKind::Column)
+    {
+        return unsupported(change, node);
+    }
+    let mut columns = children;
+    columns.sort_by_key(|column| column.ordinal);
+    let mut declarations = Vec::with_capacity(columns.len());
+    for (position, column) in columns.into_iter().enumerate() {
+        if column.ordinal != u32::try_from(position + 1).ok() {
+            return unsupported(change, node);
+        }
+        let CatalogNodeDetails::Column { column: metadata } = &column.details else {
+            return unsupported(change, node);
+        };
+        let Some(facets) = &metadata.facets.sqlite else {
+            return unsupported(change, node);
+        };
+        let declared = facets.declared_type.to_ascii_uppercase();
+        if !["INTEGER", "REAL", "TEXT", "BLOB", "NUMERIC"].contains(&declared.as_str())
+            || facets.default_expr.is_some()
+            || facets.primary_key_ordinal != 0
+            || facets.hidden != 0
+            || facets.virtual_table
+            || metadata.auto_increment
+        {
+            return unsupported(change, node);
+        }
+        declarations.push(format!(
+            "{} {}{}",
+            crate::ddl::quote_ident(&column.name, Engine::Sqlite),
+            declared,
+            if metadata.nullable == Nullability::NotNullable {
+                " NOT NULL"
+            } else {
+                ""
+            }
+        ));
+    }
+    let canonical = format!(
+        "CREATE TABLE {} ({});",
+        crate::ddl::quote_ident(&node.name, Engine::Sqlite),
+        declarations.join(", ")
+    );
+    if node
+        .extra
+        .get("sqlite_safe_create_sql")
+        .and_then(serde_json::Value::as_str)
+        != Some(canonical.as_str())
+    {
+        return unsupported(change, node);
+    }
+    Ok(format!(
+        "CREATE TABLE {}.{} ({});",
+        crate::ddl::quote_ident("main", Engine::Sqlite),
+        crate::ddl::quote_ident(&node.name, Engine::Sqlite),
+        declarations.join(", ")
+    ))
 }
 
 fn create_sql(

@@ -35,6 +35,13 @@ pub(super) fn render_bottom_panel(
         )
         .when(
             shell.active_bottom_tool == BottomTool::Monitor
+                && matches!(shell.database_monitor.view(), DatabaseMonitorView::Activity | DatabaseMonitorView::Locks | DatabaseMonitorView::Deadlocks | DatabaseMonitorView::Alerts)
+                && shell.active_connection_provider_id() == Some(&sift_protocol::Engine::SqlServer.provider_id()),
+            |dock| dock.key_context("SiftSqlServerProcesses")
+                .on_key_down(cx.listener(WorkspaceShell::handle_sqlserver_process_key)),
+        )
+        .when(
+            shell.active_bottom_tool == BottomTool::Monitor
                 && matches!(shell.database_monitor.view(), DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions | DatabaseMonitorView::Policies | DatabaseMonitorView::Roles | DatabaseMonitorView::Ownership | DatabaseMonitorView::SchemaGrants),
             |dock| dock.key_context("SiftPostgresObjects")
                 .on_key_down(cx.listener(WorkspaceShell::handle_postgres_objects_key)),
@@ -171,8 +178,9 @@ pub(super) fn render_bottom_panel(
                                     ButtonTone::Ghost
                                 })
                                 .disabled(!view.available_for(provider, connected))
-                                .on_click(cx.listener(move |shell, _, _, cx| {
-                                    shell.set_database_monitor_view(view, cx)
+                                .on_click(cx.listener(move |shell, _, window, cx| {
+                                    shell.set_database_monitor_view(view, cx);
+                                    shell.automation_focus_handle.focus(window, cx);
                                 }))
                         }))
                 })),
@@ -288,12 +296,17 @@ pub(super) fn render_bottom_panel(
                 let visible_processes = shell.database_monitor.visible_processes();
                 let processes = database_process_rows(&visible_processes);
                 let selected_process = shell.database_monitor.selected();
+                let process_cursor = shell.database_monitor.process_cursor();
+                let kill_reason = shell.operation_unavailable_reason(sift_protocol::OperationKind::KillProcess);
+                let sqlserver_processes = shell.active_connection_provider_id() == Some(&sift_protocol::Engine::SqlServer.provider_id());
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .flex_col()
                     .children(transaction)
+                    .children(sqlserver_processes.then(|| div().px_3().text_xs().child("SQL Server: j/k choose session · Enter details · d review termination · r refresh. KILL requires ALTER ANY CONNECTION and can roll back work; use editor Cancel for your own query.")))
+                    .children(kill_reason.clone().map(|reason| div().px_3().text_xs().text_color(colors.warning).child(format!("Termination unavailable: {reason}"))))
                     .child(
                         div()
                             .flex_none()
@@ -343,7 +356,8 @@ pub(super) fn render_bottom_panel(
                                 let expanded = selected_process == Some(process.process.process_id);
                                 let alert =
                                     shell.database_monitor.alert(process.process.process_id);
-                                render_database_process_row(process, expanded, alert, cx)
+                                let focused = process_cursor == Some(process.process.process_id);
+                                render_database_process_row(process, expanded, focused, kill_reason.is_none(), alert, cx)
                             })),
                     )
                     .children(shell.database_monitor.request().error().map(|message| {
@@ -2617,6 +2631,8 @@ fn render_database_deadlock_history(
 fn render_database_process_row(
     row: DatabaseProcessRow,
     expanded: bool,
+    focused: bool,
+    kill_available: bool,
     alert: Option<DatabaseAlertKind>,
     cx: &mut Context<WorkspaceShell>,
 ) -> gpui::AnyElement {
@@ -2675,11 +2691,18 @@ fn render_database_process_row(
                     row.bg(colors.danger_muted)
                 })
                 .when(expanded, |row| row.bg(colors.active_surface))
-                .on_click(
-                    cx.listener(move |shell, _, _, cx| {
-                        shell.select_database_process(process_id, cx)
-                    }),
+                .when(
+                    focused
+                        && !expanded
+                        && row.block_depth == 0
+                        && alert != Some(DatabaseAlertKind::DeadlockRisk),
+                    |row| row.bg(colors.accent_muted),
                 )
+                .when(focused, |row| row.border_l_2().border_color(colors.accent))
+                .on_click(cx.listener(move |shell, _, window, cx| {
+                    shell.select_database_process(process_id, cx);
+                    shell.automation_focus_handle.focus(window, cx);
+                }))
                 .child(
                     div()
                         .w(px(72.))
@@ -2718,6 +2741,7 @@ fn render_database_process_row(
                     div().w(px(84.)).flex().justify_end().child(
                         Button::new(("terminate-process", process_id as usize), "Terminate")
                             .tone(ButtonTone::DangerGhost)
+                            .disabled(!kill_available)
                             .on_click(cx.listener(move |shell, _, _, cx| {
                                 shell.request_terminate_process(process_id, cx)
                             })),
