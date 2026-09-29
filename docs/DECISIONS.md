@@ -3027,6 +3027,29 @@ edges remain unsupported. Sequence counters are runtime data and are outside
 schema migration. Policy and partition changes continue to refuse automatic
 rendering until their dependency closure can be proved separately.
 
+## ADR-086 — Partition attachment requires two stable existing tables
+
+Status: accepted. Date: 2026-09-29.
+
+The first automatic partition migration is attachment or detachment of one
+ordinary, permanent heap child to an unchanged range-partitioned parent in
+the same schema. Both relations and their columns exist in both complete,
+definition-bearing PostgreSQL graphs. The active graph captures the parent
+identity and server-deparsed partition bound. Rendering constructs quoted
+attach and detach statements from those catalog fields, and requires the paired parent and child
+changes, selected together, and proves that their other details and native
+state are unchanged. Attach uses `ALTER TABLE ... ATTACH PARTITION`; detach
+uses `ALTER TABLE ... DETACH PARTITION`. Each is the other's rollback.
+
+The catalog capture and renderer refuse child-local indexes, constraints,
+triggers, policy, owned sequences, inheritance or nested partitions, custom
+storage, extension membership, and an already populated partition tree. They
+also refuse a changed parent definition, incomplete graph coverage, DDL-source
+models, and mixed migration changes. Attachment may validate existing child
+rows and fail atomically if they violate its bound. A partition child created
+or dropped with its parent, concurrent policy or sequence edits, index and
+constraint dependencies, and multi-partition ordering need separate proofs.
+
 ## ADR-087 — Desktop governed tools use the authorized registry and invoke contract
 
 Status: accepted. Date: 2026-09-29.
