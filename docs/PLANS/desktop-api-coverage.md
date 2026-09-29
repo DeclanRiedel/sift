@@ -91,7 +91,9 @@ and forwarded health/readiness probes.
 
 - [x] `schema` — schema tree in the Connections dock (M4)
 - [x] `object_ddl` — canonical object DDL replaces the immediate catalog-derived preview (M4)
-- [ ] `providers` — engine/provider hints for rendering (M4)
+- [x] `providers` — lifecycle consumes the SDK endpoint per selected server;
+  the connection wizard shows dialect, quality and capability count, and Vim
+  `p` on a connection opens bounded provider/version/capability details (M4)
 - [x] `search_schema` — filtered schema search in the Connections dock (M4)
 - [x] `search_data` — bounded table-data search modal with per-row field previews (M4)
 - [x] `catalog_graph` — dependency/usages section in the object inspector (M4/M5)

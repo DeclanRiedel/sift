@@ -2425,6 +2425,7 @@ impl WorkspaceShell {
                 }
                 Modal::ExtensionContributions => self.render_extension_contributions(cx),
                 Modal::GovernedTools => self.render_governed_tools(cx),
+                Modal::ProviderDetails { instance_id, provider_id } => self.render_provider_details(instance_id, provider_id, cx),
                 Modal::ConnectionPolicy => {
                     let policy = self.connection_policy.clone();
                     let read_only = policy.as_ref().is_some_and(|policy| policy.read_only);
@@ -4022,14 +4023,20 @@ impl WorkspaceShell {
                     .into_iter()
                     .enumerate()
                     .map(|(index, (provider_id, display_name, asset))| {
-                            let available = self
+                            let descriptor = self
                                 .lifecycle
                                 .providers
                                 .iter()
                                 .find(|provider| {
                                     provider.provider.provider_id.as_str() == provider_id
-                                })
-                                .is_some_and(|provider| provider.available);
+                                });
+                            let available = descriptor.is_some_and(|provider| provider.available);
+                            let hint = descriptor.map(|provider| format!(
+                                "{} · {} · {} capabilities",
+                                provider.provider.dialect_id,
+                                provider_hints::provider_quality_label(provider.quality),
+                                provider.capabilities.len(),
+                            ));
                             let selected =
                                 selected_provider.as_deref() == Some(provider_id);
                             let logo_size = if provider_id == "sift/postgres" {
@@ -4093,6 +4100,7 @@ impl WorkspaceShell {
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .child(display_name),
                                 )
+                                .children(hint.map(|hint| div().text_xs().text_center().text_color(colors.muted_text).child(hint)))
                                 .when(!available, |card| card.child(
                                     div()
                                         .text_xs()

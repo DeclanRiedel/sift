@@ -72,6 +72,7 @@ mod tailnet;
 pub use benchmark_library::{BenchmarkLibraryAction, BenchmarkLibraryReply};
 mod pane_layout;
 mod postgres_maintenance;
+mod provider_hints;
 mod result_editing;
 mod runtime_audit;
 mod sql_drafts;
@@ -973,6 +974,7 @@ fn shell_connection_row_menu(
 ) -> impl IntoElement {
     let edit_entry = entry.clone();
     let settings_entry = entry.clone();
+    let provider_entry = entry.clone();
     let disconnect_entry = entry.clone();
     let delete_entry = entry;
     div()
@@ -1043,6 +1045,20 @@ fn shell_connection_row_menu(
                     shell.request_profile_settings(&settings_entry, cx);
                 }))
                 .child("Connection settings…"),
+        )
+        .child(
+            div()
+                .id("connection-row-provider-details")
+                .role(Role::MenuItem)
+                .h(px(28.))
+                .px_2()
+                .flex()
+                .items_center()
+                .hover(|item| item.bg(colors.hovered_surface))
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.open_provider_details(&provider_entry.provider_id, cx);
+                }))
+                .child("Provider details…"),
         )
         .child(
             div()
@@ -2238,6 +2254,10 @@ pub enum Modal {
     ApiTokens,
     ExtensionContributions,
     GovernedTools,
+    ProviderDetails {
+        instance_id: String,
+        provider_id: String,
+    },
     ConnectionPolicy,
     TenantUsage,
     VcsDiagnostics,
@@ -20427,32 +20447,31 @@ impl WorkspaceShell {
             ConnectionTreeAction::Connection(connection) => {
                 let connection_id = connection.id;
                 let connected = self.profile_is_connected(connection_id);
+                let provider_name = self
+                    .lifecycle
+                    .providers
+                    .iter()
+                    .find(|provider| provider.provider.provider_id == connection.provider_id)
+                    .map(|provider| provider.display_name.chars().take(64).collect::<String>())
+                    .or_else(|| provider_display_name(&connection.provider_id).map(str::to_owned));
                 let (connection_color, status_color, status_label) = match &self.connection_status {
                     ConnectionStatus::Connected { profile_id, .. }
                         if *profile_id == connection_id =>
                     {
-                        (
-                            colors.success,
-                            Some(colors.success),
-                            provider_display_name(&connection.provider_id),
-                        )
+                        (colors.success, Some(colors.success), provider_name.clone())
                     }
                     ConnectionStatus::Connecting { profile_id } if *profile_id == connection_id => {
-                        (colors.warning, Some(colors.warning), Some("Connecting…"))
+                        (
+                            colors.warning,
+                            Some(colors.warning),
+                            Some("Connecting…".into()),
+                        )
                     }
                     ConnectionStatus::Failed { profile_id, .. } if *profile_id == connection_id => {
-                        (colors.danger, Some(colors.danger), Some("Failed"))
+                        (colors.danger, Some(colors.danger), Some("Failed".into()))
                     }
-                    _ if connected => (
-                        colors.success,
-                        Some(colors.success),
-                        provider_display_name(&connection.provider_id),
-                    ),
-                    _ => (
-                        colors.muted_text,
-                        None,
-                        provider_display_name(&connection.provider_id),
-                    ),
+                    _ if connected => (colors.success, Some(colors.success), provider_name.clone()),
+                    _ => (colors.muted_text, None, provider_name),
                 };
                 let active = matches!(self.connection_status, ConnectionStatus::Connected { profile_id, .. } if profile_id == connection_id);
                 let open = active && self.expanded_connections.contains(&connection_id);
@@ -33341,7 +33360,19 @@ impl WorkspaceShell {
                     }
                     "p" => {
                         self.connection_nav_g_pending = false;
-                        self.preview_selected_schema_object(window, cx);
+                        match self
+                            .visible_connection_items()
+                            .get(self.connection_nav_selected)
+                            .cloned()
+                        {
+                            Some(ConnectionTreeItem {
+                                action: ConnectionTreeAction::Connection(entry),
+                                ..
+                            }) => {
+                                self.open_provider_details(&entry.provider_id, cx);
+                            }
+                            _ => self.preview_selected_schema_object(window, cx),
+                        }
                         true
                     }
                     "shift-p" => {
@@ -47956,6 +47987,60 @@ mod tests {
             workspace.read_with(&cx, |shell, _| shell.focused_surface),
             WorkspaceSurface::Editor
         );
+    }
+
+    #[gpui::test]
+    fn connection_vim_preview_opens_current_servers_provider_hints(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        workspace.update_in(&mut cx, |shell, window, cx| {
+            shell.selected_instance_id = Some("server-a".into());
+            shell.lifecycle.providers = vec![sift_protocol::ProviderDescriptor {
+                provider: sift_protocol::ProviderRef {
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    dialect_id: sift_protocol::DialectId::new("sift/postgresql").unwrap(),
+                    provider_version: "1.0".into(),
+                },
+                display_name: "PostgreSQL".into(),
+                configuration_schema: serde_json::json!({}),
+                credential_schema: serde_json::json!({}),
+                configuration_schema_version: 1,
+                capabilities: vec![sift_protocol::ProviderCapability {
+                    id: "driver.schema.graph@1".into(),
+                    limits: Default::default(),
+                }],
+                quality: Some(sift_protocol::ProviderQuality::SiftCertified),
+                available: true,
+            }];
+            shell.lifecycle.tenants = vec![crate::TenantNavEntry {
+                id: sift_api_types::TenantId(1),
+                name: "Personal".into(),
+                rooms: Vec::new(),
+                connections: vec![ConnectionNavEntry {
+                    id: 7,
+                    tenant_id: 1,
+                    name: "Demo".into(),
+                    provider_id: sift_protocol::ProviderId::new("sift/postgres").unwrap(),
+                    tags: Vec::new(),
+                }],
+            }];
+            shell.expanded_tenants.insert(1);
+            shell.run_command(CommandId::FocusConnections, window, cx);
+            shell.connection_nav_selected = 1;
+        });
+        cx.simulate_keystrokes("p");
+        workspace.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell.modal,
+                Some(Modal::ProviderDetails {
+                    instance_id: "server-a".into(),
+                    provider_id: "sift/postgres".into(),
+                })
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("provider-capability-list").is_some());
     }
 
     #[gpui::test]
