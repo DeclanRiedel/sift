@@ -160,6 +160,102 @@ async fn assert_write_denied(driver: &dyn Driver, conn: &ConnHandle, sql: String
     }
 }
 
+#[cfg(feature = "live-pg")]
+#[tokio::test]
+async fn postgres_owned_sequence_round_trips_and_fences_generic_migration() {
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let (src, dst) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE SCHEMA {src}; CREATE SCHEMA {dst}; \
+         CREATE TABLE {src}.items(id integer); CREATE TABLE {dst}.items(id integer); \
+         CREATE SEQUENCE {src}.counter AS integer START WITH 17 INCREMENT BY 3 CACHE 4; \
+         ALTER SEQUENCE {src}.counter OWNED BY {src}.items.id; \
+         CREATE INDEX items_id_idx ON {src}.items(id); \
+         CLUSTER {src}.items USING items_id_idx;"
+        ),
+    )
+    .await;
+    let ddl = round_trip(&driver, &conn, &src, &dst, "counter", ObjectKind::Sequence).await;
+    assert!(ddl.contains(&format!("OWNED BY {src}.items.id")), "{ddl}");
+
+    let graph = driver
+        .schema(
+            conn.clone(),
+            sift_protocol::SchemaScope {
+                depth: sift_protocol::SchemaDepth::Graph {
+                    options: sift_protocol::CatalogGraphOptions {
+                        schemas: Some(vec![src.clone()]),
+                        include_definitions: true,
+                        ..Default::default()
+                    },
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    let sequence = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == sift_protocol::CatalogNodeKind::Sequence && node.name == "counter"
+        })
+        .unwrap();
+    let table = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == sift_protocol::CatalogNodeKind::Table && node.name == "items")
+        .unwrap();
+    assert!(sequence.extra.contains_key("native_sequence_shape"));
+    assert_eq!(
+        sequence.extra.get("migration_unsupported"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert!(table.extra.contains_key("native_owned_sequence_shape"));
+    assert!(table.extra.contains_key("native_unsupported_index_shape"));
+    assert_eq!(
+        table.extra.get("migration_unsupported"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert!(generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&src, "items", ObjectKind::Table)
+    )
+    .await
+    .is_err());
+
+    execute(
+        &driver,
+        &conn,
+        &format!("CREATE TABLE {src}.identity_item(id bigint GENERATED ALWAYS AS IDENTITY);"),
+    )
+    .await;
+    let error = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&src, "identity_item_id_seq", ObjectKind::Sequence),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, sift_protocol::Code::UnsupportedForEngine);
+    assert!(error.message.contains("identity sequence"));
+
+    execute(
+        &driver,
+        &conn,
+        &format!("DROP SCHEMA {dst} CASCADE; DROP SCHEMA {src} CASCADE;"),
+    )
+    .await;
+    driver.close(conn).await.unwrap();
+}
+
 fn schemas() -> (String, String) {
     let id = uuid::Uuid::new_v4().simple().to_string();
     (format!("ns_{id}"), format!("nd_{id}"))

@@ -2607,7 +2607,7 @@ execution. Both reads and writes use the existing supervised PostgreSQL object
 operations and audit path. The desktop exposes this through the Vim Monitor
 workbench. Broader policy definition editing requires a separate design for
 expressions, role semantics, and reversible security changes.
-## ADR-071 — PostgreSQL sequence ownership stays native and migration-fenced
+## ADR-072 — PostgreSQL sequence ownership stays native and migration-fenced
 
 Status: accepted. Date: 2026-09-29.
 
