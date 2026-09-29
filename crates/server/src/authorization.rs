@@ -240,6 +240,7 @@ pub const fn is_connection_operation(operation: OperationKind) -> bool {
             | KillProcess
             | ImportCsv
             | BulkInsert
+            | ManageSqliteDatabase
             | BeginTransaction
             | ListTransactions
             | PreviewTransaction

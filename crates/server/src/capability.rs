@@ -233,8 +233,12 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         PreviewTransaction | CommitTransaction | RollbackTransaction | Savepoint
         | RollbackToSavepoint | ReleaseSavepoint => None,
         BulkInsert if !has_connection => Some("connection context required"),
-        BulkInsert if engine != Some(Engine::SqlServer) => {
-            Some("bulk insert is only supported by SQL Server")
+        BulkInsert if !matches!(engine, Some(Engine::SqlServer | Engine::Sqlite)) => {
+            Some("bulk insert requires SQL Server or SQLite")
+        }
+        ManageSqliteDatabase if !has_connection => Some("connection context required"),
+        ManageSqliteDatabase if engine != Some(Engine::Sqlite) => {
+            Some("SQLite maintenance requires a SQLite connection")
         }
         ReadQueryStore if !has_connection => Some("connection context required"),
         ReadQueryStore if engine != Some(Engine::SqlServer) => {
@@ -302,6 +306,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | KillProcess
         | ImportCsv
         | BulkInsert
+        | ManageSqliteDatabase
             if !has_connection =>
         {
             Some("connection context required")
@@ -386,6 +391,7 @@ fn unavailable_reason(operation: OperationKind, scope: CapabilityScope) -> Optio
         | KillProcess
         | ImportCsv
         | BulkInsert
+        | ManageSqliteDatabase
         | ExecuteRun => None,
     }
 }

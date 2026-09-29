@@ -235,6 +235,7 @@ fn is_structured_write(operation: OperationKind) -> bool {
             | OperationKind::KillProcess
             | OperationKind::ImportCsv
             | OperationKind::BulkInsert
+            | OperationKind::ManageSqliteDatabase
     )
 }
 

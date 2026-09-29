@@ -762,6 +762,45 @@ pub(super) async fn check_integrity(
     retained_json_response(&state.sessions, session, bytes)
 }
 
+pub(super) async fn sqlite_maintenance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,
+    Json(request): Json<sift_protocol::SqliteMaintenanceRequest>,
+) -> ApiResult<Json<sift_protocol::SqliteMaintenanceReport>> {
+    let _guard = state.shutdown.track_query();
+    let actor = state.sessions.session_owner(session)?.map(|id| id.0);
+    let result = async {
+        let (owner, _, _, _) = state.sessions.managed_catalog_scope(
+            session,
+            connection,
+            sift_protocol::OperationKind::ManageSqliteDatabase,
+        )?;
+        if optional_auth_context_blocking(state.clone(), headers)
+            .await?
+            .is_some_and(|auth| auth.principal_id != owner)
+        {
+            return Err(ApiError::Forbidden(
+                "SQLite maintenance caller must own the managed session".into(),
+            ));
+        }
+        crate::sqlite_maintenance::run(&state.sessions, session, connection, request.clone()).await
+    }
+    .await;
+    let report = finish_operation_as(
+        &state.sessions,
+        Operation::SqliteMaintenance {
+            session,
+            connection,
+            request,
+        },
+        result,
+        actor,
+        |_| None,
+    )?;
+    Ok(Json(report))
+}
+
 pub(super) async fn sql_server_recovery(
     State(state): State<AppState>,
     Path((session, connection)): Path<(sift_protocol::SessionId, sift_protocol::ConnectionId)>,

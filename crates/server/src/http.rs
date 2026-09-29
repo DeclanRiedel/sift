@@ -1323,6 +1323,10 @@ pub fn app(state: AppState) -> Router {
             post_with(postgres_maintenance, doc("postgresMaintenance", "Preview or apply explicit-target PostgreSQL maintenance")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/maintenance/sqlite",
+            post_with(sqlite_maintenance, doc("sqliteMaintenance", "Preview or apply scoped SQLite database creation or online backup")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/integrity",
             post_with(check_integrity, doc("checkIntegrity", "Run a scoped native integrity check without repair")),
         )

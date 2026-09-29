@@ -576,6 +576,9 @@ impl RuntimeDriver {
         {
             return false;
         }
+        if operation == OperationKind::ManageSqliteDatabase {
+            return self.semantic_engine() == Some(Engine::Sqlite) && self.as_sqlite().is_some();
+        }
         if operation == OperationKind::ListPostgresSettings {
             return self.semantic_engine() == Some(Engine::Postgres)
                 && self.supports("driver.core@1");

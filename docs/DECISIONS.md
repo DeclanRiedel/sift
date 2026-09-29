@@ -2805,6 +2805,8 @@ operator-owned, so this is not a defense against a local process replacing
 them during a call.
 
 An audited SQLite maintenance operation has explicit preview and apply phases.
+The public `ManageSqliteDatabase` operation and typed request advance the wire
+protocol to version 4; the locked core `Driver` trait remains unchanged.
 Preview reports source/destination identity, current file size, expected
 backup artifact and warnings without changing files. The server issues a
 short-lived, one-use token bound to session, connection, action, paths, root,
@@ -2814,16 +2816,16 @@ or destinations. A client disconnect cancels the work where the native API
 permits; a late result cannot be treated as a new preview. Failure removes
 any incomplete newly created destination and never replaces an existing file.
 
-The supported actions are creation of a new empty database, online backup of
-the connected `main` database to a new file, and VACUUM of that connected
-database. Creation writes a valid empty SQLite database and leaves connection
-profile registration to a separate user action. Backup uses SQLite's online
-backup API, in bounded page steps with a time and size limit, so WAL state is
-captured consistently. VACUUM is admitted only after a successful backup in
-the same server process for that source connection; the backup path and time
-are shown during preview and apply. Integrity checks remain the existing
-read-only `CheckIntegrity` operation. There is no implicit repair, checkpoint,
-PRAGMA write, extension load, or general database-admin command.
+The supported actions are creation of a new empty database and online backup
+of the connected `main` database to a new file. Creation writes a valid empty
+SQLite database and leaves connection profile registration to a separate user
+action. Backup uses SQLite's online backup API, in bounded page steps with a
+time and size limit, so WAL state is captured consistently. The preview states
+that creation has no prior data to back up and that existing databases should
+be backed up before any later mutating maintenance. Integrity checks remain
+the existing read-only `CheckIntegrity` operation. VACUUM, implicit repair,
+checkpoint, PRAGMA write, extension load, and general database-admin commands
+remain gated pending a bounded cancellation design.
 
 The request and result contain relative logical paths only. Operation audit
 records action, target, preview/apply outcome and artifact path, never file
