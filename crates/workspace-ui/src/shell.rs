@@ -12606,6 +12606,7 @@ impl WorkspaceShell {
                 destination: sqlite_maintenance_destination_input,
                 confirmation: sqlite_maintenance_confirmation_input,
                 choice: SqliteMaintenanceChoice::Create,
+                backup_verified: false,
                 generation: 0,
                 pending: None,
                 preview_request: None,
@@ -28196,6 +28197,7 @@ impl WorkspaceShell {
             return;
         }
         self.sqlite_maintenance.choice = choice;
+        self.sqlite_maintenance.backup_verified = false;
         self.sqlite_maintenance.invalidate();
         self.sqlite_maintenance
             .confirmation
@@ -28267,6 +28269,7 @@ impl WorkspaceShell {
                 &current,
                 preview,
                 self.sqlite_maintenance.confirmation.read(cx).text(),
+                self.sqlite_maintenance.backup_verified,
             ),
             (Err(message), _) => Err(message),
             (_, None) => Err("Preview SQLite maintenance before applying".into()),
@@ -28357,6 +28360,7 @@ impl WorkspaceShell {
         match event.keystroke.key.as_str() {
             "c" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Create, cx),
             "b" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Backup, cx),
+            "v" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Vacuum, cx),
             "i" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Integrity, cx),
             "p" => self.preview_sqlite_maintenance(cx),
             "a" => self.apply_sqlite_maintenance(cx),
@@ -61692,6 +61696,7 @@ mod tests {
                         source_file: "source.db".into(),
                         destination_file: Some("backup.db".into()),
                         source_bytes: 4096,
+                        estimated_extra_bytes: None,
                         backup_file: Some("backup.db".into()),
                         backup_expectation: "Verify backup".into(),
                         preview_token: Some("lease".into()),
@@ -61736,6 +61741,71 @@ mod tests {
             commands.try_recv(),
             Ok(ExecutorCommand::SqliteIntegrity { .. })
         ));
+    }
+
+    #[gpui::test]
+    fn sqlite_vacuum_desktop_requires_backup_ack_and_exact_source(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Vacuum, cx);
+            shell.preview_sqlite_maintenance(cx);
+        });
+        let generation = match commands.try_recv().expect("VACUUM preview") {
+            ExecutorCommand::SqliteMaintenance {
+                generation,
+                request,
+            } => {
+                assert!(matches!(
+                    request.action,
+                    sift_protocol::SqliteMaintenanceAction::Vacuum
+                ));
+                assert!(!request.backup_verified);
+                generation
+            }
+            _ => panic!("expected VACUUM preview"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SqliteMaintenanceFinished {
+                    generation,
+                    apply: false,
+                    result: Ok(sift_protocol::SqliteMaintenanceReport {
+                        action: sift_protocol::SqliteMaintenanceAction::Vacuum,
+                        applied: false,
+                        root_id: "managed".into(),
+                        source_file: "source.db".into(),
+                        destination_file: None,
+                        source_bytes: 4096,
+                        estimated_extra_bytes: Some(32 * 1024 * 1024),
+                        backup_file: None,
+                        backup_expectation: "Verify backup".into(),
+                        preview_token: Some("lease".into()),
+                    }),
+                },
+                cx,
+            );
+            shell
+                .sqlite_maintenance
+                .confirmation
+                .update(cx, |input, cx| {
+                    input.set_text("VACUUM managed/source.db", cx)
+                });
+            shell.apply_sqlite_maintenance(cx);
+            assert!(commands.try_recv().is_err());
+            shell.sqlite_maintenance.backup_verified = true;
+            shell.apply_sqlite_maintenance(cx);
+        });
+        match commands.try_recv().expect("VACUUM apply") {
+            ExecutorCommand::SqliteMaintenance { request, .. } => {
+                assert!(request.apply && request.confirm_write && request.backup_verified);
+                assert_eq!(request.preview_token.as_deref(), Some("lease"));
+            }
+            _ => panic!("expected VACUUM apply"),
+        }
     }
 
     #[gpui::test]

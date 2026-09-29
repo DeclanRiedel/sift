@@ -706,7 +706,7 @@ fn db_error(e: rusqlite::Error) -> DriverError {
             | rusqlite::ErrorCode::AuthorizationForStatementDenied
             | rusqlite::ErrorCode::PermissionDenied,
         ) => Code::UnsupportedForEngine,
-        Some(rusqlite::ErrorCode::TooBig) => Code::ResultTooLarge,
+        Some(rusqlite::ErrorCode::TooBig | rusqlite::ErrorCode::DiskFull) => Code::ResultTooLarge,
         Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
             Code::Other {
                 message: "SQLite database is busy; retry after the other transaction finishes"
@@ -735,6 +735,32 @@ fn db_error(e: rusqlite::Error) -> DriverError {
         result = result.with_native_code(native.extended_code.to_string());
     }
     result
+}
+
+fn check_vacuum_safety(worker: &Worker) -> Result<(), DriverError> {
+    // These PRAGMAs are deliberately denied to user SQL. Maintenance reads
+    // them under the worker's internal authority, then restores that boundary.
+    worker.internal.store(true, Ordering::Release);
+    let settings = (|| {
+        let journal: String = worker
+            .conn
+            .query_row("PRAGMA main.journal_mode", [], |row| row.get(0))
+            .map_err(db_error)?;
+        let synchronous: i64 = worker
+            .conn
+            .query_row("PRAGMA main.synchronous", [], |row| row.get(0))
+            .map_err(db_error)?;
+        Ok::<_, DriverError>((journal, synchronous))
+    })();
+    worker.internal.store(false, Ordering::Release);
+    let (journal, synchronous) = settings?;
+    if matches!(journal.to_ascii_lowercase().as_str(), "off" | "memory") || synchronous == 0 {
+        return Err(error(
+            Code::UnsupportedForEngine,
+            "SQLite VACUUM requires durable journaling and synchronous writes",
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -775,6 +801,9 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
                     "SQLite file maintenance requires no active transaction",
                 ));
             }
+            if matches!(&action, SqliteMaintenanceAction::Vacuum) {
+                check_vacuum_safety(worker)?;
+            }
             files
                 .inspect_maintenance(&worker.file_path, worker.read_only, tenant_id, &action)
                 .map(|target| target.state)
@@ -798,6 +827,9 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
                     "SQLite file maintenance requires no active transaction",
                 ));
             }
+            if matches!(&action, SqliteMaintenanceAction::Vacuum) {
+                check_vacuum_safety(worker)?;
+            }
             let target = files.inspect_maintenance(
                 &worker.file_path,
                 worker.read_only,
@@ -810,18 +842,66 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
                     "SQLite file maintenance preview is stale",
                 ));
             }
-            let destination = target.destination.as_ref().ok_or_else(|| {
-                error(
-                    Code::DriverInternal,
-                    "SQLite maintenance destination missing",
-                )
-            })?;
             if cancel.load(Ordering::Acquire) || worker.entry.closing.load(Ordering::Acquire) {
                 return Err(error(
                     Code::QueryCanceled,
                     "SQLite file maintenance canceled",
                 ));
             }
+            if matches!(&action, SqliteMaintenanceAction::Vacuum) {
+                let required = target.state.estimated_extra_bytes.ok_or_else(|| {
+                    error(Code::DriverInternal, "SQLite VACUUM space estimate missing")
+                })?;
+                files.check_vacuum_space(&worker.file_path, required)?;
+                let deadline = std::time::Instant::now() + Duration::from_secs(120);
+                let timed_out = Arc::new(AtomicBool::new(false));
+                let progress_cancel = cancel.clone();
+                let progress_closing = worker.entry.closing.clone();
+                let progress_timeout = timed_out.clone();
+                worker.conn.progress_handler(
+                    1000,
+                    Some(move || {
+                        if std::time::Instant::now() >= deadline {
+                            progress_timeout.store(true, Ordering::Release);
+                        }
+                        progress_timeout.load(Ordering::Acquire)
+                            || progress_cancel.load(Ordering::Acquire)
+                            || progress_closing.load(Ordering::Acquire)
+                    }),
+                );
+                worker.internal.store(true, Ordering::Release);
+                let result = worker.conn.execute_batch("VACUUM main");
+                worker.internal.store(false, Ordering::Release);
+                let closing = worker.entry.closing.clone();
+                worker
+                    .conn
+                    .progress_handler(1000, Some(move || closing.load(Ordering::Acquire)));
+                if let Err(failure) = result {
+                    if timed_out.load(Ordering::Acquire) {
+                        return Err(error(
+                            Code::QueryCanceled,
+                            "SQLite VACUUM exceeded 120 seconds",
+                        ));
+                    }
+                    if cancel.load(Ordering::Acquire)
+                        || worker.entry.closing.load(Ordering::Acquire)
+                    {
+                        return Err(error(Code::QueryCanceled, "SQLite VACUUM canceled"));
+                    }
+                    return Err(db_error(failure));
+                }
+                let mut state = target.state;
+                state.source_bytes = std::fs::metadata(&worker.file_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(state.source_bytes);
+                return Ok(state);
+            }
+            let destination = target.destination.as_ref().ok_or_else(|| {
+                error(
+                    Code::DriverInternal,
+                    "SQLite maintenance destination missing",
+                )
+            })?;
             let created = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -888,6 +968,7 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
                             }
                         }
                     }
+                    SqliteMaintenanceAction::Vacuum => unreachable!("VACUUM handled above"),
                 }
             })();
             if result.is_err() {

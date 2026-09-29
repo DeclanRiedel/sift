@@ -10,6 +10,7 @@ pub(super) enum SqliteMaintenanceChoice {
     #[default]
     Create,
     Backup,
+    Vacuum,
     Integrity,
 }
 
@@ -24,6 +25,7 @@ pub(super) struct SqliteMaintenanceState {
     pub destination: Entity<TextInput>,
     pub confirmation: Entity<TextInput>,
     pub choice: SqliteMaintenanceChoice,
+    pub backup_verified: bool,
     pub generation: u64,
     pub pending: Option<(u64, SqliteMaintenancePhase)>,
     pub preview_request: Option<SqliteMaintenanceRequest>,
@@ -41,10 +43,14 @@ impl SqliteMaintenanceState {
         self.preview = None;
         self.last_report = None;
         self.integrity = None;
+        self.backup_verified = false;
         self.message = None;
     }
 
     pub fn begin(&mut self, phase: SqliteMaintenancePhase) -> u64 {
+        if phase == SqliteMaintenancePhase::Preview {
+            self.backup_verified = false;
+        }
         self.generation = self.generation.wrapping_add(1);
         self.pending = Some((self.generation, phase));
         self.message = None;
@@ -73,27 +79,30 @@ pub(super) fn request(
     path: &str,
 ) -> Result<SqliteMaintenanceRequest, String> {
     let path = path.trim();
-    if path.is_empty()
-        || path.len() > 512
-        || path.contains([':', '\\'])
-        || path.chars().any(char::is_control)
-        || !std::path::Path::new(path)
-            .components()
-            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    if choice != SqliteMaintenanceChoice::Vacuum
+        && (path.is_empty()
+            || path.len() > 512
+            || path.contains([':', '\\'])
+            || path.chars().any(char::is_control)
+            || !std::path::Path::new(path)
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_))))
     {
         return Err("Destination must be a relative path of 1..512 bytes".into());
     }
     let action = match choice {
         SqliteMaintenanceChoice::Create => SqliteMaintenanceAction::Create { path: path.into() },
         SqliteMaintenanceChoice::Backup => SqliteMaintenanceAction::Backup { path: path.into() },
+        SqliteMaintenanceChoice::Vacuum => SqliteMaintenanceAction::Vacuum,
         SqliteMaintenanceChoice::Integrity => {
-            return Err("Choose Create or Backup before previewing".into())
+            return Err("Choose Create, Backup, or VACUUM before previewing".into())
         }
     };
     Ok(SqliteMaintenanceRequest {
         action,
         apply: false,
         confirm_write: false,
+        backup_verified: false,
         preview_token: None,
     })
 }
@@ -102,6 +111,7 @@ pub(super) fn confirmed_apply(
     current: &SqliteMaintenanceRequest,
     preview: &(SqliteMaintenanceRequest, SqliteMaintenanceReport),
     confirmation: &str,
+    backup_verified: bool,
 ) -> Result<SqliteMaintenanceRequest, String> {
     let (reviewed, report) = preview;
     if current.action != reviewed.action || report.action != reviewed.action || report.applied {
@@ -111,20 +121,32 @@ pub(super) fn confirmed_apply(
         .preview_token
         .as_ref()
         .ok_or("Preview expired; preview again")?;
-    let (verb, path) = match &current.action {
-        SqliteMaintenanceAction::Create { path } => ("CREATE", path),
-        SqliteMaintenanceAction::Backup { path } => ("BACKUP", path),
+    let expected = match &current.action {
+        SqliteMaintenanceAction::Create { path } => format!("CREATE {path}"),
+        SqliteMaintenanceAction::Backup { path } => format!("BACKUP {path}"),
+        SqliteMaintenanceAction::Vacuum => {
+            if !backup_verified {
+                return Err("A verified backup acknowledgment is required".into());
+            }
+            format!("VACUUM {}/{}", report.root_id, report.source_file)
+        }
     };
-    if report.destination_file.as_deref() != Some(path) {
+    let destination_ok = match &current.action {
+        SqliteMaintenanceAction::Create { path } | SqliteMaintenanceAction::Backup { path } => {
+            report.destination_file.as_deref() == Some(path)
+        }
+        SqliteMaintenanceAction::Vacuum => report.destination_file.is_none(),
+    };
+    if !destination_ok {
         return Err("Destination changed since preview; preview again".into());
     }
-    let expected = format!("{verb} {path}");
     if confirmation != expected {
         return Err(format!("Type {expected} to confirm"));
     }
     let mut request = current.clone();
     request.apply = true;
     request.confirm_write = true;
+    request.backup_verified = matches!(&request.action, SqliteMaintenanceAction::Vacuum);
     request.preview_token = Some(token.clone());
     Ok(request)
 }
@@ -145,22 +167,50 @@ mod tests {
                 source_file: "source.db".into(),
                 destination_file: Some("backups/source.db".into()),
                 source_bytes: 4096,
+                estimated_extra_bytes: None,
                 backup_file: Some("backups/source.db".into()),
                 backup_expectation: "Verify backup".into(),
                 preview_token: Some("one-use".into()),
             },
         );
-        let apply = confirmed_apply(&reviewed, &preview, "BACKUP backups/source.db").unwrap();
+        let apply =
+            confirmed_apply(&reviewed, &preview, "BACKUP backups/source.db", false).unwrap();
         assert!(apply.apply && apply.confirm_write);
         assert_eq!(apply.preview_token.as_deref(), Some("one-use"));
-        assert!(confirmed_apply(&reviewed, &preview, "backup backups/source.db").is_err());
+        assert!(confirmed_apply(&reviewed, &preview, "backup backups/source.db", false).is_err());
         assert!(confirmed_apply(
             &request(SqliteMaintenanceChoice::Create, "backups/source.db").unwrap(),
             &preview,
-            "CREATE backups/source.db"
+            "CREATE backups/source.db",
+            false
         )
         .is_err());
         assert!(request(SqliteMaintenanceChoice::Create, "../outside.db").is_err());
         assert!(request(SqliteMaintenanceChoice::Create, "/outside.db").is_err());
+    }
+
+    #[test]
+    fn vacuum_requires_verified_backup_and_source_confirmation() {
+        let reviewed = request(SqliteMaintenanceChoice::Vacuum, "").unwrap();
+        let preview = (
+            reviewed.clone(),
+            SqliteMaintenanceReport {
+                action: SqliteMaintenanceAction::Vacuum,
+                applied: false,
+                root_id: "managed".into(),
+                source_file: "source.db".into(),
+                destination_file: None,
+                source_bytes: 4096,
+                estimated_extra_bytes: Some(32 * 1024 * 1024),
+                backup_file: None,
+                backup_expectation: "Verify backup".into(),
+                preview_token: Some("one-use".into()),
+            },
+        );
+        assert!(confirmed_apply(&reviewed, &preview, "VACUUM managed/source.db", false).is_err());
+        assert!(confirmed_apply(&reviewed, &preview, "VACUUM source.db", true).is_err());
+        let apply = confirmed_apply(&reviewed, &preview, "VACUUM managed/source.db", true).unwrap();
+        assert!(apply.apply && apply.confirm_write && apply.backup_verified);
+        assert_eq!(apply.preview_token.as_deref(), Some("one-use"));
     }
 }

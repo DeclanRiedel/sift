@@ -6,6 +6,7 @@ use sift_protocol::*;
 use std::path::{Component, Path, PathBuf};
 
 const MAX_MAINTENANCE_FILE_BYTES: u64 = 1024 * 1024 * 1024;
+const VACUUM_MIN_EXTRA_BYTES: u64 = 32 * 1024 * 1024;
 
 pub(crate) struct MaintenanceTarget {
     pub state: SqliteFileMaintenanceState,
@@ -71,14 +72,21 @@ impl FilePolicy {
             SqliteMaintenanceAction::Create { path } | SqliteMaintenanceAction::Backup { path } => {
                 Some(self.inspect_new_file(root, source, path)?)
             }
+            SqliteMaintenanceAction::Vacuum => None,
         };
         let source_file = relative.to_string_lossy().into_owned();
         let destination_file = match action {
             SqliteMaintenanceAction::Create { path } | SqliteMaintenanceAction::Backup { path } => {
                 Some(path.clone())
             }
+            SqliteMaintenanceAction::Vacuum => None,
         };
         let wal = PathBuf::from(format!("{}-wal", source.display()));
+        let wal_bytes = std::fs::metadata(&wal)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let estimated_extra_bytes = matches!(action, SqliteMaintenanceAction::Vacuum)
+            .then(|| vacuum_space_requirement(metadata.len(), wal_bytes));
         let identity = format!(
             "{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}",
             root_id,
@@ -104,10 +112,26 @@ impl FilePolicy {
                 source_file,
                 destination_file,
                 source_bytes: metadata.len(),
+                estimated_extra_bytes,
                 identity,
             },
             destination,
         })
+    }
+
+    pub(crate) fn check_vacuum_space(
+        &self,
+        source: &Path,
+        required: u64,
+    ) -> Result<(), DriverError> {
+        let available =
+            fs2::available_space(source.parent().ok_or_else(denied)?).map_err(|_| {
+                error(
+                    Code::ConnectionFailed,
+                    "SQLite free space could not be checked",
+                )
+            })?;
+        check_vacuum_space_available(required, available)
     }
 
     fn inspect_new_file(
@@ -275,6 +299,102 @@ impl FilePolicy {
         }
         spec.read_only |= root.read_only;
         Ok(())
+    }
+}
+
+fn vacuum_space_requirement(source_bytes: u64, wal_bytes: u64) -> u64 {
+    source_bytes
+        .saturating_mul(2)
+        .saturating_add(wal_bytes)
+        .saturating_add(16 * 1024 * 1024)
+        .max(VACUUM_MIN_EXTRA_BYTES)
+}
+
+fn check_vacuum_space_available(required: u64, available: u64) -> Result<(), DriverError> {
+    if available < required {
+        return Err(error(
+            Code::ResultTooLarge,
+            format!("SQLite VACUUM needs at least {required} free bytes on the source filesystem"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+    use sift_driver_api::{Driver, SqliteExt};
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    #[test]
+    fn vacuum_space_guard_refuses_a_full_file_system() {
+        let source = tempfile::NamedTempFile::new().unwrap();
+        let required = vacuum_space_requirement(4096, 0);
+        assert!(check_vacuum_space_available(required, required - 1).is_err());
+        assert!(check_vacuum_space_available(required, required).is_ok());
+        assert!(fs2::available_space(source.path().parent().unwrap()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn canceled_vacuum_preserves_real_file_and_connection() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.db");
+        let db = rusqlite::Connection::open(&source).unwrap();
+        db.execute_batch("CREATE TABLE items(id INTEGER PRIMARY KEY, payload BLOB)")
+            .unwrap();
+        db.execute("INSERT INTO items VALUES(1, zeroblob(4000000))", [])
+            .unwrap();
+        db.execute("DELETE FROM items WHERE id=1", []).unwrap();
+        drop(db);
+        let before = std::fs::metadata(&source).unwrap().len();
+        let driver = crate::SqliteDriver::with_files(FilePolicy {
+            config: SqliteDriverConfig {
+                roots: std::collections::BTreeMap::from([(
+                    "test".into(),
+                    SqliteRootConfig {
+                        path: root.path().to_string_lossy().into_owned(),
+                        allowed_tenants: vec![1],
+                        read_only: false,
+                    },
+                )]),
+                max_connections: 1,
+            },
+            protected: vec![],
+        });
+        let handle = driver
+            .open_file(
+                SqliteFileConfiguration {
+                    root_id: "test".into(),
+                    path: "source.db".into(),
+                    mode: SqliteOpenMode::ReadWrite,
+                    busy_timeout_ms: 1000,
+                },
+                Some(1),
+            )
+            .await
+            .unwrap();
+        let state = driver
+            .inspect_file_maintenance(handle.clone(), 1, SqliteMaintenanceAction::Vacuum)
+            .await
+            .unwrap();
+        let result = driver
+            .apply_file_maintenance(
+                handle.clone(),
+                1,
+                SqliteMaintenanceAction::Vacuum,
+                state.identity,
+                Arc::new(AtomicBool::new(true)),
+            )
+            .await;
+        assert!(matches!(result, Err(ref error) if error.code == Code::QueryCanceled));
+        assert_eq!(std::fs::metadata(&source).unwrap().len(), before);
+        assert!(driver.ping(handle).await.is_ok());
+        let db = rusqlite::Connection::open(&source).unwrap();
+        assert_eq!(
+            db.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
     }
 }
 fn denied() -> DriverError {

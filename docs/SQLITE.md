@@ -111,11 +111,18 @@ confirmation. Existing destinations, symlink parents, protected paths and
 files above 1 GiB are refused. Backups use bounded SQLite online backup steps,
 including WAL state. Creation needs no prior backup because the destination is
 empty; keep a verified backup before later mutating maintenance. This API does
-not register a profile for the new database or offer VACUUM, restore, delete,
-or arbitrary PRAGMA writes (ADR-078). The Vim Monitor maintenance view previews
+not register a profile for the new database or offer restore, delete, or
+arbitrary PRAGMA writes (ADR-078). In-place `VACUUM` is separately admitted
+for a managed writable root: preview reports a conservative extra-space need,
+and apply requires a verified-backup acknowledgment and exact confirmation.
+Execution is cancellable with a 120-second native cap; the server request
+timeout defaults to 30 seconds and may end it first. SQLite may change implicit
+ROWIDs during VACUUM;
+see the [SQLite VACUUM documentation](https://www.sqlite.org/lang_vacuum.html)
+(ADR-085). The Vim Monitor maintenance view previews
 the managed root, source, destination, and backup expectation before a typed
 confirmation and apply. It also runs the existing read-only integrity check
-(ADR-081). In Vim mode, `c` selects create, `b` backup, `i` integrity,
+(ADR-081). In Vim mode, `c` selects create, `b` backup, `v` VACUUM, `i` integrity,
 `p` previews, `a` applies after confirmation, and `r` runs the integrity check.
 
 Values retain SQLite storage classes: null, signed 64-bit integer, float, text
