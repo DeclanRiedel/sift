@@ -694,6 +694,43 @@ async fn enrich_graph_identity_and_foreign_keys(
         }
     }
 
+    let storage_rows = conn
+        .query(
+            "SELECT n.nspname,c.relname,md5(concat_ws('|',c.reloptions::text,
+                toast_rel.reloptions::text,c.reltablespace::text,c.relam::text,
+                string_agg(concat_ws('|',a.attname,a.attstorage::text,
+                    a.attcompression::text,a.attoptions::text,a.attfdwoptions::text),
+                    E'\\n' ORDER BY a.attnum) FILTER (WHERE a.attnum IS NOT NULL)))
+             FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+             LEFT JOIN pg_catalog.pg_class toast_rel ON toast_rel.oid=c.reltoastrelid
+             LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid
+                 AND a.attnum>0 AND NOT a.attisdropped
+             LEFT JOIN pg_catalog.pg_type ty ON ty.oid=a.atttypid
+             WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p')
+             GROUP BY n.nspname,c.relname,c.reloptions,toast_rel.reloptions,c.reltablespace,c.relam
+             HAVING c.reloptions IS NOT NULL OR toast_rel.reloptions IS NOT NULL
+                 OR c.reltablespace<>0
+                 OR c.relam NOT IN (0,(SELECT oid FROM pg_catalog.pg_am WHERE amname='heap'))
+                 OR COALESCE(bool_or(a.attstorage<>ty.typstorage OR a.attcompression<>''
+                     OR a.attoptions IS NOT NULL OR a.attfdwoptions IS NOT NULL),false)",
+            &[&schemas],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in storage_rows {
+        let key = (row.get::<_, String>(0), row.get::<_, String>(1));
+        if let Some(index) = relation_nodes.get(&key).and_then(|id| node_indexes.get(id)) {
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+            graph.nodes[*index].extra.insert(
+                "native_table_storage_shape".into(),
+                row.get::<_, String>(2).into(),
+            );
+        }
+    }
+
     // The portable projection cannot safely recreate these native column shapes.
     // Keep a fingerprint so changes remain visible, and fence migration rendering.
     let fidelity_rows = conn.query(

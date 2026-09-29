@@ -262,6 +262,144 @@ fn schemas() -> (String, String) {
 }
 
 #[cfg(feature = "live-pg")]
+#[tokio::test]
+async fn postgres_table_storage_and_index_state_round_trip() {
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let (src, dst) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE SCHEMA {src}; CREATE SCHEMA {dst}; \
+             CREATE TABLE {src}.items(id bigint NOT NULL, body text) \
+                 WITH (fillfactor=70, autovacuum_enabled=false); \
+             ALTER TABLE {src}.items ALTER COLUMN body SET STORAGE MAIN; \
+             ALTER TABLE {src}.items ALTER COLUMN body SET COMPRESSION pglz; \
+             CREATE UNIQUE INDEX items_repl_idx ON {src}.items(id); \
+             ALTER TABLE {src}.items REPLICA IDENTITY USING INDEX items_repl_idx; \
+             CREATE INDEX items_cluster_idx ON {src}.items(id); \
+             ALTER TABLE {src}.items CLUSTER ON items_cluster_idx; \
+             CREATE TABLE {src}.empty_opts() WITH (fillfactor=70); \
+             CREATE TABLE {src}.toast_only(body text); \
+             ALTER TABLE {src}.toast_only SET (toast.autovacuum_enabled=false);"
+        ),
+    )
+    .await;
+    let ddl = round_trip(&driver, &conn, &src, &dst, "items", ObjectKind::Table).await;
+    for expected in [
+        "WITH (fillfactor=70, autovacuum_enabled=false)",
+        "SET STORAGE MAIN",
+        "SET COMPRESSION pglz",
+        "CLUSTER ON items_cluster_idx",
+        "REPLICA IDENTITY USING INDEX items_repl_idx",
+    ] {
+        assert!(ddl.contains(expected), "missing {expected} in {ddl}");
+    }
+    let graph = postgres_graph(&driver, &conn, &src).await;
+    let table = graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.kind == sift_protocol::CatalogNodeKind::Table && node.name == "items")
+        .unwrap();
+    assert!(table.extra.contains_key("native_table_storage_shape"));
+    assert_eq!(
+        table.extra.get("migration_unsupported"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    let empty = graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == sift_protocol::CatalogNodeKind::Table && node.name == "empty_opts"
+        })
+        .unwrap();
+    assert!(empty.extra.contains_key("native_table_storage_shape"));
+    assert_eq!(
+        empty.extra.get("migration_unsupported"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    let toast_only = graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == sift_protocol::CatalogNodeKind::Table && node.name == "toast_only"
+        })
+        .unwrap();
+    assert!(toast_only.extra.contains_key("native_table_storage_shape"));
+    let toast_error = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&src, "toast_only", ObjectKind::Table),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(toast_error.code, sift_protocol::Code::UnsupportedForEngine);
+    assert!(toast_error.message.contains("TOAST relation options"));
+
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "ALTER TABLE {dst}.items REPLICA IDENTITY DEFAULT; \
+             DROP INDEX {dst}.items_repl_idx;"
+        ),
+    )
+    .await;
+    let replica = round_trip(
+        &driver,
+        &conn,
+        &src,
+        &dst,
+        "items_repl_idx",
+        ObjectKind::Index,
+    )
+    .await;
+    assert!(replica.contains("REPLICA IDENTITY USING INDEX items_repl_idx"));
+
+    execute(
+        &driver,
+        &conn,
+        &format!("ALTER TABLE {src}.items SET (toast.autovacuum_enabled=false);"),
+    )
+    .await;
+    let error = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&src, "items", ObjectKind::Table),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, sift_protocol::Code::UnsupportedForEngine);
+    assert!(
+        error.message.contains("TOAST relation options"),
+        "{error:?}"
+    );
+    let changed = postgres_graph(&driver, &conn, &src).await;
+    let changed_table = changed
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.kind == sift_protocol::CatalogNodeKind::Table && node.name == "items")
+        .unwrap();
+    assert_ne!(
+        table.extra.get("native_table_storage_shape"),
+        changed_table.extra.get("native_table_storage_shape")
+    );
+
+    execute(
+        &driver,
+        &conn,
+        &format!("DROP SCHEMA {dst} CASCADE; DROP SCHEMA {src} CASCADE;"),
+    )
+    .await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-pg")]
 async fn postgres_graph(
     driver: &dyn Driver,
     conn: &ConnHandle,
@@ -548,16 +686,25 @@ async fn postgres_standalone_index_round_trips_and_fences_generic_migration() {
         Some(&serde_json::Value::Bool(true))
     );
 
-    for (name, reason) in [
-        ("items_pkey", "constraint-backed"),
-        ("clustered_idx", "clustered"),
-    ] {
-        let error = generate_ddl(&driver, conn.clone(), path(&src, name, ObjectKind::Index))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, sift_protocol::Code::UnsupportedForEngine);
-        assert!(error.message.contains(reason), "{error:?}");
-    }
+    let clustered = round_trip(
+        &driver,
+        &conn,
+        &src,
+        &dst,
+        "clustered_idx",
+        ObjectKind::Index,
+    )
+    .await;
+    assert!(clustered.contains("CLUSTER ON clustered_idx"));
+    let error = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&src, "items_pkey", ObjectKind::Index),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, sift_protocol::Code::UnsupportedForEngine);
+    assert!(error.message.contains("constraint-backed"), "{error:?}");
     execute(
         &driver,
         &conn,

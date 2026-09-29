@@ -18,12 +18,15 @@ SELECT CASE
         THEN 'sift:unsupported:extension member index or table belongs to its extension'
     WHEN NOT index_info.indisvalid OR NOT index_info.indisready
         THEN 'sift:unsupported:invalid or not-ready index cannot be replayed safely'
-    WHEN index_info.indisclustered OR index_info.indisreplident
-        THEN 'sift:unsupported:clustered or replica identity index has separate table state'
-    ELSE pg_catalog.pg_get_indexdef(index_rel.oid) || ';'
+    ELSE pg_catalog.pg_get_indexdef(index_rel.oid) || ';' ||
+        CASE WHEN index_info.indisclustered THEN format(E'\nALTER TABLE %I.%I CLUSTER ON %I;',
+            table_ns.nspname, table_rel.relname, index_rel.relname) ELSE '' END ||
+        CASE WHEN index_info.indisreplident THEN format(E'\nALTER TABLE %I.%I REPLICA IDENTITY USING INDEX %I;',
+            table_ns.nspname, table_rel.relname, index_rel.relname) ELSE '' END
 END
 FROM pg_catalog.pg_class index_rel
 JOIN pg_catalog.pg_namespace index_ns ON index_ns.oid = index_rel.relnamespace
 JOIN pg_catalog.pg_index index_info ON index_info.indexrelid = index_rel.oid
 JOIN pg_catalog.pg_class table_rel ON table_rel.oid = index_info.indrelid
+JOIN pg_catalog.pg_namespace table_ns ON table_ns.oid = table_rel.relnamespace
 WHERE index_ns.nspname = '__SCHEMA__' AND index_rel.relname = '__NAME__'
