@@ -61,9 +61,13 @@ sources for current support claims.
       and drop on an unchanged existing table using captured native DDL and
       qualified `DROP INDEX ... RESTRICT`. Index-set-only parent fingerprint
       changes are represented by the index node; unsafe index states, changed
-      tables, missing definitions, and DDL source models are refused. Automatic
-      multi-object ordering for table creation, owned sequences, partitions,
-      policies, and external dependencies remains open.
+      tables, missing definitions, and DDL source models are refused. A single
+      ordinary owned-sequence create on an unchanged existing heap table now
+      renders catalog-captured `CREATE SEQUENCE` before `ALTER SEQUENCE ...
+      OWNED BY`; the paired table-fingerprint change is absorbed only when both
+      changes are selected. Drop uses `RESTRICT`. Other owned-sequence changes,
+      table creation, partitions, policies, and external dependency ordering
+      remain open.
 
 ## Workbench and administration
 

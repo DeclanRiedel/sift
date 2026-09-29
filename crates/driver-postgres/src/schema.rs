@@ -497,7 +497,32 @@ async fn enrich_graph_identity_and_foreign_keys(
             owner_dep.deptype::text, owner_ns.nspname, owner_table.relname,
             EXISTS (SELECT 1 FROM pg_catalog.pg_depend extension_dep
                 WHERE extension_dep.classid='pg_catalog.pg_class'::regclass
-                  AND extension_dep.objid=sc.oid AND extension_dep.deptype='e')
+                  AND extension_dep.objid=sc.oid AND extension_dep.deptype='e'),
+            CASE WHEN $2::bool AND owner_dep.deptype='a'
+                AND owner_col.attname IS NOT NULL
+                AND owner_ns.nspname=sn.nspname AND owner_table.relkind='r'
+                AND sc.relpersistence='p' AND sc.relacl IS NULL
+                AND sc.reloptions IS NULL AND sc.reltablespace=0
+                AND s.seqtypid IN ('pg_catalog.int2'::regtype,
+                    'pg_catalog.int4'::regtype,'pg_catalog.int8'::regtype)
+                AND pg_catalog.pg_has_role(current_user,sc.relowner,'USAGE')
+                AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_description desc_info
+                    WHERE desc_info.classoid='pg_catalog.pg_class'::regclass
+                      AND desc_info.objoid=sc.oid)
+                AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend extension_dep
+                    WHERE extension_dep.classid='pg_catalog.pg_class'::regclass
+                      AND extension_dep.objid=sc.oid AND extension_dep.deptype='e')
+                AND (SELECT count(*) FROM pg_catalog.pg_depend ownership_dep
+                    WHERE ownership_dep.classid='pg_catalog.pg_class'::regclass
+                      AND ownership_dep.objid=sc.oid
+                      AND ownership_dep.refclassid='pg_catalog.pg_class'::regclass
+                      AND ownership_dep.deptype IN ('a','i')
+                      AND ownership_dep.refobjsubid>0)=1
+                THEN format('CREATE SEQUENCE %I.%I AS %s START WITH %s INCREMENT BY %s MINVALUE %s MAXVALUE %s CACHE %s %s;',
+                    sn.nspname,sc.relname,format_type(s.seqtypid,NULL),s.seqstart,
+                    s.seqincrement,s.seqmin,s.seqmax,s.seqcache,
+                    CASE WHEN s.seqcycle THEN 'CYCLE' ELSE 'NO CYCLE' END)
+                END
          FROM pg_catalog.pg_sequence s
          JOIN pg_catalog.pg_class sc ON sc.oid=s.seqrelid
          JOIN pg_catalog.pg_namespace sn ON sn.oid=sc.relnamespace
@@ -512,7 +537,7 @@ async fn enrich_graph_identity_and_foreign_keys(
              AND owner_col.attnum=owner_dep.refobjsubid AND NOT owner_col.attisdropped
          WHERE sn.nspname=ANY($1::text[])
          ORDER BY owner_ns.nspname, owner_table.relname, sn.nspname, sc.relname",
-            &[&schemas],
+            &[&schemas, &include_definitions],
         )
         .await
         .map_err(pg_err)?;
@@ -524,6 +549,7 @@ async fn enrich_graph_identity_and_foreign_keys(
         let owner_schema: Option<String> = row.get(4);
         let owner_table: Option<String> = row.get(5);
         let extension_owned: bool = row.get(6);
+        let create_sql: Option<String> = row.get(7);
         if let Some(index) = object_nodes
             .get(&(schema, name))
             .and_then(|id| node_indexes.get(id))
@@ -531,6 +557,11 @@ async fn enrich_graph_identity_and_foreign_keys(
             graph.nodes[*index]
                 .extra
                 .insert("native_sequence_shape".into(), shape.clone().into());
+            if let Some(create_sql) = create_sql {
+                graph.nodes[*index]
+                    .extra
+                    .insert("native_owned_sequence_create_sql".into(), create_sql.into());
+            }
             if dependency.is_some() || extension_owned {
                 graph.nodes[*index]
                     .extra
