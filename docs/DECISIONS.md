@@ -2958,3 +2958,27 @@ triggers, and foreign tables refuses independent creation. Automatic extension
 install/update/drop migration, package equivalence across servers, membership
 changes made through `ALTER EXTENSION ADD/DROP`, data in config tables, and
 cross-object ordering require a separate proof and remain unsupported.
+
+## ADR-084 — Owned sequence creation requires a stable existing table
+
+Status: accepted. Date: 2026-09-29.
+
+A complete, definition-bearing PostgreSQL live or server-captured graph may
+carry catalog-generated `CREATE SEQUENCE` SQL for one ordinary sequence owned
+by one column of a permanent heap table in the same schema. The first
+renderable transition is creation of that sequence when the owner table and
+column already exist unchanged in both graphs. The migration renderer proves
+the catalog `OwnsSequence` edge, matching table/column identities and details,
+and that the table's only change is its derived owned-sequence fingerprint.
+It emits `CREATE SEQUENCE` before `ALTER SEQUENCE ... OWNED BY`; rollback drops
+the sequence with `RESTRICT`. A selected table-fingerprint change is absorbed
+only when its paired sequence creation is selected and passes the same proof.
+
+The captured definition is bounded and accepted only for built-in integer
+sequence types, one ordinary ownership dependency, and effective sequence
+ownership. Identity or extension members, nondefault persistence, ACLs,
+comments, other table-native state, concurrent table/column edits, missing
+graph nodes, incomplete coverage, DDL-source graphs, and unproven dependency
+edges remain unsupported. Sequence counters are runtime data and are outside
+schema migration. Policy and partition changes continue to refuse automatic
+rendering until their dependency closure can be proved separately.
