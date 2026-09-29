@@ -973,6 +973,174 @@ async fn postgres_partition_attachment_migration_round_trip() {
 
 #[cfg(feature = "live-pg")]
 #[tokio::test]
+async fn postgres_policy_rename_migration_preserves_rls() {
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let (schema, _) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE SCHEMA {schema}; CREATE TABLE {schema}.items(id bigint); \
+             CREATE POLICY positive_id ON {schema}.items FOR SELECT TO PUBLIC USING (id > 0); \
+             ALTER TABLE {schema}.items ENABLE ROW LEVEL SECURITY;"
+        ),
+    )
+    .await;
+    let before = postgres_graph(&driver, &conn, &schema).await;
+    let reader = format!("{schema}_reader");
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE ROLE {reader} LOGIN; GRANT USAGE ON SCHEMA {schema} TO {reader}; \
+             GRANT SELECT ON {schema}.items TO {reader};"
+        ),
+    )
+    .await;
+    let mut reader_spec = spec(Engine::Postgres);
+    reader_spec.user = reader.clone();
+    let reader_conn = driver.open(&reader_spec).await.unwrap();
+    let reader_graph = postgres_graph(&driver, &reader_conn, &schema).await;
+    assert!(reader_graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.name == "items")
+        .unwrap()
+        .extra
+        .get("native_policy_oid")
+        .is_none());
+    driver.close(reader_conn).await.unwrap();
+    execute(
+        &driver,
+        &conn,
+        &format!("ALTER POLICY positive_id ON {schema}.items RENAME TO visible_id;"),
+    )
+    .await;
+    let after = postgres_graph(&driver, &conn, &schema).await;
+    let source = sift_protocol::CatalogSourceRef::Live {
+        expected_revision: before.revision,
+        options: sift_protocol::CatalogGraphOptions {
+            schemas: Some(vec![schema.clone()]),
+            include_definitions: true,
+            ..Default::default()
+        },
+    };
+    let target = sift_protocol::CatalogSourceRef::Snapshot {
+        snapshot_id: sift_protocol::CatalogSnapshotId(uuid::Uuid::new_v4()),
+    };
+    let diff = sift_core::schema_diff::diff_catalogs(
+        source.clone(),
+        &before,
+        target.clone(),
+        &after,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(diff.changes.len(), 1, "{:#?}", diff.changes);
+    let plan = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(plan.groups[0].statements.len(), 1);
+    assert!(plan.groups[0].statements[0]
+        .sql
+        .contains("RENAME TO \"visible_id\""));
+    assert_eq!(plan.rollback_groups[0].statements.len(), 1);
+    assert!(plan.rollback_groups[0].statements[0]
+        .sql
+        .contains("RENAME TO \"positive_id\""));
+
+    let mut unsafe_after = after.clone();
+    unsafe_after
+        .data
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "items")
+        .unwrap()
+        .extra
+        .insert("native_policy_body_shape".into(), "changed".into());
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &unsafe_after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+    let mut ddl_source = diff.clone();
+    ddl_source.to = sift_protocol::CatalogSourceRef::DdlSource {
+        source_id: sift_protocol::DdlSourceId(1),
+        expected_model_revision: 1,
+    };
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &ddl_source,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+
+    execute(&driver, &conn, &plan.rollback_groups[0].statements[0].sql).await;
+    execute(&driver, &conn, &plan.groups[0].statements[0].sql).await;
+    let replayed = postgres_graph(&driver, &conn, &schema).await;
+    let expected = after
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.name == "items")
+        .unwrap();
+    let actual = replayed
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.name == "items")
+        .unwrap();
+    for key in [
+        "native_security_shape",
+        "native_policy_oid",
+        "native_policy_body_shape",
+        "native_policy_name",
+    ] {
+        assert_eq!(actual.extra.get(key), expected.extra.get(key));
+    }
+    let reverse =
+        sift_core::schema_diff::diff_catalogs(source, &replayed, target, &before, &[], None)
+            .unwrap();
+    let inverse = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &reverse,
+        &replayed,
+        &before,
+        &[],
+        replayed.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    assert!(inverse.groups[0].statements[0]
+        .sql
+        .contains("RENAME TO \"positive_id\""));
+    execute(&driver, &conn, &inverse.groups[0].statements[0].sql).await;
+    execute(&driver, &conn, &format!("DROP SCHEMA {schema} CASCADE;")).await;
+    execute(&driver, &conn, &format!("DROP ROLE {reader};")).await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-pg")]
+#[tokio::test]
 async fn postgres_native_index_migration_round_trip() {
     let driver = sift_driver_postgres::PgDriver::new();
     let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();

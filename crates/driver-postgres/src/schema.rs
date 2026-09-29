@@ -813,6 +813,52 @@ async fn enrich_graph_identity_and_foreign_keys(
         }
     }
 
+    // A policy rename is the only policy migration whose semantic body can
+    // remain byte-for-byte stable. Keep the sole policy's catalog identity and
+    // body fingerprint only for a role able to own the underlying relation.
+    let policy_rename_rows = conn
+        .query(
+            "SELECT n.nspname,c.relname,p.oid::text,p.polname,
+            md5(concat_ws('|',p.polcmd,p.polpermissive::text,
+                array_to_string(p.polroles,','),coalesce(p.polqual::text,''),
+                coalesce(p.polwithcheck::text,''),c.relrowsecurity::text,
+                c.relforcerowsecurity::text))
+         FROM pg_catalog.pg_policy p
+         JOIN pg_catalog.pg_class c ON c.oid=p.polrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+         WHERE $2::bool AND n.nspname=ANY($1::text[])
+           AND c.relkind='r' AND NOT c.relispartition AND c.relpersistence='p'
+           AND (pg_catalog.pg_has_role(current_user,c.relowner,'USAGE')
+                OR current_setting('is_superuser')='on')
+           AND (SELECT count(*) FROM pg_catalog.pg_policy sole WHERE sole.polrelid=c.oid)=1
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+               WHERE d.deptype='e' AND
+                 ((d.classid='pg_catalog.pg_class'::regclass AND d.objid=c.oid)
+                  OR (d.classid='pg_catalog.pg_policy'::regclass AND d.objid=p.oid)))
+         ORDER BY n.nspname,c.relname,p.polname",
+            &[&schemas, &include_definitions],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in policy_rename_rows {
+        let schema: String = row.get(0);
+        let table: String = row.get(1);
+        if let Some(index) = object_nodes
+            .get(&(schema, table))
+            .and_then(|id| node_indexes.get(id))
+        {
+            let node = &mut graph.nodes[*index];
+            node.extra
+                .insert("native_policy_oid".into(), row.get::<_, String>(2).into());
+            node.extra
+                .insert("native_policy_name".into(), row.get::<_, String>(3).into());
+            node.extra.insert(
+                "native_policy_body_shape".into(),
+                row.get::<_, String>(4).into(),
+            );
+        }
+    }
+
     // Rewrite rules are also outside the portable table model. A definition
     // or enabled-state change must affect drift detection, and structural
     // migrations must not silently drop a rule.
