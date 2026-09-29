@@ -257,7 +257,8 @@ from writes and preserve existing optimistic conflict/preview/audit behavior.
 
 ## Protocol and integration migration
 
-Implemented public protocol is **2**. Engine::Sqlite, SQLite connection/column
+SQLite entered the public protocol in **2**; the current public protocol is
+**3**. Engine::Sqlite, SQLite connection/column
 facets and metadata inspection are public shape growth under ADR-017. Runtime
 OpenAPI/serde schemas derive from these types; protocol/lifecycle/package
 fixtures, SDK/server/desktop and extension-host checks use the new version.

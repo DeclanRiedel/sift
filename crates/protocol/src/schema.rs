@@ -102,6 +102,8 @@ pub enum ObjectKind {
     Procedure,
     Synonym,
     Sequence,
+    /// A standalone database index; constraint-owned indexes are not independent objects.
+    Index,
     Trigger,
     Type,
     Extension,

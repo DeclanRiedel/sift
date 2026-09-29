@@ -584,6 +584,75 @@ async fn enrich_graph_identity_and_foreign_keys(
         }
     }
 
+    // The portable index projection omits expressions, predicates, operator
+    // classes, collation, storage, and native state. Fingerprint every catalog
+    // definition on both the index and its table; fence generic table migration
+    // until a renderer can prove it preserves the complete index set.
+    let index_shape_rows = conn
+        .query(
+            "SELECT n.nspname, t.relname, ic.relname,
+                    md5(concat_ws('|', pg_catalog.pg_get_indexdef(i.indexrelid),
+                        i.indisvalid::text, i.indisready::text,
+                        i.indisclustered::text, i.indisreplident::text,
+                        ic.relkind::text, ic.reloptions::text,
+                        ic.reltablespace::text,
+                        EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con
+                            WHERE con.conindid=ic.oid)::text,
+                        EXISTS (SELECT 1 FROM pg_catalog.pg_inherits inh
+                            WHERE inh.inhrelid=ic.oid)::text,
+                        EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+                            WHERE d.classid='pg_catalog.pg_class'::regclass
+                              AND d.objid IN (ic.oid,t.oid) AND d.deptype='e')::text))
+             FROM pg_catalog.pg_index i
+             JOIN pg_catalog.pg_class ic ON ic.oid=i.indexrelid
+             JOIN pg_catalog.pg_class t ON t.oid=i.indrelid
+             JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
+             WHERE n.nspname=ANY($1::text[])
+             ORDER BY n.nspname,t.relname,ic.relname",
+            &[&schemas],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in index_shape_rows {
+        let schema: String = row.get(0);
+        let table: String = row.get(1);
+        let index_name: String = row.get(2);
+        let shape: String = row.get(3);
+        if let Some(index) = subordinate_nodes
+            .get(&(
+                CatalogNodeKind::Index,
+                schema.clone(),
+                table.clone(),
+                index_name.clone(),
+            ))
+            .and_then(|id| node_indexes.get(id))
+        {
+            graph.nodes[*index]
+                .extra
+                .insert("native_index_shape".into(), shape.clone().into());
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+        }
+        if let Some(index) = relation_nodes
+            .get(&(schema, table))
+            .and_then(|id| node_indexes.get(id))
+        {
+            let node = &mut graph.nodes[*index];
+            let previous = node
+                .extra
+                .get("native_index_set_shape")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            node.extra.insert(
+                "native_index_set_shape".into(),
+                format!("{previous}|{index_name}:{shape}").into(),
+            );
+            node.extra
+                .insert("migration_unsupported".into(), true.into());
+        }
+    }
+
     // The portable projection cannot safely recreate these native column shapes.
     // Keep a fingerprint so changes remain visible, and fence migration rendering.
     let fidelity_rows = conn.query(
@@ -965,13 +1034,13 @@ fn object_kind(kind: CatalogNodeKind) -> Option<ObjectKind> {
         CatalogNodeKind::Procedure => ObjectKind::Procedure,
         CatalogNodeKind::Synonym => ObjectKind::Synonym,
         CatalogNodeKind::Sequence => ObjectKind::Sequence,
+        CatalogNodeKind::Index => ObjectKind::Index,
         CatalogNodeKind::Trigger => ObjectKind::Trigger,
         CatalogNodeKind::Type => ObjectKind::Type,
         CatalogNodeKind::Extension => ObjectKind::Extension,
         CatalogNodeKind::Catalog
         | CatalogNodeKind::Schema
         | CatalogNodeKind::Column
-        | CatalogNodeKind::Index
         | CatalogNodeKind::Constraint => return None,
     })
 }
