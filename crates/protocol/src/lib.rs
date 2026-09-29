@@ -181,8 +181,8 @@ pub use session::{
     BulkInsertResponse, CancelRequest, ConnectionId, ConnectionInfo, EndTransactionRequest,
     ExecuteRequestHttp, ExecuteResponse, ExportFormat, ExportRequest, Health,
     OpenConnectionRequest, OpenSessionRequest, OperationAuditEntry, OperationStatus, Readiness,
-    SavepointRequest, SessionId, SessionInfo, TransactionInfo, TxHandleRef, WsClientMessage,
-    WsServerMessage,
+    SavepointRequest, SessionId, SessionInfo, SqliteNativeBulkRows, TransactionInfo, TxHandleRef,
+    WsClientMessage, WsServerMessage,
 };
 pub use snippet::*;
 pub use sql_variable::*;

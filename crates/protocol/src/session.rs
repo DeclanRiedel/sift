@@ -217,13 +217,31 @@ pub struct CancelRequest {
 }
 
 /// Body of `POST /v1/sessions/:id/connections/:conn_id/bulk-insert`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BulkInsertRequest {
     pub table: String,
     #[schemars(with = "Vec<u8>")]
+    #[serde(default)]
     pub data: Vec<u8>,
     #[serde(default)]
     pub format: BulkInsertFormat,
+    /// SQLite-only typed rows for `format=native`; CSV bytes must be empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<SqliteNativeBulkRows>,
+    /// Validate the target and values without writing; returns a one-use token.
+    #[serde(default)]
+    pub preview: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_token: Option<String>,
+    #[serde(default)]
+    pub confirm_write: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SqliteNativeBulkRows {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
 }
 
 #[derive(
@@ -239,6 +257,12 @@ pub enum BulkInsertFormat {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BulkInsertResponse {
     pub rows_inserted: u64,
+    #[serde(default)]
+    pub rows_validated: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_affinities: Vec<String>,
 }
 
 /// Generic ok-ack body.

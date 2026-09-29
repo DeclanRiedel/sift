@@ -163,6 +163,7 @@ struct SessionStoreInner {
     migration_cancellations:
         DashMap<sift_protocol::MigrationRunId, Arc<std::sync::atomic::AtomicBool>>,
     migration_locks: DashMap<(SessionId, ConnectionId), Arc<tokio::sync::Mutex<()>>>,
+    sqlite_bulk_previews: DashMap<String, SqliteBulkPreviewLease>,
     retained_query_results: crate::comparison::RetainedQueryRegistry,
     benchmarks: Arc<DashMap<(SessionId, ConnectionId), benchmark::ActiveBenchmark>>,
     profiles: Arc<DashMap<(SessionId, ConnectionId), profile::ActiveProfile>>,
@@ -173,6 +174,13 @@ struct CatalogRevisionState {
     digest: String,
     revision: u64,
     invalidation_epoch: u64,
+}
+
+struct SqliteBulkPreviewLease {
+    session: SessionId,
+    connection: ConnectionId,
+    fingerprint: String,
+    expires_at: Instant,
 }
 
 #[derive(Clone)]
@@ -343,6 +351,7 @@ impl SessionStore {
                 migration_runs: DashMap::new(),
                 migration_cancellations: DashMap::new(),
                 migration_locks: DashMap::new(),
+                sqlite_bulk_previews: DashMap::new(),
                 retained_query_results: Default::default(),
                 benchmarks: Default::default(),
                 profiles: Default::default(),
@@ -401,6 +410,7 @@ impl SessionStore {
                 migration_runs: DashMap::new(),
                 migration_cancellations: DashMap::new(),
                 migration_locks: DashMap::new(),
+                sqlite_bulk_previews: DashMap::new(),
                 retained_query_results: Default::default(),
                 benchmarks: Default::default(),
                 profiles: Default::default(),
@@ -1089,6 +1099,9 @@ impl SessionStore {
         self.inner
             .migration_locks
             .retain(|(session, _), _| *session != id);
+        self.inner
+            .sqlite_bulk_previews
+            .retain(|_, lease| lease.session != id);
         for run in self
             .inner
             .migration_runs
@@ -1677,6 +1690,9 @@ impl SessionStore {
             .retained_query_results
             .close_connection(session_id, conn_id);
         self.inner.migration_locks.remove(&(session_id, conn_id));
+        self.inner
+            .sqlite_bulk_previews
+            .retain(|_, lease| lease.session != session_id || lease.connection != conn_id);
         for run in self
             .inner
             .migration_runs
@@ -3510,6 +3526,14 @@ impl SessionStore {
             None,
             &[&table_path],
         )?;
+        if entry.driver.engine() == Engine::Sqlite {
+            return crate::sqlite_bulk::run(self, session_id, conn_id, req).await;
+        }
+        if req.native.is_some() || req.preview || req.preview_token.is_some() || req.confirm_write {
+            return Err(ApiError::BadRequest(
+                "SQLite native bulk fields are unsupported for this provider".into(),
+            ));
+        }
         if req.format == BulkInsertFormat::Native {
             return Err(ApiError::Driver(
                 DriverError::new(
@@ -3553,7 +3577,91 @@ impl SessionStore {
             .await?;
         Ok(BulkInsertResponse {
             rows_inserted: result.rows_inserted,
+            rows_validated: result.rows_inserted,
+            preview_token: None,
+            target_affinities: Vec::new(),
         })
+    }
+
+    pub(crate) fn store_sqlite_bulk_preview(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        fingerprint: String,
+    ) -> ApiResult<String> {
+        let now = Instant::now();
+        self.inner
+            .sqlite_bulk_previews
+            .retain(|_, lease| lease.expires_at > now);
+        if self.inner.sqlite_bulk_previews.len() >= 1_024 {
+            return Err(ApiError::BadRequest(
+                "SQLite bulk preview retention limit reached".into(),
+            ));
+        }
+        let token = uuid::Uuid::new_v4().to_string();
+        self.inner.sqlite_bulk_previews.insert(
+            token.clone(),
+            SqliteBulkPreviewLease {
+                session,
+                connection,
+                fingerprint,
+                expires_at: now + Duration::from_secs(300),
+            },
+        );
+        Ok(token)
+    }
+
+    pub(crate) fn consume_sqlite_bulk_preview(
+        &self,
+        token: &str,
+        session: SessionId,
+        connection: ConnectionId,
+        fingerprint: &str,
+    ) -> ApiResult<()> {
+        let (_, lease) = self
+            .inner
+            .sqlite_bulk_previews
+            .remove(token)
+            .ok_or_else(|| ApiError::BadRequest("SQLite bulk preview is missing or used".into()))?;
+        if lease.session != session
+            || lease.connection != connection
+            || lease.fingerprint != fingerprint
+            || lease.expires_at <= Instant::now()
+        {
+            return Err(ApiError::BadRequest(
+                "SQLite bulk preview is stale or bound to another request".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn sqlite_bulk_target_ddl(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        path: sift_protocol::ObjectPath,
+    ) -> ApiResult<String> {
+        let entry = self.authorize_connection_operation(
+            session,
+            connection,
+            sift_protocol::OperationKind::BulkInsert,
+            None,
+            &[&path],
+        )?;
+        let driver = entry.driver.clone();
+        let handle = entry
+            .handle
+            .builtin()
+            .cloned()
+            .ok_or_else(native_provider_only)?;
+        self.run_bounded("SQLite bulk target DDL", async move {
+            driver
+                .as_sqlite()
+                .ok_or_else(|| missing_ext(Engine::Sqlite, "SqliteExt"))?
+                .object_ddl(handle, path)
+                .await
+        })
+        .await
     }
 
     pub async fn begin_transaction(
@@ -6485,6 +6593,8 @@ fn sanitize_operation(operation: Operation) -> Operation {
             mut request,
         } => {
             request.data = Vec::new();
+            request.native = None;
+            request.preview_token = None;
             Operation::BulkInsert {
                 session,
                 connection,
