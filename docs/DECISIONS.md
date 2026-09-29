@@ -3026,3 +3026,26 @@ graph nodes, incomplete coverage, DDL-source graphs, and unproven dependency
 edges remain unsupported. Sequence counters are runtime data and are outside
 schema migration. Policy and partition changes continue to refuse automatic
 rendering until their dependency closure can be proved separately.
+
+## ADR-087 — Desktop governed tools use the authorized registry and invoke contract
+
+Status: accepted. Date: 2026-09-29.
+
+The Vim desktop presents governed tools as a separate browser linked from
+Extensions. Extension contributions are host projected UI actions; governed
+tools are the server's context-filtered automation registry. The desktop lists
+the latter with `mcp_only=false`, the selected server, and the current scoped
+tenant, room, profile, connection, and document context. The server remains the
+authority for which tools are available and callable. A list or result is
+bounded in the desktop; a changed server or context invalidates prior replies.
+
+Invocation uses `InvokeToolRequest` and the SDK's audited `invoke_tool` call.
+The desktop previews the tool ID, classification, target context, and canonical
+argument fingerprint without echoing argument values. Mutating classifications
+require an exact typed confirmation before the first invoke. The first invoke
+may return `ApprovalRequired`, including for reads under server policy. That
+record enters an explicit revision-checked approve step, then a separate run
+step with the original arguments and context. A changed input, selection,
+server, or context discards the approval flow. The desktop cannot choose the
+principal or bypass server authorization and approval policy. No new protocol
+or Driver method is needed.
