@@ -115,7 +115,8 @@ not register a profile for the new database or offer VACUUM, restore, delete,
 or arbitrary PRAGMA writes (ADR-078). The Vim Monitor maintenance view previews
 the managed root, source, destination, and backup expectation before a typed
 confirmation and apply. It also runs the existing read-only integrity check
-(ADR-081).
+(ADR-081). In Vim mode, `c` selects create, `b` backup, `i` integrity,
+`p` previews, `a` applies after confirmation, and `r` runs the integrity check.
 
 Values retain SQLite storage classes: null, signed 64-bit integer, float, text
 or bytes, including mixed classes in one result column. Decimal parameters bind
