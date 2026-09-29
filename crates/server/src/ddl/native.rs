@@ -1,6 +1,28 @@
 //! Catalog-owned DDL. No schema projection is treated as a lossless export.
 use super::*;
 
+pub(super) async fn index(
+    driver: &dyn Driver,
+    handle: sift_driver_api::ConnHandle,
+    object: &ObjectPath,
+    engine: Engine,
+) -> Result<String, DriverError> {
+    if engine != Engine::Postgres {
+        return Err(DriverError::new(
+            Code::UnsupportedForEngine,
+            "standalone index DDL is only supported by PostgreSQL",
+        )
+        .with_engine(engine));
+    }
+    let schema = object.schema.as_deref().ok_or_else(|| {
+        DriverError::new(Code::InvalidParameterValue, "index DDL requires a schema")
+    })?;
+    let sql = include_str!("sql/postgres-index.sql")
+        .replace("__SCHEMA__", &schema.replace('\'', "''"))
+        .replace("__NAME__", &object.name.replace('\'', "''"));
+    definition(driver, handle, sql, engine).await
+}
+
 pub(super) async fn table(
     driver: &dyn Driver,
     handle: sift_driver_api::ConnHandle,
@@ -173,7 +195,7 @@ WHERE t.user_type_id=TYPE_ID(N'{name}') AND t.is_user_defined=1"#
     definition(driver, handle, sql, engine).await
 }
 
-async fn definition(
+pub(super) async fn definition(
     driver: &dyn Driver,
     handle: sift_driver_api::ConnHandle,
     sql: String,

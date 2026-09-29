@@ -31,7 +31,21 @@ WITH target AS (
         AND (NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=conrelid)
             OR conislocal)
 )
-SELECT CASE WHEN t.relispartition THEN
+SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+        WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=t.oid AND d.deptype='e')
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_index i JOIN pg_catalog.pg_depend d
+        ON d.classid='pg_catalog.pg_class'::regclass AND d.objid=i.indexrelid AND d.deptype='e'
+        WHERE i.indrelid=t.oid)
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+        JOIN pg_catalog.pg_depend owner_dep ON owner_dep.classid='pg_catalog.pg_class'::regclass
+            AND owner_dep.refclassid='pg_catalog.pg_class'::regclass
+            AND owner_dep.refobjid=t.oid AND owner_dep.refobjsubid=a.attnum
+            AND owner_dep.deptype IN ('a','i')
+        JOIN pg_catalog.pg_depend extension_dep ON extension_dep.classid='pg_catalog.pg_class'::regclass
+            AND extension_dep.objid=owner_dep.objid AND extension_dep.deptype='e'
+        WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped)
+    THEN 'sift:unsupported:extension member table, index, or sequence belongs to its extension'
+    WHEN t.relispartition THEN
     CASE WHEN t.reloptions IS NOT NULL OR t.reltablespace <> 0 OR t.relrowsecurity OR t.relforcerowsecurity
         OR EXISTS (SELECT 1 FROM pg_catalog.pg_policy WHERE polrelid=t.oid)
         THEN 'sift:unsupported:partition child has policies or storage options'
