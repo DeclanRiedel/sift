@@ -511,6 +511,12 @@ EOF
           '' + devCommand ''cargo run -p sift-website --'';
         };
 
+        site = pkgs.writeShellApplication {
+          name = "sift-site";
+          runtimeInputs = [ pkgs.nix ];
+          text = devCommand ''cargo run -p sift-website --'';
+        };
+
         wiki = pkgs.writeShellApplication {
           name = "sift-wiki";
           runtimeInputs = [ pkgs.nix ];
@@ -530,7 +536,7 @@ EOF
               status=$?
               echo "Desktop demo + wiki failed during: $phase_name (exit $status)." >&2
               if [ -n "''${wiki_log:-}" ] && [ -s "$wiki_log" ]; then
-                echo "Keyboard wiki server log:" >&2
+                echo "Sift site server log:" >&2
                 tail -n 40 "$wiki_log" >&2
               fi
               exit "$status"
@@ -538,7 +544,7 @@ EOF
             trap wiki_error ERR
 
             repo="''${SIFT_REPO:-$PWD}"
-            wiki="$repo/docs/keyboard-wiki"
+            wiki="$repo/docs/sift-site"
             if [ ! -f "$repo/flake.nix" ] || [ ! -f "$wiki/index.html" ]; then
               echo "Run this from the sift checkout, or set SIFT_REPO=/path/to/sift." >&2
               exit 1
@@ -558,10 +564,10 @@ EOF
             : >"$lock_file"
             printf '%s\n' "$$" >&9
 
-            phase_name="checking keyboard wiki port $bind:$port"
+            phase_name="checking Sift site port $bind:$port"
             if ! python3 -c 'import socket,sys; s=socket.socket(); s.bind((sys.argv[1], int(sys.argv[2]))); s.close()' "$bind" "$port" 2>/dev/null; then
               if curl -fsS --max-time 1 "http://$bind:$port/index.html" >/dev/null 2>&1; then
-                echo "A keyboard wiki is already listening at http://$bind:$port." >&2
+                echo "The Sift site is already listening at http://$bind:$port." >&2
               else
                 echo "Port $bind:$port is already used by another process." >&2
               fi
@@ -600,7 +606,7 @@ EOF
               sleep 0.1
             done
             if [ "$ready" != "1" ]; then
-              echo "Keyboard wiki did not become ready at http://$bind:$port." >&2
+              echo "Sift site did not become ready at http://$bind:$port." >&2
               exit 1
             fi
 
@@ -645,9 +651,10 @@ EOF
               sift-check                Run cargo check for the whole workspace.
               sift-desktop              Run the native GPUI desktop client.
               sift-desktop-demo         Seeded Postgres + SQL Server + SQLite + real backend + desktop.
-              sift-desktop-demo-wiki    Run desktop demo + product page and wiki together.
-              sift-website              Preview the Topcoat product page and wiki.
-              sift-wiki                 Serve only the wiki, without the desktop demo.
+              sift-desktop-demo-wiki    Run desktop demo + Sift site together (legacy name).
+              sift-site                 Preview the Sift site.
+              sift-website              Legacy alias for sift-site.
+              sift-wiki                 Legacy alias for sift-site.
               sift-demo-sqlite          Create the SQLite fixture once, preserving existing files.
               sift-desktop-metadata    Open a read-only inspection snapshot of Sift's metadata.
               sift-dev-secret-key       Generate the ignored local metadata secret key file.
@@ -691,6 +698,7 @@ EOF
             desktop
             desktopDemo
             desktopDemoWiki
+            site
             website
             wiki
             demoSqlite
@@ -764,6 +772,10 @@ EOF
           website = {
             type = "app";
             program = "${website}/bin/sift-website";
+          };
+          sift-site = {
+            type = "app";
+            program = "${site}/bin/sift-site";
           };
           wiki = {
             type = "app";

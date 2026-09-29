@@ -1869,7 +1869,7 @@ mod tests {
 
     #[test]
     fn wiki_covers_every_available_leader_command() {
-        let wiki = include_str!("../../../../docs/keyboard-wiki/index.html");
+        let wiki = include_str!("../../../../docs/sift-site/index.html");
         for definition in DEFINITIONS
             .iter()
             .filter(|definition| definition.language.starts_with("<leader>"))
@@ -1880,7 +1880,7 @@ mod tests {
                 .replace('>', "&gt;");
             assert!(
                 wiki.contains(&encoded),
-                "keyboard wiki is missing {} ({})",
+                "Sift site is missing {} ({})",
                 definition.id.as_str(),
                 definition.language
             );

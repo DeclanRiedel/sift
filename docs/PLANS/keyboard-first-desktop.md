@@ -39,7 +39,7 @@ Families stay small and mnemonic:
 - `?` discovery
 
 Exact defaults live in `CommandRegistry`. The desktop keymap implements the
-available subset. `docs/keyboard-wiki/` separates available mappings from
+available subset. `docs/sift-site/` separates available mappings from
 planned component rollouts.
 
 ## Interaction invariants
