@@ -74,6 +74,7 @@ mod postgres_maintenance;
 mod result_editing;
 mod runtime_audit;
 mod sql_drafts;
+mod sqlite_maintenance;
 mod sqlserver_maintenance;
 mod status_bar;
 use sql_drafts::*;
@@ -95,6 +96,7 @@ pub use pane_layout::SplitDirection;
 use postgres_maintenance::{PgMaintenanceChoice, PgMaintenancePhase, PgMaintenanceState};
 use relationship_viewer::RelationshipViewerState;
 use runtime_audit::{RingKind, RuntimeAuditState};
+use sqlite_maintenance::{SqliteMaintenanceChoice, SqliteMaintenancePhase, SqliteMaintenanceState};
 use sqlserver_maintenance::{MaintenanceAction, MaintenanceMode, MaintenanceState};
 
 const PALETTE_VISIBLE_ROWS: usize = 4;
@@ -3815,6 +3817,13 @@ pub enum ExecutorCommand {
         schema: String,
         name: String,
     },
+    SqliteMaintenance {
+        generation: u64,
+        request: sift_protocol::SqliteMaintenanceRequest,
+    },
+    SqliteIntegrity {
+        generation: u64,
+    },
     LoadRoomMembers {
         room_id: i64,
     },
@@ -4745,6 +4754,15 @@ pub enum ExecutorEvent {
         result: Result<sift_protocol::PostgresMaintenanceReport, String>,
     },
     PostgresIntegrityFinished {
+        generation: u64,
+        result: Result<sift_protocol::IntegrityCheckReport, String>,
+    },
+    SqliteMaintenanceFinished {
+        generation: u64,
+        apply: bool,
+        result: Result<sift_protocol::SqliteMaintenanceReport, String>,
+    },
+    SqliteIntegrityFinished {
         generation: u64,
         result: Result<sift_protocol::IntegrityCheckReport, String>,
     },
@@ -11086,6 +11104,7 @@ pub struct WorkspaceShell {
     policy_rename_active: bool,
     maintenance: MaintenanceState,
     pg_maintenance: PgMaintenanceState,
+    sqlite_maintenance: SqliteMaintenanceState,
     transaction_state: TransactionUiState,
     savepoints: Vec<String>,
     next_savepoint: u64,
@@ -11838,6 +11857,20 @@ impl WorkspaceShell {
         let pg_maintenance_name_input = cx.new(|cx| TextInput::new("", "Table or index name", cx));
         let pg_maintenance_confirmation_input =
             cx.new(|cx| TextInput::new("", "Type APPLY schema.name", cx));
+        let sqlite_maintenance_destination_input =
+            cx.new(|cx| TextInput::new("", "Path relative to managed root", cx));
+        let sqlite_maintenance_confirmation_input =
+            cx.new(|cx| TextInput::new("", "Type CREATE or BACKUP and path", cx));
+        cx.subscribe(
+            &sqlite_maintenance_destination_input,
+            |shell, _, event: &TextInputEvent, cx| {
+                if *event == TextInputEvent::Changed {
+                    shell.sqlite_maintenance.form_changed();
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         for input in [&pg_maintenance_schema_input, &pg_maintenance_name_input] {
             cx.subscribe(input, |shell, _, event: &TextInputEvent, cx| {
                 if *event == TextInputEvent::Changed {
@@ -12510,6 +12543,18 @@ impl WorkspaceShell {
                 choice: PgMaintenanceChoice::Vacuum,
                 analyze_with_vacuum: false,
                 concurrently: false,
+                generation: 0,
+                pending: None,
+                preview_request: None,
+                preview: None,
+                last_report: None,
+                integrity: None,
+                message: None,
+            },
+            sqlite_maintenance: SqliteMaintenanceState {
+                destination: sqlite_maintenance_destination_input,
+                confirmation: sqlite_maintenance_confirmation_input,
+                choice: SqliteMaintenanceChoice::Create,
                 generation: 0,
                 pending: None,
                 preview_request: None,
@@ -13929,6 +13974,10 @@ impl WorkspaceShell {
                 }
                 self.maintenance.invalidate();
                 self.pg_maintenance.invalidate();
+                self.sqlite_maintenance.invalidate();
+                self.sqlite_maintenance
+                    .confirmation
+                    .update(cx, |input, cx| input.set_text("", cx));
                 self.maintenance
                     .confirmation
                     .update(cx, |input, cx| input.set_text("", cx));
@@ -17226,6 +17275,56 @@ impl WorkspaceShell {
                     match result {
                         Ok(report) => self.pg_maintenance.integrity = Some(report),
                         Err(message) => self.pg_maintenance.message = Some(message),
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::SqliteMaintenanceFinished {
+                generation,
+                apply,
+                result,
+            } => {
+                let phase = if apply {
+                    SqliteMaintenancePhase::Apply
+                } else {
+                    SqliteMaintenancePhase::Preview
+                };
+                if self.sqlite_maintenance.accepts(generation, phase) {
+                    self.sqlite_maintenance.pending = None;
+                    match result {
+                        Ok(report) if apply => {
+                            self.sqlite_maintenance.preview = None;
+                            self.sqlite_maintenance.preview_request = None;
+                            self.sqlite_maintenance.message = Some(if report.applied {
+                                "SQLite file maintenance completed".into()
+                            } else {
+                                "SQLite file maintenance was not applied".into()
+                            });
+                            self.sqlite_maintenance.last_report = Some(report);
+                        }
+                        Ok(report) => {
+                            if let Some(request) = self.sqlite_maintenance.preview_request.take() {
+                                self.sqlite_maintenance.preview = Some((request, report));
+                            }
+                        }
+                        Err(message) => {
+                            self.sqlite_maintenance.preview = None;
+                            self.sqlite_maintenance.preview_request = None;
+                            self.sqlite_maintenance.message = Some(message);
+                        }
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::SqliteIntegrityFinished { generation, result } => {
+                if self
+                    .sqlite_maintenance
+                    .accepts(generation, SqliteMaintenancePhase::Integrity)
+                {
+                    self.sqlite_maintenance.pending = None;
+                    match result {
+                        Ok(report) => self.sqlite_maintenance.integrity = Some(report),
+                        Err(message) => self.sqlite_maintenance.message = Some(message),
                     }
                     cx.notify();
                 }
@@ -27931,6 +28030,197 @@ impl WorkspaceShell {
                 .database_monitor
                 .move_sqlserver_settings_selection(event.keystroke.key.as_str()),
             "r" => self.load_sqlserver_settings(cx),
+            "escape" => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn sqlite_maintenance_request(
+        &self,
+        cx: &App,
+    ) -> Result<sift_protocol::SqliteMaintenanceRequest, String> {
+        sqlite_maintenance::request(
+            self.sqlite_maintenance.choice,
+            self.sqlite_maintenance.destination.read(cx).text(),
+        )
+    }
+
+    fn set_sqlite_maintenance_choice(
+        &mut self,
+        choice: SqliteMaintenanceChoice,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sqlite_maintenance.pending.is_some() {
+            return;
+        }
+        self.sqlite_maintenance.choice = choice;
+        self.sqlite_maintenance.invalidate();
+        self.sqlite_maintenance
+            .confirmation
+            .update(cx, |input, cx| input.set_text("", cx));
+        cx.notify();
+    }
+
+    fn preview_sqlite_maintenance(&mut self, cx: &mut Context<Self>) {
+        if self.sqlite_maintenance.pending.is_some() {
+            return;
+        }
+        if !self.require_operation(
+            sift_protocol::OperationKind::ManageSqliteDatabase,
+            "Preview SQLite file maintenance",
+            cx,
+        ) {
+            return;
+        }
+        let request = match self.sqlite_maintenance_request(cx) {
+            Ok(request) => request,
+            Err(message) => {
+                self.sqlite_maintenance.message = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.sqlite_maintenance.message = Some("Database executor is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let generation = self
+            .sqlite_maintenance
+            .begin(SqliteMaintenancePhase::Preview);
+        self.sqlite_maintenance.preview = None;
+        self.sqlite_maintenance.preview_request = Some(request.clone());
+        self.sqlite_maintenance
+            .confirmation
+            .update(cx, |input, cx| input.set_text("", cx));
+        if sender
+            .send(ExecutorCommand::SqliteMaintenance {
+                generation,
+                request,
+            })
+            .is_err()
+        {
+            self.sqlite_maintenance.invalidate();
+            self.sqlite_maintenance.message = Some("Database executor is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn apply_sqlite_maintenance(&mut self, cx: &mut Context<Self>) {
+        if self.sqlite_maintenance.pending.is_some() {
+            return;
+        }
+        if !self.require_operation(
+            sift_protocol::OperationKind::ManageSqliteDatabase,
+            "Apply SQLite file maintenance",
+            cx,
+        ) {
+            return;
+        }
+        let request = match (
+            self.sqlite_maintenance_request(cx),
+            self.sqlite_maintenance.preview.as_ref(),
+        ) {
+            (Ok(current), Some(preview)) => sqlite_maintenance::confirmed_apply(
+                &current,
+                preview,
+                self.sqlite_maintenance.confirmation.read(cx).text(),
+            ),
+            (Err(message), _) => Err(message),
+            (_, None) => Err("Preview SQLite maintenance before applying".into()),
+        };
+        let request = match request {
+            Ok(request) => request,
+            Err(message) => {
+                self.sqlite_maintenance.message = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.sqlite_maintenance.message = Some("Database executor is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let generation = self.sqlite_maintenance.begin(SqliteMaintenancePhase::Apply);
+        self.sqlite_maintenance.preview = None;
+        if sender
+            .send(ExecutorCommand::SqliteMaintenance {
+                generation,
+                request,
+            })
+            .is_err()
+        {
+            self.sqlite_maintenance.invalidate();
+            self.sqlite_maintenance.message = Some("Database executor is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn run_sqlite_integrity(&mut self, cx: &mut Context<Self>) {
+        if self.sqlite_maintenance.pending.is_some() {
+            return;
+        }
+        if self.sqlite_maintenance.choice != SqliteMaintenanceChoice::Integrity {
+            self.sqlite_maintenance.message =
+                Some("Choose Integrity check before running it".into());
+            cx.notify();
+            return;
+        }
+        if !self.require_operation(
+            sift_protocol::OperationKind::ExecuteQuery,
+            "Check SQLite integrity",
+            cx,
+        ) {
+            return;
+        }
+        let Some(sender) = &self.executor_sender else {
+            self.sqlite_maintenance.message = Some("Database executor is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let generation = self
+            .sqlite_maintenance
+            .begin(SqliteMaintenancePhase::Integrity);
+        self.sqlite_maintenance.integrity = None;
+        if sender
+            .send(ExecutorCommand::SqliteIntegrity { generation })
+            .is_err()
+        {
+            self.sqlite_maintenance.invalidate();
+            self.sqlite_maintenance.message = Some("Database executor is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn handle_sqlite_maintenance_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified()
+            || [
+                &self.sqlite_maintenance.destination,
+                &self.sqlite_maintenance.confirmation,
+            ]
+            .iter()
+            .any(|input| input.focus_handle(cx).is_focused(window))
+        {
+            return;
+        }
+        if self.sqlite_maintenance.pending.is_some() && event.keystroke.key != "escape" {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "c" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Create, cx),
+            "b" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Backup, cx),
+            "i" => self.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Integrity, cx),
+            "p" => self.preview_sqlite_maintenance(cx),
+            "a" => self.apply_sqlite_maintenance(cx),
+            "r" => self.run_sqlite_integrity(cx),
             "escape" => self.focus_active_pane(window, cx),
             _ => return,
         }
@@ -61004,6 +61294,97 @@ mod tests {
                 Some(sift_protocol::IntegrityOutcome::NoIssuesReported)
             );
         });
+    }
+
+    #[gpui::test]
+    fn sqlite_maintenance_preview_confirmation_and_stale_reply(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell
+                .sqlite_maintenance
+                .destination
+                .update(cx, |input, cx| input.set_text("backup.db", cx));
+            shell.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Backup, cx);
+        });
+        cx.run_until_parked();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.apply_sqlite_maintenance(cx);
+            assert!(commands.try_recv().is_err());
+            shell.preview_sqlite_maintenance(cx);
+        });
+        let generation = match commands.try_recv().expect("SQLite preview") {
+            ExecutorCommand::SqliteMaintenance {
+                generation,
+                request,
+            } => {
+                assert!(!request.apply);
+                assert_eq!(request.preview_token, None);
+                generation
+            }
+            _ => panic!("expected SQLite maintenance preview"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::SqliteMaintenanceFinished {
+                    generation,
+                    apply: false,
+                    result: Ok(sift_protocol::SqliteMaintenanceReport {
+                        action: sift_protocol::SqliteMaintenanceAction::Backup {
+                            path: "backup.db".into(),
+                        },
+                        applied: false,
+                        root_id: "managed".into(),
+                        source_file: "source.db".into(),
+                        destination_file: Some("backup.db".into()),
+                        source_bytes: 4096,
+                        backup_file: Some("backup.db".into()),
+                        backup_expectation: "Verify backup".into(),
+                        preview_token: Some("lease".into()),
+                    }),
+                },
+                cx,
+            );
+            shell.apply_sqlite_maintenance(cx);
+            assert!(commands.try_recv().is_err());
+            shell
+                .sqlite_maintenance
+                .confirmation
+                .update(cx, |input, cx| input.set_text("BACKUP backup.db", cx));
+            shell.apply_sqlite_maintenance(cx);
+        });
+        let applied_generation = match commands.try_recv().expect("SQLite apply") {
+            ExecutorCommand::SqliteMaintenance {
+                generation,
+                request,
+            } => {
+                assert!(request.apply && request.confirm_write);
+                assert_eq!(request.preview_token.as_deref(), Some("lease"));
+                generation
+            }
+            _ => panic!("expected SQLite maintenance apply"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.sqlite_maintenance.invalidate();
+            shell.on_executor_event(
+                ExecutorEvent::SqliteMaintenanceFinished {
+                    generation: applied_generation,
+                    apply: true,
+                    result: Err("late result".into()),
+                },
+                cx,
+            );
+            assert!(shell.sqlite_maintenance.message.is_none());
+            shell.set_sqlite_maintenance_choice(SqliteMaintenanceChoice::Integrity, cx);
+            shell.run_sqlite_integrity(cx);
+        });
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ExecutorCommand::SqliteIntegrity { .. })
+        ));
     }
 
     #[gpui::test]

@@ -263,6 +263,192 @@ fn schemas() -> (String, String) {
 
 #[cfg(feature = "live-pg")]
 #[tokio::test]
+async fn postgres_extension_install_recipe_round_trip_and_member_fence() {
+    // This test drops and reinstalls pg_trgm. Run it only in a disposable
+    // PostgreSQL database explicitly dedicated to extension DDL validation.
+    if std::env::var("SIFT_PG_EXTENSION_DDL_FIXTURE").as_deref() != Ok("1") {
+        return;
+    }
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let fixed_schema = generate_ddl(
+        &driver,
+        conn.clone(),
+        path("pg_catalog", "plpgsql", ObjectKind::Extension),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(fixed_schema.code, sift_protocol::Code::UnsupportedForEngine);
+    let (src, dst) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE SCHEMA {src}; CREATE SCHEMA {dst}; CREATE EXTENSION pg_trgm WITH SCHEMA {src};"
+        ),
+    )
+    .await;
+
+    let graph = postgres_graph(&driver, &conn, &src).await;
+    let extension = graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == sift_protocol::CatalogNodeKind::Extension && node.name == "pg_trgm"
+        })
+        .unwrap();
+    assert!(extension.extra.contains_key("native_extension_shape"));
+    assert_eq!(
+        extension.extra.get("migration_unsupported"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    let members = graph
+        .data
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.extra.get("extension_member_of")
+                == Some(&serde_json::Value::String(format!("{src}.pg_trgm")))
+        })
+        .collect::<Vec<_>>();
+    assert!(!members.is_empty(), "extension members were not attributed");
+    assert!(graph.data.edges.iter().any(|edge| {
+        edge.kind == sift_protocol::CatalogEdgeKind::DependsOn
+            && edge.to.as_ref() == Some(&extension.id)
+            && members.iter().any(|member| member.id == edge.from)
+    }));
+    let mut source_members = members
+        .iter()
+        .map(|node| (node.kind, node.name.clone()))
+        .collect::<Vec<_>>();
+    source_members.sort();
+
+    let member_error = generate_ddl(
+        &driver,
+        conn.clone(),
+        ObjectPath {
+            catalog: None,
+            schema: Some(src.clone()),
+            name: "show_trgm".into(),
+            kind: Some(ObjectKind::ScalarFunction),
+            routine_args: Some(vec!["text".into()]),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(member_error.code, sift_protocol::Code::UnsupportedForEngine);
+    assert!(member_error.message.contains("extension member"));
+
+    let ddl = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&src, "pg_trgm", ObjectKind::Extension),
+    )
+    .await
+    .unwrap()
+    .ddl;
+    assert!(ddl.contains(&format!(
+        "CREATE EXTENSION pg_trgm WITH SCHEMA {src} VERSION"
+    )));
+    execute(&driver, &conn, "DROP EXTENSION pg_trgm RESTRICT;").await;
+    execute(&driver, &conn, &ddl.replace(&src, &dst)).await;
+    let regenerated = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&dst, "pg_trgm", ObjectKind::Extension),
+    )
+    .await
+    .unwrap()
+    .ddl;
+    assert_eq!(regenerated, ddl.replace(&src, &dst));
+    let replayed_graph = postgres_graph(&driver, &conn, &dst).await;
+    let mut replayed_members = replayed_graph
+        .data
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.extra.get("extension_member_of")
+                == Some(&serde_json::Value::String(format!("{dst}.pg_trgm")))
+        })
+        .map(|node| (node.kind, node.name.clone()))
+        .collect::<Vec<_>>();
+    replayed_members.sort();
+    assert_eq!(source_members, replayed_members);
+
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE FUNCTION {dst}.added_member_fn() RETURNS integer \
+             LANGUAGE sql AS 'SELECT 1'; \
+             ALTER EXTENSION pg_trgm ADD FUNCTION {dst}.added_member_fn();"
+        ),
+    )
+    .await;
+    let altered_membership = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&dst, "pg_trgm", ObjectKind::Extension),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        altered_membership.code,
+        sift_protocol::Code::UnsupportedForEngine
+    );
+    assert!(altered_membership.message.contains("member manifest"));
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "ALTER EXTENSION pg_trgm DROP FUNCTION {dst}.added_member_fn(); \
+             DROP FUNCTION {dst}.added_member_fn();"
+        ),
+    )
+    .await;
+
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE TABLE {dst}.added_member(id integer); \
+             ALTER EXTENSION pg_trgm ADD TABLE {dst}.added_member;"
+        ),
+    )
+    .await;
+    let added_member = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&dst, "added_member", ObjectKind::Table),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(added_member.code, sift_protocol::Code::UnsupportedForEngine);
+    let altered_extension = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&dst, "pg_trgm", ObjectKind::Extension),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        altered_extension.code,
+        sift_protocol::Code::UnsupportedForEngine
+    );
+    assert!(altered_extension.message.contains("relation members"));
+
+    execute(
+        &driver,
+        &conn,
+        &format!("DROP EXTENSION pg_trgm RESTRICT; DROP SCHEMA {dst}; DROP SCHEMA {src};"),
+    )
+    .await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-pg")]
+#[tokio::test]
 async fn postgres_table_storage_and_index_state_round_trip() {
     let driver = sift_driver_postgres::PgDriver::new();
     let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
@@ -430,6 +616,190 @@ async fn postgres_graph(
         database_identity: "fixture".into(),
         data: snapshot.graph.unwrap(),
     }
+}
+
+#[cfg(feature = "live-pg")]
+#[tokio::test]
+async fn postgres_owned_sequence_migration_orders_creation_and_ownership() {
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let (schema, _) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!("CREATE SCHEMA {schema}; CREATE TABLE {schema}.items(id bigint);"),
+    )
+    .await;
+    let before = postgres_graph(&driver, &conn, &schema).await;
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE SEQUENCE {schema}.counter AS bigint START WITH 17 \
+             INCREMENT BY 3 CACHE 4; \
+             ALTER SEQUENCE {schema}.counter OWNED BY {schema}.items.id;"
+        ),
+    )
+    .await;
+    let after = postgres_graph(&driver, &conn, &schema).await;
+    let source = sift_protocol::CatalogSourceRef::Live {
+        expected_revision: before.revision,
+        options: sift_protocol::CatalogGraphOptions {
+            schemas: Some(vec![schema.clone()]),
+            include_definitions: true,
+            ..Default::default()
+        },
+    };
+    let target = sift_protocol::CatalogSourceRef::Snapshot {
+        snapshot_id: sift_protocol::CatalogSnapshotId(uuid::Uuid::new_v4()),
+    };
+    let diff = sift_core::schema_diff::diff_catalogs(
+        source.clone(),
+        &before,
+        target.clone(),
+        &after,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(diff.changes.len(), 2, "{:#?}", diff.changes);
+    let sequence_change = diff
+        .changes
+        .iter()
+        .find(|change| {
+            change.object_after.as_ref().is_some_and(|node| {
+                node.kind == sift_protocol::CatalogNodeKind::Sequence && node.name == "counter"
+            })
+        })
+        .unwrap();
+    let plan = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    let statements = &plan.groups[0].statements;
+    assert_eq!(statements.len(), 2);
+    assert!(statements[0].sql.starts_with("CREATE SEQUENCE "));
+    assert!(statements[1].sql.contains("OWNED BY"));
+    assert!(statements.iter().all(|statement| {
+        statement.change_ids.as_slice() == std::slice::from_ref(&sequence_change.id)
+    }));
+    assert_eq!(plan.rollback_groups[0].statements.len(), 1);
+    assert!(plan.rollback_groups[0].statements[0]
+        .sql
+        .starts_with("DROP SEQUENCE "));
+
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &after,
+        std::slice::from_ref(&sequence_change.id),
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+    let mut incomplete = diff.clone();
+    incomplete.to = sift_protocol::CatalogSourceRef::DdlSource {
+        source_id: sift_protocol::DdlSourceId(1),
+        expected_model_revision: 1,
+    };
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &incomplete,
+        &before,
+        &after,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+    let mut unsafe_table = after.clone();
+    unsafe_table
+        .data
+        .nodes
+        .iter_mut()
+        .find(|node| node.kind == sift_protocol::CatalogNodeKind::Table && node.name == "items")
+        .unwrap()
+        .extra
+        .insert("native_security_shape".into(), "changed".into());
+    assert!(sift_server::migration::render_plan(
+        Engine::Postgres,
+        &diff,
+        &before,
+        &unsafe_table,
+        &[],
+        before.revision,
+        &Default::default(),
+    )
+    .is_err());
+
+    execute(&driver, &conn, &format!("DROP SEQUENCE {schema}.counter;")).await;
+    for statement in statements {
+        execute(&driver, &conn, &statement.sql).await;
+    }
+    let replayed = postgres_graph(&driver, &conn, &schema).await;
+    for kind in [
+        sift_protocol::CatalogNodeKind::Table,
+        sift_protocol::CatalogNodeKind::Sequence,
+    ] {
+        let expected = after
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == kind)
+            .unwrap();
+        let actual = replayed
+            .data
+            .nodes
+            .iter()
+            .find(|node| node.kind == kind)
+            .unwrap();
+        let key = if kind == sift_protocol::CatalogNodeKind::Table {
+            "native_owned_sequence_shape"
+        } else {
+            "native_sequence_shape"
+        };
+        assert_eq!(actual.extra.get(key), expected.extra.get(key));
+    }
+    let drop_diff =
+        sift_core::schema_diff::diff_catalogs(source, &replayed, target, &before, &[], None)
+            .unwrap();
+    let drop_plan = sift_server::migration::render_plan(
+        Engine::Postgres,
+        &drop_diff,
+        &replayed,
+        &before,
+        &[],
+        replayed.revision,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(drop_plan.groups[0].statements.len(), 1);
+    assert!(drop_plan.groups[0].statements[0]
+        .sql
+        .starts_with("DROP SEQUENCE "));
+    execute(&driver, &conn, &drop_plan.groups[0].statements[0].sql).await;
+    let dropped = postgres_graph(&driver, &conn, &schema).await;
+    assert!(dropped
+        .data
+        .nodes
+        .iter()
+        .all(|node| node.kind != sift_protocol::CatalogNodeKind::Sequence));
+    let table = dropped
+        .data
+        .nodes
+        .iter()
+        .find(|node| node.kind == sift_protocol::CatalogNodeKind::Table)
+        .unwrap();
+    assert!(!table.extra.contains_key("native_owned_sequence_shape"));
+    execute(&driver, &conn, &format!("DROP SCHEMA {schema} CASCADE;")).await;
+    driver.close(conn).await.unwrap();
 }
 
 #[cfg(feature = "live-pg")]

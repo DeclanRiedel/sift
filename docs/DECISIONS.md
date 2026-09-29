@@ -2934,6 +2934,52 @@ refreshing invalidates older responses so a delayed result cannot overwrite the
 current view. The Runtime administration entry point stays Vim accessible;
 these read-only lists add no mutation or new driver method.
 
+## ADR-081 — SQLite desktop maintenance binds confirmation to the live connection
+
+Status: accepted. Date: 2026-09-29.
+
+The Vim Monitor maintenance view exposes the existing audited SQLite file
+maintenance and integrity APIs only for an active managed SQLite connection.
+The form accepts a path relative to the connection's configured root; the
+preview response shows the root ID, source, destination, source bytes, and
+backup expectation before a write. The desktop never accepts a server path or
+executes maintenance as SQL.
+
+The desktop keeps a preview only for the active connection generation, exact
+action and destination. Apply requires a typed confirmation naming that action
+and destination, plus the server's one-use preview token. A connection switch,
+form edit, stale reply, or completed apply clears the preview. The server
+remains authoritative for tenant/root permission, file identity, token expiry,
+exclusive creation, backup limits, and audit. Integrity runs as the existing
+read-only check without a write confirmation. VACUUM, restore, delete and
+arbitrary PRAGMA remain outside this desktop workflow.
+
+## ADR-082 — PostgreSQL extension export is a version-pinned install recipe
+
+Status: accepted. Date: 2026-09-29.
+
+`GenerateDdl` may export a PostgreSQL database extension as a quoted `CREATE
+EXTENSION ... WITH SCHEMA ... VERSION ...` statement. The first verified
+package is PostgreSQL 16 `pg_trgm` 1.6 with its pristine 46-member manifest.
+Export resolves catalog name and schema, requires effective ownership, and
+checks that the exact version is locally available and relocatable. It refuses
+any changed member manifest, config table, extension-to-extension prerequisite,
+or relation/sequence member. The statement is a package install recipe: the
+target must have the same extension package/version, and an operator must
+verify resulting membership. It is never an independent export of member
+objects or a complete cross-server backup.
+
+The PostgreSQL graph fingerprints extension version, schema, prerequisites,
+configuration, and catalog member identities. Visible member nodes are marked
+with their owning extension, with a catalog-proven dependency edge when the
+extension node is also in scope; both the extension and its members are fenced
+from generic structural migration. Native DDL for extension-owned tables,
+indexes, sequences, views, routines, types,
+triggers, and foreign tables refuses independent creation. Automatic extension
+install/update/drop migration, package equivalence across servers, membership
+changes made through `ALTER EXTENSION ADD/DROP`, data in config tables, and
+cross-object ordering require a separate proof and remain unsupported.
+
 ## ADR-083 — Desktop approval requests bind a reviewed extension action
 
 Status: accepted. Date: 2026-09-29.
@@ -2957,3 +3003,26 @@ the record's expected revision and remains a distinct action. Running consumes
 the one-use approval only with the same operation, context, and arguments.
 The review is a local confirmation, not a substitute for server authorization.
 No Driver or wire-contract signature changes are needed.
+## ADR-084 — Owned sequence creation requires a stable existing table
+
+Status: accepted. Date: 2026-09-29.
+
+A complete, definition-bearing PostgreSQL live or server-captured graph may
+carry catalog-generated `CREATE SEQUENCE` SQL for one ordinary sequence owned
+by one column of a permanent heap table in the same schema. The first
+renderable transition is creation of that sequence when the owner table and
+column already exist unchanged in both graphs. The migration renderer proves
+the catalog `OwnsSequence` edge, matching table/column identities and details,
+and that the table's only change is its derived owned-sequence fingerprint.
+It emits `CREATE SEQUENCE` before `ALTER SEQUENCE ... OWNED BY`; rollback drops
+the sequence with `RESTRICT`. A selected table-fingerprint change is absorbed
+only when its paired sequence creation is selected and passes the same proof.
+
+The captured definition is bounded and accepted only for built-in integer
+sequence types, one ordinary ownership dependency, and effective sequence
+ownership. Identity or extension members, nondefault persistence, ACLs,
+comments, other table-native state, concurrent table/column edits, missing
+graph nodes, incomplete coverage, DDL-source graphs, and unproven dependency
+edges remain unsupported. Sequence counters are runtime data and are outside
+schema migration. Policy and partition changes continue to refuse automatic
+rendering until their dependency closure can be proved separately.
