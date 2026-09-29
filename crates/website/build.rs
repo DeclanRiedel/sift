@@ -67,7 +67,7 @@ fn digest(content: &[u8]) -> String {
 }
 
 fn main() -> io::Result<()> {
-    let docs = Path::new("../../docs/keyboard-wiki");
+    let docs = Path::new("../../docs/sift-site");
     println!("cargo:rerun-if-changed={}", docs.display());
     let icon = Path::new("../desktop/assets/sift-icon.ico");
     println!("cargo:rerun-if-changed={}", icon.display());

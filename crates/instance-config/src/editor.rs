@@ -1465,7 +1465,7 @@ mod tests {
 
     #[test]
     fn configuration_wiki_covers_every_schema_field_and_table() {
-        let wiki = include_str!("../../../docs/keyboard-wiki/configuration.html");
+        let wiki = include_str!("../../../docs/sift-site/configuration.html");
         for field in FIELDS {
             assert!(
                 wiki.contains(&format!("<code>{}</code>", field.key)),

@@ -72,7 +72,9 @@ nix develop
 sift-desktop-demo
 ```
 
-To launch the same demo with the keyboard wiki at
+Preview the Sift site at `http://127.0.0.1:8787` with `nix run .#sift-site`.
+
+To launch the same demo with the Sift site at
 `http://127.0.0.1:8787`:
 
 ```sh
