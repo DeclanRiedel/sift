@@ -2593,6 +2593,8 @@ and a complete effective-privilege matrix remain separate work.
 Status: Accepted, 2026-09-29.
 
 SQLite's native stored DDL is more expressive than the structural catalog graph.
+This decision supersedes ADR-056's blanket structural-migration exclusion for
+the one additive shape below.
 The graph deliberately has partial dependency coverage, so an absent target
 object cannot authorize a drop, and a table reconstructed from columns could
 silently lose STRICT, WITHOUT ROWID, generated columns, checks, keys, indexes,

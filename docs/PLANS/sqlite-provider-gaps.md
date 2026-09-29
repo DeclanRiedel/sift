@@ -19,8 +19,15 @@ claims.
       omitted definitions. Unsupported expression syntax, virtual-table
       modules, table functions in views, and unparsed trigger/view SQL remain
       explicit coverage gaps; the graph is still partial.
-- [ ] Add schema snapshots, diff, migration preview/apply, and designer changes
-      only for DDL shapes the native model can round-trip. Reject lossy changes.
+- [~] Add schema snapshots, diff, migration preview/apply, and designer changes
+      only for DDL shapes the native model can round-trip. Durable snapshots and
+      partial-coverage diff work; audited preview, test rollback, and apply now
+      admit additive creation of simple ordinary `main` tables with native
+      INTEGER/REAL/TEXT/BLOB/NUMERIC columns and optional NOT NULL. Stored DDL
+      is verified before a canonical statement is retained. Lossy/virtual,
+      indexed, constrained, generated, STRICT, WITHOUT ROWID, TEMP, drop,
+      rename and alter shapes are refused. Designer and broader native DDL
+      round trips remain open (ADR-068).
 - [x] Improve CHECK metadata coverage while stored native SQL remains
       authoritative. Table and column clauses now scan valid SQLite table DDL
       without depending on whole-statement editor parsing; quoted names,

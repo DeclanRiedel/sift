@@ -192,6 +192,7 @@ impl BuiltinProviderAdapter {
                     "driver.schema.shallow@1",
                     "driver.schema.deep@1",
                     "driver.schema.catalog@1",
+                    "driver.schema.graph@1",
                     "driver.cancel@1",
                     "driver.savepoints@1",
                     "driver.explain@1",
@@ -571,6 +572,11 @@ impl RuntimeDriver {
             return true;
         }
         if operation == OperationKind::BulkInsert && self.semantic_engine() == Some(Engine::Sqlite)
+        {
+            return false;
+        }
+        if operation == OperationKind::ProjectCatalogDiagram
+            && self.semantic_engine() == Some(Engine::Sqlite)
         {
             return false;
         }

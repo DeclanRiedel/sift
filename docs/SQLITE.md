@@ -90,7 +90,14 @@ trigger/view SQL the parser cannot read remain gaps;
 affected nodes carry `sqlite_dependency_gap` markers. Virtual-table columns
 are omitted under the restricted connection authorizer and marked with
 `sqlite_metadata_gap`.
-Full dependency graphs, schema comparison/migration, database designer
+Durable catalog snapshots and diff are available with partial coverage. Preview,
+test rollback and apply admit only additive creation of ordinary `main` tables
+whose stored DDL contains simple INTEGER, REAL, TEXT, BLOB or NUMERIC columns
+with optional NOT NULL. The plan is one-use, revision-bound, audited and
+transactional. Unsupported native shapes and all drops, alters and renames are
+refused. The Vim desktop baseline action accepts SQLite's partial snapshot and
+previews restoring missing supported tables; any other diff change refuses the
+plan. Full dependency graphs, general schema migration, database designer
 mutations, process controls, notifications, native bulk/transfer targets,
 database creation, ATTACH/DETACH, unsafe PRAGMAs and file/extension functions
 are not advertised.
