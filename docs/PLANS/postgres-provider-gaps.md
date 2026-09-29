@@ -69,8 +69,12 @@ sources for current support claims.
       table creation and external dependency ordering remain open. A sole
       policy on a stable existing heap table can be renamed when its catalog
       OID, command, roles, expressions, permissive mode, and RLS flags are
-      unchanged; rollback renames it back. Policy creation/drop, edits to its
-      body, RLS state changes, and multiple policies remain unsupported.
+      unchanged; rollback renames it back. A sole policy can also be created
+      or dropped on an unchanged one-column `bigint id` heap table with RLS
+      enabled when the catalog proves `SELECT TO PUBLIC USING (id > N)` for a
+      bounded integer literal. Both directions require privilege-risk
+      acknowledgement and have inverse rollback. Other policy definitions,
+      body edits, RLS state changes, and multiple policies remain unsupported.
       One ordinary heap child can be attached to or detached from an unchanged
       range-partitioned parent when both tables already exist and the catalog
       proves a single dependency-free partition bound. The paired parent
