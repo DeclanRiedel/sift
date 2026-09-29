@@ -471,6 +471,119 @@ async fn enrich_graph_identity_and_foreign_keys(
         }
     }
 
+    // Ownership is outside the portable sequence projection. Keep its native
+    // shape visible to diff, and fence both ends of an ownership dependency so
+    // a generic table or sequence migration cannot silently detach it.
+    let sequence_rows = conn
+        .query(
+            "SELECT sn.nspname, sc.relname,
+            md5(concat_ws('|', s.seqtypid::text, s.seqstart::text, s.seqincrement::text,
+                s.seqmin::text, s.seqmax::text, s.seqcache::text, s.seqcycle::text,
+                coalesce(owner_dep.deptype::text,''), coalesce(owner_ns.nspname,''),
+                coalesce(owner_table.relname,''), coalesce(owner_col.attname,''),
+                coalesce((SELECT extension.extname FROM pg_catalog.pg_depend extension_dep
+                    JOIN pg_catalog.pg_extension extension ON extension.oid=extension_dep.refobjid
+                    WHERE extension_dep.classid='pg_catalog.pg_class'::regclass
+                      AND extension_dep.objid=sc.oid AND extension_dep.deptype='e'
+                      AND extension_dep.refclassid='pg_catalog.pg_extension'::regclass
+                    LIMIT 1),''))),
+            owner_dep.deptype::text, owner_ns.nspname, owner_table.relname,
+            EXISTS (SELECT 1 FROM pg_catalog.pg_depend extension_dep
+                WHERE extension_dep.classid='pg_catalog.pg_class'::regclass
+                  AND extension_dep.objid=sc.oid AND extension_dep.deptype='e')
+         FROM pg_catalog.pg_sequence s
+         JOIN pg_catalog.pg_class sc ON sc.oid=s.seqrelid
+         JOIN pg_catalog.pg_namespace sn ON sn.oid=sc.relnamespace
+         LEFT JOIN pg_catalog.pg_depend owner_dep
+           ON owner_dep.classid='pg_catalog.pg_class'::regclass
+          AND owner_dep.objid=sc.oid
+          AND owner_dep.refclassid='pg_catalog.pg_class'::regclass
+          AND owner_dep.deptype IN ('a','i') AND owner_dep.refobjsubid>0
+         LEFT JOIN pg_catalog.pg_class owner_table ON owner_table.oid=owner_dep.refobjid
+         LEFT JOIN pg_catalog.pg_namespace owner_ns ON owner_ns.oid=owner_table.relnamespace
+         LEFT JOIN pg_catalog.pg_attribute owner_col ON owner_col.attrelid=owner_table.oid
+             AND owner_col.attnum=owner_dep.refobjsubid AND NOT owner_col.attisdropped
+         WHERE sn.nspname=ANY($1::text[])
+         ORDER BY owner_ns.nspname, owner_table.relname, sn.nspname, sc.relname",
+            &[&schemas],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in sequence_rows {
+        let schema: String = row.get(0);
+        let name: String = row.get(1);
+        let shape: String = row.get(2);
+        let dependency: Option<String> = row.get(3);
+        let owner_schema: Option<String> = row.get(4);
+        let owner_table: Option<String> = row.get(5);
+        let extension_owned: bool = row.get(6);
+        if let Some(index) = object_nodes
+            .get(&(schema, name))
+            .and_then(|id| node_indexes.get(id))
+        {
+            graph.nodes[*index]
+                .extra
+                .insert("native_sequence_shape".into(), shape.clone().into());
+            if dependency.is_some() || extension_owned {
+                graph.nodes[*index]
+                    .extra
+                    .insert("migration_unsupported".into(), true.into());
+            }
+        }
+        if let Some(index) = owner_schema
+            .zip(owner_table)
+            .and_then(|key| relation_nodes.get(&key).and_then(|id| node_indexes.get(id)))
+        {
+            let node = &mut graph.nodes[*index];
+            let previous = node
+                .extra
+                .get("native_owned_sequence_shape")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            node.extra.insert(
+                "native_owned_sequence_shape".into(),
+                format!("{previous}|{shape}").into(),
+            );
+            node.extra
+                .insert("migration_unsupported".into(), true.into());
+        }
+    }
+
+    let unsupported_index_rows = conn
+        .query(
+            "SELECT n.nspname, c.relname,
+            md5(string_agg(concat_ws('|', ic.relname, pg_catalog.pg_get_indexdef(i.indexrelid),
+                i.indisvalid::text, i.indisready::text, i.indisclustered::text,
+                i.indisreplident::text, extension_member::text), E'\\n' ORDER BY ic.relname))
+         FROM pg_catalog.pg_index i
+         JOIN pg_catalog.pg_class c ON c.oid=i.indrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+         JOIN pg_catalog.pg_class ic ON ic.oid=i.indexrelid
+         CROSS JOIN LATERAL (SELECT EXISTS (
+             SELECT 1 FROM pg_catalog.pg_depend d
+             WHERE d.classid='pg_catalog.pg_class'::regclass
+               AND d.objid=ic.oid AND d.deptype='e')) ext(extension_member)
+         WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p')
+           AND (NOT i.indisvalid OR NOT i.indisready OR i.indisclustered
+                OR i.indisreplident OR extension_member)
+         GROUP BY n.nspname, c.relname",
+            &[&schemas],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in unsupported_index_rows {
+        let key = (row.get::<_, String>(0), row.get::<_, String>(1));
+        if let Some(index) = relation_nodes.get(&key).and_then(|id| node_indexes.get(id)) {
+            graph.nodes[*index]
+                .extra
+                .insert("migration_unsupported".into(), true.into());
+            graph.nodes[*index].extra.insert(
+                "native_unsupported_index_shape".into(),
+                row.get::<_, String>(2).into(),
+            );
+        }
+    }
+
     // The portable projection cannot safely recreate these native column shapes.
     // Keep a fingerprint so changes remain visible, and fence migration rendering.
     let fidelity_rows = conn.query(

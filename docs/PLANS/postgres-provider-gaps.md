@@ -28,8 +28,12 @@ sources for current support claims.
 - [ ] Cover custom table storage/options and currently rejected index states.
 - [ ] Export extension definitions and dependencies without treating extension
       member objects as independent creations.
-- [ ] Address standalone indexes and sequence ownership. Any new public object
-      kind or signature follows ADR-017 and a protocol bump.
+- [~] Address standalone indexes and sequence ownership. Sequence DDL now
+      round-trips ordinary `OWNED BY` dependencies and refuses internal identity
+      or extension member sequences; ownership is fingerprinted and fenced from
+      generic migrations. Table DDL refuses extension member indexes and
+      sequences. Standalone index DDL remains open; a new public index object
+      kind follows ADR-017 and a protocol bump.
 - [ ] Extend catalog diff/migration to preserve supported rich index, partition,
       policy, and ownership shapes; reject loss before preview/apply.
 

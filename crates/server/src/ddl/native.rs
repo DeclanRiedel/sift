@@ -173,7 +173,7 @@ WHERE t.user_type_id=TYPE_ID(N'{name}') AND t.is_user_defined=1"#
     definition(driver, handle, sql, engine).await
 }
 
-async fn definition(
+pub(super) async fn definition(
     driver: &dyn Driver,
     handle: sift_driver_api::ConnHandle,
     sql: String,
