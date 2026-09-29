@@ -66,7 +66,11 @@ sources for current support claims.
       renders catalog-captured `CREATE SEQUENCE` before `ALTER SEQUENCE ...
       OWNED BY`; the paired table-fingerprint change is absorbed only when both
       changes are selected. Drop uses `RESTRICT`. Other owned-sequence changes,
-      table creation, policies, and external dependency ordering remain open.
+      table creation and external dependency ordering remain open. A sole
+      policy on a stable existing heap table can be renamed when its catalog
+      OID, command, roles, expressions, permissive mode, and RLS flags are
+      unchanged; rollback renames it back. Policy creation/drop, edits to its
+      body, RLS state changes, and multiple policies remain unsupported.
       One ordinary heap child can be attached to or detached from an unchanged
       range-partitioned parent when both tables already exist and the catalog
       proves a single dependency-free partition bound. The paired parent

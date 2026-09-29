@@ -3072,3 +3072,28 @@ step with the original arguments and context. A changed input, selection,
 server, or context discards the approval flow. The desktop cannot choose the
 principal or bypass server authorization and approval policy. No new protocol
 or Driver method is needed.
+
+## ADR-088 — Policy migration may rename one catalog-proven policy
+
+Status: accepted. Date: 2026-09-29.
+
+The first automatic PostgreSQL policy migration is a rename of the sole policy
+on an unchanged existing permanent heap table. Rename preserves command,
+roles, permissive mode, `USING` and `WITH CHECK` expressions, and both table
+RLS flags. A definition-bearing catalog graph captures the policy OID, name,
+and a fingerprint of every semantic field and RLS flag, but never treats the
+policy expression as executable client input. The renderer requires complete
+live or server-captured graphs for the same database identity, an unchanged
+table and subordinate columns, exactly one table change, the same policy OID
+and body fingerprint, and only the policy name and derived security fingerprint
+to differ. It emits quoted `ALTER POLICY ... RENAME TO` and the inverse as
+rollback.
+
+Catalog capture marks a policy rename candidate only for effective table
+owners or superusers. Existing migration operation policy, audit, stale
+revision and digest checks, and database ownership enforcement still govern
+preview and apply; a snapshot's captured eligibility is not a privilege grant.
+Policy create/drop, expression or role edits, RLS enable/force changes,
+multiple policies, partitioned or extension-owned tables, and mixed native
+changes remain unsupported until their dependency and authority boundaries
+can be proved separately.
