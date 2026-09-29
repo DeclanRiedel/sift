@@ -703,6 +703,34 @@ struct QueryContext {
     session_lease: QuerySessionLease,
 }
 
+fn bind_active_extension_context(
+    target: &mut Option<sift_protocol::ToolContext>,
+    opened: Option<&QueryContext>,
+    instance_id: &str,
+) -> Result<(), String> {
+    if target
+        .as_ref()
+        .and_then(|context| context.connection_id.as_deref())
+        != Some("active")
+    {
+        return Ok(());
+    }
+    let Some(opened) = opened.filter(|opened| {
+        opened.instance_id == instance_id
+            && target
+                .as_ref()
+                .and_then(|context| context.profile_id)
+                .is_none_or(|profile| profile == opened.profile_id)
+    }) else {
+        return Err("Active connection is unavailable for this extension action".into());
+    };
+    target
+        .as_mut()
+        .expect("active target has context")
+        .connection_id = Some(format!("{}:{}", opened.session.0, opened.connection.0));
+    Ok(())
+}
+
 struct QuerySessionLease {
     client: Client,
     session: Option<SessionId>,
@@ -1171,36 +1199,11 @@ async fn run_query_executor(
                 if server.instance().id != instance_id {
                     continue;
                 }
-                let binding =
-                    if request
-                        .context
-                        .as_ref()
-                        .and_then(|context| context.connection_id.as_deref())
-                        == Some("active")
-                    {
-                        match context.as_ref() {
-                            Some(opened)
-                                if opened.instance_id == instance_id
-                                    && request
-                                        .context
-                                        .as_ref()
-                                        .and_then(|context| context.profile_id)
-                                        .is_none_or(|profile| profile == opened.profile_id) =>
-                            {
-                                request
-                                    .context
-                                    .as_mut()
-                                    .expect("active target has context")
-                                    .connection_id =
-                                    Some(format!("{}:{}", opened.session.0, opened.connection.0));
-                                Ok(())
-                            }
-                            _ => Err("Active connection is unavailable for this extension action"
-                                .to_owned()),
-                        }
-                    } else {
-                        Ok(())
-                    };
+                let binding = bind_active_extension_context(
+                    &mut request.context,
+                    context.as_ref(),
+                    &instance_id,
+                );
                 let result = match binding {
                     Ok(()) => match server.client().await {
                         Ok(client) => client
@@ -1213,6 +1216,37 @@ async fn run_query_executor(
                 };
                 if events
                     .send(ExecutorEvent::ExtensionContributionInvoked { generation, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::CreateExtensionApproval {
+                generation,
+                instance_id,
+                mut request,
+            } => {
+                let server = targets.borrow().clone();
+                if server.instance().id != instance_id {
+                    continue;
+                }
+                let binding = bind_active_extension_context(
+                    &mut request.context,
+                    context.as_ref(),
+                    &instance_id,
+                );
+                let result = match binding {
+                    Ok(()) => match server.client().await {
+                        Ok(client) => client
+                            .create_operation_approval(&request)
+                            .await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::ExtensionApprovalCreated { generation, result })
                     .is_err()
                 {
                     return;
@@ -8659,6 +8693,25 @@ pub fn display_rects(cx: &App) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_extension_approval_requires_a_live_matching_connection() {
+        let mut target = Some(sift_protocol::ToolContext {
+            tenant_id: Some(1),
+            room_id: None,
+            profile_id: Some(7),
+            connection_id: Some("active".into()),
+            document_id: None,
+        });
+        assert!(bind_active_extension_context(&mut target, None, "server-a").is_err());
+        assert_eq!(
+            target.as_ref().unwrap().connection_id.as_deref(),
+            Some("active")
+        );
+
+        target.as_mut().unwrap().connection_id = None;
+        assert!(bind_active_extension_context(&mut target, None, "server-a").is_ok());
+    }
 
     #[test]
     fn relationship_hops_stop_at_farthest_connected_table() {
