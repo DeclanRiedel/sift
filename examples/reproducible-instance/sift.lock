@@ -8,7 +8,7 @@ platforms = []
 [sift]
 version = "0.1.0"
 protocol = 4
-schema_digest = "sha256:ded8cccff12811dc579e06abf56428a426555fc7e5c4156822c2a6db64cd127c"
+schema_digest = "sha256:a76904cb2ce037d2aaaee5a5e7d2d693b7598604910f431383e3f6aba664460b"
 
 [[providers]]
 name = "postgres"
