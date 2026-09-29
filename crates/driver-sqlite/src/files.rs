@@ -131,7 +131,7 @@ impl FilePolicy {
         let source_family = ["", "-wal", "-shm", "-journal"].iter().any(|suffix| {
             let mut sibling = source.as_os_str().to_os_string();
             sibling.push(suffix);
-            destination == PathBuf::from(sibling)
+            destination == sibling
         });
         if source_family || std::fs::symlink_metadata(&destination).is_ok() {
             return Err(error(

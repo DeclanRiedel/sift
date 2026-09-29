@@ -2885,6 +2885,34 @@ records action, target, preview/apply outcome and artifact path, never file
 contents or secrets. File-root, tenant, connection-policy and protected-path
 checks remain the authority even when the user has an administrative tenant
 role. The desktop may expose only these typed actions in Vim mode.
+## ADR-079 — PostgreSQL heap storage and index table-state export
+
+Status: accepted. Date: 2026-09-29.
+
+PostgreSQL table DDL may emit validated catalog `reloptions` for the built-in
+heap access method, and replay per-column storage and compression overrides
+through `ALTER TABLE ... ALTER COLUMN` after creating the table. The exporter
+retains option order and values from `pg_class`/`pg_attribute`; it does not
+accept option fragments from a client. A non-default table tablespace, non-heap
+table access method, TOAST relation options, column FDW/options state, or extension
+member remains an explicit unsupported state until its external dependencies
+can be proven.
+
+`pg_get_indexdef` recreates an index definition but omits the table's chosen
+clustered index and replica identity. Table export restores these with
+`ALTER TABLE ... CLUSTER ON` and `ALTER TABLE ... REPLICA IDENTITY USING INDEX`
+after all indexes/constraints exist. Standalone index DDL includes the same
+post-create table-state statements for a supported index. Invalid or not-ready
+indexes remain unsupported: normal `CREATE INDEX` cannot faithfully recreate
+their transition state. Partition-attached, constraint-backed standalone, and
+extension-member indexes retain the ADR-075 refusal boundary. This supersedes
+ADR-075's clustered/replica-identity refusal for otherwise supported indexes.
+
+The catalog graph fingerprints heap and TOAST options, column
+storage/compression, and index state and fences generic structural migrations.
+Native DDL is a reviewable export; this decision does not enable automatic
+migration of these table-wide settings, nor infer tablespace or access-method
+availability on another server.
 
 ## ADR-081 — SQLite desktop maintenance binds confirmation to the live connection
 
