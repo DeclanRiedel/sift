@@ -2,6 +2,8 @@
 set -euo pipefail
 
 remote_device=${1:?usage: test-tailnet-hosted.sh user@tailnet-device [workspace]}
+# Both local and remote probes target the binary built from this checkout.
+# The handshake selects that binary's current wire protocol.
 workspace=${2:-$(pwd)}
 profile=${SIFT_SSH_REMOTE_PROFILE:-debug}
 server_binary="$workspace/target/$profile/sift-server"
@@ -136,7 +138,7 @@ expected_instance=$(sed -n '2p' "$payload")
 password=$(sed -n '3p' "$payload")
 handshake=$(curl -fsS --connect-timeout 5 --max-time 15 -X POST \
   -H 'content-type: application/json' \
-  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":2,"maximum":2}}' \
+  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":1,"maximum":4294967295}}' \
   "$origin/v1/handshake")
 protocol=$(jq -r .selected_protocol <<<"$handshake")
 test "$(jq -r .instance_id <<<"$handshake")" = "$expected_instance"
@@ -278,7 +280,7 @@ if [[ $https_ready != 1 ]]; then
 fi
 first=$(curl -fsS -X POST \
   -H 'content-type: application/json' \
-  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":2,"maximum":2}}' \
+  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":1,"maximum":4294967295}}' \
   "http://127.0.0.1:$port/v1/handshake")
 first_instance=$(jq -r .instance_id <<<"$first")
 first_generation=$(jq -r .daemon_generation <<<"$first")
@@ -290,7 +292,7 @@ stop_server
 start_server
 second=$(curl -fsS -X POST \
   -H 'content-type: application/json' \
-  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":2,"maximum":2}}' \
+  -d '{"client_version":"tailnet-test","client_kind":"sdk","protocol":{"minimum":1,"maximum":4294967295}}' \
   "http://127.0.0.1:$port/v1/handshake")
 second_instance=$(jq -r .instance_id <<<"$second")
 second_generation=$(jq -r .daemon_generation <<<"$second")

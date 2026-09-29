@@ -430,7 +430,9 @@ EOF
 
             phase 6 "Initialize the Git-backed demo workspace"
             seed_server_log="''${TMPDIR:-/tmp}/sift-desktop-demo-seed-server-$(id -u).log"
-            run_in_dev cargo run -q --profile release-dev -p sift-server --bin sift-server -- \
+            # Run the binary built in phase 3 directly so $! owns the server
+            # process and cleanup can stop it on both success and failure.
+            "$repo/target/release-dev/sift-server" \
               --instance-root "$instance_root" >"$seed_server_log" 2>&1 &
             seed_server_pid=$!
             seed_base_url=""
@@ -454,9 +456,11 @@ EOF
               sed -n '1,200p' "$seed_server_log" >&2
               exit 1
             fi
+            # This helper and seed server come from the same checkout; select
+            # that server's current protocol instead of pinning an old one.
             seed_protocol="$(curl -fsS -X POST "$seed_base_url/v1/handshake" \
               -H 'content-type: application/json' \
-              -d '{"client_version":"sift-desktop-demo","client_kind":"automation","protocol":{"minimum":2,"maximum":2}}' \
+              -d '{"client_version":"sift-desktop-demo","client_kind":"automation","protocol":{"minimum":1,"maximum":4294967295}}' \
               | jq -er .selected_protocol)"
             demo_tenant_id="$(curl -fsS "$seed_base_url/v1/metadata/tenants" \
               -H "x-sift-protocol-version: $seed_protocol" \

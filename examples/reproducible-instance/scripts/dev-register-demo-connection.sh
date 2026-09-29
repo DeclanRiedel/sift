@@ -13,13 +13,15 @@ pgport="${2:-${SIFT_DEMO_PG_PORT:-5433}}"
 name="${3:-Demo Postgres}"
 tenant_id="${SIFT_DEMO_TENANT_ID:-1}"
 
+# The helper targets the same-checkout demo server; negotiate its current
+# protocol instead of retaining a stale hard-coded version.
 protocol_version="$(
   curl -fsS -X POST "$base_url/v1/handshake" \
     -H 'content-type: application/json' \
     -d '{
       "client_version":"sift-demo-helper",
       "client_kind":"automation",
-      "protocol":{"minimum":2,"maximum":2}
+      "protocol":{"minimum":1,"maximum":4294967295}
     }' \
     | jq -er .selected_protocol
 )"

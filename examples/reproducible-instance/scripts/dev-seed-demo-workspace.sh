@@ -15,13 +15,15 @@ tenant_id="${SIFT_DEMO_TENANT_ID:-1}"
 room_name="${SIFT_DEMO_ROOM_NAME:-Demo Postgres}"
 workspace_name="${SIFT_DEMO_WORKSPACE_NAME:-Postgres Lab}"
 
+# The helper runs with the same-checkout demo server. Negotiate its current
+# protocol so a wire-version bump does not break demo seeding.
 protocol_version="$(
   curl -fsS -X POST "$base_url/v1/handshake" \
     -H 'content-type: application/json' \
     -d '{
       "client_version":"sift-demo-workspace",
       "client_kind":"automation",
-      "protocol":{"minimum":2,"maximum":2}
+      "protocol":{"minimum":1,"maximum":4294967295}
     }' \
     | jq -er .selected_protocol
 )"
