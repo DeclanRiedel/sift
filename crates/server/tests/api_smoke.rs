@@ -852,6 +852,7 @@ async fn bulk_insert_is_public_http_api() {
                 table: "dbo.people".into(),
                 data: b"id,name\n1,Alice\n2,Bob\n3,Carol\n".to_vec(),
                 format: sift_protocol::BulkInsertFormat::Csv,
+                ..Default::default()
             },
         ))
         .await
@@ -918,6 +919,7 @@ async fn native_bulk_insert_is_explicitly_rejected() {
                 table: "dbo.people".into(),
                 data: Vec::new(),
                 format: sift_protocol::BulkInsertFormat::Native,
+                ..Default::default()
             },
         ))
         .await

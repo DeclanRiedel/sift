@@ -2687,8 +2687,9 @@ batch, target table metadata, and every value before issuing a short lived,
 scope-bound, one-use preview token. Apply requires that token and explicit write
 confirmation, repeats authorization and validation, and refuses a changed
 request or table shape. The audit record drops both CSV bytes and native rows.
-Only an authorized existing ordinary `main` table can be targeted; the file
-policy remains the final read/write boundary.
+Only an authorized existing ordinary `main` table can be targeted; reserved
+`sqlite_` internal tables are refused. The file policy remains the final
+read/write boundary.
 
 The safe affinity matrix is intentionally narrow: integer and boolean values
 to INTEGER or NUMERIC, finite float values to REAL, text/date/time/UUID/JSON
@@ -2701,7 +2702,8 @@ presented as lossless conversion.
 
 Admission bounds rows, columns, serialized bytes and parameters. Execution
 uses the existing supervised query path in finite batches within one managed
-Serializable transaction; cancellation, timeout or any batch failure rolls
+Serializable transaction with a 120-second deadline checked between batches;
+cancellation, timeout or any batch failure rolls
 back, and rollback failure discards the connection. The current HTTP request
 is bounded in memory; this decision does not claim unbounded socket streaming
 or a resumable native batch. Existing CSV/transfer recipes remain the path for
