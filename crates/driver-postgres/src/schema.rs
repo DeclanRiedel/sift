@@ -859,6 +859,70 @@ async fn enrich_graph_identity_and_foreign_keys(
         }
     }
 
+    // Replayable create/drop uses one built-in bigint comparison. These
+    // markers are deliberately absent for arbitrary policy expressions and
+    // callers without effective table ownership.
+    let simple_policy_rows = conn
+        .query(
+            "SELECT n.nspname,c.relname,p.oid::text,p.polname,
+            pg_catalog.pg_get_expr(p.polqual,p.polrelid)
+         FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+         JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid AND a.attname='id'
+           AND a.attnum>0 AND NOT a.attisdropped
+         LEFT JOIN pg_catalog.pg_policy p ON p.polrelid=c.oid
+         WHERE $2::bool AND n.nspname=ANY($1::text[])
+           AND c.relkind='r' AND NOT c.relispartition AND c.relpersistence='p'
+           AND c.relrowsecurity AND NOT c.relforcerowsecurity
+           AND (pg_catalog.pg_has_role(current_user,c.relowner,'USAGE')
+                OR current_setting('is_superuser')='on')
+           AND a.atttypid='pg_catalog.int8'::regtype AND a.atttypmod=-1
+           AND a.attnotnull AND a.attidentity='' AND a.attgenerated=''
+           AND a.attoptions IS NULL AND a.attfdwoptions IS NULL
+           AND a.attcompression=''
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attrdef d
+               WHERE d.adrelid=c.oid AND d.adnum=a.attnum)
+           AND (SELECT count(*) FROM pg_catalog.pg_attribute other
+               WHERE other.attrelid=c.oid AND other.attnum>0 AND NOT other.attisdropped)=1
+           AND (SELECT count(*) FROM pg_catalog.pg_policy all_policies
+               WHERE all_policies.polrelid=c.oid) IN (0,1)
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+               WHERE d.deptype='e' AND d.classid='pg_catalog.pg_class'::regclass
+                 AND d.objid=c.oid)
+           AND (p.oid IS NULL OR (
+               p.polcmd='r' AND p.polpermissive AND p.polroles=ARRAY[0]::oid[]
+               AND p.polwithcheck IS NULL
+               AND pg_catalog.pg_get_expr(p.polqual,p.polrelid)
+                   ~ '^[(]id > (0|[1-9][0-9]{0,17})[)]$'
+               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+                   WHERE d.deptype='e' AND d.classid='pg_catalog.pg_policy'::regclass
+                     AND d.objid=p.oid)))
+         ORDER BY n.nspname,c.relname",
+            &[&schemas, &include_definitions],
+        )
+        .await
+        .map_err(pg_err)?;
+    for row in simple_policy_rows {
+        let schema: String = row.get(0);
+        let table: String = row.get(1);
+        if let Some(index) = object_nodes
+            .get(&(schema, table))
+            .and_then(|id| node_indexes.get(id))
+        {
+            let node = &mut graph.nodes[*index];
+            let policy_oid: Option<String> = row.get(2);
+            if policy_oid.is_some() {
+                node.extra.insert(
+                    "native_policy_safe_predicate".into(),
+                    row.get::<_, String>(4).into(),
+                );
+            } else {
+                node.extra
+                    .insert("native_policy_empty_rls".into(), true.into());
+            }
+        }
+    }
+
     // Rewrite rules are also outside the portable table model. A definition
     // or enabled-state change must affect drift detection, and structural
     // migrations must not silently drop a rule.

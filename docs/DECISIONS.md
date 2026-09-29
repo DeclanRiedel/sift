@@ -3139,3 +3139,27 @@ Policy create/drop, expression or role edits, RLS enable/force changes,
 multiple policies, partitioned or extension-owned tables, and mixed native
 changes remain unsupported until their dependency and authority boundaries
 can be proved separately.
+
+## ADR-089 — Policy create and drop replay only a catalog-proven predicate template
+
+Status: accepted. Date: 2026-09-29.
+
+An ordinary permanent heap table with exactly one `bigint id` column and RLS
+enabled without `FORCE` may transition between no policies and one simple
+policy. The supported policy is permissive `FOR SELECT TO PUBLIC` with one
+catalog-deparsed `USING (id > N)` predicate, where `N` is a bounded
+nonnegative integer literal; it has no `WITH CHECK`. This expression uses only
+the table column, a built-in comparison, and a literal. Catalog capture marks
+the empty and populated states separately and records the populated policy's
+OID, name, semantic body fingerprint, and validated predicate. The renderer
+requires complete definition-bearing graphs from the same database, one table
+change, stable table and column identity, matching RLS state, and no other
+native table state. It builds quoted `CREATE POLICY` and `DROP POLICY` SQL;
+the inverse is rollback. Both directions carry privilege risk acknowledgement.
+
+Only an effective table owner or superuser receives the replay markers.
+Migration operation policy, audit, stale revision and digest checks, and
+database ownership enforcement remain the final authority. A snapshot marker
+does not grant permission. Other commands, roles, expressions, multiple
+policies, `FORCE` or disabled RLS, partition or extension membership, table
+creation, and mixed schema changes continue to refuse automatic rendering.
