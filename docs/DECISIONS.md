@@ -2668,7 +2668,57 @@ another server session are separate operations. Server session IDs can be
 reused between observation and execution, so the confirmation is a careful UI
 guard, not an atomic database guarantee.
 
----
+## ADR-072 — PostgreSQL sequence ownership stays native and migration-fenced
+
+Status: accepted. Date: 2026-09-29.
+
+Standalone sequence DDL includes an `OWNED BY schema.table.column` statement
+for an ordinary auto dependency. It preserves configuration, not the live
+counter. An identity sequence is an internal table component; an extension
+member belongs to its extension. Export refuses both instead of creating a
+second independent object. It also refuses ambiguous dependency states.
+
+The catalog graph fingerprints sequence configuration and ownership on the
+sequence node. Owned sequences and their owner tables are marked unsupported
+for generic structural migration rendering, because the portable schema model
+cannot safely reconstruct the ownership relation or its dependency order.
+Native DDL remains available for a sequence owner to review and replay after
+the owning table exists. A detached sequence remains independently exportable.
+
+Indexes already exported as part of PostgreSQL table DDL are not a public
+standalone object. Adding a standalone index `ObjectKind` requires the
+ADR-017 protocol bump and a separate design for constraint-backed, partitioned,
+extension-owned, and invalid index states. Graph metadata fingerprints these
+states and fences affected table migrations until that design is complete.
+
+## ADR-073 — SQL Server CSV import uses reviewed column names and a retained recipe for resume
+
+Status: accepted. Date: 2026-09-29.
+
+The desktop CSV import starts from a SQL Server table or an explicitly chosen
+connection. It parses at most 64 MiB locally, displays a bounded row sample,
+and lets the operator map each source header to one distinct target column.
+For an existing table, the server remains the authority for target columns and
+types; a dry run validates CSV shape and authorization but cannot promise that
+every database conversion or constraint will pass. The reviewed target names
+are written to a temporary in-memory CSV payload; source row values are never
+changed. Type overrides apply only to a proposed new table and remain subject
+to the server's type validation. Identity, computed, rowversion, and generated
+columns are not given special insertion semantics; the operator must omit
+those source columns or use a separately reviewed SQL path.
+
+The direct import retains one request generation and a visible pending/result
+state. Local cancellation drops the HTTP waiter and invalidates late replies;
+it does not promise that SQL Server rolled back work already committed. A
+separate transfer recipe provides server-side durable resume for an existing
+table with Abort policy, no manual offset or type override, a stable run UUID,
+and a target checkpoint table. The desktop exposes this as the retry path,
+preserves the same recipe identity and file on retry, and states that progress
+within an in-flight request is not observable. Every server import, preview,
+recipe mutation, and execution uses the existing audited operations, policy
+checks, bounded driver calls, and capability negotiation. No Driver trait or
+wire contract change is needed.
+
 ## ADR-074 — SQLite native bulk targets bind typed rows under a preview lease
 
 Status: Accepted, 2026-09-29.
@@ -2708,3 +2758,30 @@ back, and rollback failure discards the connection. The current HTTP request
 is bounded in memory; this decision does not claim unbounded socket streaming
 or a resumable native batch. Existing CSV/transfer recipes remain the path for
 uploaded files and retain their own checkpoint semantics.
+
+## ADR-075 — Standalone PostgreSQL indexes use a public index object kind
+
+Status: accepted. Date: 2026-09-29.
+
+`GenerateDdl` accepts `ObjectKind::Index` and the wire protocol advances to
+version 3. A graph index node already has a PostgreSQL catalog OID, but its
+parent table path is not an unambiguous standalone DDL target. The new kind
+uses the index's schema and name to resolve its catalog identity on the server;
+it does not add a method to the locked driver trait. The existing audited,
+supervised `GenerateDdl` operation remains the authority and execution path.
+
+Native export uses `pg_get_indexdef` so expressions, operator classes,
+collations, included columns, predicates, and storage options retain their
+catalog syntax. It requires effective table ownership and refuses invalid or
+not-ready indexes, constraint-backed indexes, extension members, attached
+partition indexes, partitioned index parents, clustered or replica-identity
+state, and ambiguous or missing targets. Replaying a standalone index requires
+its table and referenced dependencies to exist first. These refused states
+remain explicit instead of silently producing an ordinary `CREATE INDEX`.
+
+The graph fingerprints every index's native definition and state on its index
+node and owning table. Generic migration rendering is fenced on affected
+tables because the portable table/index projection cannot represent the full
+native shape or dependency order. This is a safe diff boundary, not automatic
+rich-index migration support. PostgreSQL table export still includes supported
+indexes with the table; callers should select one export path for a replay.

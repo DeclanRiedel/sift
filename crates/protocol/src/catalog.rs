@@ -95,6 +95,7 @@ impl From<ObjectKind> for CatalogNodeKind {
             ObjectKind::Procedure => Self::Procedure,
             ObjectKind::Synonym => Self::Synonym,
             ObjectKind::Sequence => Self::Sequence,
+            ObjectKind::Index => Self::Index,
             ObjectKind::Trigger => Self::Trigger,
             ObjectKind::Type => Self::Type,
             ObjectKind::Extension => Self::Extension,

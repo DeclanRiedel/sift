@@ -28,8 +28,18 @@ sources for current support claims.
 - [ ] Cover custom table storage/options and currently rejected index states.
 - [ ] Export extension definitions and dependencies without treating extension
       member objects as independent creations.
-- [ ] Address standalone indexes and sequence ownership. Any new public object
-      kind or signature follows ADR-017 and a protocol bump.
+- [~] Address standalone indexes and sequence ownership. Sequence DDL now
+      round-trips ordinary `OWNED BY` dependencies and refuses internal identity
+      or extension member sequences; ownership is fingerprinted and fenced from
+      generic migrations. Table DDL refuses extension member indexes and
+      sequences. Standalone non-constraint PostgreSQL indexes now have a public
+      index object kind and native definition export, including expressions,
+      operator classes, included columns, predicates, and storage options.
+      Index catalog identity and full native shape are fingerprinted, and
+      affected tables are fenced from generic migrations. Constraint-backed,
+      partition-attached, extension-member, invalid, clustered, and replica
+      identity indexes refuse standalone export. Dependency ordering and
+      automatic rich-index migration rendering remain open.
 - [ ] Extend catalog diff/migration to preserve supported rich index, partition,
       policy, and ownership shapes; reject loss before preview/apply.
 
