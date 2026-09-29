@@ -2707,6 +2707,8 @@ impl WorkspaceShell {
                     let github_entries = self.github_allowlist.clone();
                     let approvals = self.operation_approvals.clone();
                     let audit_rows = self.operation_audit_rows.clone();
+                    let recent_operations = self.runtime_audit.operations.clone();
+                    let request_audit = self.runtime_audit.requests.clone();
                     div().h(px(650.)).flex().flex_col().gap_3()
                         .child(div().flex().items_center().justify_between()
                             .child(div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).child("Runtime administration"))
@@ -2714,15 +2716,26 @@ impl WorkspaceShell {
                                 Button::new("refresh-administration-audit", "Refresh").tone(ButtonTone::Ghost)
                                     .disabled(self.principal_admin_pending)
                                     .on_click(cx.listener(|shell, _, _, cx| shell.load_operation_audit(false, cx)))))
-                            .when(self.administration_section != AdministrationSection::Audit, |header| header.child(
+                            .when(self.administration_section == AdministrationSection::RecentOperations, |header| header.child(
+                                Button::new("refresh-recent-operations", "Refresh").tone(ButtonTone::Ghost)
+                                    .disabled(self.runtime_audit.pending.is_some())
+                                    .on_click(cx.listener(|shell, _, _, cx| shell.load_runtime_audit(RingKind::Operations, cx)))))
+                            .when(self.administration_section == AdministrationSection::RequestAudit, |header| header.child(
+                                Button::new("refresh-request-audit", "Refresh").tone(ButtonTone::Ghost)
+                                    .disabled(self.runtime_audit.pending.is_some())
+                                    .on_click(cx.listener(|shell, _, _, cx| shell.load_runtime_audit(RingKind::Requests, cx)))))
+                            .when(matches!(self.administration_section, AdministrationSection::Users | AdministrationSection::Keys | AdministrationSection::Approvals), |header| header.child(
                                 div().text_xs().text_color(colors.muted_text).child(
                                     if self.principal_admin_pending { "Updating…" } else { "Updates automatically" },
                                 ))))
-                        .child(div().flex().gap_1()
+                        .child(div().flex().flex_wrap().gap_1()
                             .child(Button::new("admin-users-tab", "Users").tone(if self.administration_section == AdministrationSection::Users { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Users, cx))))
                             .child(Button::new("admin-keys-tab", "Signing keys").tone(if self.administration_section == AdministrationSection::Keys { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Keys, cx))))
                             .child(Button::new("admin-approvals-tab", "Approvals").tone(if self.administration_section == AdministrationSection::Approvals { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Approvals, cx))))
-                            .child(Button::new("admin-audit-tab", "Audit").tone(if self.administration_section == AdministrationSection::Audit { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Audit, cx)))))
+                            .child(Button::new("admin-audit-tab", "Durable audit").tone(if self.administration_section == AdministrationSection::Audit { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::Audit, cx))))
+                            .child(Button::new("admin-recent-operations-tab", "Recent operations").tone(if self.administration_section == AdministrationSection::RecentOperations { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::RecentOperations, cx))))
+                            .child(Button::new("admin-request-audit-tab", "Request audit").tone(if self.administration_section == AdministrationSection::RequestAudit { ButtonTone::Accent } else { ButtonTone::Neutral }).on_click(cx.listener(|shell, _, _, cx| shell.select_administration_section(AdministrationSection::RequestAudit, cx)))))
+                        .child(div().text_xs().text_color(colors.muted_text).child("Vim: o recent operations · q request audit · d durable audit · r refresh"))
                         .when(self.administration_section == AdministrationSection::Users, |view| view
                             .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child("Add a password user"))
                             .child(div().flex().flex_col().gap_2().children(self.new_user_inputs.iter().cloned()))
@@ -2750,6 +2763,31 @@ impl WorkspaceShell {
                         .when(self.administration_section == AdministrationSection::Audit, |view| view
                             .child(div().id("operation-audit-list").flex_1().min_h_0().overflow_y_scroll().children(audit_rows.into_iter().enumerate().map(|(index, row)| div().id(("operation-audit-row", index)).min_h(px(54.)).px_2().py_1().flex().items_center().gap_3().border_b_1().border_color(colors.subtle_border).child(div().w(px(145.)).flex_none().text_xs().text_color(colors.muted_text).child(row.at.format("%Y-%m-%d %H:%M:%S").to_string())).child(div().min_w_0().flex_1().flex().flex_col().child(format!("{} · {}", row.action, row.target)).child(div().truncate().text_xs().text_color(colors.muted_text).child(format!("actor {} · {}{}", row.actor_principal_id.map_or_else(|| "system".into(), |id| id.0.to_string()), row.status, row.error_message.map(|error| format!(" · {error}")).unwrap_or_default())))))))
                             .child(Button::new("load-more-operation-audit", "Load more").tone(ButtonTone::Ghost).disabled(self.operation_audit_cursor.is_none() || self.principal_admin_pending).on_click(cx.listener(|shell, _, _, cx| shell.load_operation_audit(true, cx)))))
+                        .when(self.administration_section == AdministrationSection::RecentOperations, |view| view
+                            .child(div().text_xs().text_color(colors.muted_text).child("Newest 100 in-memory operations. Bodies, SQL, and bind values are hidden; refresh to update."))
+                            .child(div().id("recent-operations-list").flex_1().min_h_0().overflow_y_scroll().children(recent_operations.into_iter().enumerate().map(|(index, row)| {
+                                let summary = row.operation.audit_summary();
+                                div().id(("recent-operation-row", index)).min_h(px(54.)).px_2().py_1().flex().items_center().gap_3().border_b_1().border_color(colors.subtle_border)
+                                    .child(div().w(px(145.)).flex_none().text_xs().text_color(colors.muted_text).child(row.at.format("%Y-%m-%d %H:%M:%S").to_string()))
+                                    .child(div().min_w_0().flex_1().flex().flex_col()
+                                        .child(format!("{} · {}", summary.action, runtime_audit::path_without_query(&summary.target)))
+                                        .child(div().text_xs().text_color(colors.muted_text).child(format!("{:?} · {:?}", row.operation.kind(), row.status))))
+                            }))))
+                        .when(self.administration_section == AdministrationSection::RequestAudit, |view| {
+                            view.child(div().text_xs().text_color(colors.muted_text).child("Newest 100 in-memory HTTP requests; query parameters are hidden. Refresh to update."))
+                                .child(div().id("request-audit-list").flex_1().min_h_0().overflow_y_scroll()
+                                    .children(request_audit.into_iter().enumerate().map(|(index, row)| {
+                                        div().id(("request-audit-row", index)).min_h(px(54.)).px_2().py_1()
+                                            .flex().items_center().gap_3().border_b_1().border_color(colors.subtle_border)
+                                            .child(div().w(px(145.)).flex_none().text_xs().text_color(colors.muted_text)
+                                                .child(row.at.format("%Y-%m-%d %H:%M:%S").to_string()))
+                                            .child(div().min_w_0().flex_1().flex().flex_col()
+                                                .child(format!("{} {}", row.method, runtime_audit::path_without_query(&row.path)))
+                                                .child(div().text_xs().text_color(colors.muted_text)
+                                                    .child(format!("HTTP {} · {} ms", row.status, row.duration_ms))))
+                                    })))
+                        })
+                        .children(self.runtime_audit.error.clone().filter(|_| matches!(self.administration_section, AdministrationSection::RecentOperations | AdministrationSection::RequestAudit)).map(|error| div().text_sm().text_color(colors.danger).child(error)))
                         .children(self.principal_admin_error.clone().map(|error| div().text_sm().text_color(colors.danger).child(error)))
                         .into_any_element()
                 }
