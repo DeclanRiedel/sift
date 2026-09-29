@@ -69,6 +69,7 @@ mod modals;
 mod tailnet;
 pub use benchmark_library::{BenchmarkLibraryAction, BenchmarkLibraryReply};
 mod pane_layout;
+mod postgres_maintenance;
 mod result_editing;
 mod sql_drafts;
 mod sqlserver_maintenance;
@@ -89,6 +90,7 @@ use app_bar::AppBarMenu;
 use catalog_diagram::CatalogDiagramState;
 use database_monitor::{DatabaseAlertKind, DatabaseMonitorState, DatabaseMonitorView};
 pub use pane_layout::SplitDirection;
+use postgres_maintenance::{PgMaintenanceChoice, PgMaintenancePhase, PgMaintenanceState};
 use relationship_viewer::RelationshipViewerState;
 use sqlserver_maintenance::{MaintenanceAction, MaintenanceMode, MaintenanceState};
 
@@ -3788,6 +3790,15 @@ pub enum ExecutorCommand {
         generation: u64,
         physical_only: bool,
     },
+    PostgresMaintenance {
+        generation: u64,
+        request: sift_protocol::PostgresMaintenanceRequest,
+    },
+    PostgresIntegrity {
+        generation: u64,
+        schema: String,
+        name: String,
+    },
     LoadRoomMembers {
         room_id: i64,
     },
@@ -4697,6 +4708,15 @@ pub enum ExecutorEvent {
         result: Result<sift_protocol::SqlServerRecoveryReport, String>,
     },
     SqlServerIntegrityFinished {
+        generation: u64,
+        result: Result<sift_protocol::IntegrityCheckReport, String>,
+    },
+    PostgresMaintenanceFinished {
+        generation: u64,
+        apply: bool,
+        result: Result<sift_protocol::PostgresMaintenanceReport, String>,
+    },
+    PostgresIntegrityFinished {
         generation: u64,
         result: Result<sift_protocol::IntegrityCheckReport, String>,
     },
@@ -11037,6 +11057,7 @@ pub struct WorkspaceShell {
     policy_rename_input: Entity<TextInput>,
     policy_rename_active: bool,
     maintenance: MaintenanceState,
+    pg_maintenance: PgMaintenanceState,
     transaction_state: TransactionUiState,
     savepoints: Vec<String>,
     next_savepoint: u64,
@@ -11784,6 +11805,19 @@ impl WorkspaceShell {
         let maintenance_moves_input = cx.new(|cx| TextInput::new("", "MOVE mappings JSON", cx));
         let maintenance_confirmation_input =
             cx.new(|cx| TextInput::new("", "Type confirmation phrase", cx));
+        let pg_maintenance_schema_input = cx.new(|cx| TextInput::new("", "Schema", cx));
+        let pg_maintenance_name_input = cx.new(|cx| TextInput::new("", "Table or index name", cx));
+        let pg_maintenance_confirmation_input =
+            cx.new(|cx| TextInput::new("", "Type APPLY schema.name", cx));
+        for input in [&pg_maintenance_schema_input, &pg_maintenance_name_input] {
+            cx.subscribe(input, |shell, _, event: &TextInputEvent, cx| {
+                if *event == TextInputEvent::Changed {
+                    shell.pg_maintenance.form_changed();
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         for input in [
             &maintenance_database_input,
             &maintenance_archive_input,
@@ -12437,6 +12471,21 @@ impl WorkspaceShell {
                 preview: None,
                 preview_request: None,
                 last_recovery: None,
+                integrity: None,
+                message: None,
+            },
+            pg_maintenance: PgMaintenanceState {
+                schema: pg_maintenance_schema_input,
+                name: pg_maintenance_name_input,
+                confirmation: pg_maintenance_confirmation_input,
+                choice: PgMaintenanceChoice::Vacuum,
+                analyze_with_vacuum: false,
+                concurrently: false,
+                generation: 0,
+                pending: None,
+                preview_request: None,
+                preview: None,
+                last_report: None,
                 integrity: None,
                 message: None,
             },
@@ -13835,6 +13884,7 @@ impl WorkspaceShell {
                 }
                 self.connection_status = status.clone();
                 self.maintenance.invalidate();
+                self.pg_maintenance.invalidate();
                 self.maintenance
                     .confirmation
                     .update(cx, |input, cx| input.set_text("", cx));
@@ -17043,6 +17093,54 @@ impl WorkspaceShell {
                     match result {
                         Ok(report) => self.maintenance.integrity = Some(report),
                         Err(message) => self.maintenance.message = Some(message),
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::PostgresMaintenanceFinished {
+                generation,
+                apply,
+                result,
+            } => {
+                let phase = if apply {
+                    PgMaintenancePhase::Apply
+                } else {
+                    PgMaintenancePhase::Preview
+                };
+                if self.pg_maintenance.accepts(generation, phase) {
+                    self.pg_maintenance.pending = None;
+                    match result {
+                        Ok(report) if apply => {
+                            self.pg_maintenance.preview = None;
+                            self.pg_maintenance.message = Some(if report.applied {
+                                "PostgreSQL maintenance completed".into()
+                            } else {
+                                "PostgreSQL maintenance was not applied".into()
+                            });
+                            self.pg_maintenance.last_report = Some(report);
+                        }
+                        Ok(report) => {
+                            if let Some(request) = self.pg_maintenance.preview_request.take() {
+                                self.pg_maintenance.preview = Some((request, report));
+                            }
+                        }
+                        Err(message) => {
+                            self.pg_maintenance.preview = None;
+                            self.pg_maintenance.message = Some(message);
+                        }
+                    }
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::PostgresIntegrityFinished { generation, result } => {
+                if self
+                    .pg_maintenance
+                    .accepts(generation, PgMaintenancePhase::Integrity)
+                {
+                    self.pg_maintenance.pending = None;
+                    match result {
+                        Ok(report) => self.pg_maintenance.integrity = Some(report),
+                        Err(message) => self.pg_maintenance.message = Some(message),
                     }
                     cx.notify();
                 }
@@ -27748,6 +27846,203 @@ impl WorkspaceShell {
                 .database_monitor
                 .move_sqlserver_settings_selection(event.keystroke.key.as_str()),
             "r" => self.load_sqlserver_settings(cx),
+            "escape" => self.focus_active_pane(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn pg_maintenance_request(
+        &self,
+        cx: &App,
+    ) -> Result<sift_protocol::PostgresMaintenanceRequest, String> {
+        postgres_maintenance::request(
+            self.pg_maintenance.choice,
+            self.pg_maintenance.schema.read(cx).text(),
+            self.pg_maintenance.name.read(cx).text(),
+            self.pg_maintenance.analyze_with_vacuum,
+            self.pg_maintenance.concurrently,
+        )
+    }
+
+    fn set_pg_maintenance_choice(&mut self, choice: PgMaintenanceChoice, cx: &mut Context<Self>) {
+        if self.pg_maintenance.pending.is_some() {
+            return;
+        }
+        self.pg_maintenance.choice = choice;
+        self.pg_maintenance.invalidate();
+        cx.notify();
+    }
+
+    fn preview_pg_maintenance(&mut self, cx: &mut Context<Self>) {
+        if self.pg_maintenance.pending.is_some() {
+            return;
+        }
+        if !self.require_operation(
+            sift_protocol::OperationKind::ExecuteQuery,
+            "Preview PostgreSQL maintenance",
+            cx,
+        ) {
+            return;
+        }
+        let request = match self.pg_maintenance_request(cx) {
+            Ok(request) => request,
+            Err(message) => {
+                self.pg_maintenance.message = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.pg_maintenance.message = Some("Database executor is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let generation = self.pg_maintenance.begin(PgMaintenancePhase::Preview);
+        self.pg_maintenance.preview = None;
+        self.pg_maintenance.preview_request = Some(request.clone());
+        if sender
+            .send(ExecutorCommand::PostgresMaintenance {
+                generation,
+                request,
+            })
+            .is_err()
+        {
+            self.pg_maintenance.invalidate();
+            self.pg_maintenance.message = Some("Database executor is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn apply_pg_maintenance(&mut self, cx: &mut Context<Self>) {
+        if self.pg_maintenance.pending.is_some() {
+            return;
+        }
+        if !self.require_operation(
+            sift_protocol::OperationKind::ExecuteQuery,
+            "Apply PostgreSQL maintenance",
+            cx,
+        ) {
+            return;
+        }
+        let request = match (
+            self.pg_maintenance_request(cx),
+            self.pg_maintenance.preview.as_ref(),
+        ) {
+            (Ok(current), Some(preview)) => postgres_maintenance::confirmed_apply(
+                &current,
+                preview,
+                self.pg_maintenance.confirmation.read(cx).text(),
+            ),
+            (Err(message), _) => Err(message),
+            (_, None) => Err("Preview maintenance before applying".into()),
+        };
+        let request = match request {
+            Ok(request) => request,
+            Err(message) => {
+                self.pg_maintenance.message = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.pg_maintenance.message = Some("Database executor is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let generation = self.pg_maintenance.begin(PgMaintenancePhase::Apply);
+        if sender
+            .send(ExecutorCommand::PostgresMaintenance {
+                generation,
+                request,
+            })
+            .is_err()
+        {
+            self.pg_maintenance.invalidate();
+            self.pg_maintenance.message = Some("Database executor is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn run_pg_integrity(&mut self, cx: &mut Context<Self>) {
+        if self.pg_maintenance.pending.is_some() {
+            return;
+        }
+        if self.pg_maintenance.choice != PgMaintenanceChoice::HeapIntegrity {
+            self.pg_maintenance.message =
+                Some("Choose Heap integrity before running the check".into());
+            cx.notify();
+            return;
+        }
+        if !self.require_operation(
+            sift_protocol::OperationKind::ExecuteQuery,
+            "Check PostgreSQL heap integrity",
+            cx,
+        ) {
+            return;
+        }
+        let (schema, name) = match postgres_maintenance::integrity_target(
+            self.pg_maintenance.schema.read(cx).text(),
+            self.pg_maintenance.name.read(cx).text(),
+        ) {
+            Ok(target) => target,
+            Err(message) => {
+                self.pg_maintenance.message = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let Some(sender) = &self.executor_sender else {
+            self.pg_maintenance.message = Some("Database executor is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let generation = self.pg_maintenance.begin(PgMaintenancePhase::Integrity);
+        self.pg_maintenance.integrity = None;
+        if sender
+            .send(ExecutorCommand::PostgresIntegrity {
+                generation,
+                schema,
+                name,
+            })
+            .is_err()
+        {
+            self.pg_maintenance.invalidate();
+            self.pg_maintenance.message = Some("Database executor is unavailable".into());
+        }
+        cx.notify();
+    }
+
+    fn handle_pg_maintenance_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.modified()
+            || [
+                &self.pg_maintenance.schema,
+                &self.pg_maintenance.name,
+                &self.pg_maintenance.confirmation,
+            ]
+            .iter()
+            .any(|input| input.focus_handle(cx).is_focused(window))
+        {
+            return;
+        }
+        if self.pg_maintenance.pending.is_some() && event.keystroke.key != "escape" {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "v" => self.set_pg_maintenance_choice(PgMaintenanceChoice::Vacuum, cx),
+            "n" => self.set_pg_maintenance_choice(PgMaintenanceChoice::Analyze, cx),
+            "t" => self.set_pg_maintenance_choice(PgMaintenanceChoice::ReindexTable, cx),
+            "x" => self.set_pg_maintenance_choice(PgMaintenanceChoice::ReindexIndex, cx),
+            "h" => self.set_pg_maintenance_choice(PgMaintenanceChoice::HeapIntegrity, cx),
+            "p" => self.preview_pg_maintenance(cx),
+            "a" => self.apply_pg_maintenance(cx),
+            "r" => self.run_pg_integrity(cx),
             "escape" => self.focus_active_pane(window, cx),
             _ => return,
         }
@@ -60439,6 +60734,152 @@ mod tests {
                     .as_ref()
                     .map(|report| report.outcome),
                 Some(sift_protocol::IntegrityOutcome::NoIssuesReported)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn postgres_maintenance_preview_confirmation_and_stale_reply(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell
+                .pg_maintenance
+                .schema
+                .update(cx, |input, cx| input.set_text("public", cx));
+            shell
+                .pg_maintenance
+                .name
+                .update(cx, |input, cx| input.set_text("events", cx));
+            shell.set_pg_maintenance_choice(PgMaintenanceChoice::ReindexTable, cx);
+            shell.pg_maintenance.concurrently = true;
+        });
+        cx.run_until_parked();
+        workspace.update(&mut cx, |shell, cx| {
+            shell.apply_pg_maintenance(cx);
+            assert!(commands.try_recv().is_err());
+            shell.preview_pg_maintenance(cx);
+        });
+        let generation = match commands.try_recv().expect("maintenance preview") {
+            ExecutorCommand::PostgresMaintenance {
+                generation,
+                request,
+            } => {
+                assert!(!request.apply);
+                assert!(matches!(
+                    request.action,
+                    sift_protocol::PostgresMaintenanceAction::ReindexTable { concurrently: true }
+                ));
+                generation
+            }
+            _ => panic!("expected maintenance preview"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::PostgresMaintenanceFinished {
+                    generation,
+                    apply: false,
+                    result: Ok(sift_protocol::PostgresMaintenanceReport {
+                        sql: "REINDEX TABLE CONCURRENTLY \"public\".\"events\"".into(),
+                        applied: false,
+                        warnings: vec![],
+                    }),
+                },
+                cx,
+            );
+            shell.apply_pg_maintenance(cx);
+            assert!(commands.try_recv().is_err());
+            shell
+                .pg_maintenance
+                .confirmation
+                .update(cx, |input, cx| input.set_text("APPLY public.events", cx));
+            shell.apply_pg_maintenance(cx);
+        });
+        let apply_generation = match commands.try_recv().expect("confirmed maintenance") {
+            ExecutorCommand::PostgresMaintenance {
+                generation,
+                request,
+            } => {
+                assert!(request.apply);
+                generation
+            }
+            _ => panic!("expected maintenance apply"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.pg_maintenance.invalidate();
+            shell.on_executor_event(
+                ExecutorEvent::PostgresMaintenanceFinished {
+                    generation: apply_generation,
+                    apply: true,
+                    result: Ok(sift_protocol::PostgresMaintenanceReport {
+                        sql: "REINDEX TABLE CONCURRENTLY \"public\".\"events\"".into(),
+                        applied: true,
+                        warnings: vec![],
+                    }),
+                },
+                cx,
+            );
+            assert!(shell.pg_maintenance.last_report.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn postgres_heap_integrity_dispatches_explicit_target(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell
+                .pg_maintenance
+                .schema
+                .update(cx, |input, cx| input.set_text("audit", cx));
+            shell
+                .pg_maintenance
+                .name
+                .update(cx, |input, cx| input.set_text("events", cx));
+            shell.set_pg_maintenance_choice(PgMaintenanceChoice::HeapIntegrity, cx);
+        });
+        cx.run_until_parked();
+        workspace.update(&mut cx, |shell, cx| shell.run_pg_integrity(cx));
+        let generation = match commands.try_recv().expect("heap integrity command") {
+            ExecutorCommand::PostgresIntegrity {
+                generation,
+                schema,
+                name,
+            } => {
+                assert_eq!((schema.as_str(), name.as_str()), ("audit", "events"));
+                generation
+            }
+            _ => panic!("expected heap integrity"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::PostgresIntegrityFinished {
+                    generation,
+                    result: Ok(sift_protocol::IntegrityCheckReport {
+                        check: sift_protocol::IntegrityCheckRequest::PostgresHeap {
+                            schema: "audit".into(),
+                            name: "events".into(),
+                        },
+                        outcome: sift_protocol::IntegrityOutcome::Incomplete,
+                        findings: vec!["page unavailable".into()],
+                        warnings: vec![],
+                    }),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell
+                    .pg_maintenance
+                    .integrity
+                    .as_ref()
+                    .map(|report| report.outcome),
+                Some(sift_protocol::IntegrityOutcome::Incomplete)
             );
         });
     }

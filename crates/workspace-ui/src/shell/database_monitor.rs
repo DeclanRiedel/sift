@@ -105,11 +105,12 @@ impl DatabaseMonitorView {
 
     pub(super) fn available_for(self, provider: Option<&str>, connected: bool) -> bool {
         match self {
-            Self::QueryStore
-            | Self::AgentJobs
-            | Self::SqlServerSettings
-            | Self::Security
-            | Self::Maintenance => connected && provider == Some("sift/sql-server"),
+            Self::QueryStore | Self::AgentJobs | Self::SqlServerSettings | Self::Security => {
+                connected && provider == Some("sift/sql-server")
+            }
+            Self::Maintenance => {
+                connected && matches!(provider, Some("sift/sql-server" | "sift/postgres"))
+            }
             Self::Settings
             | Self::Extensions
             | Self::Partitions

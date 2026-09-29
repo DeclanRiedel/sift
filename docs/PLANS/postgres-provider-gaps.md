@@ -124,8 +124,13 @@ An inspection view alone does not complete the management checklist.
       capability checks and reviewable changes. Bounded policy inspection and
       owner-checked, typed rename preview/apply now cover one RLS edit; policy
       roles, expressions, creation, deletion, and table RLS toggles remain.
-- [ ] Connect existing dump/restore, maintenance, and integrity-check backends
-      to complete Linux desktop workflows where operator policy permits.
+- [~] Connect existing dump/restore, maintenance, and integrity-check backends
+      to complete Linux desktop workflows where operator policy permits. Vim
+      Monitor now previews and confirms explicit-target VACUUM, ANALYZE, and
+      REINDEX through the audited API, and runs bounded amcheck heap checks.
+      Dump/restore remains an operator CLI workflow: the desktop needs a
+      server-owned, policy-scoped archive transfer and target contract before
+      remote instances can use it safely.
 
 ## Acceptance
 
