@@ -155,6 +155,38 @@ pub fn render_plan(
     } else {
         None
     };
+    let policy_rename = if engine == Engine::Postgres {
+        let mut candidates = selected_changes.iter().copied().filter(|change| {
+            change.kind == SchemaChangeKind::Alter
+                && change.object_before.as_ref().is_some_and(|node| {
+                    node.kind == CatalogNodeKind::Table
+                        && node.extra.contains_key("native_policy_oid")
+                })
+                && change.object_after.as_ref().is_some_and(|node| {
+                    node.kind == CatalogNodeKind::Table
+                        && node.extra.contains_key("native_policy_oid")
+                })
+        });
+        match (candidates.next(), candidates.next()) {
+            (Some(change), None) => Some(render_postgres_policy_rename(
+                change,
+                diff,
+                from,
+                to,
+                &from_nodes,
+                &to_nodes,
+            )?),
+            (Some(change), Some(_)) => {
+                return Err(MigrationRenderError::UnsupportedChange {
+                    change: change.id.clone(),
+                    kind: CatalogNodeKind::Table,
+                });
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
     let mut statements = Vec::new();
     let mut warnings = diff.warnings.clone();
     if options.online_indexes {
@@ -178,7 +210,12 @@ pub fn render_plan(
         if implicitly_covered(change, &created, &dropped) {
             continue;
         }
-        let sqls = if let Some(rendered) = partition_attachment
+        let sqls = if let Some(rendered) = policy_rename
+            .as_ref()
+            .filter(|rendered| rendered.change_id == change.id)
+        {
+            vec![rendered.forward.clone()]
+        } else if let Some(rendered) = partition_attachment
             .as_ref()
             .filter(|rendered| rendered.child_change_id == change.id)
         {
@@ -188,7 +225,11 @@ pub fn render_plan(
             .filter(|rendered| rendered.sequence_change_id == change.id)
         {
             rendered.forward.clone()
-        } else if engine == Engine::Postgres && is_index_create_or_drop(change) {
+        } else if engine == Engine::Postgres
+            && is_index_create_or_drop(change)
+            && (from.provider.provider_id == Engine::Postgres.provider_id()
+                || to.provider.provider_id == Engine::Postgres.provider_id())
+        {
             vec![render_postgres_index_change(
                 change,
                 diff,
@@ -249,6 +290,19 @@ pub fn render_plan(
         {
             continue;
         }
+        if let Some(rendered) = policy_rename
+            .as_ref()
+            .filter(|rendered| rendered.change_id == change.id)
+        {
+            rollback_statements.push(MigrationStatement {
+                ordinal: u32::try_from(rollback_statements.len() + 1).unwrap_or(u32::MAX),
+                fingerprint: crate::fingerprint::sql(&rendered.rollback),
+                sql: rendered.rollback.clone(),
+                change_ids: vec![change.id.clone()],
+                risk: change.risk,
+            });
+            continue;
+        }
         if let Some(rendered) = partition_attachment
             .as_ref()
             .filter(|rendered| rendered.child_change_id == change.id)
@@ -285,7 +339,11 @@ pub fn render_plan(
             continue;
         }
         let inverse = invert_change(change);
-        let rollback = if engine == Engine::Postgres && is_index_create_or_drop(&inverse) {
+        let rollback = if engine == Engine::Postgres
+            && is_index_create_or_drop(&inverse)
+            && (from.provider.provider_id == Engine::Postgres.provider_id()
+                || to.provider.provider_id == Engine::Postgres.provider_id())
+        {
             render_postgres_index_change(&inverse, diff, to, from, &to_nodes, &from_nodes).map(Some)
         } else {
             render_change(engine, &inverse, &to_nodes, &from_nodes, from)
@@ -646,11 +704,11 @@ fn render_postgres_partition_attachment(
     if before_child.kind != CatalogNodeKind::Table
         || after_child.kind != CatalogNodeKind::Table
         || !stable_partition_relation(before_child, after_child, true)
-        || from_nodes.get(&before_child.id).is_none_or(|node| {
-            serde_json::to_value(node).ok() != serde_json::to_value(before_child).ok()
+        || !from_nodes.get(&before_child.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(before_child).ok()
         })
-        || to_nodes.get(&after_child.id).is_none_or(|node| {
-            serde_json::to_value(node).ok() != serde_json::to_value(after_child).ok()
+        || !to_nodes.get(&after_child.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(after_child).ok()
         })
     {
         return Err(reject());
@@ -702,11 +760,11 @@ fn render_postgres_partition_attachment(
     let before_parent = parent_change.object_before.as_ref().ok_or_else(reject)?;
     let after_parent = parent_change.object_after.as_ref().ok_or_else(reject)?;
     if !stable_partition_relation(before_parent, after_parent, false)
-        || from_nodes.get(&before_parent.id).is_none_or(|node| {
-            serde_json::to_value(node).ok() != serde_json::to_value(before_parent).ok()
+        || !from_nodes.get(&before_parent.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(before_parent).ok()
         })
-        || to_nodes.get(&after_parent.id).is_none_or(|node| {
-            serde_json::to_value(node).ok() != serde_json::to_value(after_parent).ok()
+        || !to_nodes.get(&after_parent.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(after_parent).ok()
         })
         || !selected.contains(&parent_change.id)
         || active_graph.data.nodes.iter().any(|node| {
@@ -722,7 +780,7 @@ fn render_postgres_partition_attachment(
     } else {
         (before_parent, after_parent)
     };
-    if active_parent.extra.get("native_descendant_shape").is_none()
+    if !active_parent.extra.contains_key("native_descendant_shape")
         || inactive_parent
             .extra
             .contains_key("native_descendant_shape")
@@ -840,6 +898,160 @@ fn partition_child_nodes<'a>(
         .collect::<Vec<_>>();
     nodes.sort_by(|a, b| a.qualified_name.cmp(&b.qualified_name));
     nodes
+}
+
+struct PolicyRenameRender {
+    change_id: SchemaChangeId,
+    forward: String,
+    rollback: String,
+}
+
+fn render_postgres_policy_rename(
+    change: &SchemaChange,
+    diff: &SchemaDiff,
+    from: &CatalogGraph,
+    to: &CatalogGraph,
+    from_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+    to_nodes: &HashMap<sift_protocol::CatalogObjectId, &CatalogNode>,
+) -> Result<PolicyRenameRender, MigrationRenderError> {
+    let reject = || MigrationRenderError::UnsupportedChange {
+        change: change.id.clone(),
+        kind: CatalogNodeKind::Table,
+    };
+    if diff.changes.len() != 1
+        || from.database_identity != to.database_identity
+        || !matches!(
+            diff.from,
+            CatalogSourceRef::Live { .. } | CatalogSourceRef::Snapshot { .. }
+        )
+        || !matches!(
+            diff.to,
+            CatalogSourceRef::Live { .. } | CatalogSourceRef::Snapshot { .. }
+        )
+        || [from, to].iter().any(|graph| {
+            graph.provider.provider_id != Engine::Postgres.provider_id()
+                || graph.data.coverage.state != CatalogCoverageState::Complete
+                || !graph.data.coverage.requested_kinds.is_empty()
+                || !graph.data.coverage.omitted_schemas.is_empty()
+                || graph.data.coverage.truncated_at_nodes.is_some()
+        })
+    {
+        return Err(reject());
+    }
+    let before = change.object_before.as_ref().ok_or_else(reject)?;
+    let after = change.object_after.as_ref().ok_or_else(reject)?;
+    let old_name = before
+        .extra
+        .get("native_policy_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty() && name.len() <= 63)
+        .ok_or_else(reject)?;
+    let new_name = after
+        .extra
+        .get("native_policy_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty() && name.len() <= 63 && *name != old_name)
+        .ok_or_else(reject)?;
+    let policy_oid = before
+        .extra
+        .get("native_policy_oid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|oid| {
+            !oid.is_empty() && oid.len() <= 20 && oid.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .ok_or_else(reject)?;
+    let body_shape = before
+        .extra
+        .get("native_policy_body_shape")
+        .and_then(serde_json::Value::as_str)
+        .filter(|hash| hash.len() == 32 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(reject)?;
+    let mut before_extra = before.extra.clone();
+    let mut after_extra = after.extra.clone();
+    for extra in [&mut before_extra, &mut after_extra] {
+        extra.remove("estimated_rows");
+        extra.remove("modified_at");
+        extra.remove("native_policy_name");
+        extra.remove("native_security_shape");
+    }
+    if before.kind != CatalogNodeKind::Table
+        || after.kind != CatalogNodeKind::Table
+        || before.id != after.id
+        || before.native_id.is_none()
+        || before.native_id != after.native_id
+        || before.name != after.name
+        || before.qualified_name != after.qualified_name
+        || before.parent_id != after.parent_id
+        || before.ordinal != after.ordinal
+        || before.completeness != after.completeness
+        || before.definition_digest != after.definition_digest
+        || serde_json::to_value(&before.details).ok() != serde_json::to_value(&after.details).ok()
+        || before.extra.get("migration_unsupported") != Some(&serde_json::Value::Bool(true))
+        || after.extra.get("migration_unsupported") != Some(&serde_json::Value::Bool(true))
+        || before.extra.get("native_security_shape") == after.extra.get("native_security_shape")
+        || before
+            .extra
+            .get("native_security_shape")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        || after
+            .extra
+            .get("native_security_shape")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        || after
+            .extra
+            .get("native_policy_oid")
+            .and_then(serde_json::Value::as_str)
+            != Some(policy_oid)
+        || after
+            .extra
+            .get("native_policy_body_shape")
+            .and_then(serde_json::Value::as_str)
+            != Some(body_shape)
+        || before_extra != after_extra
+        || before_extra.keys().any(|key| {
+            key.starts_with("native_")
+                && key != "native_policy_oid"
+                && key != "native_policy_body_shape"
+        })
+        || !from_nodes.get(&before.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(before).ok()
+        })
+        || !to_nodes
+            .get(&after.id)
+            .is_some_and(|node| serde_json::to_value(node).ok() == serde_json::to_value(after).ok())
+    {
+        return Err(reject());
+    }
+    let before_children = partition_child_nodes(from, before);
+    let after_children = partition_child_nodes(to, after);
+    if before_children.len() != after_children.len()
+        || before_children
+            .iter()
+            .zip(after_children)
+            .any(|(left, right)| {
+                serde_json::to_value(left).ok() != serde_json::to_value(right).ok()
+            })
+    {
+        return Err(reject());
+    }
+    let table = qualified_object(Engine::Postgres, change, before, from_nodes)?;
+    let forward = format!(
+        "ALTER POLICY {} ON {table} RENAME TO {};",
+        crate::ddl::quote_ident(old_name, Engine::Postgres),
+        crate::ddl::quote_ident(new_name, Engine::Postgres)
+    );
+    let rollback = format!(
+        "ALTER POLICY {} ON {table} RENAME TO {};",
+        crate::ddl::quote_ident(new_name, Engine::Postgres),
+        crate::ddl::quote_ident(old_name, Engine::Postgres)
+    );
+    Ok(PolicyRenameRender {
+        change_id: change.id.clone(),
+        forward,
+        rollback,
+    })
 }
 
 fn render_postgres_index_change(

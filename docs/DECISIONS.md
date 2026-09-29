@@ -3029,29 +3029,6 @@ edges remain unsupported. Sequence counters are runtime data and are outside
 schema migration. Policy and partition changes continue to refuse automatic
 rendering until their dependency closure can be proved separately.
 
-## ADR-086 — Partition attachment requires two stable existing tables
-
-Status: accepted. Date: 2026-09-29.
-
-The first automatic partition migration is attachment or detachment of one
-ordinary, permanent heap child to an unchanged range-partitioned parent in
-the same schema. Both relations and their columns exist in both complete,
-definition-bearing PostgreSQL graphs. The active graph captures the parent
-identity and server-deparsed partition bound. Rendering constructs quoted
-attach and detach statements from those catalog fields, and requires the paired parent and child
-changes, selected together, and proves that their other details and native
-state are unchanged. Attach uses `ALTER TABLE ... ATTACH PARTITION`; detach
-uses `ALTER TABLE ... DETACH PARTITION`. Each is the other's rollback.
-
-The catalog capture and renderer refuse child-local indexes, constraints,
-triggers, policy, owned sequences, inheritance or nested partitions, custom
-storage, extension membership, and an already populated partition tree. They
-also refuse a changed parent definition, incomplete graph coverage, DDL-source
-models, and mixed migration changes. Attachment may validate existing child
-rows and fail atomically if they violate its bound. A partition child created
-or dropped with its parent, concurrent policy or sequence edits, index and
-constraint dependencies, and multi-partition ordering need separate proofs.
-
 ## ADR-085 — SQLite VACUUM is a bounded in-place maintenance action
 
 Status: accepted. Date: 2026-09-29.
@@ -3091,3 +3068,74 @@ key; callers must not treat those ROWIDs as stable identities.
 This decision does not add arbitrary PRAGMA writes, checkpoint, ATTACH,
 restore, delete or implicit repair. Broader real-file acceptance, including
 physical ENOSPC injection and concurrent external writers, remains required.
+
+## ADR-086 — Partition attachment requires two stable existing tables
+
+Status: accepted. Date: 2026-09-29.
+
+The first automatic partition migration is attachment or detachment of one
+ordinary, permanent heap child to an unchanged range-partitioned parent in
+the same schema. Both relations and their columns exist in both complete,
+definition-bearing PostgreSQL graphs. The active graph captures the parent
+identity and server-deparsed partition bound. Rendering constructs quoted
+attach and detach statements from those catalog fields, and requires the paired parent and child
+changes, selected together, and proves that their other details and native
+state are unchanged. Attach uses `ALTER TABLE ... ATTACH PARTITION`; detach
+uses `ALTER TABLE ... DETACH PARTITION`. Each is the other's rollback.
+
+The catalog capture and renderer refuse child-local indexes, constraints,
+triggers, policy, owned sequences, inheritance or nested partitions, custom
+storage, extension membership, and an already populated partition tree. They
+also refuse a changed parent definition, incomplete graph coverage, DDL-source
+models, and mixed migration changes. Attachment may validate existing child
+rows and fail atomically if they violate its bound. A partition child created
+or dropped with its parent, concurrent policy or sequence edits, index and
+constraint dependencies, and multi-partition ordering need separate proofs.
+
+## ADR-087 — Desktop governed tools use the authorized registry and invoke contract
+
+Status: accepted. Date: 2026-09-29.
+
+The Vim desktop presents governed tools as a separate browser linked from
+Extensions. Extension contributions are host projected UI actions; governed
+tools are the server's context-filtered automation registry. The desktop lists
+the latter with `mcp_only=false`, the selected server, and the current scoped
+tenant, room, profile, connection, and document context. The server remains the
+authority for which tools are available and callable. A list or result is
+bounded in the desktop; a changed server or context invalidates prior replies.
+
+Invocation uses `InvokeToolRequest` and the SDK's audited `invoke_tool` call.
+The desktop previews the tool ID, classification, target context, and canonical
+argument fingerprint without echoing argument values. Mutating classifications
+require an exact typed confirmation before the first invoke. The first invoke
+may return `ApprovalRequired`, including for reads under server policy. That
+record enters an explicit revision-checked approve step, then a separate run
+step with the original arguments and context. A changed input, selection,
+server, or context discards the approval flow. The desktop cannot choose the
+principal or bypass server authorization and approval policy. No new protocol
+or Driver method is needed.
+
+## ADR-088 — Policy migration may rename one catalog-proven policy
+
+Status: accepted. Date: 2026-09-29.
+
+The first automatic PostgreSQL policy migration is a rename of the sole policy
+on an unchanged existing permanent heap table. Rename preserves command,
+roles, permissive mode, `USING` and `WITH CHECK` expressions, and both table
+RLS flags. A definition-bearing catalog graph captures the policy OID, name,
+and a fingerprint of every semantic field and RLS flag, but never treats the
+policy expression as executable client input. The renderer requires complete
+live or server-captured graphs for the same database identity, an unchanged
+table and subordinate columns, exactly one table change, the same policy OID
+and body fingerprint, and only the policy name and derived security fingerprint
+to differ. It emits quoted `ALTER POLICY ... RENAME TO` and the inverse as
+rollback.
+
+Catalog capture marks a policy rename candidate only for effective table
+owners or superusers. Existing migration operation policy, audit, stale
+revision and digest checks, and database ownership enforcement still govern
+preview and apply; a snapshot's captured eligibility is not a privilege grant.
+Policy create/drop, expression or role edits, RLS enable/force changes,
+multiple policies, partitioned or extension-owned tables, and mixed native
+changes remain unsupported until their dependency and authority boundaries
+can be proved separately.
