@@ -97,6 +97,7 @@ pub enum OperationKind {
     KillProcess,
     ImportCsv,
     BulkInsert,
+    ManageSqliteDatabase,
     BeginTransaction,
     ListTransactions,
     PreviewTransaction,
@@ -132,7 +133,7 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    pub const ALL: [Self; 124] = [
+    pub const ALL: [Self; 125] = [
         Self::Authenticate,
         Self::RefreshAuthSession,
         Self::Logout,
@@ -225,6 +226,7 @@ impl OperationKind {
         Self::KillProcess,
         Self::ImportCsv,
         Self::BulkInsert,
+        Self::ManageSqliteDatabase,
         Self::BeginTransaction,
         Self::ListTransactions,
         Self::PreviewTransaction,
@@ -279,6 +281,7 @@ impl OperationKind {
                 | Self::KillProcess
                 | Self::ImportCsv
                 | Self::BulkInsert
+                | Self::ManageSqliteDatabase
                 | Self::CommitTransaction
                 | Self::RollbackTransaction
                 | Self::Metadata

@@ -398,4 +398,28 @@ pub trait SqliteExt: Send + Sync {
         c: ConnHandle,
         object: sift_protocol::ObjectPath,
     ) -> Result<String, DriverError>;
+    async fn inspect_file_maintenance(
+        &self,
+        c: ConnHandle,
+        tenant_id: i64,
+        action: sift_protocol::SqliteMaintenanceAction,
+    ) -> Result<SqliteFileMaintenanceState, DriverError>;
+    async fn apply_file_maintenance(
+        &self,
+        c: ConnHandle,
+        tenant_id: i64,
+        action: sift_protocol::SqliteMaintenanceAction,
+        expected_identity: String,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<SqliteFileMaintenanceState, DriverError>;
+}
+
+/// Server-internal file preflight. Never exposes an absolute path to clients.
+#[derive(Debug, Clone)]
+pub struct SqliteFileMaintenanceState {
+    pub root_id: String,
+    pub source_file: String,
+    pub destination_file: Option<String>,
+    pub source_bytes: u64,
+    pub identity: String,
 }

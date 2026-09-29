@@ -25,7 +25,14 @@ sources for current support claims.
       explicit ownership and grant boundaries. Table export now includes policies,
       ENABLE/FORCE state, rewrite rules and their enabled state, plus a migration
       fence; ownership and grants remain.
-- [ ] Cover custom table storage/options and currently rejected index states.
+- [~] Cover custom table storage/options and currently rejected index states.
+      Built-in heap table `reloptions`, column storage/compression overrides,
+      and clustered/replica-identity index state now round-trip through native
+      table DDL; standalone index DDL restores clustered/replica state too.
+      Their catalog shape is fingerprinted and fenced from generic migrations.
+      TOAST relation options, non-default table tablespaces, non-heap access
+      methods, column options/FDW state, invalid or not-ready indexes, and
+      partition-child storage/options remain explicit refusals.
 - [ ] Export extension definitions and dependencies without treating extension
       member objects as independent creations.
 - [~] Address standalone indexes and sequence ownership. Sequence DDL now

@@ -69,6 +69,7 @@ pub mod sql_policy;
 pub mod sql_server_recovery;
 pub mod sql_server_security;
 mod sqlite_bulk;
+pub mod sqlite_maintenance;
 pub mod state_backup;
 pub mod tailnet;
 pub mod telemetry;

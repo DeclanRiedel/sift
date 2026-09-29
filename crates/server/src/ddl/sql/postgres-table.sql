@@ -45,6 +45,9 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
             AND extension_dep.objid=owner_dep.objid AND extension_dep.deptype='e'
         WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped)
     THEN 'sift:unsupported:extension member table, index, or sequence belongs to its extension'
+    WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_class toast_rel
+        WHERE toast_rel.oid=t.reltoastrelid AND toast_rel.reloptions IS NOT NULL)
+    THEN 'sift:unsupported:TOAST relation options are not replayable'
     WHEN t.relispartition THEN
     CASE WHEN t.reloptions IS NOT NULL OR t.reltablespace <> 0 OR t.relrowsecurity OR t.relforcerowsecurity
         OR EXISTS (SELECT 1 FROM pg_catalog.pg_policy WHERE polrelid=t.oid)
@@ -71,12 +74,12 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
             WHERE inh.inhrelid=t.oid)
     END
     WHEN t.relkind NOT IN ('r','p')
-    OR t.reloptions IS NOT NULL
     OR t.reltablespace <> 0 OR (t.relam <> 0 AND t.relam <> (SELECT oid FROM pg_catalog.pg_am WHERE amname='heap'))
-    OR EXISTS (SELECT 1 FROM pg_catalog.pg_index WHERE indrelid=t.oid AND (NOT indisvalid OR NOT indisready OR indisclustered OR indisreplident))
-    OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type ty ON ty.oid=a.atttypid
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_index WHERE indrelid=t.oid AND (NOT indisvalid OR NOT indisready))
+    OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
         WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped AND
-        (a.attstorage<>ty.typstorage OR a.attcompression<>'' OR a.attoptions IS NOT NULL OR a.attfdwoptions IS NOT NULL))
+        (a.attstorage NOT IN ('p','m','x','e') OR a.attcompression NOT IN ('','p','l')
+         OR a.attoptions IS NOT NULL OR a.attfdwoptions IS NOT NULL))
     THEN 'sift:unsupported:custom storage or table options'
     ELSE COALESCE((SELECT string_agg(format(
         'CREATE SEQUENCE %I.%I AS %s START WITH %s INCREMENT BY %s MINVALUE %s MAXVALUE %s CACHE %s %s;',
@@ -94,14 +97,35 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
             string_agg(format('%I.%I',pn.nspname,parent.relname),', ' ORDER BY inh.inhseqno))
             FROM pg_catalog.pg_inherits inh JOIN pg_catalog.pg_class parent ON parent.oid=inh.inhparent
             JOIN pg_catalog.pg_namespace pn ON pn.oid=parent.relnamespace
-            WHERE inh.inhrelid=t.oid HAVING count(*)>0),'') || ';' ||
+            WHERE inh.inhrelid=t.oid HAVING count(*)>0),'') ||
+        CASE WHEN t.reloptions IS NOT NULL THEN ' WITH (' || array_to_string(t.reloptions, ', ') || ')' ELSE '' END || ';' ||
         COALESCE((SELECT E'\n' || string_agg(format('ALTER SEQUENCE %I.%I OWNED BY %I.%I.%I;',sn.nspname,sc.relname,n.nspname,t.relname,a.attname),E'\n' ORDER BY a.attnum)
         FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_sequence s ON s.seqrelid=pg_get_serial_sequence(t.oid::regclass::text,a.attname)::regclass
         JOIN pg_catalog.pg_class sc ON sc.oid=s.seqrelid JOIN pg_catalog.pg_namespace sn ON sn.oid=sc.relnamespace
         WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attidentity='' AND a.attislocal),'') ||
+        COALESCE((SELECT E'\n' || string_agg(
+            CASE WHEN a.attstorage<>ty.typstorage THEN format('ALTER TABLE %I.%I ALTER COLUMN %I SET STORAGE %s;',
+                n.nspname,t.relname,a.attname,CASE a.attstorage
+                    WHEN 'p' THEN 'PLAIN' WHEN 'm' THEN 'MAIN'
+                    WHEN 'x' THEN 'EXTENDED' WHEN 'e' THEN 'EXTERNAL' END) ELSE '' END ||
+            CASE WHEN a.attcompression<>'' THEN E'\n' || format('ALTER TABLE %I.%I ALTER COLUMN %I SET COMPRESSION %s;',
+                n.nspname,t.relname,a.attname,CASE a.attcompression
+                    WHEN 'p' THEN 'pglz' WHEN 'l' THEN 'lz4' END) ELSE '' END,
+            E'\n' ORDER BY a.attnum)
+            FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type ty ON ty.oid=a.atttypid
+            WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped
+              AND (a.attstorage<>ty.typstorage OR a.attcompression<>'')),'') ||
         COALESCE((SELECT E'\n' || string_agg(pg_get_indexdef(i.indexrelid) || ';',E'\n' ORDER BY i.indexrelid)
             FROM pg_catalog.pg_index i WHERE i.indrelid=t.oid
             AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c WHERE c.conindid=i.indexrelid AND c.contype IN ('p','u','x'))),'') ||
+        COALESCE((SELECT E'\n' || string_agg(
+            CASE WHEN i.indisclustered THEN format('ALTER TABLE %I.%I CLUSTER ON %I;',
+                n.nspname,t.relname,ic.relname) ELSE '' END ||
+            CASE WHEN i.indisreplident THEN format('ALTER TABLE %I.%I REPLICA IDENTITY USING INDEX %I;',
+                n.nspname,t.relname,ic.relname) ELSE '' END,
+            E'\n' ORDER BY ic.relname)
+            FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class ic ON ic.oid=i.indexrelid
+            WHERE i.indrelid=t.oid AND (i.indisclustered OR i.indisreplident)),'') ||
         COALESCE((SELECT E'\n' || string_agg(pg_get_triggerdef(g.oid) || ';' ||
             CASE g.tgenabled WHEN 'D' THEN format(' ALTER TABLE %I.%I DISABLE TRIGGER %I;',n.nspname,t.relname,g.tgname)
             WHEN 'R' THEN format(' ALTER TABLE %I.%I ENABLE REPLICA TRIGGER %I;',n.nspname,t.relname,g.tgname)

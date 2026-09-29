@@ -99,8 +99,20 @@ refused. The Vim desktop baseline action accepts SQLite's partial snapshot and
 previews restoring missing supported tables; any other diff change refuses the
 plan. Full dependency graphs, general schema migration, database designer
 mutations, process controls, notifications, desktop native bulk/transfer targets,
-database creation, ATTACH/DETACH, unsafe PRAGMAs and file/extension functions
+desktop database creation, ATTACH/DETACH, unsafe PRAGMAs and file/extension functions
 are not advertised.
+
+The audited SQLite maintenance API previews and confirms two scoped file
+actions: create a new empty database or take an online backup of the connected
+`main` database. Both require a managed writable SQLite connection, an allowed
+tenant and a new relative destination in the same configured root. A preview
+does not create the file; apply requires its one-use token and explicit
+confirmation. Existing destinations, symlink parents, protected paths and
+files above 1 GiB are refused. Backups use bounded SQLite online backup steps,
+including WAL state. Creation needs no prior backup because the destination is
+empty; keep a verified backup before later mutating maintenance. This API does
+not register a profile for the new database or offer VACUUM, restore, delete,
+or arbitrary PRAGMA writes (ADR-078).
 
 Values retain SQLite storage classes: null, signed 64-bit integer, float, text
 or bytes, including mixed classes in one result column. Decimal parameters bind

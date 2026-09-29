@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OpenFlags};
 use sift_driver_api::{ConnHandle, Driver, ResultSetStream, TxHandle};
 use sift_protocol::*;
+use std::path::PathBuf;
 use std::{
     collections::HashMap,
     sync::{
@@ -37,6 +38,7 @@ struct Entry {
 }
 struct Worker {
     conn: Connection,
+    file_path: PathBuf,
     entry: Arc<Entry>,
     internal: Arc<AtomicBool>,
     read_only: bool,
@@ -469,6 +471,7 @@ impl Driver for SqliteDriver {
                     });
                     Ok(Worker {
                         conn,
+                        file_path: PathBuf::from(&spec.file_path),
                         entry,
                         internal,
                         readonly_tx,
@@ -756,6 +759,147 @@ impl sift_driver_api::SqliteExt for SqliteDriver {
     }
     async fn object_ddl(&self, c: ConnHandle, object: ObjectPath) -> Result<String, DriverError> {
         SqliteDriver::object_ddl(self, c, object).await
+    }
+
+    async fn inspect_file_maintenance(
+        &self,
+        c: ConnHandle,
+        tenant_id: i64,
+        action: SqliteMaintenanceAction,
+    ) -> Result<sift_driver_api::SqliteFileMaintenanceState, DriverError> {
+        let files = self.files.clone();
+        self.run(c, move |worker| {
+            if worker.transaction.is_some() {
+                return Err(error(
+                    Code::InvalidParameterValue,
+                    "SQLite file maintenance requires no active transaction",
+                ));
+            }
+            files
+                .inspect_maintenance(&worker.file_path, worker.read_only, tenant_id, &action)
+                .map(|target| target.state)
+        })
+        .await
+    }
+
+    async fn apply_file_maintenance(
+        &self,
+        c: ConnHandle,
+        tenant_id: i64,
+        action: SqliteMaintenanceAction,
+        expected_identity: String,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<sift_driver_api::SqliteFileMaintenanceState, DriverError> {
+        let files = self.files.clone();
+        self.run(c, move |worker| {
+            if worker.transaction.is_some() {
+                return Err(error(
+                    Code::InvalidParameterValue,
+                    "SQLite file maintenance requires no active transaction",
+                ));
+            }
+            let target = files.inspect_maintenance(
+                &worker.file_path,
+                worker.read_only,
+                tenant_id,
+                &action,
+            )?;
+            if target.state.identity != expected_identity {
+                return Err(error(
+                    Code::InvalidParameterValue,
+                    "SQLite file maintenance preview is stale",
+                ));
+            }
+            let destination = target.destination.as_ref().ok_or_else(|| {
+                error(
+                    Code::DriverInternal,
+                    "SQLite maintenance destination missing",
+                )
+            })?;
+            if cancel.load(Ordering::Acquire) || worker.entry.closing.load(Ordering::Acquire) {
+                return Err(error(
+                    Code::QueryCanceled,
+                    "SQLite file maintenance canceled",
+                ));
+            }
+            let created = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)
+                .map_err(|_| {
+                    error(
+                        Code::InvalidParameterValue,
+                        "SQLite maintenance destination cannot be created exclusively",
+                    )
+                })?;
+            drop(created);
+            let result = (|| -> Result<(), DriverError> {
+                match action {
+                    SqliteMaintenanceAction::Create { .. } => {
+                        let conn = Connection::open_with_flags(
+                            destination,
+                            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                        )
+                        .map_err(db_error)?;
+                        conn.execute_batch("VACUUM").map_err(db_error)
+                    }
+                    SqliteMaintenanceAction::Backup { .. } => {
+                        let mut conn = Connection::open_with_flags(
+                            destination,
+                            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                        )
+                        .map_err(db_error)?;
+                        let backup = rusqlite::backup::Backup::new(&worker.conn, &mut conn)
+                            .map_err(db_error)?;
+                        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+                        loop {
+                            if cancel.load(Ordering::Acquire)
+                                || worker.entry.closing.load(Ordering::Acquire)
+                            {
+                                break Err(error(Code::QueryCanceled, "SQLite backup canceled"));
+                            }
+                            if std::time::Instant::now() >= deadline {
+                                break Err(error(
+                                    Code::QueryCanceled,
+                                    "SQLite backup exceeded 120 seconds",
+                                ));
+                            }
+                            if std::fs::metadata(destination)
+                                .is_ok_and(|info| info.len() > 1024 * 1024 * 1024)
+                            {
+                                break Err(error(
+                                    Code::ResultTooLarge,
+                                    "SQLite backup exceeded 1 GiB",
+                                ));
+                            }
+                            match backup.step(128).map_err(db_error)? {
+                                rusqlite::backup::StepResult::Done => break Ok(()),
+                                rusqlite::backup::StepResult::More => {}
+                                rusqlite::backup::StepResult::Busy
+                                | rusqlite::backup::StepResult::Locked => {
+                                    std::thread::sleep(Duration::from_millis(10))
+                                }
+                                _ => {
+                                    break Err(error(
+                                        Code::DriverInternal,
+                                        "unexpected SQLite backup state",
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                }
+            })();
+            if result.is_err() {
+                for suffix in ["", "-journal", "-wal", "-shm"] {
+                    let mut path = destination.as_os_str().to_os_string();
+                    path.push(suffix);
+                    let _ = std::fs::remove_file(PathBuf::from(path));
+                }
+            }
+            result.map(|()| target.state)
+        })
+        .await
     }
 }
 

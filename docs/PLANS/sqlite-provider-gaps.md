@@ -52,8 +52,14 @@ claims.
       timing and completed rows alongside an estimated `EXPLAIN QUERY PLAN`.
       Native per-node actual rows, timing, and costs remain unavailable and
       are not inferred from the estimated plan.
-- [ ] Add scoped maintenance and database creation workflows for configured
-      server roots, with preview, backup expectations, and audit.
+- [~] Add scoped maintenance and database creation workflows for configured
+      server roots, with preview, backup expectations, and audit. ADR-078 adds
+      audited HTTP/SDK preview and one-use confirmed create-new database and
+      online backup-to-new-file actions, constrained to the managed SQLite
+      connection's writable root and tenant. The existing integrity check is
+      read-only. VACUUM, desktop controls, restore/delete and arbitrary PRAGMA
+      changes remain gated; creation needs no prior backup, while future
+      mutating maintenance should use a verified backup first.
 - [x] Open the authorized CSV quarantine artifact from an import result in the
       desktop, with rejected-row navigation and source-value details.
 - [x] Configure and retry durable CSV import from the desktop using a target

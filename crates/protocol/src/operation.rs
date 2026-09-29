@@ -195,6 +195,11 @@ pub enum InstanceConfigurationAction {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
+    SqliteMaintenance {
+        session: SessionId,
+        connection: ConnectionId,
+        request: crate::SqliteMaintenanceRequest,
+    },
     SqlServerRecovery {
         session: SessionId,
         connection: ConnectionId,
@@ -870,6 +875,7 @@ impl Operation {
             Self::PostgresMaintenance { .. } => OperationKind::ExecuteQuery,
             Self::CheckIntegrity { .. } => OperationKind::ExecuteQuery,
             Self::SqlServerRecovery { .. } => OperationKind::ExecuteQuery,
+            Self::SqliteMaintenance { .. } => OperationKind::ManageSqliteDatabase,
             Self::ExportQuery { .. } => OperationKind::ExportQuery,
             Self::Complete { .. } => OperationKind::Complete,
             Self::CompleteSemanticDocument { .. } => OperationKind::Complete,
@@ -1243,6 +1249,15 @@ impl Operation {
                     _ => "preview",
                 },
                 "sql_server_database",
+                Some(connection.0 as i64),
+            ),
+            Operation::SqliteMaintenance {
+                connection,
+                request,
+                ..
+            } => summary(
+                if request.apply { "apply" } else { "preview" },
+                "sqlite_maintenance",
                 Some(connection.0 as i64),
             ),
             Operation::CheckIntegrity { connection, .. } => {
