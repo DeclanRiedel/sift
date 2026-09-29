@@ -2919,20 +2919,22 @@ availability on another server.
 Status: accepted. Date: 2026-09-29.
 
 `GenerateDdl` may export a PostgreSQL database extension as a quoted `CREATE
-EXTENSION ... WITH SCHEMA ... VERSION ...` statement. It resolves the installed
-extension by catalog name and schema, requires effective ownership, and checks
-that the exact version is locally available and relocatable. Config tables,
-extension-to-extension prerequisites, and relation or sequence members remain
-unsupported by this first slice. The statement is a package install recipe:
-the target must have the same extension package/version, and an operator must
-verify the resulting membership. It is never treated as an independent export
-of member objects or as a complete cross-server backup.
+EXTENSION ... WITH SCHEMA ... VERSION ...` statement. The first verified
+package is PostgreSQL 16 `pg_trgm` 1.6 with its pristine 46-member manifest.
+Export resolves catalog name and schema, requires effective ownership, and
+checks that the exact version is locally available and relocatable. It refuses
+any changed member manifest, config table, extension-to-extension prerequisite,
+or relation/sequence member. The statement is a package install recipe: the
+target must have the same extension package/version, and an operator must
+verify resulting membership. It is never an independent export of member
+objects or a complete cross-server backup.
 
 The PostgreSQL graph fingerprints extension version, schema, prerequisites,
 configuration, and catalog member identities. Visible member nodes are marked
-with their owning extension and a catalog-proven dependency edge; both the
-extension and its members are fenced from generic structural migration. Native
-DDL for extension-owned tables, indexes, sequences, views, routines, types,
+with their owning extension, with a catalog-proven dependency edge when the
+extension node is also in scope; both the extension and its members are fenced
+from generic structural migration. Native DDL for extension-owned tables,
+indexes, sequences, views, routines, types,
 triggers, and foreign tables refuses independent creation. Automatic extension
 install/update/drop migration, package equivalence across servers, membership
 changes made through `ALTER EXTENSION ADD/DROP`, data in config tables, and
