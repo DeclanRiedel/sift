@@ -20,6 +20,7 @@ pub const SUPPORTED_HTTP_OPERATION_IDS: &[&str] = &[
     "listPostgresSettings",
     "listPostgresExtensions",
     "listPostgresPartitions",
+    "listPostgresPolicies",
     "listPostgresRoles",
     "listPostgresOwners",
     "listPostgresSchemaGrants",
@@ -1676,6 +1677,20 @@ impl Client {
     ) -> Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPartition>> {
         self.get(&format!("/v1/sessions/{session}/connections/{connection}/postgres/partitions?offset={}&limit={}",
             query.offset, query.limit.unwrap_or(100))).await
+    }
+
+    pub async fn list_postgres_policies(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        query: sift_protocol::PostgresObjectPageQuery,
+    ) -> Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPolicy>> {
+        self.get(&format!(
+            "/v1/sessions/{session}/connections/{connection}/postgres/policies?offset={}&limit={}",
+            query.offset,
+            query.limit.unwrap_or(100)
+        ))
+        .await
     }
 
     pub async fn read_postgres_replication(

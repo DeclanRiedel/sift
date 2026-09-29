@@ -1254,6 +1254,10 @@ pub fn app(state: AppState) -> Router {
             get_with(list_postgres_partitions, doc("listPostgresPartitions", "Browse PostgreSQL partitions")),
         )
         .api_route(
+            "/v1/sessions/:id/connections/:conn_id/postgres/policies",
+            get_with(list_postgres_policies, doc("listPostgresPolicies", "Browse bounded PostgreSQL row security policies")),
+        )
+        .api_route(
             "/v1/sessions/:id/connections/:conn_id/postgres/roles",
             get_with(list_postgres_roles, doc("listPostgresRoles", "Browse PostgreSQL roles without secrets")),
         )

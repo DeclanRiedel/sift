@@ -16,6 +16,7 @@ pub(super) enum DatabaseMonitorView {
     Settings,
     Extensions,
     Partitions,
+    Policies,
     Roles,
     Ownership,
     SchemaGrants,
@@ -29,7 +30,7 @@ pub(super) enum DatabaseMonitorView {
 }
 
 impl DatabaseMonitorView {
-    pub(super) const ALL: [Self; 19] = [
+    pub(super) const ALL: [Self; 20] = [
         Self::Overview,
         Self::Activity,
         Self::Locks,
@@ -44,6 +45,7 @@ impl DatabaseMonitorView {
         Self::Settings,
         Self::Extensions,
         Self::Partitions,
+        Self::Policies,
         Self::Roles,
         Self::Ownership,
         Self::SchemaGrants,
@@ -67,6 +69,7 @@ impl DatabaseMonitorView {
             Self::Settings => "monitor-view-settings",
             Self::Extensions => "monitor-view-extensions",
             Self::Partitions => "monitor-view-partitions",
+            Self::Policies => "monitor-view-policies",
             Self::Roles => "monitor-view-roles",
             Self::Ownership => "monitor-view-owners",
             Self::SchemaGrants => "monitor-view-schema-grants",
@@ -91,6 +94,7 @@ impl DatabaseMonitorView {
             Self::Settings => "Settings".into(),
             Self::Extensions => "Extensions".into(),
             Self::Partitions => "Partitions".into(),
+            Self::Policies => "Policies".into(),
             Self::Roles => "Roles".into(),
             Self::Ownership => "Ownership".into(),
             Self::SchemaGrants => "Schema grants".into(),
@@ -109,6 +113,7 @@ impl DatabaseMonitorView {
             Self::Settings
             | Self::Extensions
             | Self::Partitions
+            | Self::Policies
             | Self::Roles
             | Self::Ownership
             | Self::SchemaGrants
@@ -183,6 +188,7 @@ pub(super) struct DatabaseMonitorState {
     settings_next_offset: Option<u32>,
     extensions: Vec<sift_protocol::PostgresExtension>,
     partitions: Vec<sift_protocol::PostgresPartition>,
+    policies: Vec<sift_protocol::PostgresPolicy>,
     roles: Vec<sift_protocol::PostgresRole>,
     owners: Vec<sift_protocol::PostgresOwnedObject>,
     schema_grants: Vec<sift_protocol::PostgresSchemaGrant>,
@@ -700,6 +706,7 @@ impl DatabaseMonitorState {
                 view,
                 DatabaseMonitorView::Extensions
                     | DatabaseMonitorView::Partitions
+                    | DatabaseMonitorView::Policies
                     | DatabaseMonitorView::Roles
                     | DatabaseMonitorView::Ownership
                     | DatabaseMonitorView::SchemaGrants
@@ -731,6 +738,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Settings => true,
             DatabaseMonitorView::Extensions
             | DatabaseMonitorView::Partitions
+            | DatabaseMonitorView::Policies
             | DatabaseMonitorView::Roles
             | DatabaseMonitorView::Ownership
             | DatabaseMonitorView::SchemaGrants => true,
@@ -756,6 +764,7 @@ impl DatabaseMonitorState {
             DatabaseMonitorView::Settings => return Vec::new(),
             DatabaseMonitorView::Extensions
             | DatabaseMonitorView::Partitions
+            | DatabaseMonitorView::Policies
             | DatabaseMonitorView::Roles
             | DatabaseMonitorView::Ownership
             | DatabaseMonitorView::SchemaGrants => return Vec::new(),
@@ -784,6 +793,9 @@ impl DatabaseMonitorState {
     }
     pub(super) fn partitions(&self) -> &[sift_protocol::PostgresPartition] {
         &self.partitions
+    }
+    pub(super) fn policies(&self) -> &[sift_protocol::PostgresPolicy] {
+        &self.policies
     }
     pub(super) fn roles(&self) -> &[sift_protocol::PostgresRole] {
         &self.roles
@@ -820,6 +832,7 @@ impl DatabaseMonitorState {
         let len = match self.view {
             DatabaseMonitorView::Extensions => self.extensions.len(),
             DatabaseMonitorView::Partitions => self.partitions.len(),
+            DatabaseMonitorView::Policies => self.policies.len(),
             DatabaseMonitorView::Roles => self.roles.len(),
             DatabaseMonitorView::Ownership => self.owners.len(),
             DatabaseMonitorView::SchemaGrants => self.schema_grants.len(),
@@ -835,6 +848,7 @@ impl DatabaseMonitorState {
     pub(super) fn clear_objects(&mut self) {
         self.extensions.clear();
         self.partitions.clear();
+        self.policies.clear();
         self.roles.clear();
         self.owners.clear();
         self.schema_grants.clear();
@@ -847,6 +861,7 @@ impl DatabaseMonitorState {
             self.view,
             DatabaseMonitorView::Extensions
                 | DatabaseMonitorView::Partitions
+                | DatabaseMonitorView::Policies
                 | DatabaseMonitorView::Roles
                 | DatabaseMonitorView::Ownership
                 | DatabaseMonitorView::SchemaGrants
@@ -891,6 +906,25 @@ impl DatabaseMonitorState {
         match result {
             Ok(page) => {
                 self.partitions = page.items;
+                self.objects_offset = offset;
+                self.objects_next_offset = page.next_offset;
+                self.objects_selected = 0;
+                self.objects_request.succeed();
+            }
+            Err(message) => self.objects_request.fail(message),
+        }
+    }
+    pub(super) fn finish_policies(
+        &mut self,
+        offset: u32,
+        result: Result<sift_protocol::PostgresObjectPage<sift_protocol::PostgresPolicy>, String>,
+    ) {
+        if self.view != DatabaseMonitorView::Policies {
+            return;
+        }
+        match result {
+            Ok(page) => {
+                self.policies = page.items;
                 self.objects_offset = offset;
                 self.objects_next_offset = page.next_offset;
                 self.objects_selected = 0;
@@ -977,7 +1011,9 @@ impl DatabaseMonitorState {
         }
         if !matches!(
             self.view,
-            DatabaseMonitorView::Extensions | DatabaseMonitorView::Partitions
+            DatabaseMonitorView::Extensions
+                | DatabaseMonitorView::Partitions
+                | DatabaseMonitorView::Policies
         ) {
             return;
         }
@@ -991,6 +1027,9 @@ impl DatabaseMonitorState {
                 ) | (
                     DatabaseMonitorView::Partitions,
                     sift_protocol::PostgresObjectAction::DetachPartition { .. }
+                ) | (
+                    DatabaseMonitorView::Policies,
+                    sift_protocol::PostgresObjectAction::RenamePolicy { .. }
                 )
             );
             if !matches_view {
