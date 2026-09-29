@@ -2913,3 +2913,27 @@ storage/compression, and index state and fences generic structural migrations.
 Native DDL is a reviewable export; this decision does not enable automatic
 migration of these table-wide settings, nor infer tablespace or access-method
 availability on another server.
+
+## ADR-082 — PostgreSQL extension export is a version-pinned install recipe
+
+Status: accepted. Date: 2026-09-29.
+
+`GenerateDdl` may export a PostgreSQL database extension as a quoted `CREATE
+EXTENSION ... WITH SCHEMA ... VERSION ...` statement. It resolves the installed
+extension by catalog name and schema, requires effective ownership, and checks
+that the exact version is locally available and relocatable. Config tables,
+extension-to-extension prerequisites, and relation or sequence members remain
+unsupported by this first slice. The statement is a package install recipe:
+the target must have the same extension package/version, and an operator must
+verify the resulting membership. It is never treated as an independent export
+of member objects or as a complete cross-server backup.
+
+The PostgreSQL graph fingerprints extension version, schema, prerequisites,
+configuration, and catalog member identities. Visible member nodes are marked
+with their owning extension and a catalog-proven dependency edge; both the
+extension and its members are fenced from generic structural migration. Native
+DDL for extension-owned tables, indexes, sequences, views, routines, types,
+triggers, and foreign tables refuses independent creation. Automatic extension
+install/update/drop migration, package equivalence across servers, membership
+changes made through `ALTER EXTENSION ADD/DROP`, data in config tables, and
+cross-object ordering require a separate proof and remain unsupported.
