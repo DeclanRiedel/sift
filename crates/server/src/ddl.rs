@@ -46,6 +46,9 @@ pub async fn generate_ddl(
     }
     let kind = object.kind.unwrap_or(ObjectKind::Table);
     let engine = driver.engine();
+    if engine == Engine::Postgres && kind != ObjectKind::Extension {
+        native::reject_extension_member(driver, handle.clone(), &object, kind).await?;
+    }
     let ddl = match kind {
         ObjectKind::Table | ObjectKind::PartitionedTable => {
             native::table(driver, handle, &object, engine).await?
@@ -56,6 +59,7 @@ pub async fn generate_ddl(
             sequence::generate_sequence_ddl(driver, handle, &object, engine).await?
         }
         ObjectKind::Index => native::index(driver, handle, &object, engine).await?,
+        ObjectKind::Extension => native::extension(driver, handle, &object, engine).await?,
         ObjectKind::ForeignTable => native::foreign_table(driver, handle, &object, engine).await?,
         ObjectKind::Synonym => native::synonym(driver, handle, &object, engine).await?,
         ObjectKind::View | ObjectKind::MaterializedView => {
@@ -63,13 +67,6 @@ pub async fn generate_ddl(
         }
         ObjectKind::Procedure | ObjectKind::ScalarFunction | ObjectKind::TableValuedFunction => {
             generate_routine_ddl(driver, handle, &object, engine).await?
-        }
-        other => {
-            return Err(DriverError::new(
-                Code::UnsupportedForEngine,
-                format!("DDL generation for object kind {other:?} is not supported"),
-            )
-            .with_engine(engine));
         }
     };
     Ok(ObjectDdl { path: object, ddl })

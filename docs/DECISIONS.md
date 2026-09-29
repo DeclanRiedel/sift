@@ -2914,6 +2914,26 @@ Native DDL is a reviewable export; this decision does not enable automatic
 migration of these table-wide settings, nor infer tablespace or access-method
 availability on another server.
 
+## ADR-080 — Runtime administration shows bounded operation and request audit rings
+
+Status: accepted. Date: 2026-09-29.
+
+The Vim Runtime administration modal exposes the existing read-only
+`/v1/operations` and `/v1/audit` SDK calls as separate Recent operations and
+Request audit views. `operations` is a replayable in-memory ring of executed
+operations, not a static catalog of operation kinds; each row displays only
+`Operation::audit_summary()` and status, never the serialized operation body.
+`audit` is the in-memory HTTP request ring with method, path, status and
+duration. Neither endpoint supplies a cursor, so the desktop displays a fixed
+maximum of the newest rows from each bounded server response, with an explicit
+refresh instead of implying durable pagination. Durable operation audit remains
+the existing keyset-paged view.
+
+Every load carries a UI generation. Switching administration sections or
+refreshing invalidates older responses so a delayed result cannot overwrite the
+current view. The Runtime administration entry point stays Vim accessible;
+these read-only lists add no mutation or new driver method.
+
 ## ADR-081 — SQLite desktop maintenance binds confirmation to the live connection
 
 Status: accepted. Date: 2026-09-29.
@@ -2933,3 +2953,29 @@ remains authoritative for tenant/root permission, file identity, token expiry,
 exclusive creation, backup limits, and audit. Integrity runs as the existing
 read-only check without a write confirmation. VACUUM, restore, delete and
 arbitrary PRAGMA remain outside this desktop workflow.
+
+## ADR-082 — PostgreSQL extension export is a version-pinned install recipe
+
+Status: accepted. Date: 2026-09-29.
+
+`GenerateDdl` may export a PostgreSQL database extension as a quoted `CREATE
+EXTENSION ... WITH SCHEMA ... VERSION ...` statement. The first verified
+package is PostgreSQL 16 `pg_trgm` 1.6 with its pristine 46-member manifest.
+Export resolves catalog name and schema, requires effective ownership, and
+checks that the exact version is locally available and relocatable. It refuses
+any changed member manifest, config table, extension-to-extension prerequisite,
+or relation/sequence member. The statement is a package install recipe: the
+target must have the same extension package/version, and an operator must
+verify resulting membership. It is never an independent export of member
+objects or a complete cross-server backup.
+
+The PostgreSQL graph fingerprints extension version, schema, prerequisites,
+configuration, and catalog member identities. Visible member nodes are marked
+with their owning extension, with a catalog-proven dependency edge when the
+extension node is also in scope; both the extension and its members are fenced
+from generic structural migration. Native DDL for extension-owned tables,
+indexes, sequences, views, routines, types,
+triggers, and foreign tables refuses independent creation. Automatic extension
+install/update/drop migration, package equivalence across servers, membership
+changes made through `ALTER EXTENSION ADD/DROP`, data in config tables, and
+cross-object ordering require a separate proof and remain unsupported.

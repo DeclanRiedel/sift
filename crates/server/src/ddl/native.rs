@@ -1,6 +1,99 @@
 //! Catalog-owned DDL. No schema projection is treated as a lossless export.
 use super::*;
 
+pub(super) async fn reject_extension_member(
+    driver: &dyn Driver,
+    handle: sift_driver_api::ConnHandle,
+    object: &ObjectPath,
+    kind: ObjectKind,
+) -> Result<(), DriverError> {
+    let quoted_name = qualified_name(object, Engine::Postgres).replace('\'', "''");
+    let (class, target) = match kind {
+        ObjectKind::Table
+        | ObjectKind::PartitionedTable
+        | ObjectKind::View
+        | ObjectKind::MaterializedView
+        | ObjectKind::ForeignTable
+        | ObjectKind::Sequence
+        | ObjectKind::Index => (
+            "pg_catalog.pg_class",
+            format!("SELECT to_regclass('{quoted_name}')::oid AS oid"),
+        ),
+        ObjectKind::Type => (
+            "pg_catalog.pg_type",
+            format!("SELECT to_regtype('{quoted_name}')::oid AS oid"),
+        ),
+        ObjectKind::Procedure | ObjectKind::ScalarFunction | ObjectKind::TableValuedFunction => {
+            let signature = pg_regprocedure_name(object).replace('\'', "''");
+            (
+                "pg_catalog.pg_proc",
+                format!("SELECT to_regprocedure('{signature}')::oid AS oid"),
+            )
+        }
+        ObjectKind::Trigger => {
+            let schema = object
+                .schema
+                .as_deref()
+                .unwrap_or("public")
+                .replace('\'', "''");
+            let name = object.name.replace('\'', "''");
+            (
+                "pg_catalog.pg_trigger",
+                format!(
+                    "SELECT t.oid FROM pg_catalog.pg_trigger t \
+                     JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid \
+                     JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                     WHERE n.nspname='{schema}' AND t.tgname='{name}'"
+                ),
+            )
+        }
+        _ => return Ok(()),
+    };
+    let trigger_table_guard = if kind == ObjectKind::Trigger {
+        " OR EXISTS (SELECT 1 FROM target JOIN pg_catalog.pg_trigger t ON t.oid=target.oid \
+         JOIN pg_catalog.pg_depend d ON d.objid=t.tgrelid \
+         WHERE d.classid='pg_catalog.pg_class'::regclass \
+         AND d.refclassid='pg_catalog.pg_extension'::regclass AND d.deptype='e')"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "WITH target AS ({target}) SELECT CASE WHEN EXISTS ( \
+         SELECT 1 FROM target JOIN pg_catalog.pg_depend d ON d.objid=target.oid \
+         WHERE d.classid='{class}'::regclass \
+         AND d.refclassid='pg_catalog.pg_extension'::regclass AND d.deptype='e'){trigger_table_guard} \
+         THEN 'sift:unsupported:extension member is created with its owning extension' \
+         ELSE 'ok' END"
+    );
+    definition(driver, handle, sql, Engine::Postgres).await?;
+    Ok(())
+}
+
+pub(super) async fn extension(
+    driver: &dyn Driver,
+    handle: sift_driver_api::ConnHandle,
+    object: &ObjectPath,
+    engine: Engine,
+) -> Result<String, DriverError> {
+    if engine != Engine::Postgres {
+        return Err(DriverError::new(
+            Code::UnsupportedForEngine,
+            "database extension DDL is only supported by PostgreSQL",
+        )
+        .with_engine(engine));
+    }
+    let schema = object.schema.as_deref().ok_or_else(|| {
+        DriverError::new(
+            Code::InvalidParameterValue,
+            "extension DDL requires a schema",
+        )
+    })?;
+    let sql = include_str!("sql/postgres-extension.sql")
+        .replace("__SCHEMA__", &schema.replace('\'', "''"))
+        .replace("__NAME__", &object.name.replace('\'', "''"));
+    definition(driver, handle, sql, engine).await
+}
+
 pub(super) async fn index(
     driver: &dyn Driver,
     handle: sift_driver_api::ConnHandle,

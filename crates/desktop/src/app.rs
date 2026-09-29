@@ -1583,6 +1583,38 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::LoadRuntimeOperations { generation } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .operations()
+                        .await
+                        .map_err(|error| format!("loading recent operations failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RuntimeOperationsLoaded { generation, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            ExecutorCommand::LoadRuntimeRequestAudit { generation } => {
+                let server = targets.borrow().clone();
+                let result = match server.client().await {
+                    Ok(client) => client
+                        .audit()
+                        .await
+                        .map_err(|error| format!("loading request audit failed: {error}")),
+                    Err(error) => Err(error),
+                };
+                if events
+                    .send(ExecutorEvent::RuntimeRequestAuditLoaded { generation, result })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             ExecutorCommand::LoadDdlSources { workspace_id } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {

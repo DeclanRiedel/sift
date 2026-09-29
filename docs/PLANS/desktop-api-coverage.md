@@ -262,7 +262,10 @@ and forwarded health/readiness probes.
 
 ### Operations, audit, approvals, governed tools
 
-- [ ] `operations`, `audit` — operations catalog + audit log (M5)
+- [x] `operations`, `audit` — bounded in-memory recent-operation and HTTP
+  request audit rings in Runtime administration, with explicit refresh and
+  sanitized operation summaries. The `operations` endpoint returns executed
+  operation records rather than a static operation-kind catalog (M5).
 - [x] `operation_audit`, `operation_audit_page` — paginated operation audit
   in Runtime administration (M5)
 - [ ] `create_operation_approval`, `approve_operation` — approval flow for destructive ops (M4/M5)

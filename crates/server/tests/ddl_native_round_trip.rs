@@ -263,6 +263,192 @@ fn schemas() -> (String, String) {
 
 #[cfg(feature = "live-pg")]
 #[tokio::test]
+async fn postgres_extension_install_recipe_round_trip_and_member_fence() {
+    // This test drops and reinstalls pg_trgm. Run it only in a disposable
+    // PostgreSQL database explicitly dedicated to extension DDL validation.
+    if std::env::var("SIFT_PG_EXTENSION_DDL_FIXTURE").as_deref() != Ok("1") {
+        return;
+    }
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let fixed_schema = generate_ddl(
+        &driver,
+        conn.clone(),
+        path("pg_catalog", "plpgsql", ObjectKind::Extension),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(fixed_schema.code, sift_protocol::Code::UnsupportedForEngine);
+    let (src, dst) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE SCHEMA {src}; CREATE SCHEMA {dst}; CREATE EXTENSION pg_trgm WITH SCHEMA {src};"
+        ),
+    )
+    .await;
+
+    let graph = postgres_graph(&driver, &conn, &src).await;
+    let extension = graph
+        .data
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == sift_protocol::CatalogNodeKind::Extension && node.name == "pg_trgm"
+        })
+        .unwrap();
+    assert!(extension.extra.contains_key("native_extension_shape"));
+    assert_eq!(
+        extension.extra.get("migration_unsupported"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    let members = graph
+        .data
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.extra.get("extension_member_of")
+                == Some(&serde_json::Value::String(format!("{src}.pg_trgm")))
+        })
+        .collect::<Vec<_>>();
+    assert!(!members.is_empty(), "extension members were not attributed");
+    assert!(graph.data.edges.iter().any(|edge| {
+        edge.kind == sift_protocol::CatalogEdgeKind::DependsOn
+            && edge.to.as_ref() == Some(&extension.id)
+            && members.iter().any(|member| member.id == edge.from)
+    }));
+    let mut source_members = members
+        .iter()
+        .map(|node| (node.kind, node.name.clone()))
+        .collect::<Vec<_>>();
+    source_members.sort();
+
+    let member_error = generate_ddl(
+        &driver,
+        conn.clone(),
+        ObjectPath {
+            catalog: None,
+            schema: Some(src.clone()),
+            name: "show_trgm".into(),
+            kind: Some(ObjectKind::ScalarFunction),
+            routine_args: Some(vec!["text".into()]),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(member_error.code, sift_protocol::Code::UnsupportedForEngine);
+    assert!(member_error.message.contains("extension member"));
+
+    let ddl = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&src, "pg_trgm", ObjectKind::Extension),
+    )
+    .await
+    .unwrap()
+    .ddl;
+    assert!(ddl.contains(&format!(
+        "CREATE EXTENSION pg_trgm WITH SCHEMA {src} VERSION"
+    )));
+    execute(&driver, &conn, "DROP EXTENSION pg_trgm RESTRICT;").await;
+    execute(&driver, &conn, &ddl.replace(&src, &dst)).await;
+    let regenerated = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&dst, "pg_trgm", ObjectKind::Extension),
+    )
+    .await
+    .unwrap()
+    .ddl;
+    assert_eq!(regenerated, ddl.replace(&src, &dst));
+    let replayed_graph = postgres_graph(&driver, &conn, &dst).await;
+    let mut replayed_members = replayed_graph
+        .data
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.extra.get("extension_member_of")
+                == Some(&serde_json::Value::String(format!("{dst}.pg_trgm")))
+        })
+        .map(|node| (node.kind, node.name.clone()))
+        .collect::<Vec<_>>();
+    replayed_members.sort();
+    assert_eq!(source_members, replayed_members);
+
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE FUNCTION {dst}.added_member_fn() RETURNS integer \
+             LANGUAGE sql AS 'SELECT 1'; \
+             ALTER EXTENSION pg_trgm ADD FUNCTION {dst}.added_member_fn();"
+        ),
+    )
+    .await;
+    let altered_membership = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&dst, "pg_trgm", ObjectKind::Extension),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        altered_membership.code,
+        sift_protocol::Code::UnsupportedForEngine
+    );
+    assert!(altered_membership.message.contains("member manifest"));
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "ALTER EXTENSION pg_trgm DROP FUNCTION {dst}.added_member_fn(); \
+             DROP FUNCTION {dst}.added_member_fn();"
+        ),
+    )
+    .await;
+
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE TABLE {dst}.added_member(id integer); \
+             ALTER EXTENSION pg_trgm ADD TABLE {dst}.added_member;"
+        ),
+    )
+    .await;
+    let added_member = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&dst, "added_member", ObjectKind::Table),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(added_member.code, sift_protocol::Code::UnsupportedForEngine);
+    let altered_extension = generate_ddl(
+        &driver,
+        conn.clone(),
+        path(&dst, "pg_trgm", ObjectKind::Extension),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        altered_extension.code,
+        sift_protocol::Code::UnsupportedForEngine
+    );
+    assert!(altered_extension.message.contains("relation members"));
+
+    execute(
+        &driver,
+        &conn,
+        &format!("DROP EXTENSION pg_trgm RESTRICT; DROP SCHEMA {dst}; DROP SCHEMA {src};"),
+    )
+    .await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-pg")]
+#[tokio::test]
 async fn postgres_table_storage_and_index_state_round_trip() {
     let driver = sift_driver_postgres::PgDriver::new();
     let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();

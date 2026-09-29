@@ -71,6 +71,7 @@ pub use benchmark_library::{BenchmarkLibraryAction, BenchmarkLibraryReply};
 mod pane_layout;
 mod postgres_maintenance;
 mod result_editing;
+mod runtime_audit;
 mod sql_drafts;
 mod sqlite_maintenance;
 mod sqlserver_maintenance;
@@ -93,6 +94,7 @@ use database_monitor::{DatabaseAlertKind, DatabaseMonitorState, DatabaseMonitorV
 pub use pane_layout::SplitDirection;
 use postgres_maintenance::{PgMaintenanceChoice, PgMaintenancePhase, PgMaintenanceState};
 use relationship_viewer::RelationshipViewerState;
+use runtime_audit::{RingKind, RuntimeAuditState};
 use sqlite_maintenance::{SqliteMaintenanceChoice, SqliteMaintenancePhase, SqliteMaintenanceState};
 use sqlserver_maintenance::{MaintenanceAction, MaintenanceMode, MaintenanceState};
 
@@ -2298,6 +2300,8 @@ enum AdministrationSection {
     Keys,
     Approvals,
     Audit,
+    RecentOperations,
+    RequestAudit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3595,6 +3599,12 @@ pub enum ExecutorCommand {
     LoadOperationAudit {
         cursor: Option<String>,
     },
+    LoadRuntimeOperations {
+        generation: u64,
+    },
+    LoadRuntimeRequestAudit {
+        generation: u64,
+    },
     LoadDdlSources {
         workspace_id: i64,
     },
@@ -4548,6 +4558,14 @@ pub enum ExecutorEvent {
     OperationAuditLoaded {
         append: bool,
         result: Result<sift_protocol::CursorPage<sift_api_types::OperationAudit>, String>,
+    },
+    RuntimeOperationsLoaded {
+        generation: u64,
+        result: Result<Vec<sift_protocol::OperationAuditEntry>, String>,
+    },
+    RuntimeRequestAuditLoaded {
+        generation: u64,
+        result: Result<Vec<sift_protocol::AuditEntry>, String>,
     },
     DdlSourcesLoaded(Result<Vec<sift_protocol::DdlSource>, String>),
     DdlSourceModelLoaded(Result<sift_protocol::DdlSourceModel, String>),
@@ -11197,6 +11215,7 @@ pub struct WorkspaceShell {
     operation_approvals: Vec<sift_protocol::OperationApproval>,
     operation_audit_rows: Vec<sift_api_types::OperationAudit>,
     operation_audit_cursor: Option<String>,
+    runtime_audit: RuntimeAuditState,
     ddl_sources: Vec<sift_protocol::DdlSource>,
     selected_ddl_source: Option<i64>,
     selected_ddl_source_mappings: Vec<sift_protocol::DdlSourceMapping>,
@@ -12643,6 +12662,7 @@ impl WorkspaceShell {
             operation_approvals: Vec::new(),
             operation_audit_rows: Vec::new(),
             operation_audit_cursor: None,
+            runtime_audit: RuntimeAuditState::default(),
             ddl_sources: Vec::new(),
             selected_ddl_source: None,
             selected_ddl_source_mappings: Vec::new(),
@@ -14347,6 +14367,22 @@ impl WorkspaceShell {
                     Err(error) => self.principal_admin_error = Some(error),
                 }
                 cx.notify();
+            }
+            ExecutorEvent::RuntimeOperationsLoaded { generation, result } => {
+                if self.modal == Some(Modal::Administration)
+                    && self.administration_section == AdministrationSection::RecentOperations
+                    && self.runtime_audit.finish_operations(generation, result)
+                {
+                    cx.notify();
+                }
+            }
+            ExecutorEvent::RuntimeRequestAuditLoaded { generation, result } => {
+                if self.modal == Some(Modal::Administration)
+                    && self.administration_section == AdministrationSection::RequestAudit
+                    && self.runtime_audit.finish_requests(generation, result)
+                {
+                    cx.notify();
+                }
             }
             ExecutorEvent::DdlSourcesLoaded(result) => {
                 self.ddl_sources_pending = false;
@@ -29225,6 +29261,47 @@ impl WorkspaceShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let admin_input_focused = self
+            .new_user_inputs
+            .iter()
+            .chain(self.principal_key_inputs.iter())
+            .chain([
+                &self.github_login_input,
+                &self.github_target_principal_input,
+            ])
+            .any(|input| input.focus_handle(cx).is_focused(window));
+        if self.modal == Some(Modal::Administration)
+            && !event.keystroke.modifiers.modified()
+            && !admin_input_focused
+        {
+            let can_refresh = match self.administration_section {
+                AdministrationSection::Audit => !self.principal_admin_pending,
+                AdministrationSection::RecentOperations | AdministrationSection::RequestAudit => {
+                    self.runtime_audit.pending.is_none()
+                }
+                _ => false,
+            };
+            match event.keystroke.key.as_str() {
+                "d" => self.select_administration_section(AdministrationSection::Audit, cx),
+                "o" => {
+                    self.select_administration_section(AdministrationSection::RecentOperations, cx)
+                }
+                "q" => self.select_administration_section(AdministrationSection::RequestAudit, cx),
+                "r" if can_refresh => match self.administration_section {
+                    AdministrationSection::Audit => self.load_operation_audit(false, cx),
+                    AdministrationSection::RecentOperations => {
+                        self.load_runtime_audit(RingKind::Operations, cx)
+                    }
+                    AdministrationSection::RequestAudit => {
+                        self.load_runtime_audit(RingKind::Requests, cx)
+                    }
+                    _ => unreachable!(),
+                },
+                _ => return,
+            }
+            cx.stop_propagation();
+            return;
+        }
         if let Some(Modal::ConfirmTerminateProcess(process_id)) = self.modal {
             if event.keystroke.modifiers.modified() {
                 return;
@@ -36043,6 +36120,7 @@ impl WorkspaceShell {
     }
 
     fn open_administration(&mut self, cx: &mut Context<Self>) {
+        self.runtime_audit.invalidate();
         self.account_password_input
             .update(cx, |input, cx| input.set_text("", cx));
         self.new_user_inputs[3].update(cx, |input, cx| input.set_text("", cx));
@@ -36066,7 +36144,9 @@ impl WorkspaceShell {
                             AdministrationSection::Users => shell.load_github_allowlist(cx),
                             AdministrationSection::Keys => shell.load_principal_keys(cx),
                             AdministrationSection::Approvals => shell.load_operation_approvals(cx),
-                            AdministrationSection::Audit => {}
+                            AdministrationSection::Audit
+                            | AdministrationSection::RecentOperations
+                            | AdministrationSection::RequestAudit => {}
                         }
                     }
                     shell.modal == Some(Modal::Administration)
@@ -36100,13 +36180,35 @@ impl WorkspaceShell {
         section: AdministrationSection,
         cx: &mut Context<Self>,
     ) {
+        self.runtime_audit.invalidate();
         self.administration_section = section;
         match section {
             AdministrationSection::Users => self.load_github_allowlist(cx),
             AdministrationSection::Keys => self.load_principal_keys(cx),
             AdministrationSection::Approvals => self.load_operation_approvals(cx),
             AdministrationSection::Audit => self.load_operation_audit(false, cx),
+            AdministrationSection::RecentOperations => {
+                self.load_runtime_audit(RingKind::Operations, cx)
+            }
+            AdministrationSection::RequestAudit => self.load_runtime_audit(RingKind::Requests, cx),
         }
+    }
+
+    fn load_runtime_audit(&mut self, kind: RingKind, cx: &mut Context<Self>) {
+        let generation = self.runtime_audit.begin(kind);
+        let command = match kind {
+            RingKind::Operations => ExecutorCommand::LoadRuntimeOperations { generation },
+            RingKind::Requests => ExecutorCommand::LoadRuntimeRequestAudit { generation },
+        };
+        if self
+            .executor_sender
+            .as_ref()
+            .is_none_or(|sender| sender.send(command).is_err())
+        {
+            self.runtime_audit.pending = None;
+            self.runtime_audit.error = Some("Runtime audit service is unavailable".into());
+        }
+        cx.notify();
     }
 
     fn load_principal_keys(&mut self, cx: &mut Context<Self>) {
@@ -61262,6 +61364,83 @@ mod tests {
                     .map(|report| report.outcome),
                 Some(sift_protocol::IntegrityOutcome::Incomplete)
             );
+        });
+    }
+
+    #[gpui::test]
+    fn runtime_audit_switch_and_refresh_reject_stale_replies(cx: &mut TestAppContext) {
+        let window = shell(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = window.root(&mut cx).unwrap();
+        let (sender, mut commands) = ExecutorSender::channel(8);
+        workspace.update(&mut cx, |shell, cx| {
+            shell.executor_sender = Some(sender);
+            shell.modal = Some(Modal::Administration);
+            shell.select_administration_section(AdministrationSection::RecentOperations, cx);
+        });
+        let old = match commands.try_recv().expect("operations request") {
+            ExecutorCommand::LoadRuntimeOperations { generation } => generation,
+            _ => panic!("expected operations request"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.load_runtime_audit(RingKind::Operations, cx);
+        });
+        let current = match commands.try_recv().expect("refreshed operations request") {
+            ExecutorCommand::LoadRuntimeOperations { generation } => generation,
+            _ => panic!("expected refreshed operations request"),
+        };
+        let operation = sift_protocol::OperationAuditEntry {
+            at: chrono::Utc::now(),
+            operation: sift_protocol::Operation::InspectMetadata,
+            status: sift_protocol::OperationStatus::Succeeded,
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::RuntimeOperationsLoaded {
+                    generation: old,
+                    result: Ok(vec![operation.clone()]),
+                },
+                cx,
+            );
+            assert!(shell.runtime_audit.operations.is_empty());
+            shell.on_executor_event(
+                ExecutorEvent::RuntimeOperationsLoaded {
+                    generation: current,
+                    result: Ok(vec![operation]),
+                },
+                cx,
+            );
+            assert_eq!(shell.runtime_audit.operations.len(), 1);
+            shell.select_administration_section(AdministrationSection::RequestAudit, cx);
+        });
+        let request_generation = match commands.try_recv().expect("request audit request") {
+            ExecutorCommand::LoadRuntimeRequestAudit { generation } => generation,
+            _ => panic!("expected request audit request"),
+        };
+        workspace.update(&mut cx, |shell, cx| {
+            shell.on_executor_event(
+                ExecutorEvent::RuntimeRequestAuditLoaded {
+                    generation: request_generation,
+                    result: Ok(vec![sift_protocol::AuditEntry {
+                        at: chrono::Utc::now(),
+                        method: "GET".into(),
+                        path: "/v1/audit?token=hidden".into(),
+                        status: 200,
+                        duration_ms: 3,
+                    }]),
+                },
+                cx,
+            );
+            assert_eq!(shell.runtime_audit.requests.len(), 1);
+            shell.modal = None;
+            shell.on_executor_event(
+                ExecutorEvent::RuntimeRequestAuditLoaded {
+                    generation: request_generation,
+                    result: Ok(vec![]),
+                },
+                cx,
+            );
+            assert_eq!(shell.runtime_audit.requests.len(), 1);
         });
     }
 }
