@@ -2271,6 +2271,23 @@ impl SessionStore {
         Ok(plan)
     }
 
+    fn migration_tx_mode(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+    ) -> ApiResult<sift_protocol::TxMode> {
+        Ok(sift_protocol::TxMode {
+            isolation: if self.get_conn_entry(session, connection)?.driver.engine()
+                == Engine::Sqlite
+            {
+                sift_protocol::IsolationLevel::Serializable
+            } else {
+                sift_protocol::IsolationLevel::ReadCommitted
+            },
+            ..Default::default()
+        })
+    }
+
     pub async fn validate_migration(
         &self,
         session: SessionId,
@@ -2340,7 +2357,7 @@ impl SessionStore {
                 session,
                 sift_protocol::BeginTransactionRequest {
                     connection,
-                    mode: sift_protocol::TxMode::default(),
+                    mode: self.migration_tx_mode(session, connection)?,
                 },
                 sift_protocol::OperationKind::PreviewMigration,
             )
@@ -2471,6 +2488,7 @@ impl SessionStore {
                 "migration requires acknowledgement of every destructive or unknown risk".into(),
             ));
         }
+        let tx_mode = self.migration_tx_mode(session, connection)?;
         // Consume only after every caller-controlled precondition succeeds.
         // Removal remains the atomic one-use gate when two applies race.
         let (_, stored) = self
@@ -2549,7 +2567,7 @@ impl SessionStore {
                         session,
                         sift_protocol::BeginTransactionRequest {
                             connection,
-                            mode: sift_protocol::TxMode::default(),
+                            mode: tx_mode,
                         },
                         sift_protocol::OperationKind::ApplyMigration,
                     )

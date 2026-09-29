@@ -12,6 +12,7 @@ const MAX_DEPENDENCY_EDGES: usize = 10_000;
 const MAX_VIEW_REFERENCES: usize = 64;
 const MAX_VIEW_SQL: usize = 1024 * 1024;
 const MAX_DEPENDENCY_SQL_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SAFE_DDL_BYTES: usize = 8 * 1024 * 1024;
 
 struct DependencySource {
     schema: String,
@@ -53,6 +54,113 @@ fn schema_name(object: &ObjectPath) -> Result<&str, DriverError> {
 }
 pub fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+// A deliberately small grammar. Only this lossless subset can become an
+// executable statement in a durable catalog snapshot. No stored SQL text is
+// copied into the graph, including comments and defaults.
+fn simple_table_ddl(sql: &str, object: &ObjectInfo) -> Option<String> {
+    if sql.len() > MAX_VIEW_SQL
+        || !object.indexes.is_empty()
+        || !object.constraints.is_empty()
+        || !object.triggers.is_empty()
+    {
+        return None;
+    }
+    let tokens = Tokenizer::new(&SQLiteDialect {}, sql)
+        .tokenize()
+        .ok()?
+        .into_iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect::<Vec<_>>();
+    let word_is = |token: &Token, value: &str| {
+        matches!(token, Token::Word(word)
+            if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(value))
+    };
+    if tokens.len() < 7 || !word_is(&tokens[0], "CREATE") || !word_is(&tokens[1], "TABLE") {
+        return None;
+    }
+    let Token::Word(table) = &tokens[2] else {
+        return None;
+    };
+    if !table.value.eq_ignore_ascii_case(&object.name) || !matches!(tokens[3], Token::LParen) {
+        return None;
+    }
+    let mut cursor = 4;
+    let mut definitions = Vec::new();
+    loop {
+        let Token::Word(name) = tokens.get(cursor)? else {
+            return None;
+        };
+        cursor += 1;
+        let Token::Word(kind) = tokens.get(cursor)? else {
+            return None;
+        };
+        if kind.quote_style.is_some() {
+            return None;
+        }
+        let declared = kind.value.to_ascii_uppercase();
+        if !["INTEGER", "REAL", "TEXT", "BLOB", "NUMERIC"].contains(&declared.as_str()) {
+            return None;
+        }
+        cursor += 1;
+        let not_null = tokens
+            .get(cursor)
+            .is_some_and(|token| word_is(token, "NOT"));
+        if not_null {
+            if !tokens
+                .get(cursor + 1)
+                .is_some_and(|token| word_is(token, "NULL"))
+            {
+                return None;
+            }
+            cursor += 2;
+        }
+        let column = object.columns.get(definitions.len())?;
+        let facets = column.facets.sqlite.as_ref()?;
+        if !name.value.eq_ignore_ascii_case(&column.name)
+            || !facets.declared_type.eq_ignore_ascii_case(&declared)
+            || facets.default_expr.is_some()
+            || facets.primary_key_ordinal != 0
+            || facets.hidden != 0
+            || facets.virtual_table
+            || column.auto_increment
+            || (column.nullable == Nullability::NotNullable) != not_null
+        {
+            return None;
+        }
+        definitions.push(format!(
+            "{} {}{}",
+            quote(&column.name),
+            declared,
+            if not_null { " NOT NULL" } else { "" }
+        ));
+        match tokens.get(cursor)? {
+            Token::Comma => cursor += 1,
+            Token::RParen => {
+                cursor += 1;
+                break;
+            }
+            _ => return None,
+        }
+    }
+    if definitions.is_empty() || definitions.len() != object.columns.len() {
+        return None;
+    }
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| matches!(token, Token::SemiColon))
+    {
+        cursor += 1;
+    }
+    if cursor != tokens.len() {
+        return None;
+    }
+    Some(format!(
+        "CREATE TABLE {} ({});",
+        quote(&object.name),
+        definitions.join(", ")
+    ))
 }
 fn revisions(conn: &Connection) -> Result<(i64, i64), DriverError> {
     Ok((
@@ -101,6 +209,8 @@ fn load_once(
     let mut dependency_sources = Vec::new();
     let mut generated_sources = Vec::new();
     let mut index_expression_sources = Vec::new();
+    let mut safe_table_ddls = Vec::new();
+    let mut safe_ddl_budget = MAX_SAFE_DDL_BYTES;
     let mut dependency_sql_budget = MAX_DEPENDENCY_SQL_BYTES;
     let mut result = SchemaSnapshot::empty(scope.clone());
     let mut catalog = CatalogTree {
@@ -193,6 +303,23 @@ fn load_once(
                 deepen(conn, schema, &mut object, sql.as_deref().unwrap_or(""))?;
             }
             if navigation {
+                if schema == "main" && kind == ObjectKind::Table {
+                    let has_trigger: bool = conn
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='trigger' AND tbl_name=?1)",
+                            [&name],
+                            |row| row.get(0),
+                        )
+                        .map_err(db_error)?;
+                    if let Some(ddl) = sql
+                        .as_deref()
+                        .and_then(|sql| simple_table_ddl(sql, &object))
+                        .filter(|ddl| !has_trigger && ddl.len() <= safe_ddl_budget)
+                    {
+                        safe_ddl_budget -= ddl.len();
+                        safe_table_ddls.push((name.clone(), ddl));
+                    }
+                }
                 let cost =
                     1 + object.columns.len() + object.indexes.len() + object.constraints.len();
                 if cost > node_budget {
@@ -319,6 +446,16 @@ fn load_once(
             object.estimated_rows = None;
         }
         let mut graph = sift_core::catalog::graph_from_trees(&schema_trees, coverage, identity);
+        for (name, ddl) in safe_table_ddls {
+            if let Some(node) = graph.nodes.iter_mut().find(|node| {
+                node.kind == CatalogNodeKind::Table
+                    && node.name == name
+                    && node.qualified_name.ends_with(&format!(".main.{name}"))
+            }) {
+                node.extra
+                    .insert("sqlite_safe_create_sql".into(), ddl.into());
+            }
+        }
         enrich_dependencies(&mut graph, &dependency_sources);
         enrich_expression_dependencies(&mut graph);
         enrich_stored_expression_dependencies(
