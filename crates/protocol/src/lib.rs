@@ -5,9 +5,9 @@
 //! networking, no filesystem.
 
 /// Current wire protocol version.
-pub const PROTOCOL_VERSION_NUMBER: u32 = 3;
+pub const PROTOCOL_VERSION_NUMBER: u32 = 4;
 /// Header representation of [`PROTOCOL_VERSION_NUMBER`].
-pub const PROTOCOL_VERSION: &str = "3";
+pub const PROTOCOL_VERSION: &str = "4";
 
 pub mod agent_jobs;
 pub mod auth;
@@ -61,6 +61,10 @@ pub mod schema_diff;
 pub mod search;
 pub mod semantic;
 pub mod session;
+pub mod sqlite_maintenance;
+pub use sqlite_maintenance::{
+    SqliteMaintenanceAction, SqliteMaintenanceReport, SqliteMaintenanceRequest,
+};
 pub mod snippet;
 pub mod sql_variable;
 pub mod transaction_panel;

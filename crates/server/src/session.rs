@@ -164,6 +164,7 @@ struct SessionStoreInner {
         DashMap<sift_protocol::MigrationRunId, Arc<std::sync::atomic::AtomicBool>>,
     migration_locks: DashMap<(SessionId, ConnectionId), Arc<tokio::sync::Mutex<()>>>,
     sqlite_bulk_previews: DashMap<String, SqliteBulkPreviewLease>,
+    sqlite_maintenance_previews: DashMap<String, SqliteMaintenanceLease>,
     retained_query_results: crate::comparison::RetainedQueryRegistry,
     benchmarks: Arc<DashMap<(SessionId, ConnectionId), benchmark::ActiveBenchmark>>,
     profiles: Arc<DashMap<(SessionId, ConnectionId), profile::ActiveProfile>>,
@@ -180,6 +181,14 @@ struct SqliteBulkPreviewLease {
     session: SessionId,
     connection: ConnectionId,
     fingerprint: String,
+    expires_at: Instant,
+}
+
+struct SqliteMaintenanceLease {
+    session: SessionId,
+    connection: ConnectionId,
+    identity: String,
+    action: sift_protocol::SqliteMaintenanceAction,
     expires_at: Instant,
 }
 
@@ -352,6 +361,7 @@ impl SessionStore {
                 migration_cancellations: DashMap::new(),
                 migration_locks: DashMap::new(),
                 sqlite_bulk_previews: DashMap::new(),
+                sqlite_maintenance_previews: DashMap::new(),
                 retained_query_results: Default::default(),
                 benchmarks: Default::default(),
                 profiles: Default::default(),
@@ -411,6 +421,7 @@ impl SessionStore {
                 migration_cancellations: DashMap::new(),
                 migration_locks: DashMap::new(),
                 sqlite_bulk_previews: DashMap::new(),
+                sqlite_maintenance_previews: DashMap::new(),
                 retained_query_results: Default::default(),
                 benchmarks: Default::default(),
                 profiles: Default::default(),
@@ -1102,6 +1113,9 @@ impl SessionStore {
         self.inner
             .sqlite_bulk_previews
             .retain(|_, lease| lease.session != id);
+        self.inner
+            .sqlite_maintenance_previews
+            .retain(|_, lease| lease.session != id);
         for run in self
             .inner
             .migration_runs
@@ -1692,6 +1706,9 @@ impl SessionStore {
         self.inner.migration_locks.remove(&(session_id, conn_id));
         self.inner
             .sqlite_bulk_previews
+            .retain(|_, lease| lease.session != session_id || lease.connection != conn_id);
+        self.inner
+            .sqlite_maintenance_previews
             .retain(|_, lease| lease.session != session_id || lease.connection != conn_id);
         for run in self
             .inner
@@ -3630,6 +3647,64 @@ impl SessionStore {
         {
             return Err(ApiError::BadRequest(
                 "SQLite bulk preview is stale or bound to another request".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn store_sqlite_maintenance_preview(
+        &self,
+        session: SessionId,
+        connection: ConnectionId,
+        action: sift_protocol::SqliteMaintenanceAction,
+        identity: String,
+    ) -> ApiResult<String> {
+        let now = Instant::now();
+        self.inner
+            .sqlite_maintenance_previews
+            .retain(|_, lease| lease.expires_at > now);
+        if self.inner.sqlite_maintenance_previews.len() >= 1_024 {
+            return Err(ApiError::BadRequest(
+                "SQLite maintenance preview retention limit reached".into(),
+            ));
+        }
+        let token = uuid::Uuid::new_v4().to_string();
+        self.inner.sqlite_maintenance_previews.insert(
+            token.clone(),
+            SqliteMaintenanceLease {
+                session,
+                connection,
+                identity,
+                action,
+                expires_at: now + Duration::from_secs(300),
+            },
+        );
+        Ok(token)
+    }
+
+    pub(crate) fn consume_sqlite_maintenance_preview(
+        &self,
+        token: &str,
+        session: SessionId,
+        connection: ConnectionId,
+        action: &sift_protocol::SqliteMaintenanceAction,
+        identity: &str,
+    ) -> ApiResult<()> {
+        let (_, lease) = self
+            .inner
+            .sqlite_maintenance_previews
+            .remove(token)
+            .ok_or_else(|| {
+                ApiError::BadRequest("SQLite maintenance preview is missing or used".into())
+            })?;
+        if lease.session != session
+            || lease.connection != connection
+            || lease.action != *action
+            || lease.identity != identity
+            || lease.expires_at <= Instant::now()
+        {
+            return Err(ApiError::BadRequest(
+                "SQLite maintenance preview is stale or bound to another request".into(),
             ));
         }
         Ok(())
@@ -6596,6 +6671,18 @@ fn sanitize_operation(operation: Operation) -> Operation {
             request.native = None;
             request.preview_token = None;
             Operation::BulkInsert {
+                session,
+                connection,
+                request,
+            }
+        }
+        Operation::SqliteMaintenance {
+            session,
+            connection,
+            mut request,
+        } => {
+            request.preview_token = None;
+            Operation::SqliteMaintenance {
                 session,
                 connection,
                 request,

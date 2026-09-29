@@ -2838,3 +2838,50 @@ launching that CLI from the desktop would cross the file, credential and audit
 boundary. A future desktop path needs a server-owned, policy-scoped endpoint
 with a bounded archive transfer and explicit target confirmation. This change
 does not add a wire operation or Driver trait method for dump and restore.
+
+---
+## ADR-078 — SQLite file maintenance stays inside the configured root
+
+Status: accepted. Date: 2026-09-29.
+
+SQLite file creation and backup are server-side file operations, not SQL sent
+through the ordinary query editor. The workflow starts from an existing
+managed SQLite connection. Its profile must be read/write, and the requested
+destination must use the same configured root and tenant as that connection.
+The native SQLite extension, which owns `FilePolicy`, validates the root and
+each path component; the locked `Driver` trait does not change. On Unix, the
+parent directory must already exist within the root, be free of symlinks,
+and be outside protected paths. A destination must be absent and is created
+exclusively; overwrite, restore, delete, arbitrary absolute paths, ATTACH,
+and Windows file mutation are outside this decision. Root directories are
+operator-owned, so this is not a defense against a local process replacing
+them during a call.
+
+An audited SQLite maintenance operation has explicit preview and apply phases.
+The public `ManageSqliteDatabase` operation and typed request advance the wire
+protocol to version 4; the locked core `Driver` trait remains unchanged.
+Preview reports source/destination identity, current file size, expected
+backup artifact and warnings without changing files. The server issues a
+short-lived, one-use token bound to session, connection, action, paths, root,
+and observed file identity. Apply requires that token and a separate explicit
+confirmation, repeats authorization and preflight, and refuses changed files
+or destinations. A client disconnect cancels the work where the native API
+permits; a late result cannot be treated as a new preview. Failure removes
+any incomplete newly created destination and never replaces an existing file.
+
+The supported actions are creation of a new empty database and online backup
+of the connected `main` database to a new file. Creation writes a valid empty
+SQLite database and leaves connection profile registration to a separate user
+action. Backup uses SQLite's online backup API, in bounded page steps with a
+time and size limit, so WAL state is captured consistently. The preview states
+that creation has no prior data to back up and that existing databases should
+be backed up before any later mutating maintenance. Integrity checks remain
+the existing read-only `CheckIntegrity` operation. VACUUM, implicit repair,
+checkpoint, PRAGMA write, extension load, and general database-admin commands
+remain gated pending a bounded cancellation design.
+
+The request and result contain relative logical paths only. Operation audit
+records action, target, preview/apply outcome and artifact path, never file
+contents or secrets. File-root, tenant, connection-policy and protected-path
+checks remain the authority even when the user has an administrative tenant
+role. The desktop may expose only these typed actions in Vim mode.
