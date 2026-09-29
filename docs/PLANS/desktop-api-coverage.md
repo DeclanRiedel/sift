@@ -268,7 +268,10 @@ and forwarded health/readiness probes.
   operation records rather than a static operation-kind catalog (M5).
 - [x] `operation_audit`, `operation_audit_page` — paginated operation audit
   in Runtime administration (M5)
-- [ ] `create_operation_approval`, `approve_operation` — approval flow for destructive ops (M4/M5)
+- [x] `create_operation_approval`, `approve_operation` — Vim Extensions review,
+  exact typed confirmation, creation and revision-checked approval for write,
+  destructive and administrative actions; the server binds actor, target,
+  arguments and expiry, and execution consumes the one-use approval (M4/M5)
 - [ ] `governed_tools`, `invoke_tool` — governed tool invocation (M5)
 - [ ] `openapi` — dev/help surface (optional)
 

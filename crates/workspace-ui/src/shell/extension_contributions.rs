@@ -1,5 +1,6 @@
 //! Host-owned projection of extension descriptors. No extension content becomes UI code.
 
+use super::approval_review::ApprovalReview;
 use super::*;
 
 const MAX_FIELDS: usize = 16;
@@ -20,6 +21,8 @@ pub(super) struct ExtensionContributionsUi {
     pub result: Option<serde_json::Value>,
     pub approval: Option<sift_protocol::OperationApproval>,
     pub pending_request: Option<sift_protocol::InvokeExtensionRequest>,
+    pub approval_review: Option<ApprovalReview>,
+    pub approval_confirmation: Option<Entity<TextInput>>,
 }
 
 impl WorkspaceShell {
@@ -34,7 +37,10 @@ impl WorkspaceShell {
         }
         let key = event.keystroke.unparse();
         if self.extension_contributions.pending
-            && matches!(key.as_str(), "j" | "down" | "k" | "up" | "i" | "r")
+            && matches!(
+                key.as_str(),
+                "j" | "down" | "k" | "up" | "i" | "r" | "p" | "c" | "v"
+            )
         {
             return true;
         }
@@ -114,6 +120,17 @@ impl WorkspaceShell {
             "a" if self.extension_contributions.approval.is_some() => {
                 self.approve_selected_extension_contribution(cx);
             }
+            "p" => self.preview_selected_extension_approval(cx),
+            "v" if self.extension_contributions.approval_confirmation.is_some() => {
+                self.extension_contributions
+                    .approval_confirmation
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .focus_handle(cx)
+                    .focus(window, cx);
+            }
+            "c" => self.create_selected_extension_approval(cx),
             "r" => self.open_extension_contributions(cx),
             _ => return false,
         }
@@ -136,6 +153,8 @@ impl WorkspaceShell {
         self.extension_contributions.result = None;
         self.extension_contributions.approval = None;
         self.extension_contributions.pending_request = None;
+        self.extension_contributions.approval_review = None;
+        self.extension_contributions.approval_confirmation = None;
         self.extension_contributions.loading = true;
         self.extension_contributions.error = None;
         let generation = self.extension_contributions.generation;
@@ -174,6 +193,8 @@ impl WorkspaceShell {
         ui.result = None;
         ui.approval = None;
         ui.pending_request = None;
+        ui.approval_review = None;
+        ui.approval_confirmation = None;
         let Some(contribution) = ui
             .descriptors
             .get(extension_index)
@@ -207,6 +228,121 @@ impl WorkspaceShell {
                 }
                 Err(error) => ui.error = Some(error),
             }
+        }
+        cx.notify();
+    }
+
+    fn selected_extension_invocation(
+        &self,
+        cx: &Context<Self>,
+    ) -> Result<sift_protocol::InvokeExtensionRequest, String> {
+        let ui = &self.extension_contributions;
+        let (extension_index, contribution_index) =
+            ui.selected.ok_or("Select an extension action")?;
+        let extension = ui
+            .descriptors
+            .get(extension_index)
+            .ok_or("Extension is no longer available")?;
+        let contribution = extension
+            .contributions
+            .get(contribution_index)
+            .ok_or("Action is no longer available")?;
+        let values = ui
+            .inputs
+            .iter()
+            .map(|input| input.read(cx).text().to_owned())
+            .collect::<Vec<_>>();
+        let arguments = form_arguments(&ui.fields, &values)?;
+        invocation(
+            extension,
+            contribution,
+            arguments,
+            self.current_extension_context(cx),
+        )
+    }
+
+    fn preview_selected_extension_approval(&mut self, cx: &mut Context<Self>) {
+        if self.extension_contributions.pending {
+            return;
+        }
+        if self.extension_contributions.approval.is_some() {
+            self.extension_contributions.error =
+                Some("An approval is already attached to this action".into());
+            cx.notify();
+            return;
+        }
+        let review = self
+            .selected_extension_invocation(cx)
+            .and_then(|invocation| {
+                ApprovalReview::new(
+                    invocation,
+                    self.selected_instance_id
+                        .as_deref()
+                        .unwrap_or("local")
+                        .to_owned(),
+                )
+            });
+        match review {
+            Ok(review) => {
+                let confirmation =
+                    cx.new(|cx| TextInput::new("", "Type the approval request phrase", cx));
+                self.extension_contributions.approval_review = Some(review);
+                self.extension_contributions.approval_confirmation = Some(confirmation);
+                self.extension_contributions.error = None;
+            }
+            Err(error) => {
+                self.extension_contributions.approval_review = None;
+                self.extension_contributions.approval_confirmation = None;
+                self.extension_contributions.error = Some(error);
+            }
+        }
+        cx.notify();
+    }
+
+    fn create_selected_extension_approval(&mut self, cx: &mut Context<Self>) {
+        if self.extension_contributions.pending {
+            return;
+        }
+        let current = match self.selected_extension_invocation(cx) {
+            Ok(request) => request,
+            Err(error) => {
+                self.extension_contributions.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let ui = &mut self.extension_contributions;
+        let instance_id = self.selected_instance_id.as_deref().unwrap_or("local");
+        let request = match (&ui.approval_review, &ui.approval_confirmation) {
+            (Some(review), Some(confirmation)) => {
+                review.confirmed_request(&current, instance_id, confirmation.read(cx).text())
+            }
+            _ => Err("Review the approval request before creating it".into()),
+        };
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => {
+                ui.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        ui.pending_request = Some(current);
+        ui.pending = true;
+        ui.error = None;
+        let command = ExecutorCommand::CreateExtensionApproval {
+            generation: ui.generation,
+            instance_id: instance_id.to_owned(),
+            request,
+        };
+        if self
+            .executor_sender
+            .as_ref()
+            .is_none_or(|sender| sender.send(command).is_err())
+        {
+            ui.pending = false;
+            ui.pending_request = None;
+            ui.error = Some("Extension approval service is unavailable".into());
         }
         cx.notify();
     }
@@ -276,6 +412,8 @@ impl WorkspaceShell {
             }
         };
         ui.pending_request = Some(request.clone());
+        ui.approval_review = None;
+        ui.approval_confirmation = None;
         ui.pending = true;
         ui.error = None;
         let generation = ui.generation;
@@ -555,7 +693,7 @@ impl WorkspaceShell {
                     .child("Extension actions use the server's audited operation path."),
             )
             .child(div().text_xs().text_color(colors.muted_text).child(
-                "Vim: j/k select · Enter run · i edit fields · a approve · r refresh · Esc close",
+                "Vim: j/k select · Enter run · i edit fields · p review approval · v type phrase · c create request · a approve · r refresh · Esc close",
             ))
             .child(
                 div()
@@ -586,6 +724,15 @@ impl WorkspaceShell {
                             .map(|label| div().text_xs().text_color(colors.muted_text).child(label))
                     }))
                     .children(fields)
+                    .children(contribution.operation.as_ref().filter(|operation| {
+                        contribution.invocable
+                            && sift_protocol::classification_requires_approval(operation.classification)
+                    }).map(|_| {
+                        Button::new("preview-extension-approval", "Review approval request")
+                            .tone(ButtonTone::Neutral)
+                            .disabled(ui.pending || ui.approval.is_some())
+                            .on_click(cx.listener(|shell, _, _, cx| shell.preview_selected_extension_approval(cx)))
+                    }))
                     .children(contribution.invocable.then(|| {
                         Button::new(
                             "invoke-extension-contribution",
@@ -619,6 +766,19 @@ impl WorkspaceShell {
                         (!contribution.invocable)
                             .then(|| div().text_xs().child("Action unavailable")),
                     )
+            }))
+            .children(ui.approval_review.as_ref().map(|review| {
+                div().flex().flex_col().gap_2()
+                    .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child("Approval request review"))
+                    .child(div().text_xs().child(format!("Action: {}#{} · {:?}", review.invocation.operation.contribution_id, review.invocation.operation.action, review.invocation.operation.classification)))
+                    .child(div().text_xs().child(format!("Target: {}:{} · server {} · current signed-in principal", review.invocation.operation.target_kind, review.invocation.operation.target_id.as_deref().unwrap_or(&review.instance_id), review.instance_id)))
+                    .child(div().text_xs().font_family("monospace").child(format!("Input SHA-256: {}", review.input_fingerprint)))
+                    .child(div().text_xs().text_color(colors.warning).child(format!("Type {} to create a one-use request (expires after 5 minutes)", review.confirmation)))
+                    .children(ui.approval_confirmation.clone())
+                    .child(Button::new("create-extension-approval", "Create approval request")
+                        .tone(ButtonTone::Accent)
+                        .disabled(ui.pending)
+                        .on_click(cx.listener(|shell, _, _, cx| shell.create_selected_extension_approval(cx))))
             }))
             .children(ui.approval.as_ref().map(|approval| {
                 div()

@@ -2980,6 +2980,29 @@ install/update/drop migration, package equivalence across servers, membership
 changes made through `ALTER EXTENSION ADD/DROP`, data in config tables, and
 cross-object ordering require a separate proof and remain unsupported.
 
+## ADR-083 — Desktop approval requests bind a reviewed extension action
+
+Status: accepted. Date: 2026-09-29.
+
+The Vim Extensions view may create an operation approval only for its selected,
+invocable host-projected contribution. It builds the same typed operation,
+arguments, and required target context as invocation, then previews the
+classification, contribution/action, scoped target, and canonical input
+fingerprint without displaying secret form values. The user must type the exact
+operation-and-target confirmation before the desktop calls the existing
+`createOperationApproval` SDK method. Changing the selection, form arguments,
+target context, or selected server invalidates that preview. The desktop
+resolves the `active`
+connection marker to its concrete session/connection identity for creation,
+as it already does for invocation. The server binds the approval to the
+authenticated principal, registered operation, authorized context, and input
+fingerprint; the desktop cannot choose the actor, TTL, or approval ID.
+
+The returned approval enters the existing approve-and-run flow. Approve uses
+the record's expected revision and remains a distinct action. Running consumes
+the one-use approval only with the same operation, context, and arguments.
+The review is a local confirmation, not a substitute for server authorization.
+No Driver or wire-contract signature changes are needed.
 ## ADR-084 — Owned sequence creation requires a stable existing table
 
 Status: accepted. Date: 2026-09-29.
