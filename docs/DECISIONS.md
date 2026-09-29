@@ -2933,6 +2933,27 @@ Every load carries a UI generation. Switching administration sections or
 refreshing invalidates older responses so a delayed result cannot overwrite the
 current view. The Runtime administration entry point stays Vim accessible;
 these read-only lists add no mutation or new driver method.
+
+## ADR-081 — SQLite desktop maintenance binds confirmation to the live connection
+
+Status: accepted. Date: 2026-09-29.
+
+The Vim Monitor maintenance view exposes the existing audited SQLite file
+maintenance and integrity APIs only for an active managed SQLite connection.
+The form accepts a path relative to the connection's configured root; the
+preview response shows the root ID, source, destination, source bytes, and
+backup expectation before a write. The desktop never accepts a server path or
+executes maintenance as SQL.
+
+The desktop keeps a preview only for the active connection generation, exact
+action and destination. Apply requires a typed confirmation naming that action
+and destination, plus the server's one-use preview token. A connection switch,
+form edit, stale reply, or completed apply clears the preview. The server
+remains authoritative for tenant/root permission, file identity, token expiry,
+exclusive creation, backup limits, and audit. Integrity runs as the existing
+read-only check without a write confirmation. VACUUM, restore, delete and
+arbitrary PRAGMA remain outside this desktop workflow.
+
 ## ADR-082 — PostgreSQL extension export is a version-pinned install recipe
 
 Status: accepted. Date: 2026-09-29.

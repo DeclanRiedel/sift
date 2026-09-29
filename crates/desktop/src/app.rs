@@ -3207,6 +3207,60 @@ async fn run_query_executor(
                         .send(ExecutorEvent::PostgresIntegrityFinished { generation, result });
                 }));
             }
+            ExecutorCommand::SqliteMaintenance {
+                generation,
+                request,
+            } => {
+                let apply = request.apply;
+                let Some(opened) = context.as_ref() else {
+                    let _ = events.send(ExecutorEvent::SqliteMaintenanceFinished {
+                        generation,
+                        apply,
+                        result: Err("Connect before running SQLite maintenance".into()),
+                    });
+                    continue;
+                };
+                let client = opened.client.clone();
+                let session = opened.session;
+                let connection = opened.metadata_connection;
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let result = client
+                        .sqlite_maintenance(session, connection, request)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = events.send(ExecutorEvent::SqliteMaintenanceFinished {
+                        generation,
+                        apply,
+                        result,
+                    });
+                }));
+            }
+            ExecutorCommand::SqliteIntegrity { generation } => {
+                let Some(opened) = context.as_ref() else {
+                    let _ = events.send(ExecutorEvent::SqliteIntegrityFinished {
+                        generation,
+                        result: Err("Connect before checking SQLite integrity".into()),
+                    });
+                    continue;
+                };
+                let client = opened.client.clone();
+                let session = opened.session;
+                let connection = opened.metadata_connection;
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let result = client
+                        .check_integrity(
+                            session,
+                            connection,
+                            sift_protocol::IntegrityCheckRequest::Sqlite { quick: false },
+                        )
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ =
+                        events.send(ExecutorEvent::SqliteIntegrityFinished { generation, result });
+                }));
+            }
             ExecutorCommand::LoadRoomMembers { room_id } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
