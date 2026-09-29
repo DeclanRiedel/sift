@@ -263,6 +263,101 @@ fn schemas() -> (String, String) {
 
 #[cfg(feature = "live-pg")]
 #[tokio::test]
+async fn postgres_standalone_index_round_trips_and_fences_generic_migration() {
+    let driver = sift_driver_postgres::PgDriver::new();
+    let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();
+    let (src, dst) = schemas();
+    execute(
+        &driver,
+        &conn,
+        &format!(
+            "CREATE SCHEMA {src}; CREATE SCHEMA {dst}; \
+             CREATE TABLE {src}.items(id integer PRIMARY KEY, name text); \
+             CREATE TABLE {dst}.items(id integer PRIMARY KEY, name text); \
+             CREATE INDEX expression_idx ON {src}.items USING btree \
+                (lower(name) text_pattern_ops) INCLUDE (id) \
+                WITH (fillfactor=80) WHERE name IS NOT NULL; \
+             CREATE INDEX clustered_idx ON {src}.items(id); \
+             ALTER TABLE {src}.items CLUSTER ON clustered_idx;"
+        ),
+    )
+    .await;
+    let ddl = round_trip(
+        &driver,
+        &conn,
+        &src,
+        &dst,
+        "expression_idx",
+        ObjectKind::Index,
+    )
+    .await;
+    assert!(ddl.contains("text_pattern_ops"), "{ddl}");
+    assert!(ddl.contains("INCLUDE (id)"), "{ddl}");
+    assert!(ddl.contains("fillfactor='80'"), "{ddl}");
+    assert!(ddl.contains("WHERE (name IS NOT NULL)"), "{ddl}");
+
+    let graph = driver
+        .schema(
+            conn.clone(),
+            sift_protocol::SchemaScope {
+                depth: sift_protocol::SchemaDepth::Graph {
+                    options: sift_protocol::CatalogGraphOptions {
+                        schemas: Some(vec![src.clone()]),
+                        include_definitions: true,
+                        ..Default::default()
+                    },
+                },
+                filter: None,
+            },
+        )
+        .await
+        .unwrap()
+        .graph
+        .unwrap();
+    let index = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.kind == sift_protocol::CatalogNodeKind::Index && node.name == "expression_idx"
+        })
+        .unwrap();
+    assert!(index
+        .native_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("pg:index:")));
+    assert!(index.extra.contains_key("native_index_shape"));
+    let table = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == sift_protocol::CatalogNodeKind::Table && node.name == "items")
+        .unwrap();
+    assert!(table.extra.contains_key("native_index_set_shape"));
+    assert_eq!(
+        table.extra.get("migration_unsupported"),
+        Some(&serde_json::Value::Bool(true))
+    );
+
+    for (name, reason) in [
+        ("items_pkey", "constraint-backed"),
+        ("clustered_idx", "clustered"),
+    ] {
+        let error = generate_ddl(&driver, conn.clone(), path(&src, name, ObjectKind::Index))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, sift_protocol::Code::UnsupportedForEngine);
+        assert!(error.message.contains(reason), "{error:?}");
+    }
+    execute(
+        &driver,
+        &conn,
+        &format!("DROP SCHEMA {dst} CASCADE; DROP SCHEMA {src} CASCADE;"),
+    )
+    .await;
+    driver.close(conn).await.unwrap();
+}
+
+#[cfg(feature = "live-pg")]
+#[tokio::test]
 async fn postgres_foreign_table_round_trip_and_restricted_metadata() {
     let driver = sift_driver_postgres::PgDriver::new();
     let conn = driver.open(&spec(Engine::Postgres)).await.unwrap();

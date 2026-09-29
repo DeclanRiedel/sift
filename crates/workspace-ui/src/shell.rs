@@ -894,6 +894,7 @@ impl ObjectGroupKind {
                 ObjectKind::Synonym,
                 ObjectKind::Type,
                 ObjectKind::Extension,
+                ObjectKind::Index,
             ],
         }
     }
@@ -912,7 +913,8 @@ impl ObjectGroupKind {
             ObjectKind::Trigger
             | ObjectKind::Synonym
             | ObjectKind::Type
-            | ObjectKind::Extension => Self::Other,
+            | ObjectKind::Extension
+            | ObjectKind::Index => Self::Other,
         }
     }
 
@@ -1229,9 +1231,11 @@ fn schema_object_kind_icon(kind: sift_protocol::ObjectKind) -> IconName {
             IconName::Function
         }
         ObjectKind::Sequence => IconName::Sequence,
-        ObjectKind::Trigger | ObjectKind::Synonym | ObjectKind::Type | ObjectKind::Extension => {
-            IconName::Fallback
-        }
+        ObjectKind::Trigger
+        | ObjectKind::Synonym
+        | ObjectKind::Type
+        | ObjectKind::Extension
+        | ObjectKind::Index => IconName::Fallback,
     }
 }
 

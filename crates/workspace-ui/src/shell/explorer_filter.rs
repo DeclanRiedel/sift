@@ -66,6 +66,7 @@ const fn kind_name(kind: ObjectKind) -> &'static str {
         ObjectKind::Procedure => "procedure",
         ObjectKind::Synonym => "synonym",
         ObjectKind::Sequence => "sequence",
+        ObjectKind::Index => "index",
         ObjectKind::Trigger => "trigger",
         ObjectKind::Type => "type",
         ObjectKind::Extension => "extension",
