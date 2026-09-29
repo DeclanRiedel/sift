@@ -57,6 +57,15 @@ explicitly. Do not enable CI or introduce smoke scripts.
 
 ## Milestone evidence
 
+The completed project-wide architecture audit checked configuration and runtime
+ownership, SSH lifecycle, multiplayer and CRDT reconnect, editor scheduling,
+layout, resource bounds, and repository hosting I/O. Its fixes and tests were
+committed, and ADR-019/020 were reconciled with the implemented security
+boundaries. That audit used local HTTP/WebSocket and in-memory relay fixtures;
+native pixel capture and external PostgreSQL, SQL Server, SSH, OAuth, and
+repository-provider validation were outside its evidence. The completed audit
+checklist was retired after these durable results were recorded here.
+
 Metadata admission: three focused tests passed (capacity/reuse, failed-open
 release, simultaneous admission). Workspace Clippy and full workspace tests
 passed; the HTTP error regression checks the typed `metadata_busy` 503.
