@@ -7,7 +7,7 @@ platforms = []
 
 [sift]
 version = "0.1.0"
-protocol = 2
+protocol = 4
 schema_digest = "sha256:ded8cccff12811dc579e06abf56428a426555fc7e5c4156822c2a6db64cd127c"
 
 [[providers]]
