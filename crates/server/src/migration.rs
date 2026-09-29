@@ -1105,12 +1105,12 @@ fn render_postgres_policy_create_drop(
             != Some(body_shape)
         || before_extra != after_extra
         || before_extra.keys().any(|key| key.starts_with("native_"))
-        || from_nodes
-            .get(&before.id)
-            .is_none_or(|node| serde_json::to_value(node).ok() != serde_json::to_value(before).ok())
-        || to_nodes
+        || !from_nodes.get(&before.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(before).ok()
+        })
+        || !to_nodes
             .get(&after.id)
-            .is_none_or(|node| serde_json::to_value(node).ok() != serde_json::to_value(after).ok())
+            .is_some_and(|node| serde_json::to_value(node).ok() == serde_json::to_value(after).ok())
     {
         return Err(reject());
     }

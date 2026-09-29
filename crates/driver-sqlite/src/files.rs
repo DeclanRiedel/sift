@@ -320,6 +320,31 @@ fn check_vacuum_space_available(required: u64, available: u64) -> Result<(), Dri
     Ok(())
 }
 
+fn denied() -> DriverError {
+    error(
+        Code::UnsupportedForEngine,
+        "SQLite file is not authorized or is not an existing regular file",
+    )
+}
+
+#[cfg(unix)]
+fn file_identity(metadata: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt;
+    format!(
+        "{}:{}:{}:{}:{}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec()
+    )
+}
+
+#[cfg(not(unix))]
+fn file_identity(metadata: &std::fs::Metadata) -> String {
+    format!("{}:{:?}", metadata.len(), metadata.modified().ok())
+}
+
 #[cfg(test)]
 mod maintenance_tests {
     use super::*;
@@ -396,28 +421,4 @@ mod maintenance_tests {
             "ok"
         );
     }
-}
-fn denied() -> DriverError {
-    error(
-        Code::UnsupportedForEngine,
-        "SQLite file is not authorized or is not an existing regular file",
-    )
-}
-
-#[cfg(unix)]
-fn file_identity(metadata: &std::fs::Metadata) -> String {
-    use std::os::unix::fs::MetadataExt;
-    format!(
-        "{}:{}:{}:{}:{}",
-        metadata.dev(),
-        metadata.ino(),
-        metadata.len(),
-        metadata.mtime(),
-        metadata.mtime_nsec()
-    )
-}
-
-#[cfg(not(unix))]
-fn file_identity(metadata: &std::fs::Metadata) -> String {
-    format!("{}:{:?}", metadata.len(), metadata.modified().ok())
 }
