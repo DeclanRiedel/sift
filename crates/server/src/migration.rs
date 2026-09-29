@@ -259,7 +259,11 @@ pub fn render_plan(
             .filter(|rendered| rendered.sequence_change_id == change.id)
         {
             rendered.forward.clone()
-        } else if engine == Engine::Postgres && is_index_create_or_drop(change) {
+        } else if engine == Engine::Postgres
+            && is_index_create_or_drop(change)
+            && (from.provider.provider_id == Engine::Postgres.provider_id()
+                || to.provider.provider_id == Engine::Postgres.provider_id())
+        {
             vec![render_postgres_index_change(
                 change,
                 diff,
@@ -389,7 +393,11 @@ pub fn render_plan(
             continue;
         }
         let inverse = invert_change(change);
-        let rollback = if engine == Engine::Postgres && is_index_create_or_drop(&inverse) {
+        let rollback = if engine == Engine::Postgres
+            && is_index_create_or_drop(&inverse)
+            && (from.provider.provider_id == Engine::Postgres.provider_id()
+                || to.provider.provider_id == Engine::Postgres.provider_id())
+        {
             render_postgres_index_change(&inverse, diff, to, from, &to_nodes, &from_nodes).map(Some)
         } else {
             render_change(engine, &inverse, &to_nodes, &from_nodes, from)
@@ -750,11 +758,11 @@ fn render_postgres_partition_attachment(
     if before_child.kind != CatalogNodeKind::Table
         || after_child.kind != CatalogNodeKind::Table
         || !stable_partition_relation(before_child, after_child, true)
-        || from_nodes.get(&before_child.id).is_none_or(|node| {
-            serde_json::to_value(node).ok() != serde_json::to_value(before_child).ok()
+        || !from_nodes.get(&before_child.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(before_child).ok()
         })
-        || to_nodes.get(&after_child.id).is_none_or(|node| {
-            serde_json::to_value(node).ok() != serde_json::to_value(after_child).ok()
+        || !to_nodes.get(&after_child.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(after_child).ok()
         })
     {
         return Err(reject());
@@ -806,11 +814,11 @@ fn render_postgres_partition_attachment(
     let before_parent = parent_change.object_before.as_ref().ok_or_else(reject)?;
     let after_parent = parent_change.object_after.as_ref().ok_or_else(reject)?;
     if !stable_partition_relation(before_parent, after_parent, false)
-        || from_nodes.get(&before_parent.id).is_none_or(|node| {
-            serde_json::to_value(node).ok() != serde_json::to_value(before_parent).ok()
+        || !from_nodes.get(&before_parent.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(before_parent).ok()
         })
-        || to_nodes.get(&after_parent.id).is_none_or(|node| {
-            serde_json::to_value(node).ok() != serde_json::to_value(after_parent).ok()
+        || !to_nodes.get(&after_parent.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(after_parent).ok()
         })
         || !selected.contains(&parent_change.id)
         || active_graph.data.nodes.iter().any(|node| {
@@ -826,7 +834,7 @@ fn render_postgres_partition_attachment(
     } else {
         (before_parent, after_parent)
     };
-    if active_parent.extra.get("native_descendant_shape").is_none()
+    if !active_parent.extra.contains_key("native_descendant_shape")
         || inactive_parent
             .extra
             .contains_key("native_descendant_shape")
@@ -1258,12 +1266,12 @@ fn render_postgres_policy_rename(
                 && key != "native_policy_body_shape"
                 && key != "native_policy_safe_predicate"
         })
-        || from_nodes
-            .get(&before.id)
-            .is_none_or(|node| serde_json::to_value(node).ok() != serde_json::to_value(before).ok())
-        || to_nodes
+        || !from_nodes.get(&before.id).is_some_and(|node| {
+            serde_json::to_value(node).ok() == serde_json::to_value(before).ok()
+        })
+        || !to_nodes
             .get(&after.id)
-            .is_none_or(|node| serde_json::to_value(node).ok() != serde_json::to_value(after).ok())
+            .is_some_and(|node| serde_json::to_value(node).ok() == serde_json::to_value(after).ok())
     {
         return Err(reject());
     }

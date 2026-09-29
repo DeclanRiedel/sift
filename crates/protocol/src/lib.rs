@@ -5,9 +5,9 @@
 //! networking, no filesystem.
 
 /// Current wire protocol version.
-pub const PROTOCOL_VERSION_NUMBER: u32 = 4;
+pub const PROTOCOL_VERSION_NUMBER: u32 = 5;
 /// Header representation of [`PROTOCOL_VERSION_NUMBER`].
-pub const PROTOCOL_VERSION: &str = "4";
+pub const PROTOCOL_VERSION: &str = "5";
 
 pub mod agent_jobs;
 pub mod auth;
