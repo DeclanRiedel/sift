@@ -3117,6 +3117,64 @@ async fn run_query_executor(
                     return;
                 }
             }
+            ExecutorCommand::PostgresMaintenance {
+                generation,
+                request,
+            } => {
+                let apply = request.apply;
+                let Some(opened) = context.as_ref() else {
+                    let _ = events.send(ExecutorEvent::PostgresMaintenanceFinished {
+                        generation,
+                        apply,
+                        result: Err("Connect before running PostgreSQL maintenance".into()),
+                    });
+                    continue;
+                };
+                let client = opened.client.clone();
+                let session = opened.session;
+                let connection = opened.metadata_connection;
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let result = client
+                        .postgres_maintenance(session, connection, request)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = events.send(ExecutorEvent::PostgresMaintenanceFinished {
+                        generation,
+                        apply,
+                        result,
+                    });
+                }));
+            }
+            ExecutorCommand::PostgresIntegrity {
+                generation,
+                schema,
+                name,
+            } => {
+                let Some(opened) = context.as_ref() else {
+                    let _ = events.send(ExecutorEvent::PostgresIntegrityFinished {
+                        generation,
+                        result: Err("Connect before checking PostgreSQL heap integrity".into()),
+                    });
+                    continue;
+                };
+                let client = opened.client.clone();
+                let session = opened.session;
+                let connection = opened.metadata_connection;
+                let events = events.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let result = client
+                        .check_integrity(
+                            session,
+                            connection,
+                            sift_protocol::IntegrityCheckRequest::PostgresHeap { schema, name },
+                        )
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = events
+                        .send(ExecutorEvent::PostgresIntegrityFinished { generation, result });
+                }));
+            }
             ExecutorCommand::LoadRoomMembers { room_id } => {
                 let server = targets.borrow().clone();
                 let result = match server.client().await {
