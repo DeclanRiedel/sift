@@ -88,6 +88,13 @@ pub(super) fn render_bottom_panel(
             |dock| dock.key_context("SiftPostgresMaintenance")
                 .on_key_down(cx.listener(WorkspaceShell::handle_pg_maintenance_key)),
         )
+        .when(
+            shell.active_bottom_tool == BottomTool::Monitor
+                && shell.database_monitor.view() == DatabaseMonitorView::Maintenance
+                && shell.active_connection_provider_id().is_some_and(|id| id.as_str() == "sift/sqlite"),
+            |dock| dock.key_context("SiftSqliteMaintenance")
+                .on_key_down(cx.listener(WorkspaceShell::handle_sqlite_maintenance_key)),
+        )
         .relative()
         .h(px(dock.presentation.size))
         .flex_none()
@@ -217,6 +224,8 @@ pub(super) fn render_bottom_panel(
             } else if shell.database_monitor.view() == DatabaseMonitorView::Maintenance {
                 if shell.active_connection_provider_id().is_some_and(|id| id.as_str() == "sift/postgres") {
                     render_postgres_maintenance(shell, cx)
+                } else if shell.active_connection_provider_id().is_some_and(|id| id.as_str() == "sift/sqlite") {
+                    render_sqlite_maintenance(shell, cx)
                 } else {
                     render_sqlserver_maintenance(shell, cx)
                 }
@@ -1284,6 +1293,129 @@ fn render_agent_jobs(shell: &WorkspaceShell, cx: &mut Context<WorkspaceShell>) -
             },
         )
         .into_any_element()
+}
+
+fn render_sqlite_maintenance(
+    shell: &WorkspaceShell,
+    cx: &mut Context<WorkspaceShell>,
+) -> gpui::AnyElement {
+    let state = &shell.sqlite_maintenance;
+    let colors = cx.theme().colors;
+    let busy = state.pending.is_some();
+    let reason =
+        shell.operation_unavailable_reason(sift_protocol::OperationKind::ManageSqliteDatabase);
+    let choices = [
+        (SqliteMaintenanceChoice::Create, "Create empty database"),
+        (SqliteMaintenanceChoice::Backup, "Online backup"),
+        (SqliteMaintenanceChoice::Integrity, "Integrity check"),
+    ];
+    let mut panel = div()
+        .debug_selector(|| "sqlite-maintenance".into())
+        .id("sqlite-maintenance-scroll")
+        .flex().flex_1().min_h_0().flex_col().overflow_y_scroll().p_3().gap_2()
+        .child(SectionLabel::new("SQLITE FILE MAINTENANCE"))
+        .child(div().text_xs().child("The destination is relative to the connected database's managed root. c create · b backup · i integrity · p preview · a apply · r run check"))
+        .child(div().flex().flex_wrap().gap_2().children(choices.into_iter().enumerate().map(|(index, (choice, label))|
+            Button::new(("sqlite-maintenance-choice", index), label)
+                .tone(if state.choice == choice { ButtonTone::Neutral } else { ButtonTone::Ghost })
+                .disabled(busy)
+                .on_click(cx.listener(move |shell, _, _, cx| shell.set_sqlite_maintenance_choice(choice, cx)))
+        )));
+    if state.choice == SqliteMaintenanceChoice::Integrity {
+        panel = panel
+            .child(div().text_xs().child(
+                "Read-only main database integrity check; no repair or attached database check.",
+            ))
+            .child(
+                Button::new(
+                    "sqlite-maintenance-integrity",
+                    if busy {
+                        "Checking…"
+                    } else {
+                        "Run integrity check"
+                    },
+                )
+                .disabled(
+                    busy || shell
+                        .operation_unavailable_reason(sift_protocol::OperationKind::ExecuteQuery)
+                        .is_some(),
+                )
+                .on_click(cx.listener(|shell, _, _, cx| shell.run_sqlite_integrity(cx))),
+            );
+        if let Some(report) = &state.integrity {
+            panel = panel.child(format!(
+                "Outcome: {:?} · {} finding(s) · {} warning(s)",
+                report.outcome,
+                report.findings.len(),
+                report.warnings.len()
+            ));
+            for finding in report.findings.iter().take(50) {
+                panel = panel.child(div().font_family("monospace").child(finding.clone()));
+            }
+        }
+    } else {
+        panel = panel
+            .children(
+                reason
+                    .clone()
+                    .map(|message| div().text_color(colors.warning).child(message)),
+            )
+            .child(
+                div()
+                    .child("Destination inside managed root")
+                    .child(state.destination.clone()),
+            )
+            .child(
+                Button::new(
+                    "sqlite-maintenance-preview",
+                    if busy {
+                        "Working…"
+                    } else {
+                        "Preview file action"
+                    },
+                )
+                .disabled(busy || reason.is_some())
+                .on_click(cx.listener(|shell, _, _, cx| shell.preview_sqlite_maintenance(cx))),
+            );
+        if let Some((request, report)) = &state.preview {
+            let (verb, path) = match &request.action {
+                sift_protocol::SqliteMaintenanceAction::Create { path } => ("CREATE", path),
+                sift_protocol::SqliteMaintenanceAction::Backup { path } => ("BACKUP", path),
+            };
+            panel = panel
+                .child(SectionLabel::new("REVIEWED FILE ACTION"))
+                .child(format!(
+                    "Root: {} · Source: {} ({} bytes)",
+                    report.root_id, report.source_file, report.source_bytes
+                ))
+                .child(format!(
+                    "Destination: {}",
+                    report.destination_file.as_deref().unwrap_or("unknown")
+                ))
+                .child(div().text_xs().child(report.backup_expectation.clone()))
+                .child(format!("Type {verb} {path} to confirm"))
+                .child(state.confirmation.clone())
+                .child(
+                    Button::new("sqlite-maintenance-apply", "Apply confirmed file action")
+                        .disabled(busy || reason.is_some())
+                        .tone(ButtonTone::Danger)
+                        .on_click(
+                            cx.listener(|shell, _, _, cx| shell.apply_sqlite_maintenance(cx)),
+                        ),
+                );
+        }
+    }
+    if let Some(message) = &state.message {
+        panel = panel.child(div().text_color(colors.warning).child(message.clone()));
+    }
+    if let Some(report) = &state.last_report {
+        panel = panel.child(format!(
+            "Completed in root {}: {}",
+            report.root_id,
+            report.destination_file.as_deref().unwrap_or("unknown")
+        ));
+    }
+    panel.into_any_element()
 }
 
 fn render_postgres_maintenance(

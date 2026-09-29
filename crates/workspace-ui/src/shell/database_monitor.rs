@@ -109,7 +109,11 @@ impl DatabaseMonitorView {
                 connected && provider == Some("sift/sql-server")
             }
             Self::Maintenance => {
-                connected && matches!(provider, Some("sift/sql-server" | "sift/postgres"))
+                connected
+                    && matches!(
+                        provider,
+                        Some("sift/sql-server" | "sift/postgres" | "sift/sqlite")
+                    )
             }
             Self::Settings
             | Self::Extensions

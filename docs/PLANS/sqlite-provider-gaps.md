@@ -57,8 +57,10 @@ claims.
       audited HTTP/SDK preview and one-use confirmed create-new database and
       online backup-to-new-file actions, constrained to the managed SQLite
       connection's writable root and tenant. The existing integrity check is
-      read-only. VACUUM, desktop controls, restore/delete and arbitrary PRAGMA
-      changes remain gated; creation needs no prior backup, while future
+      read-only. The Vim Monitor now offers preview/confirmation for create
+      and backup plus the read-only integrity action (ADR-081). VACUUM,
+      restore/delete and arbitrary PRAGMA changes remain gated; creation needs
+      no prior backup, while future
       mutating maintenance should use a verified backup first.
 - [x] Open the authorized CSV quarantine artifact from an import result in the
       desktop, with rejected-row navigation and source-value details.
