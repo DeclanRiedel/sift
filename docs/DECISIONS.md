@@ -3012,8 +3012,8 @@ The first automatic partition migration is attachment or detachment of one
 ordinary, permanent heap child to an unchanged range-partitioned parent in
 the same schema. Both relations and their columns exist in both complete,
 definition-bearing PostgreSQL graphs. The active graph captures the parent
-identity, server-deparsed partition bound, and catalog-generated attach and
-detach statements. Rendering requires exactly the paired parent and child
+identity and server-deparsed partition bound. Rendering constructs quoted
+attach and detach statements from those catalog fields, and requires the paired parent and child
 changes, selected together, and proves that their other details and native
 state are unchanged. Attach uses `ALTER TABLE ... ATTACH PARTITION`; detach
 uses `ALTER TABLE ... DETACH PARTITION`. Each is the other's rollback.
