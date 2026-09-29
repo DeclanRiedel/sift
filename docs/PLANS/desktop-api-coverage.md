@@ -134,15 +134,18 @@ and forwarded health/readiness probes.
 - [x] `preview_edits` — multi-cell staged-edit preview with conflict display (M4)
 - [x] `apply_edits` — apply typed edits with staged-edit revert controls (M4)
 - [ ] `bulk_insert` — bulk insert flow (M5)
-- [ ] `import_csv` — CSV import (M5)
+- [x] `import_csv` — Vim CSV import dialog with target-column mapping,
+  dry-run preview, cancellation, results, and eligible durable retry (M5)
 
 ### Transactions & process control — transaction bar, process list
 
 - [x] `begin_transaction`, `commit_transaction`, `rollback_transaction` — transaction controls (M4)
 - [x] `execute_in_tx` — run inside an open transaction (M4)
 - [ ] `list_transactions`, `preview_transaction` — transaction state panel (M4)
-- [ ] `create_savepoint`, `rollback_to_savepoint`, `release_savepoint` — savepoint controls (M4)
-- [ ] `list_processes`, `kill_process` — process/activity monitor (M4)
+- [x] `create_savepoint`, `rollback_to_savepoint`, `release_savepoint` — Vim
+  transaction controls with focused command/history coverage (M4)
+- [x] `list_processes`, `kill_process` — Vim process monitor with reviewed,
+  snapshot-bound termination and capability reasons (M4)
 
 ### Results depth (polish of the built grid)
 
@@ -260,7 +263,8 @@ and forwarded health/readiness probes.
 ### Operations, audit, approvals, governed tools
 
 - [ ] `operations`, `audit` — operations catalog + audit log (M5)
-- [ ] `operation_audit`, `operation_audit_page` — per-operation audit detail (M5)
+- [x] `operation_audit`, `operation_audit_page` — paginated operation audit
+  in Runtime administration (M5)
 - [ ] `create_operation_approval`, `approve_operation` — approval flow for destructive ops (M4/M5)
 - [ ] `governed_tools`, `invoke_tool` — governed tool invocation (M5)
 - [ ] `openapi` — dev/help surface (optional)
